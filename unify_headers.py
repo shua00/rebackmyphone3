@@ -450,7 +450,7 @@ def build_xml_header(title, history, extra_meta=None):
         "<!--",
         "=" * 80,
         f"  {title}",
-        "-" * 80,
+        "~" * 80,          ← 改为波浪号
         f"  构建批次 : {TARGET_BUILD_BATCH}",
         f"  协议版本 : {TARGET_PROTOCOL}",
         f"  最后修改 : {lt}（{ls}）",
@@ -459,7 +459,7 @@ def build_xml_header(title, history, extra_meta=None):
         for line in extra_meta:
             lines.append(f"  {line}")
     lines += [
-        "-" * 80,
+        "~" * 80,          ← 改为波浪号
         f"  修改记录（倒序，仅列最近 {MAX_HISTORY} 条，更早见 CHANGELOG.txt）:",
     ]
     for t, s in history[:MAX_HISTORY]:
