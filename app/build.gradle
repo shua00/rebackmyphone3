@@ -1,0 +1,41 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.example.devicefinder'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.example.devicefinder"
+        minSdk 21
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+
+        // ★ 自动生成格式为 YYYYMMDD-HHmm 的版本号（例如 20261110-1930）
+        def buildTime = new java.text.SimpleDateFormat("yyyyMMdd-HHmm").format(new java.util.Date())
+        buildConfigField "String", "AUTO_BUILD_VERSION", "\"${buildTime}\""
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // ★ 必须开启这个选项，否则无法生成 BuildConfig.java 文件
+    buildFeatures {
+        buildConfig true
+    }
+}
+
+dependencies {
+    // 纯原生零第三方依赖，保持百 KB 极致体积
+}

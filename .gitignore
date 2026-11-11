@@ -1,0 +1,32 @@
+# Android 构建产物
+build/
+.gradle/
+local.properties
+*.apk
+*.aab
+captures/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# unify_headers.py 备份
+.header_backup/
+
+# 运行时产物（server2/rescue2 会生成）
+received_logs/
+uploads/
+screenshots/
+*.log
+track_history.db
+track_history.db-*
+*.jsonl
+
+# Python
+__pycache__/
+*.pyc
+
+# 系统
+.DS_Store
+Thumbs.db

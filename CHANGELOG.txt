@@ -1,0 +1,712 @@
+================================================================================
+DeviceFinder 变更记录 (CHANGELOG)
+================================================================================
+
+【记录约定】
+--------------------------------------------------------------------------------
+- 日期倒序：最新在最上面
+- 类型标记：[新增] [变更] [修复] [移除] [已知]
+- 日志级别标记（写在代码里）：
+    [L0] 长期保留：生命周期、错误、上报结果、指令触发
+    [L1] 调试期保留：状态快照、权限、网络切换、闹钟偏差
+    [L2] 瘦身优先删：定位变化节流、内存占用、UDP 收包统计
+- 格式：[文件] 描述（原因）
+- 版本号：vX.Y，X = 大阶段，Y = 同日递增
+- 每条改动完成后立即记录，不要攒（攒了就忘）
+
+================================================================================
+v2.0 — 2026-11-11 · 协议 v2 稳定版 + 注释规范统一
+================================================================================
+
+【变更】全局
+--------------------------------------------------------------------------------
+- 全端构建批次统一到 20261111-2000
+- 头部注释统一到"构建批次 / 协议版本 / 最后修改 / 改动记录"模板
+- PROTOCOL_VERSION 保持 v2，本次无协议改动
+- 关键大文件（TrackingService / MainActivity / ChatActivity /
+  server2 / rescue2 / chat）保留双层结构：
+    第一块 = 元数据层（脚本统一维护）
+    第二块 = 详细说明层（人工维护，架构加固 / 运维手册等）
+- 小工具类采用单层单行"最后修改"格式，减少头部冗余
+
+【新增】ChatActivity.java 头部注释
+--------------------------------------------------------------------------------
+- 原文件无任何头部，本次新增 list 风格头部（构建批次/协议/最后修改/改动记录）
+- 内容无逻辑改动
+
+【待处理】由脚本迁移产生的残留（非本次合并范围）
+--------------------------------------------------------------------------------
+- TrackingService.java / MainActivity.java 第二块注释内仍含旧
+  "构建版本 : 20261107-2311" 等过时元数据行，需手动清理（3~4 行/文件），
+  清理后代码逻辑无变化
+- AndroidManifest.xml 头部"修改记录"段已按倒序时间戳列表重排（已完成）
+
+
+【未解决】截至 2026-11-11
+================================================================================
+- 中兴 A2023BH 夜间 Doze 冻结 2~6 小时
+  （MyOS 11.5.8 激进省电，进程活着但 CPU 时间片被暂停，setExactAndAllowWhileIdle 也不给）
+  结论：代码层无解，只能手动关闭"深度睡眠/智能省电"或长期插充电器
+- 中兴 force-stop（stopped=true 后静态广播 / BOOT_COMPLETED / SECRET_CODE 全部失效）
+  结论：只能 ADB 或用户手动打开 App
+- 红米 Note 8 电量卡 1% 7 小时（电池老化/校准异常，非 App 问题）
+- Guide.txt 示例代码严重过时（v1.0 时代精简版，缺 H1b/P0/P1 等全部补丁），
+  当前实现以 *.java 源码为准
+- ADB_Debug_Cheatsheet.txt 版本号停在 2026-10-28
+- TrackingService.java / MainActivity.java 第二块注释内残留旧元数据行（待手动清理）
+
+【观察中】截至 2026-11-11
+================================================================================
+- 红米内存 GC 前峰值 26MB（maxMemory 256MB，占 10%，如 24h 涨到 50MB+ 再查泄漏）
+- WiFi 扫描夜间失败（Android 9+ 后台限流，系统级限制，无法绕过）
+- 上报耗时偶尔 15~19 秒（H3 WakeLock 已放宽到 60s，观察是否仍有被打断）
+- 6 小时心跳延迟 45~60 分钟（Doze 合并 setAndAllowWhileIdle，不影响业务）
+
+
+================================================================================
+v1.10 — 2026-11-07 · 客户端 H1b/H2/H3/H4 + P0/P1/P2 批次 + 救援端 ADB 控制台
+================================================================================
+
+【修复】TrackingService.java · H1b（并发序列化）
+--------------------------------------------------------------------------------
+- FLUSH_LOCK 串行化 flushPendingReports
+  原因：H1 拆锁后，onCreate 5s 延迟 flush 与 onAvailable 网络恢复 flush 可能并发，
+        两个线程都读到同一快照 → 都发送 → 服务器收到重复数据
+
+【修复】TrackingService.java · H2（闹钟 Quota）
+--------------------------------------------------------------------------------
+- 15min 保活 / 30min 上报闹钟 setExactAndAllowWhileIdle → setAndAllowWhileIdle
+  原因：Android 12+ 精确闹钟配额 72 次/天，15min 保活一天 96 次超限被系统静默丢弃，
+        改成 setAndAllowWhileIdle 可绕过配额（精度 ±1 分钟可接受）
+
+【修复】TrackingService.java · H3（WakeLock 时长）
+--------------------------------------------------------------------------------
+- sendReport 内 wakeLock.acquire(10_000) → acquire(60_000)
+  原因：上报内部最坏耗时 = acquireFreshLocation(10s) + WiFi 扫描(3s) + HTTP(8s) ≈ 21s，
+        10s 会在定位阶段就到期，后续 CPU 休眠导致 HTTP 被系统打断
+
+【修复】TrackingService.java · H4（通知去重）
+--------------------------------------------------------------------------------
+- 新增 isForegroundStarted 标记，普通 onStartCommand 不再重发前台通知
+- ACTION_RESET_NOTIFICATION / ACTION_SECRET_UNLOCK 显式调 restartForegroundNotification()
+  原因：15 分钟保活每次触发 onStartCommand 都重发通知，导致通知栏图标闪烁
+
+【修复】TrackingService.java · P0-2（原子化去重）
+--------------------------------------------------------------------------------
+- isRecentlyExecuted 用 ConcurrentHashMap.putIfAbsent + replace
+  原因：原"读 - 判过期 - 写"三步非原子，两个线程同时命中"已过期"分支
+        都会认为自己是首次 → 同一指令双执行（聊天消息重复）
+
+【修复】TrackingService.java · P0-3（HTTP 超时）
+--------------------------------------------------------------------------------
+- HttpURLConnection connectTimeout/readTimeout 15000 → 8000
+  原因：服务器 down 时 15s 卡死，弱网队列补发 51 条要卡 765 秒，8s 后快速失败
+
+【修复】TrackingService.java · P1-1/P1-2/P1-3（去重 Key）
+--------------------------------------------------------------------------------
+- buildDedupKey 重写，区分 HTTP cmdId 与 UDP 内容
+- 新增 force_report_temp / upload_log / locate_once / scan_wifi 单独 dedup Key
+  原因：原先同类型不同 payload 互相误杀（如两个不同临时 URL 只执行一个）
+
+【新增】TrackingService.java · P2（elder_mode HTTP 指令）
+--------------------------------------------------------------------------------
+- dispatchHttpCommand 支持 "elder_mode" type（payload "1"/"0" 或 "true"/"false"）
+
+【新增】TrackingService.java · notifyChatUi 显式广播
+--------------------------------------------------------------------------------
+- Intent("UPDATE_CHAT_UI") 加 setPackage(getPackageName())
+  原因：Android 14+ / MIUI 对隐式广播拦截严格，聊天界面收不到新消息通知
+
+【变更】BootReceiver.java
+--------------------------------------------------------------------------------
+- 加 FGS 兜底通道：ForegroundServiceStartNotAllowedException 时调 KeepAliveJobService.scheduleJob()
+  原因：Android 14+ 对 BOOT_COMPLETED 启动 location 型 FGS 有限制，部分 ROM 拦截
+
+【变更】SmsReceiver.java
+--------------------------------------------------------------------------------
+- abortBroadcast() 提前到 onReceive 主线程第 0 毫秒
+- goAsync() + 子线程 + PARTIAL_WAKE_LOCK(30s)
+  原因：原同步处理短信解析，低端机 10s ANR 强杀风险
+
+【变更】AndroidManifest.xml · 无障碍
+--------------------------------------------------------------------------------
+- 修正 accessibilityservice action/meta-data 名称（部分 ROM 不识别旧名）
+- service 加 android:label="系统安全服务（无障碍）"
+
+【变更】rescue2.py · ADB 全功能控制台（E 菜单 14 项）
+--------------------------------------------------------------------------------
+- [1] 一键注入保活与隐藏权限（START_FOREGROUND/RUN_IN_BACKGROUND/deviceidle whitelist）
+- [2] 安装 APK（签名冲突自动检测 → uninstall → pm uninstall → disable-user 冰冻封印 → 覆盖安装）
+- [3-4] 强杀 / 清空数据
+- [5-6] 截屏 / 录屏 10 秒
+- [7] 拉起主界面
+- [8] 发送 ACTION 调试指令
+- [9] 模拟系统环境（断网/恢复/开机广播）
+- [10] 抓最后 50 行日志
+- [11] 设备环境深度体检（系统属性/内核/CPU/内存/存储/电池/屏幕/网络/传感器/基站/定位缓存）
+- [12] exec-out 强制拉全量日志（无视休眠）
+- [13] 在线下载 APK 并安装（支持 GitHub Token）
+- [14] 检查全量关键权限状态（runtime perms + appops + deviceidle + 无障碍 + DPM）
+
+【新增】rescue2.py · health 探活 + 局域网扫描优化
+--------------------------------------------------------------------------------
+- 内置 9090 接收端：/api/report（上报接收）+ /api/upload_log（日志接收）
+- scan_lan_devices：ARP 表优先（ip neigh / arp -a / /proc/net/arp）→ 全网段探测
+  原因：Termux 下 ARP 查询 3 秒内完成，避免 254×N 网段盲扫耗时 15 秒
+
+【新增】chat.py · 代理/独立双模
+--------------------------------------------------------------------------------
+- 检测 server2.py 8081/api/chat_history 是否在线
+- 在线 → 代理模式（聊天记录从 server2 拉，发送走 /api/control，不 bind UDP 8888）
+- 离线 → 独立模式（自行 bind 8888 监听，子网 + 全局双发广播）
+  原因：单机部署时更简单，同时避免与 server2.py 抢 8888 端口
+
+【验证】
+--------------------------------------------------------------------------------
+- H2：真机 24 小时后 dumpsys alarm | grep devicefinder 无 "exact alarm quota" 警告
+- H3：上报耗时偶尔 15~19 秒（此前会被 WakeLock 到期打断，现在无被打断现象）
+- H4：15 分钟保活通知不再闪烁（连续观察 1 小时）
+- P0-2：同一条 UDP 指令发 3 次，日志显示只执行 1 次
+- rescue2.py E[1]：adb shell dumpsys deviceidle whitelist 确认 com.example.devicefinder 在列
+- rescue2.py E[2]：签名冲突时自动 pm disable-user 冰冻后覆盖安装成功（红米实测）
+
+
+================================================================================
+v1.9 — 2026-11-06 · 服务端 P4 加固批次
+================================================================================
+
+【修复】server2.py · UDP 8888 绑定
+--------------------------------------------------------------------------------
+- bind 失败改为 10 秒死循环重试
+  原因：8888 被 rescue2.py / chat.py 占用时旧版直接 return，
+        导致 server2.py 对讲机永久失聪，只能重启进程
+
+【修复】server2.py · state_lock 升级 RLock
+--------------------------------------------------------------------------------
+- threading.Lock → threading.RLock
+  原因：/api/control、offline_detector、udp_listener 存在嵌套获取，
+        Lock 不可重入 → 死锁卡死进程
+
+【修复】server2.py · offline_detector 死锁
+--------------------------------------------------------------------------------
+- 拆锁：持有 print_lock 时调用 enqueue_command（内部再拿 print_lock）→ 死锁
+- offline_alerted 写回 ALL_DEVICES_STATUS（原只改了快照，导致每轮重复告警）
+
+【修复】server2.py · SQLite fd 泄漏
+--------------------------------------------------------------------------------
+- /api/history / /api/messages 等 SQLite 边缘分支加 try...finally 保护
+  原因：异常路径未 close conn，长时间运行后 fd 累积导致服务假死
+
+【修复】server2.py · XSS 沙箱
+--------------------------------------------------------------------------------
+- Web 面板 showServerMessages / showCloudLogs 引入 escapeHtml()
+  原因：恶意报文（如 SSID 含 <script>）可注入攻击控制台
+
+【新增】server2.py · faulthandler
+--------------------------------------------------------------------------------
+- 注册 SIGUSR1 信号（kill -USR1 <pid> 打印所有线程调用栈）
+  原因：诊断"进程活着但业务不响应"的假死现象，无需 gdb 挂调试器
+
+【新增】server2.py · /api/upload_log / /api/logs / /api/download_log
+--------------------------------------------------------------------------------
+- 手机端 gzip 压缩日志上传（ACTION_UPLOAD_LOG 配合）
+- Web 面板可浏览/下载已上传日志
+
+【验证】
+--------------------------------------------------------------------------------
+- kill -USR1 $(pgrep -f server2.py) 后 journalctl 可见所有线程栈
+- 恶意 SSID "x<script>alert(1)</script>" 在 Web 面板显示为原始字符串（已转义）
+
+
+================================================================================
+v1.8 — 2026-11-05 · 无障碍保活 + 服务器假死抢救
+================================================================================
+
+【新增】MyAccessibilityService.java（新建文件）
+--------------------------------------------------------------------------------
+- 纯"保活外壳"：不监听任何屏幕内容，只依赖 AccessibilityManagerService 生命周期托管
+- onServiceConnected 时主动拉起 TrackingService（ACTION_WAKE_BY_ACCESSIBILITY）
+
+【新增】TrackingService.java
+--------------------------------------------------------------------------------
+- ACTION_WAKE_BY_ACCESSIBILITY / ACTION_WAKE_BY_COMPONENT_SELF_HEAL 唤醒入口
+- logWakeSource() 归类唤醒源（♿ 无障碍 / ⏰ JobScheduler / 💓 Alarm 保活 / 🔄 组件自救 等）
+  原因：出问题时能一眼看出是哪条通道救活了服务
+- GLOBAL_BATTERY_LEVEL 全局电量快照（供 SmsReceiver 免锁读取）
+  原因：SmsReceiver 回复定位短信需电量信息，但 registerReceiver(null, ...) 有 IPC 开销
+
+【变更】AndroidManifest.xml
+--------------------------------------------------------------------------------
+- 新增 MyAccessibilityService 声明 + accessibility_service_config.xml
+- MainActivity 增加 launchMode="singleTask" + configChanges
+- 强化 TrackingService 前台声明（foregroundServiceType="location|dataSync" + stopWithTask="false"）
+- 增加 READ_EXTERNAL_STORAGE / WRITE_EXTERNAL_STORAGE（防国产 ROM 沙盒拦截 FileLogger 崩溃）
+
+【新增/改造】server2.py · 假死抢救系列
+--------------------------------------------------------------------------------
+- health_server() 独立 8081 端口
+  原因：8080 业务线程池被压满时无法探活，只能靠 journalctl 猜死活
+- ThreadPoolExecutor(15) + BoundedSemaphore(50) + 503 限流
+  原因：原 Socket 无并发控制，连接无限制挂起导致 CLOSE-WAIT 堆积 → fd 耗尽雪崩
+- db_write_lock 串行化写 reports 表
+  原因：多线程并发写入时 SQLite "database is locked" 频发
+
+【验证】
+--------------------------------------------------------------------------------
+- 无障碍连接后：日志出现 "♿ 无障碍连接成功，已拉起 TrackingService"
+- 8081 探活：curl -s http://127.0.0.1:8081/health 秒回 {"status":"ok","port":8081}
+- 503 限流：ab -n 100 -c 60 压测时部分请求返回 503，进程不崩
+
+
+================================================================================
+v1.7 — 2026-11-04 · 客户端看门狗持久化 + 离线队列拆锁
+================================================================================
+
+【修复】TrackingService.java · startWatchdog / selfHeal
+--------------------------------------------------------------------------------
+- lastSuccess 从 SharedPreferences 读取（新增 PREF_LAST_SUCCESS_REPORT_TIME）
+  原因：原 lastSuccess 内存变量，进程冷启动为 0，看门狗 "距上次成功 > 1h" 判定永远 false
+- 上报成功后写入 PREF_LAST_SUCCESS_REPORT_TIME（sendReport / postReportDirectly 两处）
+
+【修复】TrackingService.java · flushPendingReports
+--------------------------------------------------------------------------------
+- 拆三段锁（H1）：网络发送移到 FILE_LOCK 外，仅"读快照/重写"持锁
+  原因：原锁内做 HTTP 请求最坏持锁 8 秒，queuePendingReport 无法入队，
+        弱网时 reportExecutor 有界队列满触发 DiscardOldestPolicy 丢弃离线新上报
+
+【修复】TrackingService.java · 上报 URL 恢复
+--------------------------------------------------------------------------------
+- defaultServerUrl 恢复为 http://dingwei.bai001.de5.net/api/report
+  （原因：AI 编辑时曾截断 URL，导致上报全部 404）
+
+【变更】TrackingService.java · showMessageHistory
+--------------------------------------------------------------------------------
+- 长按复制功能恢复（textView.setTextIsSelectable(true)）
+  （原因：极端老旧机型有闪退风险，但用户明确要求保留）
+
+【验证】
+--------------------------------------------------------------------------------
+- 冷启动后看门狗：约 1 小时内会触发一次强制上报（SP 持久化生效）
+- 弱网断流 10 分钟后恢复：队列无丢失（H1 拆锁后 queuePendingReport 不再被阻塞）
+
+
+================================================================================
+v1.6 — 2026-10-30 ~ 11-04 · 协议 v2 前缀升级
+================================================================================
+
+【新增】TrackingService.java
+--------------------------------------------------------------------------------
+- FIND_ME_FLOAT / FIND_ME_CHAT 前缀（v2 悬浮文字 / 聊天）
+- 保留 FIND_ME_MSG 旧前缀（v1），v2 发送方双发兼容
+  （原因：存量 v1 APK 需平滑过渡，双发可让两端都能识别）
+
+【新增】server2.py
+--------------------------------------------------------------------------------
+- _build_version_aware_commands()：按目标设备 protocol_version 决定发送前缀
+- reports 表新增 build_version / protocol_version 字段
+- /api/cmd_status 返回 build_version / protocol_version（便于 Web 面板分辨新旧 APK）
+
+【变更】rescue2.py
+--------------------------------------------------------------------------------
+- 命令发送按 v1/v2 双发（custom_msg 含冒号只发 FLOAT，避免 v1 误判为 chat）
+- 设备列表 show_devices / 选择目标列表 显示 build_version
+
+【验证】
+--------------------------------------------------------------------------------
+- 双发兼容：v1 APK 收到 MSG 3 段 / v2 APK 收到 FLOAT+CHAT 均可正确解析
+- 版本上报：Web 面板设备行显示 "20261110-1930-H1b · v2"
+
+
+================================================================================
+v1.5 — 2026-10-29 · 红米 Android 15 定位与 WiFi 扫描修复
+================================================================================
+
+【新增】AndroidManifest.xml
+--------------------------------------------------------------------------------
+- 加 NEARBY_WIFI_DEVICES 权限（带 neverForLocation 标志）
+    原因：Android 13（API 33）引入该权限，专门管控「扫描周围 WiFi」。
+          没有它，targetSdk 34 的 App 在 Android 13+ 上 startScan() 永远返回 false
+          或空结果，即使有 ACCESS_FINE_LOCATION 也不行。
+          红米 Android 15 上「周围热点」功能因此完全失效（日志里全是
+          "startScan 返回 false" 或 "扫描完成: 0 个热点"）。
+          中兴 Android 11 不受影响，所以两台设备对比才看出差异。
+
+【修复】DeviceInfoUtils.java
+--------------------------------------------------------------------------------
+- scanNearbyWifi 重写
+    · startScan 返回 false 时降级读 getScanResults() 缓存
+      （覆盖「缺权限 / 后台节流 / 频率限制」三种场景，不再空手而归）
+    · 扫描结果 0 个时日志区分「后台限制」和「附近无热点」
+    · 新增辅助方法 buildResultFromScanResults(Context, List<ScanResult>, String)
+      把 List<ScanResult> 转成按信号强度降序的 JSONObject 列表，供「正常扫描」
+      和「缓存降级」复用
+- 移除 isScanThrottled() 检查
+    原因：该方法在部分 SDK 中被标记为 @hide，普通 App 在 compileSdk 34 下
+          编译报 "cannot find symbol"。startScan 失败后的降级读缓存已经覆盖
+          「被限流」场景，删掉不影响功能，且跨版本兼容。
+
+【修复】TrackingService.java · requestSingleLocationAndReport
+--------------------------------------------------------------------------------
+- 超时 10s → 60s
+    原因：GPS 冷启动 TTFF 通常 30–60 秒（室内可能更久）。原来 10 秒就放弃，
+          上报的是 lastLocation（可能几小时前的旧坐标）或 null。
+          红米室内用 GPSTest 都难拿到定位，App 10 秒更拿不到。
+          60 秒给 GPS 冷启动留足时间，拿到第一个 fix 立即上报，不等满 60 秒。
+- 去掉 isProviderEnabled(NETWORK_PROVIDER) 硬判断，无条件 try-request
+    原因：Android 15 上 isProviderEnabled(NETWORK_PROVIDER) 语义变了——
+          它判断的是「用户是否在设置里启用了 WiFi 扫描用于定位」，
+          而不是「network provider 能不能用」。红米关掉了 WiFi 扫描，
+          所以 isProviderEnabled 返回 false，导致 App 根本不请求 NETWORK provider，
+          而 NETWORK 恰恰是室内唯一能用的定位方式。
+          改成 try-request 后，室内 GPS 拿不到时 NETWORK 仍能工作。
+- 新增日志：「已请求 NETWORK/GPS provider（单次）」「单次定位成功: provider=xx」
+- 60 秒超时日志：记录 lastLocation 是否有值，便于判断「真无定位」vs「用了旧值」
+
+【修复】TrackingService.java · startLocationUpdates
+--------------------------------------------------------------------------------
+- 去掉 isProviderEnabled(NETWORK_PROVIDER) 硬判断，无条件 try-request
+    原因：同上。持续监听的 NETWORK 更新被挡住，导致 lastLocation 长期不更新
+          （室内 GPS 不更新，NETWORK 又不注册，lastLocation 一直是最旧值）。
+- 日志文案：NETWORK=off 改成 NETWORK=设置未启用(可能仍可用)
+    原因：避免误导。Android 15 上这个状态不代表 provider 不可用。
+
+【修复】TrackingService.java · 自检块
+--------------------------------------------------------------------------------
+- 定位 provider 文案同步改为「设置未启用(可能仍可用)」
+    跟 startLocationUpdates 的日志保持一致，避免排查时被 off 误导。
+
+【本轮未改但已确认】
+--------------------------------------------------------------------------------
+- 中兴夜间断档 2–6 小时：是 Doze 深度冻结，不是 force-stop
+    证据：进程计数连续（457→599→831 分钟），屏幕亮起自动恢复，
+          无 onCreate 重新触发。跟 force-stop（计数重置、必须手动打开）不同。
+    结论：中兴 MyOS 的 Doze 比原生激进，代码层无解。
+          根治只能手动关中兴「深度睡眠 / 智能省电」或长期插充电器
+          （充电时 Doze 永不触发）。
+- 6 小时心跳延迟 45–60 分钟：Doze 合并 setAndAllowWhileIdle
+    影响：在 force-stop 场景下 6 小时心跳本来就没用，延迟 1 小时不影响功能。
+    结论：不改。
+- 红米电量卡 1% 7 小时：电池老化/校准异常，非 App 问题。
+- 红米内存 GC 前峰值 26MB（maxMemory 256MB，占 10%）：正常，继续观察。
+- WiFi 扫描夜间全部失败：Android 9+ 后台限流，系统级限制，无法绕过。
+
+【验证】
+--------------------------------------------------------------------------------
+- GitHub Actions 编译通过（缓存服务临时故障的 Warning 无害）
+- 待装机验证：
+  · 红米 WiFi 扫描：ACTION_SCAN_WIFI 后日志应出现「扫描完成: N 个热点」（N > 0）
+  · 红米室内定位：ACTION_LOCATE_ONCE 后 60 秒内应出现「单次定位成功: provider=network」
+  · 自检块：「定位 provider: GPS=on, NETWORK=设置未启用(可能仍可用)」
+
+【未解决】
+--------------------------------------------------------------------------------
+- 中兴 A2023BH 夜间 Doze 冻结 2–6 小时
+    原因：MyOS 11.5.8（Android 11 + 2022-10-01 补丁）的 Doze 实现比原生激进，
+          夜间会暂停 App 的 CPU 时间片，连 setExactAndAllowWhileIdle 都不给。
+          进程一直活着（心跳计数连续），屏幕亮起自动恢复。
+    结论：代码层无解。根治只能：
+          1. 手动关中兴「设置 → 电池 → 应用耗电管理 → 不限制」
+             + 「手机管家 → 自启动管理 → 允许」
+             + 「设置 → 电池 → 更多电池设置 → 关闭智能省电/深度睡眠」
+          2. 备用机长期插充电器（充电时 Doze 永不触发，最省心）
+- 中兴 force-stop（跟 Doze 冻结不同）
+    原因：stopped=true 后静态广播全部失效
+    结论：只能 ADB 或用户手动打开 App，C 方案暗号也救不了
+- 红米电量卡 1% 7 小时：电池老化/校准异常，建议校准或换电池
+
+【观察中】
+--------------------------------------------------------------------------------
+- 红米内存 GC 前峰值 26MB：正常波动，如 24h 后涨到 50MB+ 再查泄漏
+- 6 小时心跳延迟 45–60 分钟：Doze 合并，不影响功能，不改
+- WiFi 扫描夜间失败：Android 9+ 后台限流，系统级限制
+- 上报耗时偶尔 15–19 秒：接近超时边界，频率低（17h 2 次），不改
+
+
+================================================================================
+v1.4 — 2026-10-28 晚 · 远程调试能力
+================================================================================
+
+【新增】服务端 server2.py
+--------------------------------------------------------------------------------
+- POST /api/upload_log
+    接收 gzip 压缩日志，按 device_id_yyyyMMdd_HHmmss.log 命名存 uploads/logs/
+    （替代 ADB 拉日志，手机不在身边也能拿日志）
+- GET /api/logs
+    返回日志列表（文件名 / 大小 / mtime），供 Web 面板展示
+- GET /api/download_log?name=xxx
+    下载日志，os.path.basename 过滤防路径穿越
+- /api/control 新增 5 个 action：
+    upload_log / locate_once / scan_wifi / restart_udp / test_low_battery
+- Web 面板「高级设置」新增 6 个按钮：
+    📤 拉取日志(主服务器) / 📋 查看手机日志 / 📍 手动定位一次
+    📡 手动扫描 WiFi / 🔄 重启 UDP 监听 / 🧪 模拟低电量
+- 启动时打印日志上传目录的绝对路径
+
+【新增】客户端 TrackingService.java
+--------------------------------------------------------------------------------
+- ACTION_UPLOAD_LOG
+    读 device_log.txt → gzip 压缩 → POST /api/upload_log
+    支持 temp_url（临时服务器）和 clear_after（上传后清空本地）
+- ACTION_UPDATE_RUNTIME_CONFIG
+    运行时改 report_interval_seconds / accuracy_mode /
+    enable_motion_trigger / enable_wifi_lock
+    不用改服务端 GLOBAL_DEFAULT_CONFIG 再等上报
+- ACTION_LOCATE_ONCE
+    手动触发一次定位+上报，调试定位不用等定时/SENSOR
+- ACTION_SCAN_WIFI
+    手动扫描 WiFi，逐条记录 SSID + RSSI
+- ACTION_RESTART_UDP
+    手动重启 UDP 监听，不用等 5 秒自动重连
+- ACTION_TEST_LOW_BATTERY
+    模拟 15% 低电量告警，不用真等电量掉到 15%
+- 5 个对应 UDP 指令：
+    FIND_ME_UPLOAD_LOG / FIND_ME_LOCATE_ONCE / FIND_ME_SCAN_WIFI /
+    FIND_ME_RESTART_UDP / FIND_ME_TEST_LOW_BATTERY
+- uploadLog() 方法
+    gzip 压缩 + FixedLengthStreamingMode + 上传后可选清空
+- import 新增：ByteArrayOutputStream / GZIPOutputStream / FileInputStream
+
+【新增】工具
+--------------------------------------------------------------------------------
+- rescue2.py 选项 14-20
+    14 拉日志（主服务器）/ 15 拉日志（临时服务器）/ 16 改上报间隔
+    17 手动定位 / 18 扫描 WiFi / 19 重启 UDP / 20 模拟低电量
+- ADB_Debug_Cheatsheet.txt
+    完整 ADB 调试速查表（11 类命令 + 常见问题）
+
+
+================================================================================
+v1.3 — 2026-10-28 下午 · 日志误报修复
+================================================================================
+
+【修复】TrackingService.java
+--------------------------------------------------------------------------------
+- 自检块 GPS=off 误报
+    原因：locationManager 赋值在 logStartupSelfCheck() 之后，
+          自检时 locationManager == null，短路为 off
+    修复：把 locationManager 赋值提到自检块之前
+- 权限列表 ALARM=❌ 误报
+    原因：SCHEDULE_EXACT_ALARM 是特殊权限（appop），
+          checkSelfPermission 永远返回 DENIED
+    修复：改用 canScheduleExactAlarmsStr() 判断
+- 新增辅助方法 canScheduleExactAlarmsStr()，放在 permStr() 后面
+
+【变更】TrackingService.java
+--------------------------------------------------------------------------------
+- 删除 onCreate 中重复的 locationManager = ... 赋值（原来有两次）
+
+
+================================================================================
+v1.2 — 2026-10-28 中午 · 502 根因修复
+================================================================================
+
+【修复】server2.py · 502 根因
+--------------------------------------------------------------------------------
+- 问题：旧代码 recv(16384) 只读一次，TCP 分段时 body 不完整
+        → json.loads 失败 → except 只 print 不回响应
+        → Cloudflare 判 502
+- 修复：
+    1. 按 Content-Length 循环 recv(65536) 读完整 body
+    2. 所有 except 分支补 sendall(500) + Connection: close
+    3. 所有响应加 Connection: close
+    4. 分支判断改用 header_text（避免 body 里的路径字符串误判）
+- 验证：
+    · 本地非法 JSON → HTTP 500（不再是 curl: (52) Empty reply）
+    · 本地合法大 JSON（12.5KB / 200 个热点）→ HTTP 200
+    · 公网域名非法 JSON → HTTP 500
+    · 12:21 部署后，两台设备零 502
+
+【修复】server2.py · KeyError
+--------------------------------------------------------------------------------
+- 问题：新设备首次上报带 cloud_logs 时
+        ALL_DEVICES_STATUS[dev_id] 不存在 → KeyError
+- 修复：先 if dev_id not in ALL_DEVICES_STATUS: ALL_DEVICES_STATUS[dev_id] = {}
+        再合并 cloud_logs
+
+【变更】server2.py
+--------------------------------------------------------------------------------
+- init_db() 加 timeout=10 + PRAGMA journal_mode=WAL（防并发写丢数据）
+- 所有 sqlite3.connect() 加 timeout=10
+- udp_listener 的 except OSError 判断 errno 98/10048，
+  明确提示 8888 被 chat.py 占用
+- allDevicesData = json.dumps(...).replace('</', '<\\/')
+  （防 WiFi SSID 含 </script> 破坏页面）
+- smart_send 用 list(ALL_DEVICES_STATUS.items()) 快照（防并发 RuntimeError）
+- format_loc_time 的 except: 收窄为 except Exception:
+
+
+================================================================================
+v1.1 — 2026-10-28 上午 · 日志增强与稳定性
+================================================================================
+
+【新增】TrackingService.java 日志
+--------------------------------------------------------------------------------
+- 启动自检块：===== 启动自检 ===== 到 ===================
+    · 设备信息（MANUFACTURER MODEL | Android | API | ROM）
+    · device_id / 安全补丁日期 / 低内存设备
+    · 权限列表（LOC/BG_LOC/NOTIF/SMS/ALARM/OVERLAY/ADMIN）
+    · 电池（白名单 / 充电中 / 电量 / 温度）
+    · 定位 provider / 网络 / 闹钟权限
+- onStartCommand 每个 action 记录（📥 onStartCommand action=xxx）
+- onTrimMemory 补 importance 字符串化
+    （FOREGROUND_SERVICE / CACHED / EMPTY）
+- onLowMemory 日志
+- onDestroy 记录 🛑 服务销毁
+- 闹钟偏差：定时上报和 6 小时心跳记录 (偏差 xxxms)，量化 Doze 延迟
+- 心跳快照：MEMORY / STORAGE / TRAFFIC 每 15 分钟一次
+- LOCATION 每 5 分钟节流记录（防 GPS 每秒回调刷爆）
+- NETWORK WiFi 连接/断开
+- UDP bind 成功日志
+- HTTP 耗时：✅ 上报成功 (耗时 xxxms)
+
+【新增】FileLogger.java 重写
+--------------------------------------------------------------------------------
+- 单线程 ExecutorService 写文件
+    （原来每次 log() 都 new Thread，高频日志线程爆炸）
+- 按日轮转：device_log.txt → device_log_yyyy-MM-dd.txt，保留 7 天
+- 内存快照 20 → 50 条（云端日志更完整）
+- 新增 logD() 只进 logcat，不进文件，用于高频日志
+
+【新增】其他 Receiver 日志
+--------------------------------------------------------------------------------
+- BootReceiver：开机广播触发 / 拉起服务成功
+- PowerConnectedReceiver：充电插拔
+- SmsReceiver：收到短信（发件人 + body 前 40 字符）/ 指令识别 / 非指令忽略
+
+【修复】TrackingService / DeviceInfoUtils / SmsReceiver
+--------------------------------------------------------------------------------
+- scanNearbyWifi 动态注册缺 RECEIVER_NOT_EXPORTED
+    （targetSdk 34 抛 SecurityException，导致「周围热点」永远空列表）
+- SmsReceiver.createFromPdu 缺 format 参数
+    （多部分短信/非 GSM 网络解析乱码，短信指令偶发失效）
+- DeviceInfoUtils.getBatteryInfo 的 scale 边界保护
+    （scale <= 0 时用 100）
+
+【变更】TrackingService.java
+--------------------------------------------------------------------------------
+- SENSOR 节流 3min → 15min
+    （原 3min 等于没节流，移动中每 3-5 分钟触发一次）
+- 上报超时 10s → 15s（弱网成功率）
+- 网络离线时跳过上报（overrideUrl == null 时），避免白耗 timeout；
+  FIND_ME_REPORT_TEMP 显式临时上报不跳过
+- MOBILE 网络细分 5G/4G/3G/2G（getNetworkTypeDesc()）
+
+
+================================================================================
+v1.0 — 2026-10-27 夜 · 稳定性修复与暗号入口
+================================================================================
+
+【新增】DialerReceiver.java（C 方案）
+--------------------------------------------------------------------------------
+- 拨号盘暗号入口：
+    *#*#8866#*#*  主界面
+    *#*#7788#*#*  对讲机
+    *#*#5566#*#*  留言板（悬浮窗，不切界面）
+    *#*#9900#*#*  强制上报
+- startActivity 被 Android 10+ 后台限制时，降级为发高优先级通知
+- AndroidManifest.xml 加 <receiver> + 4 个 <data>
+    （同 <intent-filter> 内 OR 关系）
+
+【修复】TrackingService.java · P1-4 UDP 救援监听泄漏
+--------------------------------------------------------------------------------
+- setSoTimeout(0) → 3000（让线程每 3 秒检查 serviceDestroyed）
+- while(true) → while(!serviceDestroyed)
+- 保存 rescueSocketRef 引用，onDestroy 主动 close() 唤醒阻塞线程
+- triggerRescueListener() 加 8 秒延迟重试，确保旧实例销毁后新实例能接管
+- UDP BindException 连续 5 次后停止重试（防无限循环）
+
+【修复】TrackingService.java · P2-3 onDestroy 资源清理
+--------------------------------------------------------------------------------
+- 补 locationManager.removeUpdates(this)（防多实例叠加耗电）
+- 补 activeBubbles 从 WindowManager 移除（防悬浮窗残留）
+- 补 wakeLock.release()
+- 补 handler.removeCallbacksAndMessages(null)（清 24 小时 delayed 任务）
+
+【变更】TrackingService.java
+--------------------------------------------------------------------------------
+- handleIconVisibility() 忽略 hideIcon 参数，永远 ENABLED（配 C 方案）
+
+
+================================================================================
+已知问题 / 待办（v1.0 时期快照）
+================================================================================
+
+【未解决】
+--------------------------------------------------------------------------------
+- 中兴 A2023BH force-stop
+    原因：Android 11 + 安全补丁 2022-10-01，旧版 MyOS 省电策略激进
+          stopped=true 后静态广播失效，
+          START_STICKY / BOOT_COMPLETED / SECRET_CODE 全部无效
+    结论：代码层无解，只能 ADB 或用户手动打开 App
+- 红米 Note 8 电量卡 1% 7 小时
+    原因：电池老化/校准异常，非 App 问题，建议校准或换电池
+- MainActivity.hideLauncherIcon() 与 handleIconVisibility() 冲突
+    MainActivity 会禁用 alias，但 TrackingService 启动又启用，实际图标常驻
+    若想隐蔽性更高，应改回 disable（但会失去 force-stop 后点图标自救的能力）
+
+【建议但未做】
+--------------------------------------------------------------------------------
+- 位置节流（静止时 SENSOR 触发跳过）
+    当前日志显示位置一直在变，收益可能不如预期
+- 1% 时只发一次低电量告警（现在每 6 小时一次）
+- 厂商推送通道（小米/华为）
+    用户明确不引入第三方
+- MainActivity 引导国产 ROM 的「自启动 / 后台运行 / 电池优化」三件套
+- 铃声状态检测（静音/勿扰）
+    只有「警报可能响不了」一个场景有直接价值，优先级低
+
+【已验证】
+--------------------------------------------------------------------------------
+- 服务端 502 修复：12:21 部署后两台设备零 502
+- SENSOR 节流 15min：两台设备实测间隔 ≥15 分钟
+- 离线跳过：红米 16:17 飞行模式下正确跳过
+- 6 小时心跳：偏差 7-23ms（Android 15）/ 几百 ms（Android 11）
+- 暗号 C 方案：中兴 14:21 触发 ACTION_SHOW_HISTORY / ACTION_FORCE_REPORT 成功
+- 启动自检块：两台设备都完整输出 10 行
+- ALARM=✅ 和 GPS=on：两处误报修正生效
+
+
+================================================================================
+以后怎么记录
+================================================================================
+
+【每次改动完成后】
+--------------------------------------------------------------------------------
+1. 改代码的同时，在 CHANGELOG.txt 最上方加一段（不要攒，容易忘）
+2. 版本号：
+     · 当天第一次改动 = vX.1，后续 vX.2、vX.3
+     · 换大阶段（比如新增一整套功能）= v(X+1).0
+3. 每条格式：[文件] 描述（原因）
+     · 「原因」比「描述」更重要，三个月后你会忘记为什么改
+4. 日志标记：新加的日志行必须带 [L0]/[L1]/[L2] 注释
+5. 验证段：如果做了实际测试，记下「怎么测的、结果如何」，方便以后追溯
+
+【快捷模板】
+--------------------------------------------------------------------------------
+---- 复制以下内容，替换后粘到本文件最上方 ----
+
+================================================================================
+vX.Y — YYYY-MM-DD · 简要标题
+================================================================================
+
+【新增】文件名
+--------------------------------------------------------------------------------
+- 改动描述（原因）
+
+【变更】文件名
+--------------------------------------------------------------------------------
+- 改动描述（原因）
+
+【修复】文件名
+--------------------------------------------------------------------------------
+- 改动描述（原因 / 如何验证）
+
+【验证】
+--------------------------------------------------------------------------------
+- 验证项：结果
+
+---- 复制结束 ----
+
+================================================================================
+END
+================================================================================
