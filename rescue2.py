@@ -6,9 +6,10 @@ rescue2.py — 局域网救援/调试终端（Ultimate v2 协议）
 ------------------------------------------------------------
 构建批次 : 20261111-2000
 协议版本 : v2
-最后修改 : 2026-11-12 22:45（v2.0 通道可视化 + v2.0.1 架构优化 + 修复版本常量）
+最后修改 : 2026-11-13 00:30（v2.0.2 紧急三连击 + ADB 安装工具箱 + 并发防弹）
 ------------------------------------------------------------
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
+  2026-11-13 00:30  v2.0.2 紧急三连击 + ADB 安装工具箱 + 并发防弹
   2026-11-12 22:45  v2.0 通道可视化 + v2.0.1 架构优化 + 修复版本常量
   2026-11-11 19:45  注释规范统一（无逻辑改动）
 ============================================================
@@ -145,6 +146,7 @@ RECEIVER_OK = False
 UDP_OK = False
 _LAST_UDP_MSG = {}
 _LAST_UDP_MSG_TTL = 10
+print_lock = threading.Lock()  # v2.0.2 补丁：全局打印锁，防多线程输出错乱
 
 # ===== 环境检测 =====
 def is_termux():
@@ -381,7 +383,8 @@ class LogReceiver(BaseHTTPRequestHandler):
             info["source_ip"] = client_ip
             if _is_private_ip(client_ip): info["source_ip_lan"] = client_ip
             info["last_log"] = time.time()
-        print(f"\n{I.recv} 收到日志: {filename} ({len(data)} bytes) -> {os.path.abspath(filepath)}")
+        with print_lock:
+            print(f"\n{I.recv} 收到日志: {filename} ({len(data)} bytes) -> {os.path.abspath(filepath)}")
         self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
         self.wfile.write(b'{"status":"ok"}')
 
@@ -403,8 +406,9 @@ class LogReceiver(BaseHTTPRequestHandler):
             acc, provider = loc.get("accuracy", -1), loc.get("provider", "?")
             loc_str = f"{lat},{lng} (精度 {float(acc):.0f}m, {provider})" if lat else "无定位"
             chg_str = "充电中" if is_chg else "未充电"
-            print(f"\n{I.recv} [{dev_id}] 电量 {batt}% ({chg_str}) | WiFi {wifi} | IP {local_ip}")
-            print(f"   位置: {loc_str} | 周围热点: {len(data.get('nearby_wifi', []))} 个")
+            with print_lock:
+                print(f"\n{I.recv} [{dev_id}] 电量 {batt}% ({chg_str}) | WiFi {wifi} | IP {local_ip}")
+                print(f"   位置: {loc_str} | 周围热点: {len(data.get('nearby_wifi', []))} 个")
             with _state_lock:
                 RECEIVED_REPORTS += 1
                 info = DISCOVERED_DEVICES.setdefault(dev_id, {})
@@ -452,7 +456,9 @@ def udp_listener():
                         if now_ts - _LAST_UDP_MSG.get(dedup_key, 0) < 5.0: continue
                         _LAST_UDP_MSG[dedup_key] = now_ts
                         if len(_LAST_UDP_MSG) > 100:
-                            for k in [k for k, v in _LAST_UDP_MSG.items() if v < now_ts - _LAST_UDP_MSG_TTL]: _LAST_UDP_MSG.pop(k, None)
+                            # v2.0.2 补丁：利用字典有序性，超限时直接踢掉最老的记录，防内存泄漏
+                            while len(_LAST_UDP_MSG) > 100:
+                                _LAST_UDP_MSG.pop(next(iter(_LAST_UDP_MSG)))
                         print(f"\n{I.chat} [{sender}] {content}  (来自 {addr[0]})")
                         with _state_lock:
                             info = DISCOVERED_DEVICES.setdefault(sender, {})
@@ -548,6 +554,9 @@ def scan_lan_devices():
         new_devices = {dev_id: info for dev_id, info in DISCOVERED_DEVICES.items() if info.get("last_seen", 0) >= scan_start}
     if not new_devices:
         print(f"\n{I.err} 未发现任何运行中的手机")
+        # v2.0.2 补丁：跨网段提示
+        print(f"{I.ping} 提示：如果手机连接的是 4G 或其他网段，局域网扫描无法发现它。")
+        print(f"      可以尝试在菜单直接输入手机的公网/局域网 IP 进行定向控制。")
         return
     print(f"\n{I.ok} 发现 {len(new_devices)} 台手机：")
     for dev_id, info in new_devices.items():
@@ -927,6 +936,116 @@ def download_and_install_apk(device):
             subprocess.run(["adb", "-s", device, "shell", "am", "start", "-n", f"{PACKAGE_NAME}/.MainActivity"], capture_output=True)
         except Exception as e: print(f"{I.err} 安装失败: {e}")
 
+def install_any_apk(device):
+    while True:
+        print("\n--- 📦 任意 APK 安装工具箱 ---")
+        print("  [1] 安装本机 APK (拖拽 / 路径输入，支持多文件)")
+        print("  [2] 在线下载并安装 (URL)")
+        print("  [3] 扫描手机下载目录批量安装 (限 Termux/PC本目录)")
+        print("  [0] 返回上一层")
+        choice = input("请选择 (0-3): ").strip()
+        if choice == '0': return
+        
+        targets = []
+        if choice == '1':
+            print(f"\n{I.ping} 提示：可直接将多个 APK 拖拽到窗口，或输入用空格分隔的路径。")
+            raw_input = input("请输入本地 APK 路径: ").strip()
+            if not raw_input: continue
+            # 解析带引号的路径（处理含空格路径）和普通空格分隔
+            import re
+            targets = re.findall(r'"([^"]+)"', raw_input)
+            if not targets:
+                targets = raw_input.split()
+                
+        elif choice == '2':
+            url = input("\n下载链接 (URL): ").strip()
+            if not url: continue
+            filename = url.split("/")[-1].split("?")[0] or "downloaded_file.apk"
+            if not filename.lower().endswith(".apk"): filename += ".apk"
+            
+            # 存到系统临时目录，避免污染项目代码目录
+            import tempfile
+            save_path = os.path.join(tempfile.gettempdir(), filename)
+            print(f"{I.ping} 正在下载至: {save_path}")
+            try:
+                import urllib.request
+                import ssl
+                # 忽略 SSL 证书校验（应付一些自签名的内部服务器）
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=60, context=ctx) as response, open(save_path, 'wb') as out_file:
+                    shutil.copyfileobj(response, out_file)
+                print(f"{I.ok} 下载完成。")
+                targets = [save_path]
+            except Exception as e:
+                print(f"{I.err} 下载失败: {e}")
+                continue
+                
+        elif choice == '3':
+            dirs_to_scan = []
+            if is_termux():
+                dirs_to_scan.extend(["/sdcard/Download", os.path.expanduser("~/storage/downloads")])
+            dirs_to_scan.append(os.getcwd())
+            
+            found_apks = []
+            seen = set()
+            for d in dirs_to_scan:
+                if os.path.isdir(d):
+                    for f in os.listdir(d):
+                        if f.lower().endswith(".apk"):
+                            fp = os.path.abspath(os.path.join(d, f))
+                            if fp not in seen:
+                                seen.add(fp)
+                                found_apks.append(fp)
+            
+            if not found_apks:
+                print(f"{I.warn} 在默认目录中未找到 APK。")
+                continue
+                
+            print(f"\n找到 {len(found_apks)} 个 APK：")
+            for i, f in enumerate(found_apks, 1):
+                print(f"  {i}. {os.path.basename(f)} ({os.path.getsize(f)//1024//1024}MB)")
+            
+            sel = input("\n请输入要安装的编号 (如 1,2,3 或 all，回车取消): ").strip()
+            if not sel: continue
+            if sel.lower() == 'all':
+                targets = found_apks
+            else:
+                try:
+                    idxs = [int(x.strip()) for x in sel.split(",") if x.strip().isdigit()]
+                    targets = [found_apks[i-1] for i in idxs if 0 < i <= len(found_apks)]
+                except Exception:
+                    pass
+                    
+        if targets:
+            print(f"\n{I.ping} 准备批量安装 {len(targets)} 个 APK 至 {device} ...")
+            success_count = 0
+            for apk in targets:
+                if not os.path.isfile(apk):
+                    print(f"{I.err} 文件不存在，跳过: {apk}")
+                    continue
+                print(f"  正在安装: {os.path.basename(apk)} ...")
+                try:
+                    res = subprocess.run(["adb", "-s", device, "install", "-r", "-g", "-t", "-d", apk], 
+                                         capture_output=True, timeout=120)
+                    stdout = res.stdout.decode('utf-8', errors='ignore')
+                    stderr = res.stderr.decode('utf-8', errors='ignore')
+                    out_msg = stdout + "\n" + stderr
+                    
+                    if "Success" in out_msg:
+                        print(f"    {I.ok} 安装成功")
+                        success_count += 1
+                    else:
+                        print(f"    {I.err} 安装失败:")
+                        print("      " + out_msg.strip().replace("\n", "\n      "))
+                except subprocess.TimeoutExpired:
+                    print(f"    {I.err} 安装超时 (超过 120 秒)")
+                except Exception as e:
+                    print(f"    {I.err} 安装异常: {e}")
+            print(f"\n{I.ok} 批量安装完成: 成功 {success_count}/{len(targets)}")
+
 def menu_e_adb_manager():
     while True:
         print("\n" + "=" * 50)
@@ -946,9 +1065,10 @@ def menu_e_adb_manager():
         print("  [12] ADB 强制拉取全量日志")
         print("  [13] 在线下载并安装 APK")
         print("  [14] 检查全量关键权限状态")
+        print("  [15] 安装任意第三方 APK (支持 URL/批量)")
         print("  [0] 返回上一级")
         print("=" * 50)
-        c = input("请输入编号 (0-14): ").strip()
+        c = input("请输入编号 (0-15): ").strip()
         if c == '0': return
         if c == '1':
             device = choose_adb_device()
@@ -1096,6 +1216,9 @@ def menu_e_adb_manager():
         elif c == '14':
             device = choose_adb_device()
             if device: adb_check_permissions(device)
+        elif c == '15':
+            device = choose_adb_device()
+            if device: install_any_apk(device)
 
 # ===== 其他二级菜单 =====
 def menu_a_server_config():
@@ -1238,8 +1361,19 @@ def send_emergency():
     print(f"\n{I.warn} 即将发送紧急宏指令！")
     targets = choose_targets_multi("请选择紧急呼叫目标: ")
     if targets:
-        send_udp(f"FIND_ME_EMERGENCY:{RESCUE_SECRET}", targets)
-        print(f"{I.ok} 紧急指令已下发。")
+        # v2.0.2 补丁：拆解为客户端支持的 3 个真实指令，顺序为 定位 -> 上报 -> 警报
+        print(f"{I.send} [1/3] 唤醒手机定位模块...")
+        send_udp(f"FIND_ME_LOCATE_ONCE:{RESCUE_SECRET}", targets, quiet=True)
+        
+        print(f"{I.send} [2/3] 触发强力上报...")
+        send_udp(f"FIND_ME_REPORT:{RESCUE_SECRET}", targets, quiet=True)
+        
+        print(f"{I.send} [3/3] 播放最高警报...")
+        send_udp(f"FIND_ME_ALARM:{RESCUE_SECRET}", targets, quiet=True)
+        
+        print(f"{I.ok} 紧急三连击指令已全部下发。")
+        print(f"{I.ping} 提示：手机收到指令后，会将最新位置上报至其【已配置的主服务器(server2)】。")
+        print(f"      如果你需要让手机直接上报到本机(PC/Termux)，请使用主菜单 [1] 或 [C] 菜单进行临时定向抓包。")
 
 def main():
     local_ip = get_local_ip()
