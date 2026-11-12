@@ -256,6 +256,11 @@ public class TrackingService extends Service implements LocationListener {
     //   本锁只保护 flush 自己，不影响 queuePendingReport 入队（它用 FILE_LOCK）。
     private static final Object FLUSH_LOCK = new Object();
 
+    // v2.0.1 补丁：防抖与排期锁
+    private final Object alarmScheduleLock = new Object();
+    private static long lastAlarmTriggerTime = 0;
+    private static long lastTrimMemoryLogTime = 0;
+
     // ★ 核心替换：改造线程池，使用有界队列和抛弃最老任务策略，防止弱网卡死导致 OOM
     private final java.util.concurrent.ExecutorService reportExecutor =
             new ThreadPoolExecutor(
@@ -559,6 +564,14 @@ public class TrackingService extends Service implements LocationListener {
             } else if ("ACTION_CLEAR_HISTORY".equals(action)) {
                 clearMessageHistory();
             } else if ("ACTION_ALARM_TRIGGER".equals(action)) {
+                // v2.0.1 补丁：2秒内相同来源的重复唤醒，直接掐断
+                long now = System.currentTimeMillis();
+                if (now - lastAlarmTriggerTime < 2000) {
+                    FileLogger.logD("ALARM", "⏭ 拦截 2 秒内的重复定时上报");
+                    return START_STICKY;
+                }
+                lastAlarmTriggerTime = now;
+
                 long actual = System.currentTimeMillis();
                 long drift = lastAlarmExpectedAt > 0 ? actual - lastAlarmExpectedAt : -1;
                 FileLogger.log(this, "ALARM", "⏰ 定时上报闹钟被唤醒" + (drift >= 0 ? " (偏差 " + drift + "ms)" : ""));
@@ -1816,22 +1829,24 @@ public class TrackingService extends Service implements LocationListener {
     private void scheduleNextReport() {
         if (alarmManager == null || alarmPendingIntent == null) return;
 
-        // ★ 补丁4：强制 cancel 先前可能因快速轮询或手动触发而在内核留存的旧句柄。
-        // 彻底阻断因并发触发导致的闹钟频率超限（Quota 限流），消灭偶发性假死。
-        try { alarmManager.cancel(alarmPendingIntent); } catch (Exception ignored) {}
+        synchronized (alarmScheduleLock) { // v2.0.1 补丁：确保排队与取消的原子性
+            // ★ 补丁4：强制 cancel 先前可能因快速轮询或手动触发而在内核留存的旧句柄。
+            // 彻底阻断因并发触发导致的闹钟频率超限（Quota 限流），消灭偶发性假死。
+            try { alarmManager.cancel(alarmPendingIntent); } catch (Exception ignored) {}
 
-        int rc = reportCount.get();
-        // reportIntervalMs 已从 reportAlarmIntervalMs 初始化，远端 config 可继续覆盖
-        long delay = (rc == 1 || rc == 2) ? 3 * 60 * 1000L : reportIntervalMs;
-        long triggerAtMillis = System.currentTimeMillis() + delay;
-        lastAlarmExpectedAt = triggerAtMillis;
-        // ★ H2 修复 2026-11-07：30 分钟上报不需要秒级精度，改用 setAndAllowWhileIdle，
-        //   避免占用 Android 12+ 精确闹钟配额（72 次/天）。
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, alarmPendingIntent);
-            else alarmManager.set(AlarmManager.RTC_WAKEUP, triggerAtMillis, alarmPendingIntent);
-        } catch (Exception e) {
-            FileLogger.log(this, "ALARM", "⚠️ 主上报闹钟设置失败: " + e.getMessage());
+            int rc = reportCount.get();
+            // reportIntervalMs 已从 reportAlarmIntervalMs 初始化，远端 config 可继续覆盖
+            long delay = (rc == 1 || rc == 2) ? 3 * 60 * 1000L : reportIntervalMs;
+            long triggerAtMillis = System.currentTimeMillis() + delay;
+            lastAlarmExpectedAt = triggerAtMillis;
+            // ★ H2 修复 2026-11-07：30 分钟上报不需要秒级精度，改用 setAndAllowWhileIdle，
+            //   避免占用 Android 12+ 精确闹钟配额（72 次/天）。
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, alarmPendingIntent);
+                else alarmManager.set(AlarmManager.RTC_WAKEUP, triggerAtMillis, alarmPendingIntent);
+            } catch (Exception e) {
+                FileLogger.log(this, "ALARM", "⚠️ 主上报闹钟设置失败: " + e.getMessage());
+            }
         }
     }
 
@@ -1879,7 +1894,7 @@ public class TrackingService extends Service implements LocationListener {
                 Location loc = lastLocation;
                 long locAgeMs = loc != null ? (System.currentTimeMillis() - loc.getTime()) : Long.MAX_VALUE;
                 final long FRESH_THRESHOLD_MS = 10 * 60 * 1000L;
-                final long FRESH_TIMEOUT_MS = 10000L;
+                final long FRESH_TIMEOUT_MS = 3000L; // v2.0.1: 缩短至3秒，防阻塞线程池
 
                 if (loc == null || locAgeMs > FRESH_THRESHOLD_MS) {
                     if (loc != null && locAgeMs > 15 * 60 * 1000L && !force) {
@@ -1893,7 +1908,7 @@ public class TrackingService extends Service implements LocationListener {
                             loc = fresh;
                             lastLocation = fresh;
                         } else {
-                            FileLogger.log(TrackingService.this, "REPORT", "⚠️ 主动刷新定位超时 (耗时 " + costMs + "ms, 旧值 " + (locAgeMs == Long.MAX_VALUE ? "无" : (locAgeMs / 1000) + "s 前") + ")，将使用旧值");
+                            FileLogger.log(TrackingService.this, "REPORT", "⚠️ 主动刷新定位超时 (耗时 " + costMs + "ms, 旧值 " + (locAgeMs == Long.MAX_VALUE ? "无" : (locAgeMs / 1000) + "s 前") + ")，将使用旧值/空值上报");
                         }
                     }
                 }
@@ -3283,6 +3298,11 @@ public class TrackingService extends Service implements LocationListener {
     public void onTrimMemory(int level) {
         super.onTrimMemory(level);
         if (level >= TRIM_MEMORY_RUNNING_LOW) {
+            // v2.0.1 补丁：60 秒时间窗，超过 1 分钟才允许记录一次文件，防高频 IO
+            long now = System.currentTimeMillis();
+            if (now - lastTrimMemoryLogTime < 60 * 1000L) return;
+            lastTrimMemoryLogTime = now;
+
             try {
                 ActivityManager.RunningAppProcessInfo info = new ActivityManager.RunningAppProcessInfo();
                 ActivityManager.getMyMemoryState(info);
