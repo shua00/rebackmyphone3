@@ -55,8 +55,8 @@ import argparse
 # ============================ 配置区 ============================
 TARGET_BUILD_BATCH     = "20261111-2000"
 TARGET_PROTOCOL        = "v2"
-TARGET_CHANGE_TIME     = "2026-11-11 19:45"
-TARGET_CHANGE_SUMMARY  = "注释规范统一（无逻辑改动）"
+TARGET_CHANGE_TIME     = "2026-11-12 22:45"
+TARGET_CHANGE_SUMMARY  = "v2.0 通道可视化 + v2.0.1 架构优化 + 修复版本常量"
 MAX_HISTORY            = 3
 BACKUP_DIR             = ".header_backup"
 
@@ -450,7 +450,7 @@ def build_xml_header(title, history, extra_meta=None):
         "<!--",
         "=" * 80,
         f"  {title}",
-        "~" * 80,          ← 改为波浪号
+        "~" * 80,
         f"  构建批次 : {TARGET_BUILD_BATCH}",
         f"  协议版本 : {TARGET_PROTOCOL}",
         f"  最后修改 : {lt}（{ls}）",
@@ -459,7 +459,7 @@ def build_xml_header(title, history, extra_meta=None):
         for line in extra_meta:
             lines.append(f"  {line}")
     lines += [
-        "~" * 80,          ← 改为波浪号
+        "~" * 80,
         f"  修改记录（倒序，仅列最近 {MAX_HISTORY} 条，更早见 CHANGELOG.txt）:",
     ]
     for t, s in history[:MAX_HISTORY]:
