@@ -1913,6 +1913,26 @@ public class TrackingService extends Service implements LocationListener {
                 json.put("build_version", BuildInfo.BUILD_VERSION);
                 json.put("os_version", "Android " + Build.VERSION.RELEASE); json.put("chat_locked", isChatLocked());
                 json.put("elder_mode", isElderMode());
+
+                // v2.0 补丁：通道健康度快照（供 Web 面板可视化）
+                //   注意：这是"本次上报前"的状态，不含本次上报结果
+                try {
+                    SharedPreferences _spCh = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
+                    long _lastSuccess = _spCh.getLong(PREF_LAST_SUCCESS_REPORT_TIME, 0);
+
+                    boolean _udpOk;
+                    synchronized (rescueLock) { _udpOk = isListeningForRescue; }
+
+                    JSONObject channelObj = new JSONObject();
+                    channelObj.put("udp_listening", _udpOk);
+                    channelObj.put("udp_bind_fail", udpBindFailCount);
+                    channelObj.put("consecutive_failures", consecutiveFailures);
+                    channelObj.put("offline_queue_size", countPendingReports());
+                    channelObj.put("last_success_ago_s",
+                            _lastSuccess > 0 ? (System.currentTimeMillis() - _lastSuccess) / 1000 : -1);
+                    json.put("channel", channelObj);
+                } catch (Exception ignored) {}
+
                 PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE); json.put("is_screen_on", pm != null && pm.isInteractive()); json.put("uptime_ms", SystemClock.elapsedRealtime());
                 JSONObject battObj = new JSONObject(); battObj.put("level", battery[0]); battObj.put("is_charging", battery[1] == 1); json.put("battery", battObj);
                 JSONObject netObj = new JSONObject(); netObj.put("wifi_ssid", wifi[0]); netObj.put("wifi_bssid", wifi[1]); netObj.put("wifi_rssi", Integer.parseInt(wifi[2])); netObj.put("local_ip", ip); json.put("network", netObj);
@@ -2102,6 +2122,29 @@ public class TrackingService extends Service implements LocationListener {
             }
         } catch (Exception e) {
             FileLogger.log(this, "UDP", "⚠️ bindSocketToWifi 失败（将使用系统默认出口）: " + e.getMessage());
+        }
+    }
+
+    /**
+     * v2.0 补丁：统计离线队列当前条数（本次上报前快照）。
+     * 返回 -1 表示读取失败（服务端会把 -1 视为队列状态未知 → 保守降级）。
+     */
+    private int countPendingReports() {
+        try {
+            java.io.File dir = getExternalFilesDir(null);
+            if (dir == null) return -1;
+            java.io.File qf = new java.io.File(dir, PENDING_REPORTS_FILE);
+            if (!qf.exists()) return 0;
+            int lines = 0;
+            java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader(qf));
+            try {
+                while (br.readLine() != null) lines++;
+            } finally {
+                try { br.close(); } catch (Exception ignored) {}
+            }
+            return lines;
+        } catch (Exception e) {
+            return -1;
         }
     }
 

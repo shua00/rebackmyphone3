@@ -13,6 +13,7 @@ captures/
 
 # unify_headers.py 备份
 .header_backup/
+.patch_backup/
 
 # 运行时产物（server2/rescue2 会生成）
 received_logs/
@@ -30,3 +31,6 @@ __pycache__/
 # 系统
 .DS_Store
 Thumbs.db
+
+#patch
+apply_v20_patch.py

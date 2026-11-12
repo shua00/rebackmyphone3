@@ -20,7 +20,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ================= 配置区 =================
-WEB_PORT = 8081
+WEB_PORT = 8082
 UDP_PORT = 8888
 RESCUE_SECRET = "your_private_secret_key"  # ⚠️ 必须与手机端一致
 SERVER2_URL = "http://127.0.0.1:8080"      # server2.py 的地址

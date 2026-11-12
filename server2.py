@@ -820,6 +820,36 @@ def send_udp_broadcast(command_str, target_ip="255.255.255.255"):
 
 # ==================== 主处理器 ====================
 
+def _channel_badge_html(ch, gap_min):
+    """
+    v2.0 补丁：生成通道健康度徽章 HTML。
+    返回空字符串表示不显示（旧版 APK 未上报 channel）。
+    """
+    if gap_min is not None and gap_min > 120:
+        return "<span title='失联超过 2 小时' style='color:#cf222e;font-size:13px;'>🔴 </span>"
+    if not ch:
+        return ""
+    health = ch.get("health", "")
+    if health == "good":
+        return "<span title='UDP 直连正常，对讲机可用' style='color:#2da44e;font-size:13px;'>📡 </span>"
+    if health == "degraded":
+        reasons = []
+        if not ch.get("udp_listening", True):
+            reasons.append("UDP 监听未启动")
+        q = ch.get("offline_queue_size", 0)
+        if isinstance(q, int) and q > 0:
+            reasons.append(f"离线队列积压 {q} 条")
+        elif isinstance(q, int) and q < 0:
+            reasons.append("离线队列状态未知")
+        cf = ch.get("consecutive_failures", 0) or 0
+        if cf > 0:
+            reasons.append(f"连续上报失败 {cf} 次")
+        tip = " / ".join(reasons) if reasons else "通道异常"
+        return (f"<span title='{html_lib.escape(tip)}' "
+                f"style='color:#bf8700;font-size:13px;'>🌐 </span>")
+    return ""
+
+
 def handle_client(client_conn, client_addr):
     try:
         client_conn.settimeout(3.0)
@@ -875,6 +905,20 @@ def handle_client(client_conn, client_addr):
                 if executed_ids:
                     process_executed_commands(dev_id, executed_ids)
                 data["received_at"] = int(datetime.datetime.now().timestamp() * 1000)
+
+                # v2.0 补丁：通道健康度判定（服务端算，客户端不填）
+                ch = data.get("channel") or {}
+                if ch:
+                    qsize = ch.get("offline_queue_size")
+                    if qsize is None or (isinstance(qsize, int) and qsize < 0):
+                        ch["health"] = "degraded"  # 队列状态未知，保守降级
+                    elif (ch.get("udp_listening") and
+                          qsize == 0 and
+                          (ch.get("consecutive_failures", 0) or 0) == 0):
+                        ch["health"] = "good"
+                    else:
+                        ch["health"] = "degraded"
+                    data["channel"] = ch
 
                 with state_lock:
                     if dev_id not in ALL_DEVICES_STATUS:
@@ -1083,6 +1127,7 @@ def handle_client(client_conn, client_addr):
                         # ★ 2026-11-07 [P4.8]
                         "build_version": info.get("build_version", "旧版"),
                         "protocol_version": info.get("protocol_version", 1),
+                        "channel": info.get("channel") or {},
                     }
                 resp = json.dumps(result); resp_bytes = resp.encode('utf-8')
                 client_conn.sendall(
@@ -1527,8 +1572,11 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
                         _pv_raw = str(info.get("protocol_version", 1) or 1)
                         _bv = html_lib.escape(_bv_raw[:32], quote=True)
                         _pv = html_lib.escape(_pv_raw[:4], quote=True)
-                        # ★ 2026-11-07 [P4.7] 版本 + 转义
-                        html += f"<tr><td><b>{dev_id}</b><br><span style='font-size:11px;color:#8c959f'>{_bv} · v{_pv}</span></td>"
+                        # v2.0 补丁：通道健康度徽章 + dev_id 转义
+                        _ch = info.get("channel") or {}
+                        _badge = _channel_badge_html(_ch, gap_min)
+                        html += (f"<tr><td><b>{html_lib.escape(dev_id, quote=True)}</b>"
+                                 f"<br>{_badge}<span style='font-size:11px;color:#8c959f'>{_bv} · v{_pv}</span></td>")
                         html += f"<td>{sys_status}</td>"
                         html += f"<td>{battery.get('level', '?')}%</td>"
                         html += f"<td>{wifi_info}</td>"
