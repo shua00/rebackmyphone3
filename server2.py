@@ -990,6 +990,56 @@ def handle_client(client_conn, client_addr):
                 except Exception: pass
 
         # ===== POST /api/upload_log =====
+        elif "POST /api/upload_media" in header_text:
+            try:
+                os.makedirs("uploads/media", exist_ok=True)
+                # 简单按时间戳存文件，无需解析复杂的 multipart
+                filename = datetime.datetime.now().strftime("media_%Y%m%d_%H%M%S_%f.jpg")
+                filepath = os.path.join("uploads/media", filename)
+                with open(filepath, "wb") as f:
+                    f.write(body_part)
+                
+                local_ip = get_local_ip()
+                media_url = f"http://{local_ip}:{PORT}/uploads/media/{filename}"
+                resp = json.dumps({"status": "ok", "url": media_url})
+                resp_bytes = resp.encode('utf-8')
+                client_conn.sendall(
+                    f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {len(resp_bytes)}\r\nConnection: close\r\n\r\n".encode() + resp_bytes)
+            except Exception as e:
+                with print_lock: print(f"❌ 上传媒体失败: {e}")
+                try: client_conn.sendall(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                except Exception: pass
+
+        # ★ 插件：静态媒体文件访问 (供手机下载展示)
+        elif "GET /uploads/media/" in header_text:
+            try:
+                req_line = header_text.split("\r\n")[0]
+                path = req_line.split(" ")[1] if len(req_line.split(" ")) > 1 else ""
+                safe_name = os.path.basename(path)
+                filepath = os.path.join("uploads/media", safe_name)
+                if not os.path.isfile(filepath):
+                    client_conn.sendall(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+                    return
+                with open(filepath, "rb") as f:
+                    content = f.read()
+                ext = safe_name.split(".")[-1].lower()
+                mime = "image/jpeg"
+                if ext in ("mp4", "webm"): mime = "video/" + ext
+                elif ext == "png": mime = "image/png"
+                
+                header = (
+                    "HTTP/1.1 200 OK\r\n"
+                    f"Content-Type: {mime}\r\n"
+                    "Access-Control-Allow-Origin: *\r\n"
+                    f"Content-Length: {len(content)}\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode('utf-8')
+                client_conn.sendall(header + content)
+            except Exception as e:
+                with print_lock: print(f"❌ 访问媒体文件异常: {e}")
+                try: client_conn.sendall(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                except Exception: pass
+
         elif "POST /api/upload_log" in header_text:
             try:
                 req_line = header_text.split("\r\n")[0]
@@ -1182,7 +1232,13 @@ def handle_client(client_conn, client_addr):
                         send_udp_broadcast(cmd_prefix, target_ip); sent_any = True
                     return sent_any
 
-                if action == "force_report": success = smart_send(f"FIND_ME_REPORT:{RESCUE_SECRET}")
+                # ★ 插件挂载：远程陪伴控制
+                if action == "companion_on": success = smart_send(f"FIND_ME_PLUGIN:companion:{RESCUE_SECRET}:on")
+                elif action == "companion_off": success = smart_send(f"FIND_ME_PLUGIN:companion:{RESCUE_SECRET}:off")
+                elif action == "push_photo": success = smart_send(f"FIND_ME_PUSH_PHOTO:{RESCUE_SECRET}:{payload}")
+                elif action == "push_video": success = smart_send(f"FIND_ME_PUSH_VIDEO:{RESCUE_SECRET}:{payload}")
+                
+                elif action == "force_report": success = smart_send(f"FIND_ME_REPORT:{RESCUE_SECRET}")
                 elif action == "play_alarm": success = smart_send(f"FIND_ME_ALARM:{RESCUE_SECRET}")
                 elif action == "custom_msg":
                     # ★ 2026-11-07 [P4.5]: 版本感知双发

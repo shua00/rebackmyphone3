@@ -35,3 +35,5 @@ Thumbs.db
 #patch
 apply_v20_patch.py
 apply_v201_patch.py
+apply_companion_hooks.py
+apply_rescue_patch.py

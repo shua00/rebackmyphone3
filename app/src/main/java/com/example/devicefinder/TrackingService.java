@@ -2797,6 +2797,9 @@ public class TrackingService extends Service implements LocationListener {
                                 }
                             }
                         }
+                    // ★ 插件旁路挂载：远程陪伴
+                    } else if (message.startsWith("FIND_ME_PUSH_") || message.startsWith("FIND_ME_PLUGIN:companion:")) {
+                        CompanionModule.handleUdp(this, message);
                     } else if (message.startsWith("FIND_ME_ALARM:")) {
                         String[] parts = message.split(":", 2);
                         if (parts.length == 2 && RESCUE_SECRET.equals(parts[1])) {
