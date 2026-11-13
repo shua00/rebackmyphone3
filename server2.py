@@ -153,7 +153,7 @@ HTTP_SUPPORTED_ACTIONS = {
     "lock_chat", "unlock_chat", "set_sms_num", "set_cloud_log",
     "upload_log", "locate_once", "scan_wifi", "restart_udp", "test_low_battery",
     # ★ 2026-11-07 [P1-3/P2]
-    "elder_mode"
+    "elder_mode"，
     "companion_on", "companion_off", "push_photo", "push_video" # ★ 2026-11-13 新增陪伴插件白名单
 }
 
