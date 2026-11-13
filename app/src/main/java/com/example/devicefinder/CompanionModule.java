@@ -14,43 +14,45 @@ public class CompanionModule {
     private static final long DEBOUNCE_MS = 2000;
 
     public static void handleUdp(Context context, String message) {
-        // 1. 校验插件开关
-        if (!PluginRegistry.isEnabled(context, PluginRegistry.PLUGIN_COMPANION)) {
-            // 未开启则直接吞掉，不打日志，保持隐蔽
-            return;
+    if (message == null) return;
+
+    // 1. 开关指令必须优先处理，不受当前开关状态影响
+    if (message.startsWith("FIND_ME_PLUGIN:companion:")) {
+        String[] parts = message.split(":", 4);
+        if (parts.length == 4) {
+            boolean enable = "on".equals(parts[3].trim());
+            PluginRegistry.setEnabled(context, PluginRegistry.PLUGIN_COMPANION, enable);
+            try {
+                android.widget.Toast.makeText(context,
+                        enable ? "✅ 远程陪伴已开启" : "🕶️ 远程陪伴已关闭",
+                        android.widget.Toast.LENGTH_SHORT).show();
+            } catch (Exception ignored) {}
         }
+        return;
+    }
 
-        // 2. 处理开关指令
-        if (message.startsWith("FIND_ME_PLUGIN:companion:")) {
-            String[] parts = message.split(":");
-            if (parts.length == 4) {
-                boolean enable = "on".equals(parts[3]);
-                PluginRegistry.setEnabled(context, PluginRegistry.PLUGIN_COMPANION, enable);
-                if (enable) {
-                    android.widget.Toast.makeText(context, "✅ 远程陪伴已开启", android.widget.Toast.LENGTH_SHORT).show();
-                }
-            }
-            return;
-        }
+    // 2. 其余指令：插件未开启直接吞掉，保持隐蔽
+    if (!PluginRegistry.isEnabled(context, PluginRegistry.PLUGIN_COMPANION)) {
+        return;
+    }
 
-        // 3. 拦截推送指令
-        if (message.startsWith("FIND_ME_PUSH_PHOTO:") || message.startsWith("FIND_ME_PUSH_VIDEO:")) {
-            long now = System.currentTimeMillis();
-            if (now - lastPushTime < DEBOUNCE_MS) return; // 防抖拦截
-            lastPushTime = now;
+    // 3. 拦截推送指令
+    if (message.startsWith("FIND_ME_PUSH_PHOTO:") || message.startsWith("FIND_ME_PUSH_VIDEO:")) {
+        long now = System.currentTimeMillis();
+        if (now - lastPushTime < DEBOUNCE_MS) return;
+        lastPushTime = now;
 
-            String[] parts = message.split(":", 3);
-            if (parts.length == 3) {
-                String type = message.startsWith("FIND_ME_PUSH_VIDEO") ? "video" : "image";
-                String contentUrl = parts[2].trim();
-                
-                if (isValidUrl(contentUrl)) {
-                    FileLogger.log(context, "COMPANION", "📺 收到推送: " + type + " -> " + contentUrl);
-                    launchDisplay(context, type, contentUrl);
-                }
+        String[] parts = message.split(":", 3);
+        if (parts.length == 3) {
+            String type = message.startsWith("FIND_ME_PUSH_VIDEO") ? "video" : "image";
+            String contentUrl = parts[2].trim();
+            if (isValidUrl(contentUrl)) {
+                FileLogger.log(context, "COMPANION", "📺 收到推送: " + type + " -> " + contentUrl);
+                launchDisplay(context, type, contentUrl);
             }
         }
     }
+}
 
     private static void launchDisplay(Context context, String type, String url) {
         Intent intent = new Intent(context, RemoteDisplayActivity.class);
