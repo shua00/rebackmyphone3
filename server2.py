@@ -154,6 +154,7 @@ HTTP_SUPPORTED_ACTIONS = {
     "upload_log", "locate_once", "scan_wifi", "restart_udp", "test_low_battery",
     # ★ 2026-11-07 [P1-3/P2]
     "elder_mode"
+    "companion_on", "companion_off", "push_photo", "push_video" # ★ 2026-11-13 新增陪伴插件白名单
 }
 
 # ===== reports 表字段声明 =====
