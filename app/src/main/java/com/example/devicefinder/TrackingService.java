@@ -3222,10 +3222,6 @@ public class TrackingService extends Service implements LocationListener {
                     if ("1".equals(payload) || "true".equalsIgnoreCase(payload)) setElderMode(true);
                     else setElderMode(false);
                     break;
-                                case "elder_mode":
-                    if ("1".equals(payload) || "true".equalsIgnoreCase(payload)) setElderMode(true);
-                    else setElderMode(false);
-                    break;
                 // ★ 2026-11-13 插件挂载：远程陪伴（HTTP 通道 → 复用 CompanionModule 统一处理）
                 case "companion_on":
                     CompanionModule.handleUdp(this,
@@ -3246,9 +3242,6 @@ public class TrackingService extends Service implements LocationListener {
                         CompanionModule.handleUdp(this,
                                 "FIND_ME_PUSH_VIDEO:" + RESCUE_SECRET + ":" + payload);
                     }
-                    break;
-                default:
-                    FileLogger.log(this, "HTTP_CMD", "⚠️ 未知 HTTP 指令: " + type);
                     break;
                 default:
                     FileLogger.log(this, "HTTP_CMD", "⚠️ 未知 HTTP 指令: " + type);
