@@ -4,9 +4,10 @@
  * ------------------------------------------------------------
  *  构建批次 : 20261111-2000
  *  协议版本 : v2
- *  最后修改 : 2026-11-12 22:45（v2.0 通道可视化 + v2.0.1 架构优化 + 修复版本常量）
+ *  最后修改 : 2026-11-13 13:15（修复滚动监听 NPE 与 onDestroy 状态残留）
  * ------------------------------------------------------------
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
+ *    2026-11-13 13:15  修复滚动监听 NPE 与 onDestroy 状态残留
  *    2026-11-12 22:45  v2.0 通道可视化 + v2.0.1 架构优化 + 修复版本常量
  *    2026-11-11 19:45  注释规范统一（无逻辑改动）
  * ============================================================
@@ -82,6 +83,9 @@ public class ChatActivity extends Activity {
 
         // 【新增】监听滚动，判断是否滑到了底部
         scrollView.getViewTreeObserver().addOnScrollChangedListener(() -> {
+            // ★ 修复：防止布局未加载完或子 View 被系统回收导致的 NPE 闪退
+            if (scrollView.getChildCount() == 0) return;
+            
             int diff = (scrollView.getChildAt(0).getBottom() - (scrollView.getHeight() + scrollView.getScrollY()));
             isAtBottom = diff <= 50; // 留50像素余量
             if (isAtBottom) {
@@ -218,6 +222,9 @@ public class ChatActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        // ★ 修复：双保险，防止极端情况下没走 onPause 导致后台一直发无用广播
+        isForeground = false;
+        
         // [B7] 防御：onCreate 中 registerReceiver 已包 try/catch，
         //      若注册失败或 Activity 生命周期异常未注册就走到 onDestroy，
         //      unregisterReceiver 会抛 IllegalArgumentException 崩溃
