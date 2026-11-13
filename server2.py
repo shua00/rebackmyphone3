@@ -153,7 +153,7 @@ HTTP_SUPPORTED_ACTIONS = {
     "lock_chat", "unlock_chat", "set_sms_num", "set_cloud_log",
     "upload_log", "locate_once", "scan_wifi", "restart_udp", "test_low_battery",
     # ★ 2026-11-07 [P1-3/P2]
-    "elder_mode"，
+    "elder_mode",
     "companion_on", "companion_off", "push_photo", "push_video" # ★ 2026-11-13 新增陪伴插件白名单
 }
 
@@ -391,7 +391,7 @@ def save_report(dev_id, data, source_ip):
                      lat, lng, accuracy, location_provider, location_time, location_age_s,
                      recent_locations_json,
                      nearby_wifi_count, nearby_wifi_json, raw_json, ext_json,
-                     build_version, protocol_version)  # ★ 2026-11-07 [P4.3]
+                     build_version, protocol_version)
                     VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?, ?,?,?, ?,?, ?,?,?, ?,?,?, ?,?,?,?, ?,?,?,?,?,?, ?, ?,?,?,?, ?,?)""", (
                     dev_id, ts, received_at, dt.strftime("%Y-%m-%d"), dt.hour, dt.weekday(),
                     batt_level, is_charging, batt_temp, batt_volt,
