@@ -4,10 +4,12 @@
  * ------------------------------------------------------------
  *  构建批次 : 20261111-2000
  *  协议版本 : v2
- *  最后修改 : 2026-11-12 22:45（v2.0 通道可视化 + v2.0.1 架构优化 + 修复版本常量）
+ *  最后修改 : 2026-11-17 21:00（P0级保活修复：闹钟加 FGS 豁免）
  *  运行功耗 : 极轻量级 (深度适配低内存设备)
  * ------------------------------------------------------------
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
+ *    2026-11-17 21:00  P0级保活修复：闹钟改用 getForegroundService
+ *    2026-11-13 13:00  插件挂载：远程陪伴（HTTP 通道 → 复用 CompanionModule 统一处理）
  *    2026-11-12 22:45  v2.0 通道可视化 + v2.0.1 架构优化 + 修复版本常量
  *    2026-11-11 19:45  注释规范统一（无逻辑改动）
  *    2026-11-07 23:11  （历史，摘要见 CHANGELOG.txt）
@@ -313,7 +315,12 @@ public class TrackingService extends Service implements LocationListener {
             Intent reportIntent = new Intent(this, TrackingService.class);
             reportIntent.setAction("ACTION_ALARM_TRIGGER");
             int flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE : PendingIntent.FLAG_UPDATE_CURRENT;
-            alarmPendingIntent = PendingIntent.getService(this, 1001, reportIntent, flags);
+            // ★ P0级保活修复：API 26+ 使用 getForegroundService() 触发，打破后台启动限制
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                alarmPendingIntent = PendingIntent.getForegroundService(this, 1001, reportIntent, flags);
+            } else {
+                alarmPendingIntent = PendingIntent.getService(this, 1001, reportIntent, flags);
+            }
 
             sensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
             if (sensorManager != null) {
@@ -475,7 +482,12 @@ public class TrackingService extends Service implements LocationListener {
         Intent intent = new Intent(this, TrackingService.class);
         intent.setAction("ACTION_KEEP_ALIVE");
         int flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE : PendingIntent.FLAG_UPDATE_CURRENT;
-        PendingIntent pi = PendingIntent.getService(this, 1002, intent, flags);
+        PendingIntent pi;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            pi = PendingIntent.getForegroundService(this, 1002, intent, flags);
+        } else {
+            pi = PendingIntent.getService(this, 1002, intent, flags);
+        }
 
         // ★ 补丁4：在向系统内核排队下一次保活闹钟前，强制 cancel 掉旧的句柄。
         // 彻底清除 Android 电源管理内核中可能残留的幽灵闹钟，完美绕开 Android 12+ 精确闹钟 Quota 节流。
@@ -1569,7 +1581,12 @@ public class TrackingService extends Service implements LocationListener {
         Intent intent = new Intent(this, TrackingService.class);
         intent.setAction("ACTION_HEARTBEAT");
         int flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE : PendingIntent.FLAG_UPDATE_CURRENT;
-        PendingIntent pi = PendingIntent.getService(this, 9999, intent, flags);
+        PendingIntent pi;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            pi = PendingIntent.getForegroundService(this, 9999, intent, flags);
+        } else {
+            pi = PendingIntent.getService(this, 9999, intent, flags);
+        }
 
         // ★ 补丁4：设置前强制 cancel 旧句柄，规避 Android 12+ 精确闹钟 Quota 节流斩杀
         try { alarmManager.cancel(pi); } catch (Exception ignored) {}
