@@ -47,7 +47,7 @@ public class CompanionModule {
             String[] parts = message.split(":", 3);
             if (parts.length == 3) {
                 // 动态向前嗅探截取 11 到 15 字节，自动还原出原始信令特征：video / audio / web / photo
-                String type = message.substring(13, message.indexOf(":", 13)).toLowerCase();
+                String type = message.substring(8, message.indexOf(":", 8)).toLowerCase();
                 String contentUrl = parts[2].trim();
                 if (isValidUrl(contentUrl)) {
                     FileLogger.log(context, "COMPANION", "📺 收到五模直推分流: " + type + " -> " + contentUrl);
