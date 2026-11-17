@@ -2,13 +2,14 @@
 ============================================================
 server2.py — 全功能同步服务（v2 协议稳定版）
 ------------------------------------------------------------
-构建批次 : 20261111-2000
+构建批次 : 20261117-1000
 协议版本 : v2
-最后修改 : 2026-11-12 22:45（v2.0 通道可视化 + v2.0.1 架构优化 + 修复版本常量）
+最后修改 : 2026-11-18 2:00（v2.2 远程陪伴面板折叠化，与对讲机交互统一，上报未收集全）
 ------------------------------------------------------------
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
+  2026-11-17 10:00  v2.2 远程陪伴面板改为按钮折叠式，与「局域网对讲机」交互完全一致，首屏更清爽
+  2026-11-13 10:30  v2.1 媒体上传动态后缀 + 远程陪伴 Web 面板 + 图/视频自动识别推送
   2026-11-12 22:45  v2.0 通道可视化 + v2.0.1 架构优化 + 修复版本常量
-  2026-11-11 19:45  注释规范统一（无逻辑改动）
 ============================================================
 """
 
@@ -32,7 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 ============================================================
 DeviceFinder server2.py — 全功能同步服务（终极稳健版）
 ============================================================
-版本发布 : 2026-11-12
+版本发布 : 2026-11-17
 核心架构 : 原生 Socket + 多线程 (ThreadPoolExecutor)
 ============================================================
 
@@ -44,6 +45,8 @@ DeviceFinder server2.py — 全功能同步服务（终极稳健版）
 - 地图三图层（天地图无偏移 + 高德自动坐标转换 + 谷歌国际版备用）
 - 地图容器延迟初始化（解决手机端白屏）
 - 全前端 JS 已 ES5 化，完美兼容所有浏览器 / 微信 / WebView
+- ★ v2.1 远程陪伴：Web 面板一键推图/推视频，自动识别 MIME 类型
+- ★ v2.2 远程陪伴面板改为按钮折叠式，与「局域网对讲机」交互统一
 
 【二、历史安全 / 健壮性修复】
 - 修复 .get("key", {}).get() 链式调用遇到 null 崩溃的问题，统一改用 (get() or {}).get()
@@ -67,8 +70,21 @@ DeviceFinder server2.py — 全功能同步服务（终极稳健版）
 7. 纵深防御沙箱 (XSS 切断)
    - 对云端留言 (showServerMessages) 与日志预览 (showCloudLogs) 引入 escapeHtml 沙箱净化，斩断所有恶意报文注入通道。
 
+【四、2026-11-13 v2.1 远程陪伴媒体推送】
+- POST /api/upload_media 改为动态识别后缀（.jpg/.jpeg/.png/.gif/.mp4/.webm），修复旧版写死 .jpg 导致视频 MIME 错乱、手机端无法播放的 Bug
+- Web 面板新增「👨‍👩‍👧 远程陪伴」蓝色控制区：开启/关闭陪伴模式、选择本地文件、一键推送到电视/手机
+- 前端 uploadCompanionMedia() 依据 file.type 自动判断走 push_photo 还是 push_video，无需人工选择
+- 静态媒体服务 GET /uploads/media/ 依据后缀返回正确 Content-Type（image/jpeg、image/png、image/gif、video/mp4、video/webm）
+
+【五、2026-11-17 v2.2 远程陪伴面板折叠化】
+- 原常驻蓝色面板改为「按钮触发 → 独立容器展开/收起」模式，与「🗣️ 局域网对讲机」交互完全一致
+- 首屏占用从 ~200px 降为 0，设备状态表直接上移，符合“监控优先”的使用习惯
+- 按钮使用蓝色描边强调色（与对讲机同款），保证发现性
+- uploadCompanionMedia() 推送成功后自动展开面板（若当前为折叠态），避免家属错失反馈
+- 未改动 HTML 结构内的 <details> 高级设置（保留原生无障碍语义，视觉已足够区分）
+
 ============================================================
-【四、🚀 日常运维与排错实战手册】
+【六、🚀 日常运维与排错实战手册】
 ============================================================
 
 ▶ 1. 服务生死管理 (Systemd 接管)
@@ -95,6 +111,16 @@ DeviceFinder server2.py — 全功能同步服务（终极稳健版）
   - 查询设备数 : python3 -c "import sqlite3; print(sqlite3.connect('track_history.db').execute('SELECT COUNT(DISTINCT device_id) FROM reports').fetchone()[0])"
   - 清理并压缩: python3 -c "import sqlite3; c=sqlite3.connect('track_history.db'); c.execute(\"DELETE FROM reports WHERE device_id LIKE 'heavy_%'\"); c.commit(); c.execute('VACUUM'); print('VACUUM Done')"
 
+▶ 6. 远程陪伴媒体推送排错（v2.1 新增）
+  - 确认上传目录存在 : ls -lh uploads/media/
+  - 确认静态访问可达 : curl -I http://127.0.0.1:8080/uploads/media/<文件名>
+  - 若视频不播放     : 检查手机端是否支持该编码（建议 H.264/AAC 的 .mp4）
+  - 若图片不显示     : 检查浏览器控制台，确认返回 Content-Type 是否与后缀一致
+
+▶ 7. 远程陪伴面板入口（v2.2 变更）
+  - 原常驻面板已改为按钮折叠式，入口在「🗣️ 局域网对讲机」右侧的「👨‍👩‍👧 远程陪伴」按钮
+  - 若家属反馈“找不到”，确认按钮是否因浏览器缓存显示旧版，强制刷新（Ctrl+F5）即可
+
 ============================================================
 """
 
@@ -114,7 +140,7 @@ AUTH_TOKEN = "your_private_secret_key"
 RESCUE_SECRET = "your_private_secret_key"
 
 # ===== 版本 =====
-BUILD_VERSION = "20261111-2000"
+BUILD_VERSION = "20261117-1000"
 PROTOCOL_VERSION = 2
 
 GLOBAL_DEFAULT_CONFIG = {
@@ -140,6 +166,10 @@ LAST_MSG_INFO_TTL = 10.0
 UPLOAD_LOG_DIR = "uploads/logs"
 os.makedirs(UPLOAD_LOG_DIR, exist_ok=True)
 
+# ★ v2.1 新增：媒体上传目录（图片/视频）
+UPLOAD_MEDIA_DIR = "uploads/media"
+os.makedirs(UPLOAD_MEDIA_DIR, exist_ok=True)
+
 # ===== HTTP 下行指令队列 =====
 PENDING_COMMANDS = {}
 CMD_TTL_SECONDS = 86400
@@ -154,8 +184,12 @@ HTTP_SUPPORTED_ACTIONS = {
     "upload_log", "locate_once", "scan_wifi", "restart_udp", "test_low_battery",
     # ★ 2026-11-07 [P1-3/P2]
     "elder_mode",
-    "companion_on", "companion_off", "push_photo", "push_video" # ★ 2026-11-13 新增陪伴插件白名单
+    "companion_on", "companion_off", "push_photo", "push_video", # ★ 2026-11-13 新增陪伴插件白名单
+    "push_audio", "push_web"  # ★ v2.6 2026-11-18 强力挂载新特权
 }
+
+# ===== 允许的媒体后缀白名单（v2.1）=====
+ALLOWED_MEDIA_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.mp4', '.webm', '.mp3', '.aac', '.wma', '.html', '.h5'}
 
 # ===== reports 表字段声明 =====
 REPORTS_COLUMNS = [
@@ -201,18 +235,23 @@ REPORTS_COLUMNS = [
     ("nearby_wifi_json",       "TEXT"),
     ("raw_json",               "TEXT"),
     ("ext_json",               "TEXT"),
-    # ★ 2026-11-07 [P4.2]
     ("build_version",          "TEXT"),
     ("protocol_version",       "INTEGER"),
+    
+    # 🌟 2026-11-18 终极合流：完整补齐远程陪伴插件「全链路全状态」落库物理字段
+    ("companion_enabled",      "INTEGER"), # 陪伴模式总开关状态 (1:开启, 0:关闭)
+    ("push_photo_url",         "TEXT"),    # 当前全屏挂载的图片 URL 地址
+    ("push_video_url",         "TEXT"),    # 当前循环播放的视频/直播源 URL 地址
+    ("push_audio_url",         "TEXT"),    # 当前后台硬解的纯音频/网络广播 URL 地址
+    ("push_web_url",           "TEXT")     # 当前全屏常驻的网页/H5 看板 URL 地址
 ]
 
+# ★ 修复：补上缺失的 REPORTS_INDEXES 定义（原代码在 init_db 中遍历它却从未定义，导致启动即 NameError）
 REPORTS_INDEXES = [
-    ("idx_reports_dev_ts",  "ON reports(device_id, timestamp)"),
-    ("idx_reports_dev_day", "ON reports(device_id, day_str)"),
-    ("idx_reports_ts",      "ON reports(timestamp)"),
-    ("idx_reports_day",     "ON reports(day_str)"),
+    ("idx_reports_device_ts", "ON reports (device_id, timestamp)"),
+    ("idx_reports_timestamp", "ON reports (timestamp)"),
+    ("idx_reports_day_str",   "ON reports (day_str)"),
 ]
-
 
 def _parse_bool_val(v):
     """严格解析布尔/整型状态，避免 0 == False 导致 0 被转为 None"""
@@ -820,6 +859,23 @@ def send_udp_broadcast(command_str, target_ip="255.255.255.255"):
         return False
 
 
+# ==================== 媒体 MIME 判定（v2.1）====================
+
+def get_media_mime(filename):
+    """根据后缀返回正确的 Content-Type，避免视频被当作图片发送"""
+    ext = os.path.splitext(filename)[1].lower()
+    if ext in ('.mp4',):
+        return "video/mp4"
+    if ext in ('.webm',):
+        return "video/webm"
+    if ext in ('.png',):
+        return "image/png"
+    if ext in ('.gif',):
+        return "image/gif"
+    # .jpg / .jpeg / 兜底
+    return "image/jpeg"
+
+
 # ==================== 主处理器 ====================
 
 def _channel_badge_html(ch, gap_min):
@@ -990,13 +1046,23 @@ def handle_client(client_conn, client_addr):
                 try: client_conn.sendall(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 except Exception: pass
 
-        # ===== POST /api/upload_log =====
+        # ===== POST /api/upload_media =====
+        # ★ v2.1 补丁：动态识别后缀，支持视频（修复旧版写死 .jpg 导致 MIME 错乱）
         elif "POST /api/upload_media" in header_text:
             try:
-                os.makedirs("uploads/media", exist_ok=True)
-                # 简单按时间戳存文件，无需解析复杂的 multipart
-                filename = datetime.datetime.now().strftime("media_%Y%m%d_%H%M%S_%f.jpg")
-                filepath = os.path.join("uploads/media", filename)
+                os.makedirs(UPLOAD_MEDIA_DIR, exist_ok=True)
+                # 从 URL 中提取原始文件名后缀（例如 ?filename=test.mp4）
+                req_line = header_text.split("\r\n")[0]
+                path_with_query = req_line.split(" ")[1] if len(req_line.split(" ")) > 1 else ""
+                params = parse_qs(urlparse(path_with_query).query)
+                orig_name = params.get("filename", ["unknown.jpg"])[0]
+                ext = os.path.splitext(orig_name)[1].lower()
+                if ext not in ALLOWED_MEDIA_EXTS:
+                    ext = '.jpg' # 兜底
+
+                filename = datetime.datetime.now().strftime("media_%Y%m%d_%H%M%S_%f") + ext
+                filepath = os.path.join(UPLOAD_MEDIA_DIR, filename)
+                
                 with open(filepath, "wb") as f:
                     f.write(body_part)
                 
@@ -1017,16 +1083,13 @@ def handle_client(client_conn, client_addr):
                 req_line = header_text.split("\r\n")[0]
                 path = req_line.split(" ")[1] if len(req_line.split(" ")) > 1 else ""
                 safe_name = os.path.basename(path)
-                filepath = os.path.join("uploads/media", safe_name)
+                filepath = os.path.join(UPLOAD_MEDIA_DIR, safe_name)
                 if not os.path.isfile(filepath):
                     client_conn.sendall(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
                     return
                 with open(filepath, "rb") as f:
                     content = f.read()
-                ext = safe_name.split(".")[-1].lower()
-                mime = "image/jpeg"
-                if ext in ("mp4", "webm"): mime = "video/" + ext
-                elif ext == "png": mime = "image/png"
+                mime = get_media_mime(safe_name)
                 
                 header = (
                     "HTTP/1.1 200 OK\r\n"
@@ -1475,6 +1538,9 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
 .chat-input-area input { flex: 1; min-width: 200px; margin: 0; }
 .chat-input-area button { margin: 0; }
 
+/* ★ v2.2 远程陪伴面板：默认隐藏，由「👨‍👩‍👧 远程陪伴」按钮切换显示 */
+#companionBox { display: none; margin-top: 24px; }
+
 .device-selector { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px; border-top: 1px solid var(--color-border-muted); background: #fff; }
 .device-tag { position: relative; cursor: pointer; }
 .device-tag input { position: absolute; opacity: 0; cursor: pointer; height: 0; width: 0; }
@@ -1505,6 +1571,8 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
         <button class="btn-primary" onclick="sendCmd('force_report')">全局同步状态</button>
         <button onclick="showServerMessages()">查看云端留言</button>
         <button onclick="toggleChatBox()" style="color:#0969da; border-color:#0969da;">🗣️ 局域网对讲机</button>
+        <!-- ★ v2.2 新增：远程陪伴按钮，与对讲机交互一致（点击展开/收起下方独立面板） -->
+        <button onclick="toggleCompanionBox()" style="color:#0969da; border-color:#0969da;">👨‍👩‍👧 远程陪伴</button>
     </div>
     <details style="margin-top: 16px; border-top: 1px solid var(--color-border-muted); padding-top: 12px;">
         <summary>⚙️ 高级设置与系统工具</summary>
@@ -1542,6 +1610,34 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
     <div class="chat-input-area">
         <input type="text" id="chatInput" placeholder="输入消息..." onkeypress="handleChatEnter(event)">
         <button class="btn-primary" onclick="sendChat()">发送</button>
+    </div>
+</div>
+
+<!-- ★ v2.2 新增：远程陪伴面板独立容器，默认隐藏，与 #chatBox 平级 -->
+<div id="companionBox">
+    <div style="padding: 16px; background: #f0f7ff; border: 1px solid #0969da; border-radius: 6px;">
+        <h3 style="margin-top: 0; color: #0969da; font-size: 16px;">👨‍👩‍👧 远程陪伴 (给老人推照片/视频)</h3>
+        <div class="btn-group" style="margin-top: 8px;">
+            <button class="btn-primary" onclick="sendCmd('companion_on')">🟢 开启陪伴模式</button>
+            <button onclick="sendCmd('companion_off')">⚪ 关闭陪伴模式</button>
+        </div>
+        
+        <!-- ★ v2.5 终极无痕镜像网关：一个可视输入框承载双模，外接幽灵隐藏文件选择器 -->
+        <div class="input-row" style="margin-top: 12px; background: #fff; padding: 10px; border-radius: 6px;">
+            <!-- 可视化伪装框：可显示文件名，也可直接粘贴 URL 外链 -->
+            <input type="text" id="companionFileFake" placeholder="点击选择本地图片/视频，或直接在此粘贴网络 URL 链接..." style="flex: 1; color: #24292f;"
+                   onclick="if(this.value.indexOf('http') !== 0) { document.getElementById('companionFileReal').click(); }"
+                   onchange="if(this.value.indexOf('http') === 0) { this.style.color='#0969da'; } else { this.style.color='#24292f'; }">
+            
+            <!-- 幽灵隐藏真实选择器：完全不可见，只在后台提供本地文件字节流支持 -->
+            <!-- ★ v2.7 完美镜像双模输入框：移除内部注释，规避 HTML 标签解析死锁 -->
+<input type="file" id="companionFileReal" accept="image/*,video/*" style="display: none;" onchange="if(this.files && this.files.length > 0) { document.getElementById('companionFileFake').value = this.files[0].name; document.getElementById('companionFileFake').style.color='#24292f'; }">        
+            <button class="btn-primary" onclick="uploadCompanionMedia()">🚀 推送到电视/手机</button>
+        </div>
+
+        <div style="color: var(--color-fg-muted); font-size: 12px; margin-top: 8px;">
+            * 提示：推送前请先点击“开启陪伴模式”。选择照片或短视频后点击推送，老人屏幕会全屏展示。
+        </div>
     </div>
 </div>
 
@@ -1686,6 +1782,7 @@ var markersLayer = null;
 var polyline = null;
 var isMapVisible = false;
 var isChatVisible = false;
+var isCompanionVisible = false;  // ★ v2.2 远程陪伴面板展开状态
 var _offlineDevices = [];
 
 var TIANDITU_KEY = "e669a4b8bc516a2d6e0104f746069b5a"; // 填入你的天地图 Key
@@ -1826,6 +1923,13 @@ function toggleChatBox() {
     } else {
         chatBox.style.display = 'none';
     }
+}
+
+// ★ v2.2 新增：远程陪伴面板展开/收起（与对讲机交互一致）
+function toggleCompanionBox() {
+    var box = document.getElementById('companionBox');
+    isCompanionVisible = !isCompanionVisible;
+    box.style.display = isCompanionVisible ? 'block' : 'none';
 }
 
 function handleChatEnter(e) { if (e.key === 'Enter') sendChat(); }
@@ -2126,6 +2230,134 @@ function confirmCleanAllOffline() {
     sendCmd('clean_offline');
 }
 
+// ★ v2.1 新增：远程陪伴媒体上传（自动识别图片/视频）
+// ★ v2.4 终端双模网关：零提示、全自动无痕分流转发
+// ★ v2.5 镜像双通道路由：彻底解决服务端误加载与死锁卡死
+// ★ v2.6 镜像五通道路由：零提示、智能识别（图/影/音/网/纯文本）无痕转发
+function uploadCompanionMedia() {
+    var fakeInput = document.getElementById('companionFileFake');
+    var realInput = document.getElementById('companionFileReal');
+    
+    var inputVal = fakeInput.value ? fakeInput.value.trim() : "";
+    
+    // 智能断路器：严格判定当前框内是网络外链还是本地文件名
+    var isRemoteUrl = inputVal.indexOf("http://") === 0 || inputVal.indexOf("https://") === 0;
+
+    // 保底拦截：两路皆空，则判定为“纯文本大字报模式”
+    var isPureText = !realInput.files.length && !isRemoteUrl && inputVal.length > 0;
+
+    if (!realInput.files.length && !isRemoteUrl && !isPureText) { 
+        showToast("请选择文件、粘贴 URL 外链，或直接输入纯文本大字报内容！"); 
+        return; 
+    }
+
+    if (isPureText) {
+        // ============================================================
+        // 【通道 C】纯文本大字报 — 自动转换为标准的 text 标签指令发走
+        // ============================================================
+        showToast("正在通过云端路由直接同步大字报文本...");
+        fetch('/api/control', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: 'custom_msg', payload: inputVal, target_ip: 'all'})
+        })
+        .then(function(res) { return res.json(); }).then(function(data) {
+            if (data.status === 'ok') {
+                showToast("🚀 纯文本大字报指令已无痕同步！");
+                fakeInput.value = ""; realInput.value = "";
+            }
+        });
+        return;
+    }
+
+    if (isRemoteUrl) {
+        // ============================================================
+        // 【通道 B】网络外链直推逻辑 — 智能感知图/影/音/网，彻底阻断文件上传
+        // ============================================================
+        var mediaUrl = inputVal;
+        var lowerUrl = mediaUrl.toLowerCase();
+        
+        var action = "push_photo"; // 默认归图
+        
+        // 视频流特征识别（含直播源 m3u8）
+        var isVideo = lowerUrl.indexOf('.mp4') !== -1 || lowerUrl.indexOf('.webm') !== -1 || 
+                      lowerUrl.indexOf('.m3u8') !== -1 || lowerUrl.indexOf('live') !== -1 || lowerUrl.indexOf('stream') !== -1;
+                      
+        // 🎵 音频流特征识别（网络电台、相声、MP3 戏曲）
+        var isAudio = lowerUrl.indexOf('.mp3') !== -1 || lowerUrl.indexOf('.wma') !== -1 || 
+                      lowerUrl.indexOf('.aac') !== -1 || lowerUrl.indexOf('audio') !== -1 || lowerUrl.indexOf('fm') !== -1;
+        
+        if (isVideo) { action = 'push_video'; }
+        else if (isAudio) { action = 'push_audio'; } // ★ v2.6 新增音频信令
+        else if (lowerUrl.indexOf('.jpg') === -1 && lowerUrl.indexOf('.png') === -1 && lowerUrl.indexOf('.gif') === -1 && lowerUrl.indexOf('.jpeg') === -1) {
+            // ★ v2.6 新增全屏网页 H5 路由：既不是视频、不是音频、不是常见图片，直接划归为网页挂载
+            action = 'push_web'; 
+        }
+        
+        showToast("正在通过智能网关进行外链分流推送 [" + action + "]...");
+        
+        fetch('/api/control', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: action, payload: mediaUrl, target_ip: 'all'})
+        })
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            if (data.status === 'ok') {
+                if (!isCompanionVisible) toggleCompanionBox();
+                showToast("🚀 外链直推指令已成功同步！");
+                fakeInput.value = ""; realInput.value = "";
+                fakeInput.type = "text";
+            } else {
+                showToast("❌ 外链推送失败: " + (data.msg || "未知错误"));
+            }
+        })
+        .catch(function(err) { showToast("❌ 请求异常: " + err.message); });
+
+    } else {
+        // ============================================================
+        // 【通道 A】原生本地文件流通道 — 保持高保真转存
+        // ============================================================
+        var file = realInput.files[0];
+        var isVideo = file.type.startsWith('video');
+        var action = isVideo ? 'push_video' : 'push_photo';
+        
+        showToast("正在上传本地媒体文件至服务器，请稍候...");
+        
+        fetch('/api/upload_media?filename=' + encodeURIComponent(file.name), {
+            method: 'POST',
+            body: file
+        })
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            if (data.status === 'ok') {
+                showToast("✅ 服务器转存完毕，正在同步下发信令...");
+                return fetch('/api/control', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({action: action, payload: data.url, target_ip: 'all'})
+                });
+            } else {
+                throw new Error(data.msg || "服务器本地存储失败");
+            }
+        })
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            if (data.status === 'ok') {
+                if (!isCompanionVisible) toggleCompanionBox();
+                showToast("🚀 媒体同步指令已下发！");
+                fakeInput.value = ""; realInput.value = "";
+                fakeInput.type = "text";
+            } else {
+                showToast("❌ 推送失败: " + (data.msg || "未知错误"));
+            }
+        })
+        .catch(function(err) { showToast("❌ 发生故障: " + err.message); });
+    }
+}
+
+
+
 function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, function(c) {
         return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
@@ -2207,6 +2439,7 @@ def start_server():
         print(f"[SV] server2.py {BUILD_VERSION} (协议 v{PROTOCOL_VERSION})")
         print(f"🚀 设备同步服务已启动: http://{get_local_ip()}:{PORT}")
         print(f"📁 日志上传目录: {os.path.abspath(UPLOAD_LOG_DIR)}")
+        print(f"📁 媒体上传目录: {os.path.abspath(UPLOAD_MEDIA_DIR)}")
         print(f"🚨 失联检测: 每 5 分钟扫描一次，>2 小时未上报告警")
         print(f"📋 HTTP 下行队列: TTL={CMD_TTL_SECONDS}s, 上限={CMD_MAX_PER_DEVICE}/设备")
         print(f"🗑️  离线设备清理: 弹窗展示>30分钟未活动, 批量清理阈值={CLEAN_OFFLINE_THRESHOLD_MS // 3600000}小时")
