@@ -36,21 +36,26 @@ public class CompanionModule {
         }
 
         // ★ 第 3 步：推送指令
-        if (message.startsWith("FIND_ME_PUSH_PHOTO:") || message.startsWith("FIND_ME_PUSH_VIDEO:")) {
+        // ★ 强力补丁：2026-11-18 完美对接 server2.py 镜像五通路下行网关，全面解除信令阻断限制
+        if (message.startsWith("FIND_ME_PUSH_PHOTO:") || message.startsWith("FIND_ME_PUSH_VIDEO:")
+                || message.startsWith("FIND_ME_PUSH_AUDIO:") || message.startsWith("FIND_ME_PUSH_WEB:")) {
+            
             long now = System.currentTimeMillis();
             if (now - lastPushTime < DEBOUNCE_MS) return;
             lastPushTime = now;
-
+        
             String[] parts = message.split(":", 3);
             if (parts.length == 3) {
-                String type = message.startsWith("FIND_ME_PUSH_VIDEO") ? "video" : "image";
+                // 动态向前嗅探截取 11 到 15 字节，自动还原出原始信令特征：video / audio / web / photo
+                String type = message.substring(13, message.indexOf(":", 13)).toLowerCase();
                 String contentUrl = parts[2].trim();
                 if (isValidUrl(contentUrl)) {
-                    FileLogger.log(context, "COMPANION", "📺 收到推送: " + type + " -> " + contentUrl);
+                    FileLogger.log(context, "COMPANION", "📺 收到五模直推分流: " + type + " -> " + contentUrl);
                     launchDisplay(context, type, contentUrl);
                 }
             }
         }
+
     }
 
     private static void launchDisplay(Context context, String type, String url) {
