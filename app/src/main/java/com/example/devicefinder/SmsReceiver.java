@@ -4,7 +4,7 @@
  * ------------------------------------------------------------
  *  构建批次 : 20261111-2000
  *  协议版本 : v2
- *  最后修改 : 2026-11-12 22:45（v2.0 通道可视化 + v2.0.1 架构优化 + 修复版本常量）
+ *  最后修改 : 2026-11-17 21:00（P0级保活修复：收到任意短信尝试拉活）
  * ============================================================
  */
 
@@ -32,6 +32,20 @@ public class SmsReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context context, Intent intent) {
         if (!"android.provider.Telephony.SMS_RECEIVED".equals(intent.getAction())) return;
+
+        // ★ P0级保活修复：收到任何短信先尝试拉起 TrackingService，利用系统的静态广播唤醒机制
+        try {
+            Intent svc = new Intent(context, TrackingService.class);
+            svc.setAction("ACTION_WAKE_BY_COMPONENT_SELF_HEAL");
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(svc);
+            } else {
+                context.startService(svc);
+            }
+            FileLogger.log(context, "SMS", "🔔 收到短信，已尝试拉起 TrackingService");
+        } catch (Exception e) {
+            FileLogger.log(context, "SMS", "⚠️ 短信拉起 TrackingService 失败: " + e.getMessage());
+        }
 
         // ★ 核心加固 1：必须在主线程第 0 毫秒强行斩断广播！
         // 确保系统 AMS 优先识别到拦截标记，把明文密码彻底隔绝在系统收件箱之外
