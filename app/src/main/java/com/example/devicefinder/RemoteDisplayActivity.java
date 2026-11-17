@@ -26,9 +26,9 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 
 /**
- * RemoteDisplayActivity — 远程陪伴五模全自动多媒体容器
+ * RemoteDisplayActivity — 远程陪伴五模全自动多媒体容器（带有全状态回传持久化版本）
  * 支持：静态图片、循环视频、网络直播流、后台音频流、全功能交互式网页 H5 挂载。
- * 具备：15秒自愈断路器、2K级防 OOM 降采样、网络缓冲区硬拉高、智能按键锁拦截。
+ * 具备：15秒自愈断路器、2K级防 OOM 降采样、网络缓冲区硬拉高、智能按键锁拦截、真实 URL 状态持久化。
  * 2026-11-18
  */
 public class RemoteDisplayActivity extends Activity {
@@ -114,7 +114,7 @@ public class RemoteDisplayActivity extends Activity {
     /**
      * 1. 🌐 全功能网页加载引擎（支持完整点击交互、滑动、双指缩放）
      */
-    private void initWebView(String url) {
+    private void initWebView(final String url) {
         FileLogger.log(this, "WEB_CORE", "🌐 全屏纯净 H5 容器挂载启动: " + url);
         try {
             webView = new WebView(this);
@@ -138,8 +138,15 @@ public class RemoteDisplayActivity extends Activity {
 
             webView.setWebViewClient(new WebViewClient() {
                 @Override
-                public void onPageFinished(WebView view, String url) {
+                public void onPageFinished(WebView view, String loadedUrl) {
                     handler.removeCallbacks(timeoutRunnable); // 渲染成功，撤销超时门限
+                    
+                    // 🌟 状态无损同步：落盘记录当前全屏常驻的网页外链，以便主追踪引擎打包回传
+                    getSharedPreferences("device_finder_prefs", MODE_PRIVATE).edit()
+                        .putString("current_push_web_url", loadedUrl)
+                        .putString("current_push_photo_url", "")
+                        .putString("current_push_video_url", "")
+                        .putString("current_push_audio_url", "").commit();
                 }
                 @Override
                 public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
@@ -155,11 +162,10 @@ public class RemoteDisplayActivity extends Activity {
             finish();
         }
     }
-
     /**
      * 2. 🎬 视频/直播流渲染管道（M3U8 直播源原地治愈断连）
      */
-    private void initVideo(String url) {
+    private void initVideo(final String url) {
         try {
             videoView = new VideoView(this);
             rootLayout.addView(videoView, new FrameLayout.LayoutParams(-1, -1));
@@ -171,6 +177,13 @@ public class RemoteDisplayActivity extends Activity {
                     mp.setLooping(true); // 标准点播文件开启无限循环
                 }
                 videoView.start();
+                
+                // 🌟 状态无损同步：落盘记录当前全屏播放的视频或直播源，以便主追踪引擎打包回传
+                getSharedPreferences("device_finder_prefs", MODE_PRIVATE).edit()
+                    .putString("current_push_video_url", url)
+                    .putString("current_push_photo_url", "")
+                    .putString("current_push_audio_url", "")
+                    .putString("current_push_web_url", "").commit();
                 FileLogger.log(this, "COMPANION", "▶ 视频/直播流加载完毕，起播成功");
             });
 
@@ -195,10 +208,11 @@ public class RemoteDisplayActivity extends Activity {
             finish();
         }
     }
+
     /**
      * 3. 🎵 纯音频流渲染管道（网络电台/戏曲，支持息屏收听，极度省电）
      */
-    private void initAudio(String url) {
+    private void initAudio(final String url) {
         FileLogger.log(this, "AUDIO_CORE", "📻 后台音频流硬解起动: " + url);
         try {
             backgroundAudioPlayer = new MediaPlayer();
@@ -207,6 +221,13 @@ public class RemoteDisplayActivity extends Activity {
                 handler.removeCallbacks(timeoutRunnable);
                 mp.setLooping(true);
                 mp.start();
+                
+                // 🌟 状态无损同步：落盘记录当前后台正在收听的网络电台戏曲，以便主追踪引擎打包回传
+                getSharedPreferences("device_finder_prefs", MODE_PRIVATE).edit()
+                    .putString("current_push_audio_url", url)
+                    .putString("current_push_photo_url", "")
+                    .putString("current_push_video_url", "")
+                    .putString("current_push_web_url", "").commit();
                 Toast.makeText(RemoteDisplayActivity.this, "📻 局域网/云端广播已起播", Toast.LENGTH_SHORT).show();
             });
             backgroundAudioPlayer.setOnErrorListener((mp, what, extra) -> {
@@ -224,7 +245,7 @@ public class RemoteDisplayActivity extends Activity {
     /**
      * 4. 🖼️ 图片解析管道（5MB 内存预读缓冲区，杜绝二次连接漏洞 + 2K级降采样抗 OOM）
      */
-    private void initImage(String url) {
+    private void initImage(final String url) {
         imageView = new ImageView(this);
         imageView.setScaleType(ImageView.ScaleType.FIT_CENTER);
         rootLayout.addView(imageView, new FrameLayout.LayoutParams(-1, -1));
@@ -266,7 +287,15 @@ public class RemoteDisplayActivity extends Activity {
                 if (bitmap != null) {
                     handler.removeCallbacks(timeoutRunnable);
                     final Bitmap bmp = bitmap;
-                    runOnUiThread(() -> imageView.setImageBitmap(bmp));
+                    runOnUiThread(() -> {
+                        imageView.setImageBitmap(bmp);
+                        // 🌟 状态无损同步：落盘记录当前全屏照片墙挂载的图片网址，以便主追踪引擎打包回传
+                        getSharedPreferences("device_finder_prefs", MODE_PRIVATE).edit()
+                            .putString("current_push_photo_url", url)
+                            .putString("current_push_video_url", "")
+                            .putString("current_push_audio_url", "")
+                            .putString("current_push_web_url", "").commit();
+                    });
                 } else {
                     throw new Exception("Bitmap null");
                 }
@@ -327,5 +356,12 @@ public class RemoteDisplayActivity extends Activity {
         super.onDestroy();
         resetAllViews();
         handler.removeCallbacksAndMessages(null);
+        
+        // 🌟 退出状态联动清空：清空所有在播痕迹，主追踪服务下次上报会自动把云端状态对齐洗净
+        getSharedPreferences("device_finder_prefs", MODE_PRIVATE).edit()
+            .putString("current_push_photo_url", "")
+            .putString("current_push_video_url", "")
+            .putString("current_push_audio_url", "")
+            .putString("current_push_web_url", "").commit();
     }
 }
