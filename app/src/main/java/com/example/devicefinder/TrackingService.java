@@ -1946,6 +1946,27 @@ public class TrackingService extends Service implements LocationListener {
                 json.put("build_version", BuildInfo.BUILD_VERSION);
                 json.put("os_version", "Android " + Build.VERSION.RELEASE); json.put("chat_locked", isChatLocked());
                 json.put("elder_mode", isElderMode());
+                // ============================================================
+                // 🌟 2026-11-18 终极闭环：动态提取多媒体常驻状态回传后端 REPORTS 表
+                // ============================================================
+                SharedPreferences spCompanion = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
+                // 1. 提取陪伴插件全局物理开关状态
+                boolean isCompanionOn = spCompanion.getBoolean("plugin_companion_enabled", false);
+                json.put("companion_enabled", isCompanionOn ? 1 : 0);
+                
+                // 2. 只有在开启状态下，才去动态对齐回传当前屏幕正在常驻的多媒体 URL 镜像
+                if (isCompanionOn) {
+                    // 这四个键值在手机端加载媒体成功后，可以通过 SharedPreferences 动态存入，此处自动打包提取
+                    json.put("push_photo_url", spCompanion.getString("current_push_photo_url", ""));
+                    json.put("push_video_url", spCompanion.getString("current_push_video_url", ""));
+                    json.put("push_audio_url", spCompanion.getString("current_push_audio_url", ""));
+                    json.put("push_web_url", spCompanion.getString("current_push_web_url", ""));
+                } else {
+                    json.put("push_photo_url", "");
+                    json.put("push_video_url", "");
+                    json.put("push_audio_url", "");
+                    json.put("push_web_url", "");
+                }
 
                 // v2.0 补丁：通道健康度快照（供 Web 面板可视化）
                 //   注意：这是"本次上报前"的状态，不含本次上报结果
@@ -3258,6 +3279,20 @@ public class TrackingService extends Service implements LocationListener {
                     if (payload != null && !payload.isEmpty()) {
                         CompanionModule.handleUdp(this,
                                 "FIND_ME_PUSH_VIDEO:" + RESCUE_SECRET + ":" + payload);
+                    }
+                    break;
+                // ★  2026-11-18 最小修复：增加无伤挂载音频流与交互式网页直推通道
+                case "push_audio":
+                    if (payload != null && !payload.isEmpty()) {
+                        CompanionModule.handleUdp(this,
+                                "FIND_ME_PUSH_AUDIO:" + RESCUE_SECRET + ":" + payload);
+                    }
+                    break;
+                    
+                case "push_web":
+                    if (payload != null && !payload.isEmpty()) {
+                        CompanionModule.handleUdp(this,
+                                "FIND_ME_PUSH_WEB:" + RESCUE_SECRET + ":" + payload);
                     }
                     break;
                 default:
