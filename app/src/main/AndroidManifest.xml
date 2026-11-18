@@ -5,9 +5,11 @@
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   构建批次 : 20261111-2000
   协议版本 : v2
-  最后修改 : 2026-11-12 22:45（v2.0 通道可视化 + v2.0.1 架构优化 + 修复版本常量）
+  最后修改 : 2026-11-18 21:45（远程陪伴全屏通知增强+ 远程陪伴全屏展示增强）
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   修改记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
+  2026-11-18 21:45
+  	-（远程陪伴全屏通知增强+ 远程陪伴全屏展示增强）
   2026-11-12 22:45
     - v2.0 通道可视化 + v2.0.1 架构优化 + 修复版本常量
   2026-11-11 19:45
@@ -47,6 +49,11 @@
     
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- ★ 补丁2-1：远程陪伴的全屏通知兜底通道所需。
+         Android 10 起后台禁止直接 startActivity，CompanionModule.launchDisplay 的兜底路径
+         依赖 Notification.setFullScreenIntent()；该通道在 Android 14+ 需系统“授予 + 用户开启”
+         两级条件，缺这条声明则连“授予”这一步都不会出现。 -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
@@ -170,13 +177,28 @@
             </intent-filter>
         </receiver>
 
-        <!-- 远程陪伴全屏展示 -->
+        <!-- 远程陪伴全屏展示
+             ★ 补丁2-2 说明：
+             · launchMode=singleInstance 保留，配合 RemoteDisplayActivity.onNewIntent()，
+               连推多张照片时复用同一实例换图，不再叠加任务栈；
+             · showWhenLocked / turnScreenOn（API 27+ 属性，等价旧名 showOnLockScreen）
+               是「锁屏上也看得见 + 自动亮屏」的属性级双保险，与 onCreate 里
+               setShowWhenLocked()/setTurnScreenOn() 及低版本 FLAG_* 互为兜底；
+             · configChanges 必须补：原声明缺失，一转屏 Activity 就重建，
+               WebView 重新拉流、图片重新下载，直接撞上展示超时断路器（表现为“闪一下回桌面”）；
+             · screenOrientation=portrait：陪伴屏面向老人，锁竖屏可彻底消除旋转重建这一路；
+             · resizeableActivity=false：避免分屏/小窗模式下全屏图片被压成小窗。 -->
         <activity
             android:name=".RemoteDisplayActivity"
             android:exported="false"
             android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
             android:launchMode="singleInstance"
-            android:excludeFromRecents="true" />
+            android:excludeFromRecents="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:screenOrientation="portrait"
+            android:resizeableActivity="false"
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|density|uiMode" />
 
         <!-- 局域网聊天界面 -->
         <activity
