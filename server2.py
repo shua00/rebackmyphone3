@@ -4,7 +4,7 @@ server2.py — 全功能同步服务（v2 协议稳定版）
 ------------------------------------------------------------
 构建批次 : 20261117-1000
 协议版本 : v2
-最后修改 : 2026-11-18 2:00（v2.2 远程陪伴面板折叠化，与对讲机交互统一，上报未收集全）
+最后修改 : 2026-11-18 23:00（v2.2 远程陪伴面板折叠化，与对讲机交互统一，上报未收集全）
 ------------------------------------------------------------
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
   2026-11-17 10:00  v2.2 远程陪伴面板改为按钮折叠式，与「局域网对讲机」交互完全一致，首屏更清爽
@@ -33,7 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 ============================================================
 DeviceFinder server2.py — 全功能同步服务（终极稳健版）
 ============================================================
-版本发布 : 2026-11-17
+版本发布 : 2026-11-18
 核心架构 : 原生 Socket + 多线程 (ThreadPoolExecutor)
 ============================================================
 
@@ -136,8 +136,15 @@ CLEAN_OFFLINE_THRESHOLD_MS = 2 * 3600 * 1000    # "清理全部离线设备"阈�
 MANAGE_OFFLINE_THRESHOLD_S = 30 * 60            # "管理离线设备"弹窗展示阈值：30 分钟
 
 PORT = 8080
-AUTH_TOKEN = "your_private_secret_key"
-RESCUE_SECRET = "your_private_secret_key"
+# ★ FIX-1 2026-11-18 [安全 P0]：口令改为支持环境变量注入。
+#   原值 your_private_secret_key 直接写在源码里，等于公开：任何拿到本文件的人
+#   都能伪造 /api/report 上报、伪造带 RESCUE_SECRET 的 UDP 信令。
+AUTH_TOKEN = os.environ.get("DF_AUTH_TOKEN") or "your_private_secret_key"
+RESCUE_SECRET = os.environ.get("DF_RESCUE_SECRET") or AUTH_TOKEN
+# 控制面（/api/control）鉴权开关，默认开启。
+# 现场若有大量不带 token 的旧前端/脚本，可设 DF_CONTROL_AUTH=0 临时过渡（务必同时改口令）。
+CONTROL_AUTH_ENABLED = (os.environ.get("DF_CONTROL_AUTH", "1") != "0")
+USING_DEFAULT_CREDENTIALS = (AUTH_TOKEN == "your_private_secret_key")
 
 # ===== 版本 =====
 BUILD_VERSION = "20261117-1000"
@@ -173,6 +180,28 @@ os.makedirs(UPLOAD_MEDIA_DIR, exist_ok=True)
 # ===== HTTP 下行指令队列 =====
 PENDING_COMMANDS = {}
 CMD_TTL_SECONDS = 86400
+# ★ 2026-11-18 补丁A：展示类指令 TTL 由 86400 压到 600
+#   原因：客户端改成"未渲染成功不 ack"（CompanionModule/TrackingService 补丁）后，失败指令会留在队列反复重投。
+#   展示类（图片/视频/音频/网页/陪伴开关）过期即失去意义，留 24h 会让老人机一天内被同一张图反复弹屏。
+# ★ 2026-11-18 [A档修正] 原补丁A 写的是 600，在「不换 TrackingService」的组合下会直接丢指令，故上调：
+#   依据：本文件 147 行 report_interval_seconds 默认 1800，且 device_log.txt 155/188 行实证
+#   「距上次成功上报 30 分钟，强制触发一次」→ 手机最长 1800s 才取一次队列。
+#   原版 TrackingService 只在上报时取 pending 指令，600s < 1800s ⇒ push_photo 还没被取走就过期删除，
+#   服务端日志只有「📋 [HTTP队列] +push_photo」再无任何后续，表现即「推了永远不显示」。
+#   取 7200 = 覆盖 2 个完整上报周期。等将来上了「未渲染成功不 ack」的客户端(C档)，
+#   失败指令会被主动重投，届时可把它调回 600~1800 以抑制反复弹屏。
+DISPLAY_CMD_TTL_SECONDS = 7200
+DISPLAY_ACTIONS = {"push_photo", "push_video", "push_audio", "push_web",
+                   "companion_on", "companion_off"}
+
+def cmd_ttl_for(action):
+    """按指令类型返回 TTL：展示类 600s，其余（上报/告警/留言/配置）维持 86400s"""
+    return DISPLAY_CMD_TTL_SECONDS if (action in DISPLAY_ACTIONS) else CMD_TTL_SECONDS
+
+# ★ 2026-11-18 补丁B：UDP 重发包数预算（原先 all 全推一次最多打出 27 份重复信令，日志已实证）
+UDP_ROUNDS_BROADCAST = 2      # 广播/子网广播 每目标重发轮次（原 3）
+UDP_ROUNDS_UNICAST   = 1      # 单播 每目标重发轮次（原 2）
+UDP_TOTAL_PACKET_BUDGET = 4   # 单次 smart_send 总包数上限，超过则退化为一次广播
 CMD_MAX_PER_DEVICE = 50
 CMD_SEQ = 0
 _cmd_lock = threading.Lock()
@@ -189,7 +218,9 @@ HTTP_SUPPORTED_ACTIONS = {
 }
 
 # ===== 允许的媒体后缀白名单（v2.1）=====
-ALLOWED_MEDIA_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.mp4', '.webm', '.mp3', '.aac', '.wma', '.html', '.h5'}
+ALLOWED_MEDIA_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.mp4', '.webm', '.mkv',
+                     '.mp3', '.aac', '.m4a', '.wav', '.ogg', '.wma', '.html', '.h5'}
+
 
 # ===== reports 表字段声明 =====
 REPORTS_COLUMNS = [
@@ -464,21 +495,24 @@ def cleanup_old_reports():
     try:
         now_ms = int(datetime.datetime.now().timestamp() * 1000)
         cleared_raw = cleared_nearby = 0
-        conn = sqlite3.connect('track_history.db', timeout=30)
-        try:
-            conn.execute("PRAGMA busy_timeout=30000")
-            c = conn.cursor()
-            if REPORTS_KEEP_RAW_DAYS > 0:
-                cutoff = now_ms - REPORTS_KEEP_RAW_DAYS * 86400 * 1000
-                c.execute("UPDATE reports SET raw_json=NULL WHERE timestamp < ? AND raw_json IS NOT NULL", (cutoff,))
-                cleared_raw = c.rowcount
-            if REPORTS_KEEP_NEARBY_DAYS > 0:
-                cutoff = now_ms - REPORTS_KEEP_NEARBY_DAYS * 86400 * 1000
-                c.execute("UPDATE reports SET nearby_wifi_json=NULL WHERE timestamp < ? AND nearby_wifi_json IS NOT NULL", (cutoff,))
-                cleared_nearby = c.rowcount
-            conn.commit()
-        finally:
-            conn.close()
+        # ★ FIX-2 2026-11-18：这是两条全表 UPDATE（写事务），原先没持 db_write_lock，
+        #   与 save_report / save_history / POST /api/message 的写事务并发 -> database is locked
+        with db_write_lock:
+            conn = sqlite3.connect('track_history.db', timeout=30)
+            try:
+                conn.execute("PRAGMA busy_timeout=30000")
+                c = conn.cursor()
+                if REPORTS_KEEP_RAW_DAYS > 0:
+                    cutoff = now_ms - REPORTS_KEEP_RAW_DAYS * 86400 * 1000
+                    c.execute("UPDATE reports SET raw_json=NULL WHERE timestamp < ? AND raw_json IS NOT NULL", (cutoff,))
+                    cleared_raw = c.rowcount
+                if REPORTS_KEEP_NEARBY_DAYS > 0:
+                    cutoff = now_ms - REPORTS_KEEP_NEARBY_DAYS * 86400 * 1000
+                    c.execute("UPDATE reports SET nearby_wifi_json=NULL WHERE timestamp < ? AND nearby_wifi_json IS NOT NULL", (cutoff,))
+                    cleared_nearby = c.rowcount
+                conn.commit()
+            finally:
+                conn.close()
         if cleared_raw or cleared_nearby:
             with print_lock:
                 print(f"🧹 [reports] 清理完成: raw_json -{cleared_raw}, nearby -{cleared_nearby}")
@@ -551,9 +585,13 @@ def _build_version_aware_commands(target_devs, action_name, payload):
         if versions == {2}:
             return [f"FIND_ME_FLOAT:{RESCUE_SECRET}:{payload}"]
         if versions == {1}:
-            if has_colon:
-                return []
-            return [f"FIND_ME_MSG:{RESCUE_SECRET}:{payload}"]
+            # ★ FIX-3 2026-11-18：旧版此处 return []，使 /api/control 回 status=error；
+            #   但第 1377~1380 行早已把这条 custom_msg 入队 —— 前端提示"失败"，
+            #   设备下次上报却照样收到并弹屏，返回码与实际行为相反。
+            #   改为把半角冒号降级成全角冒号：v1 用首个冒号切字段，全角冒号不会被截断，
+            #   消息不丢、返回码也恢复真实。
+            safe_payload = payload.replace(":", "：") if has_colon else payload
+            return [f"FIND_ME_MSG:{RESCUE_SECRET}:{safe_payload}"]
         cmds = [f"FIND_ME_FLOAT:{RESCUE_SECRET}:{payload}"]
         if not has_colon:
             cmds.append(f"FIND_ME_MSG:{RESCUE_SECRET}:{payload}")
@@ -614,7 +652,7 @@ def get_pending_commands(dev_id):
     with _cmd_lock:
         queue = PENDING_COMMANDS.get(dev_id, [])
         if not queue: return []
-        valid = [c for c in queue if now - c["ts"] < CMD_TTL_SECONDS]
+        valid = [c for c in queue if now - c["ts"] < cmd_ttl_for(c.get("type", ""))]
         if len(valid) != len(queue):
             if valid: PENDING_COMMANDS[dev_id] = valid
             else: PENDING_COMMANDS.pop(dev_id, None)
@@ -626,7 +664,7 @@ def cleanup_expired_commands():
     with _cmd_lock:
         for dev_id in list(PENDING_COMMANDS.keys()):
             queue = PENDING_COMMANDS.get(dev_id, [])
-            valid = [c for c in queue if now - c["ts"] < CMD_TTL_SECONDS]
+            valid = [c for c in queue if now - c["ts"] < cmd_ttl_for(c.get("type", ""))]
             if valid: PENDING_COMMANDS[dev_id] = valid
             else: PENDING_COMMANDS.pop(dev_id, None)
 
@@ -795,7 +833,17 @@ def format_loc_time(ts_ms):
     except Exception: return "N/A"
 
 
-def get_local_ip():
+# ★ FIX-6 2026-11-18 [性能 P1]：get_local_ip 原先每次 smart_send 都跑一遍
+#   （最多 4 次 UDP connect，各 1s 超时；全失败还要同步读 /proc/net/fib_trie），
+#   而 send_udp_broadcast 内部 get_subnet_broadcast 会再调一次 —— 单次 /api/control 最多探测 2 轮。
+#   15 worker 的线程池下，外网抖动时几个慢请求就能把 worker 占满，表现为整站变慢。
+#   改为进程级 TTL 缓存（探测逻辑原样保留在 _detect_local_ip）。
+_LOCAL_IP_CACHE_TTL = 300
+_local_ip_cache = {"ip": None, "ts": 0.0}
+_local_ip_lock = threading.Lock()
+
+
+def _detect_local_ip():
     for target in [("8.8.8.8", 80), ("114.114.114.114", 53), ("1.1.1.1", 443), ("223.5.5.5", 53)]:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -818,6 +866,19 @@ def get_local_ip():
     return "127.0.0.1"
 
 
+def get_local_ip(force_refresh=False):
+    """带 TTL 缓存的本机出口 IP。force_refresh=True 强制重探（切网/网卡热插拔时用）。"""
+    now = time.time()
+    with _local_ip_lock:
+        if (not force_refresh) and _local_ip_cache["ip"] and (now - _local_ip_cache["ts"]) < _LOCAL_IP_CACHE_TTL:
+            return _local_ip_cache["ip"]
+    ip = _detect_local_ip()
+    with _local_ip_lock:
+        _local_ip_cache["ip"] = ip
+        _local_ip_cache["ts"] = time.time()
+    return ip
+
+
 def get_subnet_broadcast():
     ip = get_local_ip()
     if ip.startswith("127.") or ip == "0.0.0.0": return "255.255.255.255"
@@ -838,42 +899,86 @@ def send_udp_broadcast(command_str, target_ip="255.255.255.255"):
                 actual = subnet; targets = [subnet, "255.255.255.255"]
             else:
                 actual = "255.255.255.255"; targets = ["255.255.255.255"]
-            repeats = 3
+            repeats = UDP_ROUNDS_BROADCAST
         elif is_subnet:
-            actual = target_ip; targets = [target_ip]; repeats = 3
+            actual = target_ip; targets = [target_ip]; repeats = UDP_ROUNDS_BROADCAST
         else:
-            actual = target_ip; targets = [target_ip]; repeats = 2
+            actual = target_ip; targets = [target_ip]; repeats = UDP_ROUNDS_UNICAST
         mode = " (广播)" if (is_full or is_subnet) else " (单播)"
         with print_lock:
             print(f"\n📡 [控制台] 发送至 {actual}{mode}: {command_str}")
+        sent_pkts = 0
         for t in targets:
             for _ in range(repeats):
                 try:
                     sock.sendto(command_str.encode('utf-8'), (t, 8888))
+                    sent_pkts += 1
                     time.sleep(0.05)
                 except Exception: pass
         sock.close()
-        return True
+        # ★ FIX-7 2026-11-18：返回真实发包数。旧版只要 socket 建得起就恒返 True，
+        #   使 smart_send 几乎永远 sent_any=True，/api/control 里
+        #   "UDP 未确认送达，已排队 N 条" 那条兜底分支成了死代码，
+        #   UI 一律弹"✅ 指令发送成功" —— 把"发出去了"报成"成功了"，误导运维。
+        return sent_pkts
     except Exception as e:
         with print_lock: print(f"发送失败: {e}")
-        return False
+        return 0
 
 
 # ==================== 媒体 MIME 判定（v2.1）====================
 
+# ★ 2026-11-18 修复：补齐 webp/bmp/音频，杜绝“后缀与 Content-Type 不一致导致手机端不解码”
+MIME_BY_EXT = {
+    '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.png': 'image/png', '.gif': 'image/gif',
+    '.webp': 'image/webp', '.bmp': 'image/bmp',
+    '.mp4': 'video/mp4', '.webm': 'video/webm', '.mkv': 'video/x-matroska',
+    '.mp3': 'audio/mpeg', '.aac': 'audio/aac', '.m4a': 'audio/mp4',
+    '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.wma': 'audio/x-ms-wma',
+    '.html': 'text/html; charset=utf-8', '.h5': 'text/html; charset=utf-8',
+}
+
+
 def get_media_mime(filename):
     """根据后缀返回正确的 Content-Type，避免视频被当作图片发送"""
     ext = os.path.splitext(filename)[1].lower()
-    if ext in ('.mp4',):
-        return "video/mp4"
-    if ext in ('.webm',):
-        return "video/webm"
-    if ext in ('.png',):
-        return "image/png"
-    if ext in ('.gif',):
-        return "image/gif"
-    # .jpg / .jpeg / 兜底
-    return "image/jpeg"
+    return MIME_BY_EXT.get(ext, 'application/octet-stream')
+
+
+def sniff_media_ext(body_bytes):
+    """★ 2026-11-18 新增：用文件头魔数判定真实类型。
+    前端 fetch 上传时后缀来自文件名，用户改名/手机相册导出成 .heic/浏览器伪造 .png
+    都会让服务端写出“假 jpg”，手机端 BitmapFactory 直接 decode 出 null —— 表现就是推图不显示。
+    """
+    if not body_bytes or len(body_bytes) < 16:
+        return None
+    head = body_bytes[:16]
+    if head[:3] == b'\xff\xd8\xff':
+        return '.jpg'
+    if head[:8] == b'\x89PNG\r\n\x1a\n':
+        return '.png'
+    if head[:6] in (b'GIF87a', b'GIF89a'):
+        return '.gif'
+    if head[:2] == b'BM':
+        return '.bmp'
+    if head[:4] == b'RIFF' and body_bytes[8:12] == b'WEBP':
+        return '.webp'
+    if head[4:8] == b'ftyp':
+        return '.mp4'
+    if head[:4] == b'\x1a\x45\xdf\xa3':
+        return '.webm'
+    if head[:3] == b'ID3' or head[:2] in (b'\xff\xfb', b'\xff\xf3', b'\xff\xf2'):
+        return '.mp3'
+    if head[:4] == b'\x00\x00\x00' or head[4:8] == b'wAVe':
+        return '.wav'
+    if head[:5] in (b'<?xml', b'<!DOC', b'<html', b'<Html'):
+        return '.html'
+    return None
+
+
+def is_probably_image(ext):
+    return (ext or '') in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp')
 
 
 # ==================== 主处理器 ====================
@@ -935,10 +1040,17 @@ def handle_client(client_conn, client_addr):
                 break
         if content_length > 0:
             while len(body_part) < content_length:
-                chunk = client_conn.recv(65536)
+                try:
+                    chunk = client_conn.recv(65536)
+                except socket.timeout:
+                    break
                 if not chunk: break
                 body_part += chunk
+                if len(raw) > 30 * 1024 * 1024: break
             body_part = body_part[:content_length]
+        # ★ 2026-11-18 修复：记录截断标记。旧版把半张图当完整文件落盘，
+        # 手机端 BitmapFactory.decodeStream 返回 null —— 典型症状“推送图片手机端不显示”。
+        BODY_TRUNCATED = (content_length > 0 and len(body_part) < content_length)
         if not header_text: return
 
         if header_text.startswith("OPTIONS"):
@@ -1033,13 +1145,19 @@ def handle_client(client_conn, client_addr):
                 msg_time = data.get("time_str", "")
                 msg = data.get("message", "")
                 ts = data.get("timestamp", 0)
-                conn = sqlite3.connect('track_history.db', timeout=10)
-                try:
-                    c = conn.cursor()
-                    c.execute("INSERT INTO messages VALUES (?, ?, ?, ?)", (dev_id, msg_time, msg, ts))
-                    conn.commit()
-                finally:
-                    conn.close()
+                # ★ FIX-2 2026-11-18：这是全文件唯一一处绕过 db_write_lock 的 INSERT。
+                #   必须与 save_report / save_history 共用同一把写锁，
+                #   否则与 30 分钟一轮的高频上报并发时就是 database is locked 的真源头
+                #   （评审说的"读不加锁"反而是伪问题：WAL 下读者读快照，不会被写者挡住）。
+                with db_write_lock:
+                    conn = sqlite3.connect('track_history.db', timeout=10)
+                    try:
+                        conn.execute("PRAGMA busy_timeout=10000")
+                        c = conn.cursor()
+                        c.execute("INSERT INTO messages VALUES (?, ?, ?, ?)", (dev_id, msg_time, msg, ts))
+                        conn.commit()
+                    finally:
+                        conn.close()
                 client_conn.sendall(b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             except Exception as e:
                 with print_lock: print(f"❌ POST /api/message 异常: {e}")
@@ -1060,21 +1178,57 @@ def handle_client(client_conn, client_addr):
                 if ext not in ALLOWED_MEDIA_EXTS:
                     ext = '.jpg' # 兜底
 
+                # ★ 2026-11-18 修复①：拒绝残缺文件落盘（上传超时 / 10MB 截断）
+                if content_length <= 0:
+                    raise ValueError("上传体为空(Content-Length=0)")
+                if BODY_TRUNCATED:
+                    raise ValueError(f"上传不完整: 期望 {content_length} 字节，仅收到 {len(body_part)} 字节")
+
+                # ★ 2026-11-18 修复②：用魔数纠正后缀，杜绝“假 jpg / 真 heic”导致手机端解码失败
+                sniffed = sniff_media_ext(body_part)
+                if sniffed and sniffed != ext:
+                    with print_lock:
+                        print(f"⚠️ [media] 声明后缀 {ext} 与真实魔数 {sniffed} 不符，已按真实类型纠正"
+                              + ("（原始可能是 HEIC/TIFF 等手机私有格式，安卓端可能仍无法解码）"
+                                 if sniffed == '.html' or ext in ('.heic', '.heif') else ""))
+                    if sniffed:
+                        ext = sniffed
+                if not is_probably_image(ext) and sniffed and is_probably_image(sniffed):
+                    ext = sniffed
+
                 filename = datetime.datetime.now().strftime("media_%Y%m%d_%H%M%S_%f") + ext
                 filepath = os.path.join(UPLOAD_MEDIA_DIR, filename)
-                
+
                 with open(filepath, "wb") as f:
                     f.write(body_part)
-                
-                local_ip = get_local_ip()
-                media_url = f"http://{local_ip}:{PORT}/uploads/media/{filename}"
-                resp = json.dumps({"status": "ok", "url": media_url})
+                    f.flush()
+                    os.fsync(f.fileno())   # ★ 2026-11-18 修复③：立即刷盘，消除“刚推就 404”的竞态
+
+                # ★ 2026-11-18 修复④：URL 主机优先取浏览器实际访问的 Host 头。
+                # 旧版写死 get_local_ip()：多网卡 / Docker(172.17.x.x) / NAT / 公网映射场景下
+                # 会选到一个手机根本连不通的网段 IP，图片必然不显示。
+                host_hdr = ""
+                for _hl in header_text.split("\r\n"):
+                    if _hl.lower().startswith("host:"):
+                        host_hdr = _hl.split(":", 1)[1].strip().strip("/")
+                        break
+                if host_hdr and not host_hdr.startswith("127.") and host_hdr != "localhost":
+                    media_url = f"http://{host_hdr}/uploads/media/{filename}"
+                else:
+                    media_url = f"http://{get_local_ip()}:{PORT}/uploads/media/{filename}"
+                with print_lock:
+                    print(f"🖼️ [media] 已转存 {filename} ({len(body_part)}B, mime={get_media_mime(filename)}) -> {media_url}")
+                resp = json.dumps({"status": "ok", "url": media_url,
+                                   "mime": get_media_mime(filename), "size": len(body_part)})
                 resp_bytes = resp.encode('utf-8')
                 client_conn.sendall(
                     f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {len(resp_bytes)}\r\nConnection: close\r\n\r\n".encode() + resp_bytes)
             except Exception as e:
                 with print_lock: print(f"❌ 上传媒体失败: {e}")
-                try: client_conn.sendall(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                try:
+                    err = json.dumps({"status": "error", "msg": f"媒体转存失败: {e}"}, ensure_ascii=False).encode('utf-8')
+                    client_conn.sendall(
+                        f"HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {len(err)}\r\nConnection: close\r\n\r\n".encode() + err)
                 except Exception: pass
 
         # ★ 插件：静态媒体文件访问 (供手机下载展示)
@@ -1082,19 +1236,25 @@ def handle_client(client_conn, client_addr):
             try:
                 req_line = header_text.split("\r\n")[0]
                 path = req_line.split(" ")[1] if len(req_line.split(" ")) > 1 else ""
+                # ★ 2026-11-18 修复：先剥掉 query（?t=123 会让 basename 得到带问号的假文件名 -> 必然 404）
+                path = path.split("?")[0].split("#")[0]
                 safe_name = os.path.basename(path)
                 filepath = os.path.join(UPLOAD_MEDIA_DIR, safe_name)
                 if not os.path.isfile(filepath):
-                    client_conn.sendall(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+                    with print_lock:
+                        print(f"⚠️ [media] 404: 请求 {path} -> 本地不存在 {filepath}")
+                    client_conn.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                     return
                 with open(filepath, "rb") as f:
                     content = f.read()
                 mime = get_media_mime(safe_name)
-                
+
                 header = (
                     "HTTP/1.1 200 OK\r\n"
                     f"Content-Type: {mime}\r\n"
                     "Access-Control-Allow-Origin: *\r\n"
+                    "Accept-Ranges: bytes\r\n"
+                    "Cache-Control: no-cache\r\n"
                     f"Content-Length: {len(content)}\r\n"
                     "Connection: close\r\n\r\n"
                 ).encode('utf-8')
@@ -1256,6 +1416,18 @@ def handle_client(client_conn, client_addr):
         elif "POST /api/control" in header_text:
             try:
                 cmd_data = json.loads(body_part.decode('utf-8', errors='ignore'))
+                # ★ FIX-1 2026-11-18 [安全 P0]：控制面此前完全裸奔 —— /api/report(1021)
+                #   与 /api/message(1098) 都校验 token，唯独 /api/control 没有。
+                #   任何能连到 8080 的人都可以下发 clear_history / lock_chat /
+                #   change_server / push_web(任意 URL 全屏挂到老人手机) / clean_device。
+                if not isinstance(cmd_data, dict):
+                    client_conn.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    return
+                if CONTROL_AUTH_ENABLED and cmd_data.get("token") != AUTH_TOKEN:
+                    with print_lock:
+                        print(f"⛔ [控制面鉴权失败] {client_addr[0]} 的 /api/control 请求 token 无效")
+                    client_conn.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    return
                 action = cmd_data.get("action")
                 payload = cmd_data.get("payload", "")
                 target_ip = cmd_data.get("target_ip", "255.255.255.255")
@@ -1269,7 +1441,8 @@ def handle_client(client_conn, client_addr):
                         enqueue_command(dev_id, action, payload)
 
                 def smart_send(cmd_prefix):
-                    sent_any = False
+                    nonlocal extra_msg          # ★ 2026-11-18：必须声明，否则下面赋值只改到局部变量
+                    sent_pkts = 0
                     try:
                         local_ip = get_local_ip()
                         local_prefix = ".".join(local_ip.split(".")[:3])
@@ -1277,30 +1450,52 @@ def handle_client(client_conn, client_addr):
                     if isinstance(target_ip, list):
                         for ip in target_ip:
                             if ip and ip != '0.0.0.0':
-                                send_udp_broadcast(cmd_prefix, ip); sent_any = True
+                                sent_pkts += send_udp_broadcast(cmd_prefix, ip)
                     elif target_ip == "all" or target_ip == "255.255.255.255":
                         # ★ 2026-11-07 修复：改用 state_lock，与 /api/report、clean_device 等写方互斥
+                        # ★ 2026-11-18 补丁B：先聚合去重、再一次性发送，总包数受 UDP_TOTAL_PACKET_BUDGET 约束
                         with state_lock:
                             devices_snapshot = {k: dict(v) for k, v in ALL_DEVICES_STATUS.items()}
+                        unicast_ips = []
+                        remote_ips = []
                         for dev_id, info in devices_snapshot.items():
                             ip = (info.get("source_ip") or info.get("udp_source_ip") or (info.get("network") or {}).get("local_ip"))
                             if not ip or ip == '0.0.0.0': continue
                             if local_prefix and ip.startswith(local_prefix + "."):
-                                send_udp_broadcast(cmd_prefix, ip)
+                                if ip not in unicast_ips: unicast_ips.append(ip)
                             else:
-                                send_udp_broadcast(cmd_prefix, "255.255.255.255")
-                            sent_any = True
-                        if not sent_any:
-                            send_udp_broadcast(cmd_prefix, "255.255.255.255")
+                                # ★ FIX-8 2026-11-18：旧版在这里把该 IP 直接丢弃，注释写"广播已能覆盖全网段"
+                                #   —— 这是错的：255.255.255.255 不出路由器、不出公网，跨网段/专网路由可达的
+                                #   设备因此彻底收不到信令，只能等下一次 HTTP 上报（默认 1800s）。
+                                #   改为单独收集，广播照发的同时在预算内补一次定向单播。
+                                if ip not in remote_ips: remote_ips.append(ip)
+                        need_broadcast = (not unicast_ips) or (len(unicast_ips) > UDP_TOTAL_PACKET_BUDGET)
+                        if need_broadcast:
+                            sent_pkts += send_udp_broadcast(cmd_prefix, "255.255.255.255")
+                        else:
+                            for ip in unicast_ips:
+                                sent_pkts += send_udp_broadcast(cmd_prefix, ip)
+                        if remote_ips and (len(unicast_ips) + len(remote_ips)) <= UDP_TOTAL_PACKET_BUDGET:
+                            for ip in remote_ips:
+                                sent_pkts += send_udp_broadcast(cmd_prefix, ip)
+                        if not unicast_ips and not remote_ips:
+                            # ★ 2026-11-18 修复（自 server2_2.py 移植）：无在线设备时旧版直接回"指令执行失败"，
+                            #   家属以为是推送逻辑坏了；实际包已广播，只是设备不在列表/不在同网段。
+                            extra_msg = "已向子网广播，但当前设备列表为空：请确认手机已在同一 WiFi 下且已成功上报（走流量时 UDP 不可达）"
                     else:
-                        send_udp_broadcast(cmd_prefix, target_ip); sent_any = True
-                    return sent_any
+                        sent_pkts += send_udp_broadcast(cmd_prefix, target_ip)
+                    return sent_pkts > 0
 
                 # ★ 插件挂载：远程陪伴控制
                 if action == "companion_on": success = smart_send(f"FIND_ME_PLUGIN:companion:{RESCUE_SECRET}:on")
                 elif action == "companion_off": success = smart_send(f"FIND_ME_PLUGIN:companion:{RESCUE_SECRET}:off")
                 elif action == "push_photo": success = smart_send(f"FIND_ME_PUSH_PHOTO:{RESCUE_SECRET}:{payload}")
                 elif action == "push_video": success = smart_send(f"FIND_ME_PUSH_VIDEO:{RESCUE_SECRET}:{payload}")
+                # ★ 2026-11-18 修复：v2.6 只把 push_audio/push_web 加进了 HTTP_SUPPORTED_ACTIONS，
+                #   却忘了在 /api/control 里补 UDP 下发分支 —— 这两个 action 永远 success=False，
+                #   只能等手机下一次上报（默认 1800 秒）才从队列里取到，表现为“推了没反应/很久才显示”。
+                elif action == "push_audio": success = smart_send(f"FIND_ME_PUSH_AUDIO:{RESCUE_SECRET}:{payload}")
+                elif action == "push_web":   success = smart_send(f"FIND_ME_PUSH_WEB:{RESCUE_SECRET}:{payload}")
                 
                 elif action == "force_report": success = smart_send(f"FIND_ME_REPORT:{RESCUE_SECRET}")
                 elif action == "play_alarm": success = smart_send(f"FIND_ME_ALARM:{RESCUE_SECRET}")
@@ -1311,8 +1506,11 @@ def handle_client(client_conn, client_addr):
                     for cmd_prefix in cmds:
                         if smart_send(cmd_prefix):
                             success = True
+                    # ★ FIX-3 2026-11-18：v1+冒号已改为全角冒号降级下发，cmds 不再为空；
+                    #   这里只保留"确实构造不出信令"的兜底提示。
                     if not cmds:
-                        extra_msg = "目标设备均为 v1，不支持含冒号的悬浮提示，请改用对讲机"
+                        success = False
+                        extra_msg = "未能构造下行信令，指令已写入队列，等手机下次上报时下发"
                 elif action == "chat_msg":
                     # ★ 2026-11-07 [P4.5]: CHAT + MSG 双发
                     success = False
@@ -1376,10 +1574,15 @@ def handle_client(client_conn, client_addr):
                         success = False; extra_msg = f"清理失败: {e}"
 
                 queued_count = len(target_devs) if action in HTTP_SUPPORTED_ACTIONS else 0
+                # ★ FIX-7 2026-11-18：UDP 无送达确认，"包发出去了" != "设备执行了"。
+                #   旧版只要 smart_send 返回真就报"指令发送成功"，且 queued_count>0 的
+                #   排队提示因 success 恒真而永不显示。现在如实回传链路状态。
                 if extra_msg:
                     resp = json.dumps({"status": "ok" if success else "error", "msg": extra_msg})
                 elif queued_count > 0 and not success:
-                    resp = json.dumps({"status": "ok", "msg": f"UDP 未确认送达，已排队 {queued_count} 条，等手机下次上报时下发"})
+                    resp = json.dumps({"status": "ok", "msg": f"UDP 不可达，已排队 {queued_count} 条，等手机下次上报时下发"})
+                elif queued_count > 0 and success:
+                    resp = json.dumps({"status": "ok", "msg": f"✅ 已发出并排队 {queued_count} 条（UDP 无送达确认，设备离线时靠队列兜底）"})
                 else:
                     resp = json.dumps({"status": "ok" if success else "error", "msg": "" if success else "指令执行失败"})
                 resp_bytes = resp.encode('utf-8')
@@ -1617,6 +1820,8 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
 <div id="companionBox">
     <div style="padding: 16px; background: #f0f7ff; border: 1px solid #0969da; border-radius: 6px;">
         <h3 style="margin-top: 0; color: #0969da; font-size: 16px;">👨‍👩‍👧 远程陪伴 (给老人推照片/视频)</h3>
+        <!-- ★ 2026-11-18 补丁C：陪伴面板自带设备勾选区（原先勾选框只在"对讲机"面板里，推图时无处可选） -->
+        <div class="device-selector" id="companionSelector"><label class="device-tag"><input type="checkbox" class="companion-cb" value="all" checked><span>所有人 (群发)</span></label></div>
         <div class="btn-group" style="margin-top: 8px;">
             <button class="btn-primary" onclick="sendCmd('companion_on')">🟢 开启陪伴模式</button>
             <button onclick="sendCmd('companion_off')">⚪ 关闭陪伴模式</button>
@@ -1784,6 +1989,8 @@ var isMapVisible = false;
 var isChatVisible = false;
 var isCompanionVisible = false;  // ★ v2.2 远程陪伴面板展开状态
 var _offlineDevices = [];
+// ★ FIX-1：控制面鉴权令牌，由服务端渲染时替换 __ADMIN_TOKEN__ 注入
+var ADMIN_TOKEN = "__ADMIN_TOKEN__";
 
 var TIANDITU_KEY = "e669a4b8bc516a2d6e0104f746069b5a"; // 填入你的天地图 Key
 var currentMapType = "tianditu";
@@ -1926,10 +2133,21 @@ function toggleChatBox() {
 }
 
 // ★ v2.2 新增：远程陪伴面板展开/收起（与对讲机交互一致）
+// ★ 2026-11-18 补丁C：设备列表独立拉取，不依赖"对讲机"面板是否展开（fetchChatHistory 未展开会直接 return）
+function fetchDeviceTargets() {
+    fetch('/api/chat_history')
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        // ★ FIX-5：两个面板各自独立渲染，不再共用一份 tagHtml
+        renderSelectors(data.devices || []);
+    }).catch(function(e) {});
+}
+
 function toggleCompanionBox() {
     var box = document.getElementById('companionBox');
     isCompanionVisible = !isCompanionVisible;
     box.style.display = isCompanionVisible ? 'block' : 'none';
+    if (isCompanionVisible) fetchDeviceTargets();
 }
 
 function handleChatEnter(e) { if (e.key === 'Enter') sendChat(); }
@@ -1937,9 +2155,7 @@ function handleChatEnter(e) { if (e.key === 'Enter') sendChat(); }
 function sendChat() {
     var msg = document.getElementById('chatInput').value.trim();
     if(!msg) return;
-    var selectedIps = [];
-    var cbs = document.querySelectorAll('.target-cb:checked');
-    for (var i = 0; i < cbs.length; i++) { selectedIps.push(cbs[i].value); }
+    var selectedIps = readChecked(SEL_CHAT);
     if(selectedIps.length === 0) return showToast("请至少选择一个发送目标！");
     var targetParam = selectedIps.indexOf("all") !== -1 ? "all" : selectedIps;
     document.getElementById('chatInput').value = "";
@@ -1947,7 +2163,7 @@ function sendChat() {
     fetch('/api/control', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({action: 'chat_msg', payload: msg, target_ip: targetParam})
+        body: JSON.stringify({token: ADMIN_TOKEN, action: 'chat_msg', payload: msg, target_ip: targetParam})
     }).then(function() {
         setTimeout(fetchChatHistory, 300);
     });
@@ -1972,17 +2188,9 @@ function fetchChatHistory() {
             chatDiv.innerHTML = html;
             chatDiv.scrollTop = chatDiv.scrollHeight;
         }
-        var selectorDiv = document.getElementById('deviceSelector');
-        var currentChecked = [];
-        var cbs = document.querySelectorAll('.target-cb:checked');
-        for (var i = 0; i < cbs.length; i++) { currentChecked.push(cbs[i].value); }
-
-        var tagHtml = '<label class="device-tag"><input type="checkbox" class="target-cb" value="all" ' + (currentChecked.indexOf('all') !== -1 || currentChecked.length === 0 ? 'checked' : '') + '><span>所有人 (群发)</span></label>';
-        data.devices.forEach(function(dev) {
-            var isChecked = currentChecked.indexOf(dev.ip) !== -1 ? 'checked' : '';
-            tagHtml += '<label class="device-tag"><input type="checkbox" class="target-cb" value="' + escapeHtml(dev.ip) + '" ' + isChecked + '><span>' + escapeHtml(dev.id) + '</span></label>';
-        });
-        if (selectorDiv.innerHTML !== tagHtml) { selectorDiv.innerHTML = tagHtml; }
+        // ★ FIX-5：原来这里把同一份 tagHtml 同时写进 #deviceSelector 和 #companionSelector，
+        //   两个面板的勾选态被强行同步；现在按各自 class 独立渲染。
+        renderSelectors(data.devices || []);
     }).catch(function(e) {});
     if (isChatVisible) setTimeout(fetchChatHistory, 2000);
 }
@@ -2066,14 +2274,67 @@ function showLogs() {
     }).catch(function(e) { showToast("拉取日志列表失败: " + e.message); });
 }
 
+// ★ FIX-5 2026-11-18：对讲机面板与远程陪伴面板此前共用 class="target-cb"，
+//   且 fetchDeviceTargets / fetchChatHistory 把同一份 tagHtml 写进两个容器，
+//   导致"在陪伴面板只勾老人A"会同时改掉对讲机面板的勾选，反之亦然。
+//   现在拆成两套 class + 两份独立选中态，各面板自渲染、自读取。
+var SEL_CHAT = 'target-cb';       // 对讲机面板 #deviceSelector
+var SEL_COMPANION = 'companion-cb'; // 远程陪伴面板 #companionSelector
+
+function readChecked(cls) {
+    var seen = {}, out = [];
+    var cbs = document.querySelectorAll('.' + cls + ':checked');
+    for (var i = 0; i < cbs.length; i++) {
+        var v = cbs[i].value;
+        if (!seen[v]) { seen[v] = 1; out.push(v); }
+    }
+    return out;
+}
+
+function buildSelectorHtml(devices, currentChecked, cls) {
+    var tagHtml = '<label class="device-tag"><input type="checkbox" class="' + cls + '" value="all" ' + (currentChecked.indexOf('all') !== -1 || currentChecked.length === 0 ? 'checked' : '') + '><span>所有人 (群发)</span></label>';
+    devices.forEach(function(dev) {
+        var isChecked = currentChecked.indexOf(dev.ip) !== -1 ? 'checked' : '';
+        tagHtml += '<label class="device-tag"><input type="checkbox" class="' + cls + '" value="' + escapeHtml(dev.ip) + '" ' + isChecked + '><span>' + escapeHtml(dev.id) + '</span></label>';
+    });
+    return tagHtml;
+}
+
+// 两个面板分别用自己的 class 读回选中态再各自重绘：
+// 2 秒一轮的轮询只刷新"本面板自己"的勾选，不会把另一个面板的取消状态冲掉。
+function renderSelectors(devices) {
+    var el1 = document.getElementById('deviceSelector');
+    if (el1) {
+        var h1 = buildSelectorHtml(devices, readChecked(SEL_CHAT), SEL_CHAT);
+        if (el1.innerHTML !== h1) el1.innerHTML = h1;
+    }
+    var el2 = document.getElementById('companionSelector');
+    if (el2) {
+        var h2 = buildSelectorHtml(devices, readChecked(SEL_COMPANION), SEL_COMPANION);
+        if (el2.innerHTML !== h2) el2.innerHTML = h2;
+    }
+}
+
+// ★ 2026-11-18 补丁C：统一从"设备勾选框"取目标（与对讲机 sendChat 复用同一套 selector）
+function getSelectedTarget(cls) {
+    var out = readChecked(cls || SEL_CHAT);
+    if (out.length === 0) return null;
+    return out.indexOf("all") !== -1 ? "all" : out;
+}
+// 推送类指令取目标；未勾选任何设备时回退全推（保持老行为，不会把功能改坏）
+function mediaTarget() {
+    var t = getSelectedTarget(SEL_COMPANION);
+    return t ? t : "all";
+}
+
 function sendCmd(action, payload, target_ip) {
     if (payload === undefined) payload = "";
-    if (target_ip === undefined) target_ip = "255.255.255.255";
+    if (target_ip === undefined) target_ip = mediaTarget();
     
     fetch('/api/control', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({action: action, payload: payload, target_ip: target_ip})
+        body: JSON.stringify({token: ADMIN_TOKEN, action: action, payload: payload, target_ip: target_ip})
     })
     .then(function(res) {
         if (!res.ok) throw new Error('HTTP error! status: ' + res.status);
@@ -2259,15 +2520,21 @@ function uploadCompanionMedia() {
         fetch('/api/control', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({action: 'custom_msg', payload: inputVal, target_ip: 'all'})
+            body: JSON.stringify({token: ADMIN_TOKEN, action: 'custom_msg', payload: inputVal, target_ip: mediaTarget()})
         })
-        .then(function(res) { return res.json(); }).then(function(data) {
+        .then(function(res) {
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return res.json();
+        }).then(function(data) {
             if (data.status === 'ok') {
-                showToast("🚀 纯文本大字报指令已无痕同步！");
+                showToast("🚀 " + (data.msg || "纯文本大字报指令已无痕同步！"));
                 fakeInput.value = ""; realInput.value = "";
+            } else {
+                // ★ FIX-4 2026-11-18：旧版只有 ok 分支、整条 Promise 链无 .catch，
+                //   status=error 或 HTTP 5xx 时点了毫无反应 —— 这才是"大字报失效"的真实高频原因。
+                showToast("❌ 大字报下发失败: " + (data.msg || "未知错误"));
             }
-        });
-        return;
+        }).catch(function(err) { showToast("❌ 大字报请求异常: " + err.message); });
     }
 
     if (isRemoteUrl) {
@@ -2299,7 +2566,7 @@ function uploadCompanionMedia() {
         fetch('/api/control', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({action: action, payload: mediaUrl, target_ip: 'all'})
+            body: JSON.stringify({token: ADMIN_TOKEN, action: action, payload: mediaUrl, target_ip: mediaTarget()})
         })
         .then(function(res) { return res.json(); })
         .then(function(data) {
@@ -2319,9 +2586,20 @@ function uploadCompanionMedia() {
         // 【通道 A】原生本地文件流通道 — 保持高保真转存
         // ============================================================
         var file = realInput.files[0];
-        var isVideo = file.type.startsWith('video');
-        var action = isVideo ? 'push_video' : 'push_photo';
-        
+        // ★ 2026-11-18 修复：部分浏览器/微信内核 file.type 为空串，会把视频误判成图片；补后缀判型
+        var fileName = (file.name || '').toLowerCase();
+        var isVideo = (file.type || '').indexOf('video') === 0 ||
+                      /\\.(mp4|webm|mkv|mov|avi|m3u8)$/.test(fileName);
+        var isAudio = (file.type || '').indexOf('audio') === 0 ||
+                      /\\.(mp3|aac|m4a|wav|ogg|wma)$/.test(fileName);
+        var action = isVideo ? 'push_video' : (isAudio ? 'push_audio' : 'push_photo');
+
+        // ★ 2026-11-18 提示：HEIC/RAW 等手机私有格式安卓无法解码，推送前就给家属明确反馈
+        if (/\\.(heic|heif|dng|cr2|nef|arw)$/.test(fileName)) {
+            showToast("❌ " + file.name + " 是 iPhone/相机原始格式，手机端无法解码，请先转成 JPG 再推");
+            return;
+        }
+
         showToast("正在上传本地媒体文件至服务器，请稍候...");
         
         fetch('/api/upload_media?filename=' + encodeURIComponent(file.name), {
@@ -2331,11 +2609,15 @@ function uploadCompanionMedia() {
         .then(function(res) { return res.json(); })
         .then(function(data) {
             if (data.status === 'ok') {
+                // ★ 2026-11-18 修复：URL 主机若是回环/局域网探测失败地址，手机必然取不到图，当场告警
+                if (data.url && (data.url.indexOf('http://127.') === 0 || data.url.indexOf('http://localhost') === 0 || data.url.indexOf('http://0.0.0.0') === 0 || data.url.indexOf('http://172.17.') === 0)) {
+                    showToast("⚠️ 生成的地址 " + data.url + " 手机大概率访问不到，请用局域网 IP 打开控制台后重试");
+                }
                 showToast("✅ 服务器转存完毕，正在同步下发信令...");
                 return fetch('/api/control', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({action: action, payload: data.url, target_ip: 'all'})
+                    body: JSON.stringify({token: ADMIN_TOKEN, action: action, payload: data.url, target_ip: mediaTarget()})
                 });
             } else {
                 throw new Error(data.msg || "服务器本地存储失败");
@@ -2365,6 +2647,8 @@ function escapeHtml(s) {
 }
 </script>
 </body></html>"""
+                # ★ FIX-1：把服务端令牌注入前端（用 replace 而非 f-string，避免 HTML 里大量 {} 冲突）
+                html = html.replace("__ADMIN_TOKEN__", html_lib.escape(AUTH_TOKEN, quote=True))
                 html_bytes = html.encode('utf-8')
                 client_conn.sendall(
                     f"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {len(html_bytes)}\r\nConnection: close\r\n\r\n".encode('utf-8') + html_bytes)
@@ -2442,6 +2726,11 @@ def start_server():
         print(f"📁 媒体上传目录: {os.path.abspath(UPLOAD_MEDIA_DIR)}")
         print(f"🚨 失联检测: 每 5 分钟扫描一次，>2 小时未上报告警")
         print(f"📋 HTTP 下行队列: TTL={CMD_TTL_SECONDS}s, 上限={CMD_MAX_PER_DEVICE}/设备")
+        if USING_DEFAULT_CREDENTIALS:
+            print("🚨 [安全] 仍在使用出厂默认口令 your_private_secret_key！"
+                  "请设置环境变量 DF_AUTH_TOKEN（可选 DF_RESCUE_SECRET）后重启服务。")
+        if not CONTROL_AUTH_ENABLED:
+            print("🚨 [安全] 控制面鉴权已关闭(DF_CONTROL_AUTH=0)：/api/control 任何人可调用，切勿暴露公网。")
         print(f"🗑️  离线设备清理: 弹窗展示>30分钟未活动, 批量清理阈值={CLEAN_OFFLINE_THRESHOLD_MS // 3600000}小时")
         try:
             conn_chk = sqlite3.connect('track_history.db', timeout=5)
