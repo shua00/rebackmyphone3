@@ -4,7 +4,7 @@ server2.py — 全功能同步服务（v2 协议稳定版）
 ------------------------------------------------------------
 构建批次 : 20261117-1000
 协议版本 : v2
-最后修改 : 2026-11-18 23:00（v2.2 远程陪伴面板折叠化，与对讲机交互统一，上报未收集全）
+最后修改 : 2026-11-18 23:35（v2.2 远程陪伴面板折叠化，与对讲机交互统一，上报未收集全）
 ------------------------------------------------------------
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
   2026-11-17 10:00  v2.2 远程陪伴面板改为按钮折叠式，与「局域网对讲机」交互完全一致，首屏更清爽
@@ -593,7 +593,8 @@ def _build_version_aware_commands(target_devs, action_name, payload):
             safe_payload = payload.replace(":", "：") if has_colon else payload
             return [f"FIND_ME_MSG:{RESCUE_SECRET}:{safe_payload}"]
         cmds = [f"FIND_ME_FLOAT:{RESCUE_SECRET}:{payload}"]
-        if not has_colon:
+        if not has_colon and 1 in versions and 2 not in versions:
+            # ★ 2026-11-18 gai极简补丁：只有当前列表里【全都是v1老设备】时才允许追加 FIND_ME_MSG 弹窗信令
             cmds.append(f"FIND_ME_MSG:{RESCUE_SECRET}:{payload}")
         return cmds
     if action_name == "chat_msg":
@@ -674,8 +675,10 @@ def cmd_cleaner():
     while True:
         try:
             time.sleep(3600)
-            cleanup_expired_commands()
-            cleanup_old_reports()
+            # ★ 2026-11-18 gai极简补丁：强制让清理线程和上报/写入线程排队，阻断 SQLite 锁冲突
+            with db_write_lock:
+                cleanup_expired_commands()
+                cleanup_old_reports()
         except Exception as e:
             with print_lock:
                 print(f"⚠️ 清理异常: {e}")
@@ -1475,7 +1478,8 @@ def handle_client(client_conn, client_addr):
                         else:
                             for ip in unicast_ips:
                                 sent_pkts += send_udp_broadcast(cmd_prefix, ip)
-                        if remote_ips and (len(unicast_ips) + len(remote_ips)) <= UDP_TOTAL_PACKET_BUDGET:
+                        # ★ 2026-11-18 gai极简补丁：删掉 <= UDP_TOTAL_PACKET_BUDGET 限制，确保 4G 异地流量设备 100% 能收到秒级单播
+                        if remote_ips:
                             for ip in remote_ips:
                                 sent_pkts += send_udp_broadcast(cmd_prefix, ip)
                         if not unicast_ips and not remote_ips:
