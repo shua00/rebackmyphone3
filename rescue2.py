@@ -6,9 +6,10 @@ rescue2.py — 局域网救援/调试终端（Ultimate v2 协议）
 ------------------------------------------------------------
 构建批次 : 20261111-2000
 协议版本 : v2
-最后修改 : 2026-11-13 00:30（v2.0.2 紧急三连击 + ADB 安装工具箱 + 并发防弹）
+最后修改 : 2026-11-20 1:30（v2.0.3 远程陪伴特权推流）
 ------------------------------------------------------------
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
+  2026-11-20 1:30  v2.0.2 新增p远程陪伴特权推流
   2026-11-13 00:30  v2.0.2 紧急三连击 + ADB 安装工具箱 + 并发防弹
   2026-11-12 22:45  v2.0 通道可视化 + v2.0.1 架构优化 + 修复版本常量
   2026-11-11 19:45  注释规范统一（无逻辑改动）
@@ -1334,7 +1335,7 @@ def print_main_menu(local_ip):
     print("\n【 高频操作 】")
     print("  [1] 强制上报        [2] 定位+上报")
     print("  [3] 拉取日志        [4] 查看设备")
-    print("  [5] 播放警报        [6] 对讲机")
+    print("  [5] 播放警报        [6] 对讲机        [P] 远程陪伴(推URL)")
     
     print("\n【 系统级保活与紧急指令 】")
     print("  [7] 注入 ADB 保活   [8] 紧急寻找")
@@ -1407,6 +1408,36 @@ def main():
             if chat:
                 send_udp(f"FIND_ME_CHAT:{RESCUE_SECRET}:PC_Terminal:{chat}", choose_targets_multi())
                 send_udp(f"FIND_ME_MSG:{RESCUE_SECRET}:PC_Terminal:{chat}", choose_targets_multi())
+        # 2026-11-20 ：1:45 精准插入以下独立特权流处理分支：
+        elif choice == 'P':
+            input_val = input("\n请输入远程陪伴媒体 URL / 直播源 / H5 网页地址: ").strip()
+            if not input_val: continue
+            
+            # 🌟 1. 协议自适应防重叠补全门：100% 对齐我们昨晚确定的双反斜杠强逃逸安全法则
+            media_url = input_val
+            if not re.match(r"^[a-zA-Z]+://", media_url):
+                media_url = "http://" + media_url
+                
+            lower_url = media_url.toLowerCase() if hasattr(media_url, "toLowerCase") else media_url.lower()
+            
+            # 🌟 2. 多路强感知网关：零提示、全自动无痕分流判型
+            action = "push_photo" # 默认归图
+            
+            # 视频流特征识别（含直播源 m3u8 / 商业分流直播特征）
+            if (".mp4" in lower_url or ".webm" in lower_url or ".m3u8" in lower_url or "live" in lower_url or "stream" in lower_url):
+                action = "push_video"
+            # 🎵 音频流特征识别（网络电台/相声戏曲）
+            elif (".mp3" in lower_url or ".wma" in lower_url or ".aac" in lower_url or "audio" in lower_url or "radio" in lower_url or "fm" in lower_url):
+                action = "push_audio"
+            # 🌐 全屏网页 H5 路由特征自愈
+            elif (".jpg" not in lower_url and ".png" not in lower_url and ".gif" not in lower_url and ".jpeg" not in lower_url and ".bmp" not in lower_url and ".webp" not in lower_url):
+                action = "push_web"
+                
+            # 🌟 3. 选择要远端开屏的老人手机目标
+            targets = choose_targets_multi(f"请选择接收该 [{action}] 媒体的目标设备: ")
+            if targets:
+                print(f"{I.send} 正在通过独立陪伴网关同步下发信令 [{action}] -> {media_url}")
+                send_udp(f"FIND_ME_{action.upper()}:{RESCUE_SECRET}:{media_url}", targets)
         elif choice == '7':
             device = choose_adb_device()
             if device:
