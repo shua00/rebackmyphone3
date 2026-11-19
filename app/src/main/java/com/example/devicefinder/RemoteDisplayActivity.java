@@ -80,6 +80,8 @@ public class RemoteDisplayActivity extends Activity {
     private final int LOADING_TIMEOUT_MS = 15000;          // 视频/音频：15s 足够
     private final int SLOW_DISPLAY_TIMEOUT_MS = 30000;     // [R6] 图片/网页：容忍 4G + CDN 大图
     private String currentUrl = "";
+    // 🌟 2026-11-20 0:50 新增：连续侧滑返回防死循环时间戳
+    private long lastBackPressedTime = 0;
 
     // [R2] 图片下载硬上限：超过直接放弃，避免 OOM 与长时间白屏
     private static final int IMAGE_MAX_BYTES = 12 * 1024 * 1024;
@@ -576,16 +578,28 @@ public class RemoteDisplayActivity extends Activity {
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (isLocked) {
-            return true; // 3秒内拦截任何硬键，防御误触
+            return true; // 3秒内硬锁拦截，防御冷启动误触
         }
-
-        // 网页核心特征支持：优先响应网页后退，保证正常浏览不中断
-        if (webView != null && webView.canGoBack() && keyCode == KeyEvent.KEYCODE_BACK) {
-            webView.goBack();
-            return true;
+    
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            long now = System.currentTimeMillis();
+            // 🌟 2026-11-20 0:50 终极强切断路器：如果老人在 1.5 秒内连续侧滑/按返回键 2 次，
+            // 说明网页陷入了重定向死循环或者白屏卡死，直接无条件离场自毁，绝不纠缠！
+            if (now - lastBackPressedTime < 1500) {
+                FileLogger.log(this, "COMPANION", "🚪 检测到连续侧滑，断路器硬切强制退出容器: " + currentUrl);
+                finish();
+                return true;
+            }
+            lastBackPressedTime = now;
+    
+            // 🌟 正常网页浏览通路：如果是多级普通网页，允许其正常后退
+            if (webView != null && webView.canGoBack()) {
+                webView.goBack();
+                return true;
+            }
         }
-
-        // 其它媒体流、或网页退无可退时，直接按任意键离场自毁
+    
+        // 其它媒体流通道（视频/图片/音频）、或网页退无可退、或触发断路器时，直接任意键/侧滑自毁
         finish();
         return true;
     }
