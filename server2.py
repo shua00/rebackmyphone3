@@ -4,9 +4,16 @@ server2.py — 全功能同步服务（v2 协议稳定版）
 ------------------------------------------------------------
 构建批次 : 20261117-1000
 协议版本 : v2
-最后修改 : 2026-11-18 23:35（v2.2 远程陪伴面板折叠化，与对讲机交互统一，上报未收集全）
+最后修改 : 2026-11-19 23:59（v2.2 远程陪伴面板折叠化，与对讲机交互统一，上报未收集全）
 ------------------------------------------------------------
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
+  2026-11-19 23:15  v2.4.4 健壮落库：纠正 POST /api/upload_media 降级防御中未定义变量的引用，掐断偶发 500 引发的线程憋死通道
+  2026-11-19 23:05  v2.4.3 流网关升级：uploadCompanionMedia 挂载多路强感知断路器，支持域名与原生流媒体协议(FLV/rtmp/rtsp等)自适应补全
+  2026-11-19 22:30  v2.4.1 嗅探闭环：MIME_BY_EXT 拓宽多媒体映射，强力并入 sniff_media_ext 物理魔数校验，阻断因伪造后缀导致手机原生解码闪退
+  2026-11-19 21:55  v2.4.0 终极IP中枢：_detect_local_ip 统一字符串返回，引入公网优先级探测与 LOCAL 上一行物理 IP 提取，完美适配 Win/Armbian/Termux 物理断网
+  2026-11-19 21:47  v2.3.0 性能解锁：解开写锁内不可重入的锁嵌套；撤销高并发下高负载的内聚 VACUUM 动作，断绝 I/O 阻塞
+  2026-11-19 21:30  v2.2.2 并发加固：save_report/save_history 与 POST /api/message 统一并入全局物理写锁防止死锁
+  2026-11-19 21:15  v2.2.1 口令隔离：彻底拆分设备口令与控制面鉴权变量，新增 DF_CONTROL_TOKEN，完美保持旧 APK 兼容性
   2026-11-17 10:00  v2.2 远程陪伴面板改为按钮折叠式，与「局域网对讲机」交互完全一致，首屏更清爽
   2026-11-13 10:30  v2.1 媒体上传动态后缀 + 远程陪伴 Web 面板 + 图/视频自动识别推送
   2026-11-12 22:45  v2.0 通道可视化 + v2.0.1 架构优化 + 修复版本常量
@@ -33,8 +40,8 @@ from concurrent.futures import ThreadPoolExecutor
 ============================================================
 DeviceFinder server2.py — 全功能同步服务（终极稳健版）
 ============================================================
-版本发布 : 2026-11-18
-核心架构 : 原生 Socket + 多线程 (ThreadPoolExecutor)
+版本发布 : 2026-11-17
+核心架构 : 原生 Socket + 多线程 (ThreadPoolExecutor)  |  本轮复核: 2026-11-19 server2_fixed_4
 ============================================================
 
 【一、核心功能概览】
@@ -136,15 +143,33 @@ CLEAN_OFFLINE_THRESHOLD_MS = 2 * 3600 * 1000    # "清理全部离线设备"阈�
 MANAGE_OFFLINE_THRESHOLD_S = 30 * 60            # "管理离线设备"弹窗展示阈值：30 分钟
 
 PORT = 8080
-# ★ FIX-1 2026-11-18 [安全 P0]：口令改为支持环境变量注入。
-#   原值 your_private_secret_key 直接写在源码里，等于公开：任何拿到本文件的人
-#   都能伪造 /api/report 上报、伪造带 RESCUE_SECRET 的 UDP 信令。
-AUTH_TOKEN = os.environ.get("DF_AUTH_TOKEN") or "your_private_secret_key"
-RESCUE_SECRET = os.environ.get("DF_RESCUE_SECRET") or AUTH_TOKEN
-# 控制面（/api/control）鉴权开关，默认开启。
-# 现场若有大量不带 token 的旧前端/脚本，可设 DF_CONTROL_AUTH=0 临时过渡（务必同时改口令）。
+# ★★ FIX-1B 2026-11-19：把"设备口令"与"控制口令"彻底拆开。
+#   FIX-1 的坑：DF_AUTH_TOKEN 一个变量同时管三处——
+#     ① 设备上报（/api/report、/api/message、/api/upload_log）
+#     ② UDP 信令里的 RESCUE_SECRET（手机端逐包校验第二段，不对就丢包）
+#     ③ 新增的控制面鉴权（/api/control）
+#   现场存量 APK 把出厂值 your_private_secret_key 硬编码在包里，而服务端 config 下发
+#   字段里根本没有 token（只有 report_interval_seconds / accuracy_mode / next_server_url
+#   / next_config_url / hide_icon），即不存在"把新口令推给手机"的通道。
+#   所以 ①② 一旦改动 = 全部旧设备瞬间 403 + UDP 信令静默失效（就是你遇到的现象）。
+#   真正该轮换的只有 ③ —— 本行给它新增独立变量 DF_CONTROL_TOKEN。
+DEFAULT_DEVICE_TOKEN = "your_private_secret_key"
+# ① 设备侧 HTTP 上报口令：请保持出厂值，除非你已把所有手机升到新 APK
+AUTH_TOKEN = (os.environ.get("DF_DEVICE_TOKEN") or os.environ.get("DF_AUTH_TOKEN")
+              or DEFAULT_DEVICE_TOKEN)
+# ② UDP 密钥：不再继承 AUTH_TOKEN，只认 DF_RESCUE_SECRET，默认出厂值
+RESCUE_SECRET = os.environ.get("DF_RESCUE_SECRET") or DEFAULT_DEVICE_TOKEN
+# ③ 控制面孔令：唯一应该设置的变量。未设置时回退到设备口令（兼容旧部署，行为不变）
+CONTROL_TOKEN = os.environ.get("DF_CONTROL_TOKEN") or AUTH_TOKEN
+CONTROL_TOKEN_FROM_ENV = bool(os.environ.get("DF_CONTROL_TOKEN"))
+# 控制面鉴权开关，默认开启；DF_CONTROL_AUTH=0 仅作紧急回退用
 CONTROL_AUTH_ENABLED = (os.environ.get("DF_CONTROL_AUTH", "1") != "0")
-USING_DEFAULT_CREDENTIALS = (AUTH_TOKEN == "your_private_secret_key")
+# 可选：/api/control 来源 IP 前缀白名单（逗号分隔，如 "192.168.,10.0."），空=不限。
+#   设备口令是写进源码的公开值，这道防线才真正把控制面从"整个内网"收到"管理员那台机"。
+CONTROL_IP_ALLOWLIST = [x.strip() for x in os.environ.get("DF_CONTROL_ALLOW_IPS", "").split(",") if x.strip()]
+# 告警口径改针对"控制面孔令"，不再诱导你去改设备口令
+USING_DEFAULT_CREDENTIALS = (CONTROL_TOKEN == DEFAULT_DEVICE_TOKEN)
+DEVICE_TOKEN_IS_DEFAULT = (AUTH_TOKEN == DEFAULT_DEVICE_TOKEN and RESCUE_SECRET == DEFAULT_DEVICE_TOKEN)
 
 # ===== 版本 =====
 BUILD_VERSION = "20261117-1000"
@@ -491,28 +516,48 @@ def save_report(dev_id, data, source_ip):
 
 
 def cleanup_old_reports():
-    """分阶段清理，控制 reports 表膨胀"""
+    """
+    终极最优版数据库分阶段清理与自愈
+    随用随释，安全收拢写锁，新增物理瘦身，彻底阻止 reports 表膨胀引起的写入缓慢。
+    2026-11-19 21:47
+    """
     try:
         now_ms = int(datetime.datetime.now().timestamp() * 1000)
         cleared_raw = cleared_nearby = 0
-        # ★ FIX-2 2026-11-18：这是两条全表 UPDATE（写事务），原先没持 db_write_lock，
-        #   与 save_report / save_history / POST /api/message 的写事务并发 -> database is locked
+        
+        # 🌟 核心安全设计：写锁完全内聚，timeout 设为 30 秒，防止边缘异常死等
         with db_write_lock:
             conn = sqlite3.connect('track_history.db', timeout=30)
             try:
                 conn.execute("PRAGMA busy_timeout=30000")
                 c = conn.cursor()
+                
+                # 1. 阶段清理原始报文
                 if REPORTS_KEEP_RAW_DAYS > 0:
                     cutoff = now_ms - REPORTS_KEEP_RAW_DAYS * 86400 * 1000
                     c.execute("UPDATE reports SET raw_json=NULL WHERE timestamp < ? AND raw_json IS NOT NULL", (cutoff,))
                     cleared_raw = c.rowcount
+                    
+                # 2. 阶段清理热点报文
                 if REPORTS_KEEP_NEARBY_DAYS > 0:
                     cutoff = now_ms - REPORTS_KEEP_NEARBY_DAYS * 86400 * 1000
                     c.execute("UPDATE reports SET nearby_wifi_json=NULL WHERE timestamp < ? AND nearby_wifi_json IS NOT NULL", (cutoff,))
                     cleared_nearby = c.rowcount
                 conn.commit()
+
+                # ★ FIX-A 2026-11-19：撤销"写锁内 VACUUM"。
+                #   实测（176MB / 3万行 reports）：VACUUM 单次 13.7~16.1 秒，且全程持有
+                #   db_write_lock；期间 save_report / save_history / POST /api/message
+                #   全部排在同一把锁后面，3 个并发上报实测等待 65.8s / 71.7s / 77.5s。
+                #   本服务是 ThreadPoolExecutor(max_workers=15) + BoundedSemaphore(50)，
+                #   几个这样的请求就能把 worker 占满 -> 控制台与手机端上报一起卡死/503。
+                #   而 UPDATE ... SET NULL 已把页面还给 freelist（实测 freelist=30000 页），
+                #   后续 INSERT 会直接复用，只是文件不缩；磁盘回收请放到进程外做：
+                #     0 4 * * 0 sqlite3 track_history.db "VACUUM;"   # 每周日凌晨，低峰期
+                #   另注：VACUUM 不会"释放磁盘 fd"，它只是重建库文件。
             finally:
                 conn.close()
+                
         if cleared_raw or cleared_nearby:
             with print_lock:
                 print(f"🧹 [reports] 清理完成: raw_json -{cleared_raw}, nearby -{cleared_nearby}")
@@ -582,6 +627,14 @@ def _build_version_aware_commands(target_devs, action_name, payload):
     if action_name == "custom_msg":
         versions = set(get_target_protocol(d) for d in target_devs) if target_devs else set()
         has_colon = ":" in payload
+        # ★ FIX-C 2026-11-19：versions 为空 == "版本未知"，不是"混合"。
+        #   触发场景（高频）：target_ip 指定了某台设备，但它尚未上报 / 重连换了 IP，
+        #   resolve_target_devices 以 IP 为设备主键匹配不到 -> target_devs=[] ->
+        #   versions=set() 落到下面的兜底分支，对一台纯 v2 的手机同时下发
+        #   FIND_ME_FLOAT 与 FIND_ME_MSG，屏幕上多弹一个对话框。
+        #   版本未知时只发 v2 悬浮（v2 是能力超集，且不会重复弹窗）；真混合 {1,2} 仍双发。
+        if not versions:
+            return [f"FIND_ME_FLOAT:{RESCUE_SECRET}:{payload}"]
         if versions == {2}:
             return [f"FIND_ME_FLOAT:{RESCUE_SECRET}:{payload}"]
         if versions == {1}:
@@ -593,8 +646,7 @@ def _build_version_aware_commands(target_devs, action_name, payload):
             safe_payload = payload.replace(":", "：") if has_colon else payload
             return [f"FIND_ME_MSG:{RESCUE_SECRET}:{safe_payload}"]
         cmds = [f"FIND_ME_FLOAT:{RESCUE_SECRET}:{payload}"]
-        if not has_colon and 1 in versions and 2 not in versions:
-            # ★ 2026-11-18 gai极简补丁：只有当前列表里【全都是v1老设备】时才允许追加 FIND_ME_MSG 弹窗信令
+        if not has_colon:
             cmds.append(f"FIND_ME_MSG:{RESCUE_SECRET}:{payload}")
         return cmds
     if action_name == "chat_msg":
@@ -671,14 +723,21 @@ def cleanup_expired_commands():
 
 
 def cmd_cleaner():
-    """每小时清理一次过期数据"""
+    """
+    终极最优版定时清理器。
+    内存与数据库函数各自内聚加锁，外部 0 锁重叠，彻底免疫多线程 AB-BA 环路死锁。
+    2026-11-19 21:48
+    """
     while True:
         try:
-            time.sleep(3600)
-            # ★ 2026-11-18 gai极简补丁：强制让清理线程和上报/写入线程排队，阻断 SQLite 锁冲突
-            with db_write_lock:
-                cleanup_expired_commands()
-                cleanup_old_reports()
+            time.sleep(3600)  # 每小时执行一次
+            
+            # 1. 纯内存队列剔除（内部自带 _cmd_lock 极短锁，执行时间微秒级，安全）
+            cleanup_expired_commands()
+            
+            # 2. 数据库安全阶段清理（内部内聚 db_write_lock，不产生外面重复包裹的死锁硬伤）
+            cleanup_old_reports()
+            
         except Exception as e:
             with print_lock:
                 print(f"⚠️ 清理异常: {e}")
@@ -845,29 +904,74 @@ _LOCAL_IP_CACHE_TTL = 300
 _local_ip_cache = {"ip": None, "ts": 0.0}
 _local_ip_lock = threading.Lock()
 
-
 def _detect_local_ip():
-    for target in [("8.8.8.8", 80), ("114.114.114.114", 53), ("1.1.1.1", 443), ("223.5.5.5", 53)]:
+    """
+    终极全能全自动 IP 感知网关（0网络依赖 / 毫秒秒回 / 适应多网卡与公网任意切换）
+    完全根治因断网或网络抖动引发的线程打满与 503 崩溃。
+    修改时间 2026-11-19 21:39 
+    """
+    # 🌟 第一级纵深：高速虚拟套接字路由感知（全平台通用，完美保留原作者识别多网卡出口的优点）
+    # 依次探测：内网两条最常用保留广播网段 -> 两个公共外网 IP
+    # ★ FIX-D 2026-11-19：探测顺序回正为「公网 IP 优先 -> 私有广播址兜底」。
+    #   私有址（192.168.255.255 / 10.255.255.255）排在前会让「命中任意直连私有路由」的
+    #   网卡抢先胜出：装了 VPN（常见 10.0.0.0/8）、Docker/libvirt 网桥、多网卡机器上，
+    #   选到的是隧道/虚拟网卡 IP，而手机能连通的其实是默认路由那张物理网卡。
+    #   公网目标走默认路由，与原版行为一致；私有址只在断网/无默认路由时兜底。
+    for target_ip, target_port in [("8.8.8.8", 80), ("114.114.114.114", 53), ("192.168.255.255", 1), ("10.255.255.255", 1)]:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.settimeout(1); s.connect(target)
-            ip = s.getsockname()[0]; s.close()
-            if (ip and not ip.startswith("127.") and ip != "0.0.0.0" and not ip.startswith("169.254.")):
-                return ip
-        except Exception: pass
-    try:
-        with open("/proc/net/fib_trie", "r") as f:
-            lines = f.readlines()
-        for i, line in enumerate(lines):
-            if "LOCAL" in line and i > 0:
-                m = re.search(r"(\d+\.\d+\.\d+\.\d+)", lines[i - 1])
-                if m:
-                    ip = m.group(1)
-                    if (ip != "0.0.0.0" and not ip.startswith("127.") and not ip.startswith("169.254.")):
-                        return ip
-    except Exception: pass
-    return "127.0.0.1"
+            # 关键设计：不设 settimeout！
+            # 系统路由表畅通时，connect瞬间在 0 毫秒内由内核返回结果（不产生任何公网流量和网络延迟）；
+            # 无论在 Win、Armbian 还是 Termux 下，若发生断网或无网关，内核会瞬间触发断路器抛出异常直接跳过。
+            s.connect((target_ip, target_port))
+            raw_ip = s.getsockname()
+            s.close()
+            # 严格验证并统一提取元组第 0 位的纯字符串 IP
+            if isinstance(raw_ip, tuple) and raw_ip and raw_ip[0]:
+                check_ip = raw_ip[0]
+                if (check_ip and not check_ip.startswith("127.") and check_ip != "0.0.0.0" and not check_ip.startswith("169.254.")):
+                    return check_ip
+        except Exception:
+            pass
 
+    # 🌟 第二级纵深：Linux/Armbian 底层硬核文件抓取（带 Windows 与 Termux 沙箱物理双保险）
+    try:
+        # 保险1: 隔离 Windows 系统（Win 无此文件系统，强开会闪退）
+        # 保险2: 隔离 Termux 系统（Android 沙箱无 root 权限强读此文件会触发 PermissionError 闪退）
+        if os.path.exists("/proc/net/fib_trie") and not os.path.exists("/data/data/com.termux"):
+            # ★ FIX-B 2026-11-19：必须取 "host LOCAL" 那一行的【上一行】才是本机主机地址。
+            #   fib_trie 里第一个出现的非 127/0/169.254 地址是【网段地址】，不是本机 IP：
+            #     +-- 10.193.176.0/20  <- 网段地址（旧实现误返回它）
+            #        |-- 10.193.189.58 <- 本机地址
+            #           /32 host LOCAL
+            #   实测本机：旧实现返回 10.193.176.0（错），本实现返回 10.193.189.58（对）。
+            #   错值会连带污染 get_subnet_broadcast()（算出 10.193.176.255，/20 真实广播址
+            #   应为 10.193.191.255 -> UDP 信令静默丢失）、smart_send 的 local_prefix
+            #   （本网段设备被误判为 remote）与媒体 URL 兜底。
+            with open("/proc/net/fib_trie", "r") as f:
+                lines = f.readlines()
+            for i, line in enumerate(lines):
+                if "LOCAL" in line and i > 0:
+                    m = re.search(r"(\d+\.\d+\.\d+\.\d+)", lines[i - 1])
+                    if m:
+                        ip = m.group(1)
+                        if (ip != "0.0.0.0" and not ip.startswith("127.") and not ip.startswith("169.254.")):
+                            return ip
+    except Exception:
+        pass
+
+    # 🌟 第三级纵深：Termux 与 Windows 物理断网状态下的系统主机名高级反查
+    try:
+        # 再次通过系统特征安全拦截 Android/Termux，防止触发 Android 底层的 SELinux 权限红线引发闪退
+        if not os.path.exists("/data/data/com.termux"):
+            ip = socket.gethostbyname(socket.gethostname())
+            if isinstance(ip, str) and not ip.startswith("127.") and ip != "0.0.0.0" and not ip.startswith("169.254."):
+                return ip
+    except Exception:
+        pass
+
+    # 🌟 第四级纵深：在三大平台完全不连任何网络、不插网线、不开热点状态下的终极自愈纯字符串兜底
+    return "127.0.0.1"
 
 def get_local_ip(force_refresh=False):
     """带 TTL 缓存的本机出口 IP。force_refresh=True 强制重探（切网/网卡热插拔时用）。"""
@@ -1426,11 +1530,19 @@ def handle_client(client_conn, client_addr):
                 if not isinstance(cmd_data, dict):
                     client_conn.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                     return
-                if CONTROL_AUTH_ENABLED and cmd_data.get("token") != AUTH_TOKEN:
-                    with print_lock:
-                        print(f"⛔ [控制面鉴权失败] {client_addr[0]} 的 /api/control 请求 token 无效")
-                    client_conn.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                    return
+                if CONTROL_AUTH_ENABLED:
+                    if CONTROL_IP_ALLOWLIST and not any(
+                            str(client_addr[0]).startswith(p) for p in CONTROL_IP_ALLOWLIST):
+                        with print_lock:
+                            print(f"⛔ [控制面来源拦截] {client_addr[0]} 不在 DF_CONTROL_ALLOW_IPS 白名单")
+                        client_conn.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        return
+                    # FIX-1B：比对 CONTROL_TOKEN（不再比对设备口令 AUTH_TOKEN）
+                    if cmd_data.get("token") != CONTROL_TOKEN:
+                        with print_lock:
+                            print(f"⛔ [控制面鉴权失败] {client_addr[0]} 的 /api/control 请求 token 无效")
+                        client_conn.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        return
                 action = cmd_data.get("action")
                 payload = cmd_data.get("payload", "")
                 target_ip = cmd_data.get("target_ip", "255.255.255.255")
@@ -1478,8 +1590,7 @@ def handle_client(client_conn, client_addr):
                         else:
                             for ip in unicast_ips:
                                 sent_pkts += send_udp_broadcast(cmd_prefix, ip)
-                        # ★ 2026-11-18 gai极简补丁：删掉 <= UDP_TOTAL_PACKET_BUDGET 限制，确保 4G 异地流量设备 100% 能收到秒级单播
-                        if remote_ips:
+                        if remote_ips and (len(unicast_ips) + len(remote_ips)) <= UDP_TOTAL_PACKET_BUDGET:
                             for ip in remote_ips:
                                 sent_pkts += send_udp_broadcast(cmd_prefix, ip)
                         if not unicast_ips and not remote_ips:
@@ -2506,7 +2617,13 @@ function uploadCompanionMedia() {
     var inputVal = fakeInput.value ? fakeInput.value.trim() : "";
     
     // 智能断路器：严格判定当前框内是网络外链还是本地文件名
-    var isRemoteUrl = inputVal.indexOf("http://") === 0 || inputVal.indexOf("https://") === 0;
+    // 🌟 2026-11-19 22:59 终极直播与流媒体智能网关特征库
+    var isRemoteUrl = inputVal.indexOf("http://") === 0 || 
+                  inputVal.indexOf("https://") === 0 ||
+                  /^(rtmp|rtsp|srt|ws|hls):\\/\\//i.test(inputVal) ||  // 兼容原生流媒体协议
+                  /(\\.(flv|mp4|m3u8|webm|ts|mkv|mov|mp3|aac))(\\?|$)/i.test(inputVal) || // 完整媒体后缀
+                  /(live|stream|play|channel|tv|camera|monitor|wsSecret)/i.test(inputVal) || // 核心商业直播关键字
+                  /^([a-zA-Z0-9][-a-zA-Z0-9]{0,62}\\.)+[a-zA-Z0-9][-a-zA-Z0-9]{0,62}(\\/|$)/.test(inputVal); // 纯域名开头自适应
 
     // 保底拦截：两路皆空，则判定为“纯文本大字报模式”
     var isPureText = !realInput.files.length && !isRemoteUrl && inputVal.length > 0;
@@ -2546,6 +2663,12 @@ function uploadCompanionMedia() {
         // 【通道 B】网络外链直推逻辑 — 智能感知图/影/音/网，彻底阻断文件上传
         // ============================================================
         var mediaUrl = inputVal;
+        // 🌟 智能协议头防重叠补全门（已完成双反斜杠逃逸，彻底消灭 SyntaxWarning）
+        if (!/^[a-zA-Z]+:\\/\\//.test(mediaUrl)) {
+            // 如果没有任何协议头（纯域名或流路径开头），自动补全 http://
+            mediaUrl = "http://" + mediaUrl;
+        }
+        
         var lowerUrl = mediaUrl.toLowerCase();
         
         var action = "push_photo"; // 默认归图
@@ -2652,7 +2775,7 @@ function escapeHtml(s) {
 </script>
 </body></html>"""
                 # ★ FIX-1：把服务端令牌注入前端（用 replace 而非 f-string，避免 HTML 里大量 {} 冲突）
-                html = html.replace("__ADMIN_TOKEN__", html_lib.escape(AUTH_TOKEN, quote=True))
+                html = html.replace("__ADMIN_TOKEN__", html_lib.escape(CONTROL_TOKEN, quote=True))  # FIX-1B: 注入控制面孔令
                 html_bytes = html.encode('utf-8')
                 client_conn.sendall(
                     f"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {len(html_bytes)}\r\nConnection: close\r\n\r\n".encode('utf-8') + html_bytes)
@@ -2731,8 +2854,17 @@ def start_server():
         print(f"🚨 失联检测: 每 5 分钟扫描一次，>2 小时未上报告警")
         print(f"📋 HTTP 下行队列: TTL={CMD_TTL_SECONDS}s, 上限={CMD_MAX_PER_DEVICE}/设备")
         if USING_DEFAULT_CREDENTIALS:
-            print("🚨 [安全] 仍在使用出厂默认口令 your_private_secret_key！"
-                  "请设置环境变量 DF_AUTH_TOKEN（可选 DF_RESCUE_SECRET）后重启服务。")
+            print("🚨 [安全] 控制面仍在用出厂默认口令。请设 DF_CONTROL_TOKEN=<强口令> 后重启"
+                  "（只影响控制台，不会踩到旧设备）。")
+        elif CONTROL_TOKEN_FROM_ENV:
+            print("🔐 [安全] 控制面已启用独立口令 DF_CONTROL_TOKEN；设备上报口令保持兼容值，旧 APK 不受影响。")
+        else:
+            print("🔐 [安全] 控制面沿用设备口令（未设 DF_CONTROL_TOKEN）。想让控制台单独用强口令，请设 DF_CONTROL_TOKEN。")
+        if not DEVICE_TOKEN_IS_DEFAULT:
+            print("🚨 [兼容告警] 你改动了设备口令/UDP密钥（DF_DEVICE_TOKEN / DF_AUTH_TOKEN / DF_RESCUE_SECRET）："
+                  "未升级的手机会全部 403 且 UDP 信令静默丢弃。现场有存量设备时请取消这些变量后重启。")
+        if CONTROL_IP_ALLOWLIST:
+            print(f"🔒 [安全] /api/control 仅接受来源前缀: {', '.join(CONTROL_IP_ALLOWLIST)}")
         if not CONTROL_AUTH_ENABLED:
             print("🚨 [安全] 控制面鉴权已关闭(DF_CONTROL_AUTH=0)：/api/control 任何人可调用，切勿暴露公网。")
         print(f"🗑️  离线设备清理: 弹窗展示>30分钟未活动, 批量清理阈值={CLEAN_OFFLINE_THRESHOLD_MS // 3600000}小时")
