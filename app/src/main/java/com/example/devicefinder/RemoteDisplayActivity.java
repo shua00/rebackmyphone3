@@ -65,6 +65,13 @@ import java.net.URL;
  *  未采纳（有意保持 538 行版原样）：static 内部类 + WeakReference（timeoutRunnable 是实例
  *       lambda，仍强持 Activity，该改造达不到它宣称的效果）、UA 2.3→2.5、异常文案缩短、
  *       RECEIVER_EXPORTED→NOT_EXPORTED（安全收紧，待你确认后单独改）。
+ * ------------------------------------------------------------
+ * 2026-11-20 修复批次 fix-20261120-C（原生 FLV 降级 + 外部协议拦截；R1~R6/M1~M4 一项不删）
+ *  [F1] 原生 VideoView 播放 .flv 报 what=1（类原生 AOSP 缺少 FLV 解复用器）时，
+ *       自动平滑降级至内置 WebView + flv.js（Chromium MSE 软解），零本地依赖。
+ *  [F2] WebViewClient 增加 shouldOverrideUrlLoading 拦截非 http/https 协议（如 baiduboxapp://），
+ *       防止门户网站自动唤起外部 App 触发 ERR_UNKNOWN_URL_SCHEME 误退出。
+ *  [F3] resetAllViews() 销毁 WebView 前强制 loadUrl("about:blank") + destroy()，防止后台持续拉流。
  * ============================================================
  */
 public class RemoteDisplayActivity extends Activity {
@@ -82,6 +89,7 @@ public class RemoteDisplayActivity extends Activity {
     private String currentUrl = "";
     // 🌟 2026-11-20 0:50 新增：连续侧滑返回防死循环时间戳
     private long lastBackPressedTime = 0;
+    private boolean hasFlvFallback = false;                // [F1] 标记当前会话是否已触发过 FLV -> H5 降级
 
     // [R2] 图片下载硬上限：超过直接放弃，避免 OOM 与长时间白屏
     private static final int IMAGE_MAX_BYTES = 12 * 1024 * 1024;
@@ -162,6 +170,7 @@ public class RemoteDisplayActivity extends Activity {
         }
         url = url.trim();
         currentUrl = url;
+        hasFlvFallback = false;
 
         // 重置状态
         handler.removeCallbacks(timeoutRunnable);
@@ -203,7 +212,7 @@ public class RemoteDisplayActivity extends Activity {
                 || u.contains("/uploads/media/");
     }
     private static boolean looksVideo(String u) {
-        return endsWithAny(u, ".mp4", ".webm", ".mkv", ".mov", ".avi", ".m3u8")
+        return endsWithAny(u, ".mp4", ".webm", ".mkv", ".mov", ".avi", ".m3u8", ".flv")
                 || u.contains("live") || u.contains("stream");
     }
     private static boolean looksAudio(String u) {
@@ -246,6 +255,14 @@ public class RemoteDisplayActivity extends Activity {
 
             webView.setWebViewClient(new WebViewClient() {
                 @Override
+                public boolean shouldOverrideUrlLoading(WebView view, String targetUrl) {
+                    if (targetUrl == null || (!targetUrl.startsWith("http://") && !targetUrl.startsWith("https://"))) {
+                        FileLogger.log(RemoteDisplayActivity.this, "WEB_CORE", "🛡️ 拦截非 HTTP 外部唤醒协议: " + targetUrl);
+                        return true;
+                    }
+                    return false;
+                }
+                @Override
                 public void onPageFinished(WebView view, String loadedUrl) {
                     handler.removeCallbacks(timeoutRunnable);
                     getSharedPreferences("device_finder_prefs", MODE_PRIVATE).edit()
@@ -256,6 +273,9 @@ public class RemoteDisplayActivity extends Activity {
                 }
                 @Override
                 public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+                    if (failingUrl != null && !failingUrl.startsWith("http://") && !failingUrl.startsWith("https://")) {
+                        return;
+                    }
                     handler.removeCallbacks(timeoutRunnable);
                     FileLogger.log(RemoteDisplayActivity.this, "WEB_CORE",
                             "❌ 网页加载失败 code=" + errorCode + " desc=" + description + " url=" + failingUrl);
@@ -271,7 +291,7 @@ public class RemoteDisplayActivity extends Activity {
         }
     }
     /**
-     * 2. 🎬 视频/直播流渲染管道（M3U8 直源原地自愈断连）
+     * 2. 🎬 视频/直播流渲染管道（M3U8/MP4 原生直源 + AOSP 原生不支持 FLV 自动降级 H5 flv.js）
      */
     private void initVideo(final String url) {
         try {
@@ -281,7 +301,8 @@ public class RemoteDisplayActivity extends Activity {
 
             videoView.setOnPreparedListener(mp -> {
                 handler.removeCallbacks(timeoutRunnable);
-                if (url.toLowerCase().indexOf(".m3u8") == -1) {
+                String lowerUrl = url.toLowerCase();
+                if (!lowerUrl.contains(".m3u8") && !lowerUrl.contains(".flv")) {
                     mp.setLooping(true); // 标准点播文件开启无限循环
                 }
                 videoView.start();
@@ -299,6 +320,21 @@ public class RemoteDisplayActivity extends Activity {
                 handler.removeCallbacks(timeoutRunnable);
                 FileLogger.log(this, "COMPANION", "❌ 视频异常 what=" + what + ", extra=" + extra);
 
+                // [F1] 类原生 AOSP (what=1) 不支持 FLV 容器时，自动降级至内置 WebView + flv.js
+                if (what == 1 && url.toLowerCase().contains(".flv") && !hasFlvFallback) {
+                    hasFlvFallback = true;
+                    FileLogger.log(this, "COMPANION", "🔄 原生播放器不支持 FLV，自动降级至 H5(flv.js) 容器播放");
+                    try {
+                        if (videoView != null) {
+                            videoView.stopPlayback();
+                            rootLayout.removeView(videoView);
+                            videoView = null;
+                        }
+                    } catch (Exception ignored) {}
+                    initFlvFallbackWebView(url);
+                    return true;
+                }
+
                 // 直播网络层闪断自愈（错误代码 -1004 代表连接丢失）。启动原地2秒无痕重连，不跳出界面
                 if (what == MediaPlayer.MEDIA_ERROR_SERVER_DIED || extra == -1004) {
                     FileLogger.log(this, "COMPANION", "🔄 网络流闪断，正在尝试原地重新拉流...");
@@ -313,6 +349,57 @@ public class RemoteDisplayActivity extends Activity {
             });
         } catch (Exception e) {
             handler.removeCallbacks(timeoutRunnable);
+            finish();
+        }
+    }
+
+    /**
+     * [F1] 轻量级 H5 flv.js 降级播放器（零本地包体积增量，仅在原生 MediaPlayer 不支持 FLV 时触发）
+     */
+    private void initFlvFallbackWebView(final String flvUrl) {
+        handler.removeCallbacks(timeoutRunnable);
+        handler.postDelayed(timeoutRunnable, SLOW_DISPLAY_TIMEOUT_MS);
+        try {
+            webView = new WebView(this);
+            rootLayout.addView(webView, new FrameLayout.LayoutParams(-1, -1));
+
+            WebSettings ws = webView.getSettings();
+            ws.setJavaScriptEnabled(true);
+            ws.setDomStorageEnabled(true);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
+                ws.setMediaPlaybackRequiresUserGesture(false);
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                ws.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+            }
+
+            webView.setWebViewClient(new WebViewClient() {
+                @Override
+                public void onPageFinished(WebView view, String loadedUrl) {
+                    handler.removeCallbacks(timeoutRunnable);
+                    getSharedPreferences("device_finder_prefs", MODE_PRIVATE).edit()
+                        .putString("current_push_video_url", flvUrl)
+                        .putString("current_push_photo_url", "")
+                        .putString("current_push_audio_url", "")
+                        .putString("current_push_web_url", "").commit();
+                    FileLogger.log(RemoteDisplayActivity.this, "COMPANION", "▶ H5(flv.js) 降级容器已挂载");
+                }
+            });
+
+            String safeUrl = flvUrl.replace("\\", "\\\\").replace("'", "\\'");
+            String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                    + "<style>*{margin:0;padding:0;background:#000}video{width:100vw;height:100vh;object-fit:contain}</style>"
+                    + "<script src='https://staticfile.net'></script></head><body>"
+                    + "<video id='v' autoplay playsinline></video><script>"
+                    + "if(window.flvjs&&flvjs.isSupported()){"
+                    + "var p=flvjs.createPlayer({type:'flv',isLive:true,url:'" + safeUrl + "'});"
+                    + "p.attachMediaElement(document.getElementById('v'));p.load();p.play();"
+                    + "}</script></body></html>";
+
+            webView.loadDataWithBaseURL("https://localhost/", html, "text/html", "UTF-8", null);
+        } catch (Exception e) {
+            handler.removeCallbacks(timeoutRunnable);
+            FileLogger.log(this, "COMPANION", "❌ H5(flv.js) 降级容器初始化失败: " + e.getMessage());
             finish();
         }
     }
@@ -557,7 +644,16 @@ public class RemoteDisplayActivity extends Activity {
     private void resetAllViews() {
         try { if (videoView != null) { videoView.stopPlayback(); rootLayout.removeView(videoView); videoView = null; } } catch (Exception ignored) {}
         try { if (imageView != null) { imageView.setImageBitmap(null); rootLayout.removeView(imageView); imageView = null; } } catch (Exception ignored) {}
-        try { if (webView != null) { webView.stopLoading(); webView.clearHistory(); rootLayout.removeView(webView); webView = null; } } catch (Exception ignored) {}
+        try {
+            if (webView != null) {
+                webView.stopLoading();
+                webView.loadUrl("about:blank"); // [F3] 彻底释放 H5 / flv.js 拉流线程与内存
+                webView.clearHistory();
+                rootLayout.removeView(webView);
+                webView.destroy();
+                webView = null;
+            }
+        } catch (Exception ignored) {}
         try { if (backgroundAudioPlayer != null) { if (backgroundAudioPlayer.isPlaying()) backgroundAudioPlayer.stop(); backgroundAudioPlayer.release(); backgroundAudioPlayer = null; } } catch (Exception ignored) {}
     }
 
@@ -593,7 +689,8 @@ public class RemoteDisplayActivity extends Activity {
             lastBackPressedTime = now;
     
             // 🌟 正常网页浏览通路：如果是多级普通网页，允许其正常后退
-            if (webView != null && webView.canGoBack()) {
+            // [F1] 仅在非 FLV 降级模式下允许普通网页后退；FLV 降级页面直接按返回退出
+            if (webView != null && !hasFlvFallback && webView.canGoBack()) {
                 webView.goBack();
                 return true;
             }
