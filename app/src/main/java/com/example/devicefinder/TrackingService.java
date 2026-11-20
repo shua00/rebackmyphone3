@@ -2,12 +2,21 @@
  * ============================================================
  *  TrackingService.java — 全内核高并发后台同步与常驻常活引擎
  * ------------------------------------------------------------
- *  构建批次 : 20261111-2000
+ *  构建批次 : 20261120-2110
  *  协议版本 : v2
- *  最后修改 : 2026-11-17 21:00（P0级保活修复：闹钟加 FGS 豁免）
+ *  最后修改 : 2026-11-20 21:10（与服务端 v2.5.1 对齐的一致性修复：补发自我续跑 / 幂等回执回收 / 主线程解析下移 / 双保险续期 等 9 处）
  *  运行功耗 : 极轻量级 (深度适配低内存设备)
  * ------------------------------------------------------------
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
+ *    2026-11-20 21:10  可靠性修复：[B1] 离线补发>FLUSH_BATCH_MAX 条时自我续跑（不再等网络状态变化）；
+ *                      [B3] 批量下行响应解析由主线程 handler.post 移回工作线程（消除 ANR 风险）；
+ *                      [C2] 内存级计时器撞车抑制时自我续期 + sendReport 去重抑制时补排下一轮，防周期链断裂；
+ *                      [C3] 静止防抖合并同时检查被覆盖旧行的指令回执，不再吞回执；
+ *                      [低危1] 服务端已确认的 executed_cmd_ids 及时回收；[低危3] 队列 rename 失败降级追加写不丢点；
+ *                      [低危4] 队列超限裁剪留痕日志；[低危5] 移除死代码 truncateQueueFile 并校正架构注释
+ *    2026-11-20 20:20  定时上报双保险：新增内存级 inMemoryReportRunnable，与硬件 AlarmManager 互补防限流
+ *    2026-11-20 14:30  弱网与续航优化：新增 502/503/504/429 指数退避（找回特权/高优触发直通）及离线队列静止防抖合并
+ *    2026-11-20 12:00  离线补发优化：新增 /api/report_batch 批量优先通道，不支持或部分接收自动逐条降级
  *    2026-11-17 21:00  P0级保活修复：闹钟改用 getForegroundService
  *    2026-11-13 13:00  插件挂载：远程陪伴（HTTP 通道 → 复用 CompanionModule 统一处理）
  *    2026-11-12 22:45  v2.0 通道可视化 + v2.0.1 架构优化 + 修复版本常量
@@ -31,8 +40,10 @@
  * 4. 防卡死线程池：引入有界队列与 DiscardOldest 拒绝策略，并缩短定位超时。
  * 5. 零崩溃绘制测算 (Anti-NPE)：气泡宽度测算剥离了尚未 attach 的 View 属性，
  *    改用纯内存 Paint 画笔边界计算，绝杀定制 ROM (MIUI/ColorOS) 上的底层闪退。
- * 6. 绝对文件流安全：队列裁剪 (truncateQueueFile) 被纳入 FILE_LOCK 矩阵，
- *    彻底杜绝极端弱网下并发对冲写入导致的离线 JSON 结构破坏。
+ * 6. 绝对文件流安全：离线队列的入队裁剪 (enforceQueueLimits) 与补发后的整表重写全部在
+ *    FILE_LOCK 矩阵内完成，并统一经 writeQueueAtomically（同目录临时文件 + fsync + rename）
+ *    原子替换；rename 失败时降级为追加写，绝不用空文件覆盖旧队列、也绝不丢本次新记录。
+ *    （原 truncateQueueFile 已无任何调用点，2026-11-20 [低危5] 移除，裁剪职责由 enforceQueueLimits 承担）
  * 7. 闹钟防爆装甲 (Alarm Quota Armor)：在重排保活与主上报闹钟前强制 cancel
  *    旧的 PendingIntent 句柄，完美绕开 Android 12+ 的精确闹钟 Quota 节流斩杀。
  * 8. [补丁 2/3/4/5] 全局保活策略可调 (顶部 4 行) + onCreate 顶层秒起防线 +
@@ -222,6 +233,9 @@ public class TrackingService extends Service implements LocationListener {
     // ==================== [HTTP下行] 字段区 ====================
     private static final String PREF_EXECUTED_CMD_IDS = "executed_cmd_ids";
     private static final int EXECUTED_CMD_IDS_MAX = 100;
+    // ★ 2026-11-20 [低危1] 回执集合「读-改-写」互斥锁：上报线程（回收已确认回执）与
+    //   parseResponse（追加新回执）可能在不同工作线程并发，无锁会造成丢更新。
+    private final Object executedCmdIdsLock = new Object();
     private static final int FAST_POLL_BATTERY_THRESHOLD = 20;
     private static final int FAST_POLL_MAX_CONSECUTIVE = 5;
     private static final long CMD_TIME_WINDOW_MS = 60 * 1000L;
@@ -258,6 +272,23 @@ public class TrackingService extends Service implements LocationListener {
     //   两个线程都读到同一快照 → 都发送 → 服务器收到重复数据。
     //   本锁只保护 flush 自己，不影响 queuePendingReport 入队（它用 FILE_LOCK）。
     private static final Object FLUSH_LOCK = new Object();
+    // 新增2026-11-20 放在 TrackingService 类字段区（FLUSH_LOCK 附近）
+    private final java.util.concurrent.atomic.AtomicBoolean flushInFlight =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private static final int FLUSH_BATCH_MAX = 30;
+    private static final int FLUSH_MAX_CONSECUTIVE_FAILS = 2;
+    private static final long FLUSH_CONTINUE_DELAY_MS = 3000L; // ★ 2026-11-20 [B1] 残留批次自我续跑间隔
+    // 新增2026-11-20 结束
+
+    // ★ 2026-11-20 新增：服务端过载(502/503/504/429)指数退避 & 离线队列静止防抖合并参数
+    //   高优触发源（SMS/UDP/远程指令/运动/低电量/手动/临终上报，均以 force=true 进入）具备找回特权，
+    //   可无视退避窗口立即抢占发包；普通周期上报在退避窗口内直接并入离线队列，省电省流量。
+    private int  consecutiveServerBusyCount = 0;                       // 连续过载次数（退避阶梯）
+    private long serverBackoffUntilMs        = 0L;                     // 退避冷却截止时刻(ms)
+    private static final long SERVER_BACKOFF_BASE_MS  = 15 * 60 * 1000L;  // 首次过载冷却 15 分钟
+    private static final long SERVER_BACKOFF_MAX_MS   = 60 * 60 * 1000L;  // 最大冷却上限 60 分钟
+    private static final long OFFLINE_MERGE_WINDOW_MS = 15 * 60 * 1000L;  // 离线静止合并窗口 15 分钟
+    private static final double OFFLINE_MERGE_DIST_M  = 50.0;             // 静止位移判定阈值 50 米
 
     // v2.0.1 补丁：防抖与排期锁
     private final Object alarmScheduleLock = new Object();
@@ -269,7 +300,7 @@ public class TrackingService extends Service implements LocationListener {
             new ThreadPoolExecutor(
                     5, 5, 0L, TimeUnit.MILLISECONDS,
                     new LinkedBlockingQueue<>(20),
-                    new ThreadPoolExecutor.DiscardOldestPolicy()
+                    new ThreadPoolExecutor.AbortPolicy()
             );
 
     @Override
@@ -593,7 +624,8 @@ public class TrackingService extends Service implements LocationListener {
                         FileLogger.log(this, "REPORT", "⚠️ WifiLock acquire 失败: " + e.getMessage());
                     }
                 }
-                sendReport(true, true);
+                // 周期闹钟属于普通上报，遵守服务端退避；手动/找回触发仍使用 force=true。
+                sendReport(true, false);
                 handler.postDelayed(() -> { if (wifiLock != null && wifiLock.isHeld()) wifiLock.release(); }, 15000);
             } else if ("ACTION_SECRET_UNLOCK".equals(action)) {
                 long now = System.currentTimeMillis();
@@ -678,7 +710,9 @@ public class TrackingService extends Service implements LocationListener {
                 String intervalStr = intent.getStringExtra("report_interval_seconds");
                 if (intervalStr != null) {
                     try {
-                        long newInterval = Long.parseLong(intervalStr) * 1000L;
+                        long seconds = Long.parseLong(intervalStr);
+                        if (seconds < 60L || seconds > 7L * 24L * 60L * 60L) throw new IllegalArgumentException("间隔必须为 60 秒至 7 天");
+                        long newInterval = TimeUnit.SECONDS.toMillis(seconds);
                         reportIntervalMs = newInterval;
                         changed.append("interval=").append(intervalStr).append("s, ");
                     } catch (Exception e) { FileLogger.log(this, "CONFIG", "⚠️ interval 参数非法: " + intervalStr); }
@@ -1660,7 +1694,9 @@ public class TrackingService extends Service implements LocationListener {
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
             if (cm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                NetworkRequest request = new NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build();
+                NetworkRequest request = new NetworkRequest.Builder()
+                        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        .build();
                 networkCallback = new ConnectivityManager.NetworkCallback() {
                     @Override
                     public void onAvailable(Network network) {
@@ -1668,8 +1704,8 @@ public class TrackingService extends Service implements LocationListener {
                         String oldSsid = DeviceInfoUtils.cachedSsid;
                         String[] wifiInfo = DeviceInfoUtils.getWifiInfo(TrackingService.this);
                         String newSsid = wifiInfo[0];
-                        if (newSsid.equals("UNKNOWN") || newSsid.equals("<unknown ssid>")) return;
-                        if (!oldSsid.equals(newSsid) && !oldSsid.equals("UNKNOWN")) {
+                        if (!newSsid.equals("UNKNOWN") && !newSsid.equals("<unknown ssid>")
+                                && !oldSsid.equals(newSsid) && !oldSsid.equals("UNKNOWN")) {
                             FileLogger.log(TrackingService.this, "NETWORK", "✅ WiFi 连接: SSID=" + newSsid + ", IP=" + DeviceInfoUtils.getLocalIpAddress());
                             sendReport(true, false);
                             triggerRescueListener();
@@ -1844,47 +1880,84 @@ public class TrackingService extends Service implements LocationListener {
         return result[0];
     }
 
-    private void scheduleNextReport() {
-        if (alarmManager == null || alarmPendingIntent == null) return;
+    // ★ 2026-11-20 20:20 借鉴双保险：内存级周期上报计时器（与 AlarmManager 硬件闹钟互补，绕过定制 ROM 对后台闹钟的限流）
+    private final Runnable inMemoryReportRunnable = () -> {
+        if (!serviceDestroyed) {
+            long now = System.currentTimeMillis();
+            if (now - lastAlarmTriggerTime < 2000) { // 与硬件闹钟 2 秒内撞车时自动防重
+                // ★ 2026-11-20 [C2] 修复：原先撞车即 return，内存级计时器链条就此终止。若硬件闹钟那一路
+                //   又因去重窗口 / ROM 限流没有走到 scheduleNextReport，双保险会同时熄火、周期上报静默断裂。
+                //   改为按完整周期自我续期（scheduleNextReport 自带 removeCallbacks，重复排期安全无堆积）。
+                FileLogger.log(TrackingService.this, "ALARM", "⏭ 内存级计时器与硬件闹钟撞车，已按完整周期自我续期，防双保险熄火");
+                if (!serviceDestroyed) handler.postDelayed(inMemoryReportRunnable, reportIntervalMs);
+                return;
+            }
+            lastAlarmTriggerTime = now;
+            FileLogger.log(this, "ALARM", "⏰ 内存级周期计时器触发上报");
+            sendReport(true, false);
+        }
+    };
 
+    private void scheduleNextReport() {
         synchronized (alarmScheduleLock) { // v2.0.1 补丁：确保排队与取消的原子性
-            // ★ 补丁4：强制 cancel 先前可能因快速轮询或手动触发而在内核留存的旧句柄。
-            // 彻底阻断因并发触发导致的闹钟频率超限（Quota 限流），消灭偶发性假死。
+            int rc = reportCount.get();
+            long delay = (rc == 1 || rc == 2) ? 3 * 60 * 1000L : reportIntervalMs;
+
+            // 1. 第一重保险（内存级）：进程存活期间准点触发，不受 MIUI/ColorOS 后台闹钟推迟影响
+            handler.removeCallbacks(inMemoryReportRunnable);
+            if (!serviceDestroyed) {
+                handler.postDelayed(inMemoryReportRunnable, delay);
+            }
+
+            // 2. 第二重保险（硬件级）：保留原有 AlarmManager，防深度 Doze 休眠或进程被回收
+            if (alarmManager == null || alarmPendingIntent == null) return;
             try { alarmManager.cancel(alarmPendingIntent); } catch (Exception ignored) {}
 
-            int rc = reportCount.get();
-            // reportIntervalMs 已从 reportAlarmIntervalMs 初始化，远端 config 可继续覆盖
-            long delay = (rc == 1 || rc == 2) ? 3 * 60 * 1000L : reportIntervalMs;
             long triggerAtMillis = System.currentTimeMillis() + delay;
             lastAlarmExpectedAt = triggerAtMillis;
-            // ★ H2 修复 2026-11-07：30 分钟上报不需要秒级精度，改用 setAndAllowWhileIdle，
-            //   避免占用 Android 12+ 精确闹钟配额（72 次/天）。
             try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, alarmPendingIntent);
-                else alarmManager.set(AlarmManager.RTC_WAKEUP, triggerAtMillis, alarmPendingIntent);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, alarmPendingIntent);
+                } else {
+                    alarmManager.set(AlarmManager.RTC_WAKEUP, triggerAtMillis, alarmPendingIntent);
+                }
             } catch (Exception e) {
                 FileLogger.log(this, "ALARM", "⚠️ 主上报闹钟设置失败: " + e.getMessage());
             }
         }
     }
 
+
     private void sendReport(final boolean withNearbyWifi, boolean force) { sendReport(withNearbyWifi, force, null); }
 
     private void sendReport(final boolean withNearbyWifi, boolean force, final String overrideUrl) {
         long currentTime = System.currentTimeMillis();
+        boolean dedupSuppressed = false;
         synchronized (reportLock) {
-            if (!force && currentTime - lastReportTime < 5000) return;
-            if (force && currentTime - lastReportTime < 2000) return;
-            lastReportTime = currentTime;
+            if (!force && currentTime - lastReportTime < 5000) dedupSuppressed = true;
+            else if (force && currentTime - lastReportTime < 2000) dedupSuppressed = true;
+            else lastReportTime = currentTime;
+        }
+        if (dedupSuppressed) {
+            // ★ 2026-11-20 [C2] 修复：被去重窗口抑制时原先直接 return，既不走上报的 finally、也不补排
+            //   scheduleNextReport。一旦此刻硬件闹钟正好被 MIUI/ColorOS 限流推迟（正是双保险要防的场景），
+            //   周期上报链会静默断裂，只能等短信/UDP/运动等其它触发源。这里在锁外补排下一轮，
+            //   scheduleNextReport 自带 removeCallbacks + alarmManager.cancel，重复调用安全。
+            FileLogger.log(this, "REPORT", "⏭ 去重窗口抑制本次上报，已补排下一轮定时任务，防止周期链断裂");
+            if (!serviceDestroyed) scheduleNextReport();
+            return;
         }
         final String activeUrl = (overrideUrl != null && !overrideUrl.isEmpty()) ? overrideUrl : getCurrentServerUrl();
 
+        if (!reportInFlight.compareAndSet(false, true)) {
+            FileLogger.log(this, "REPORT", "⏭ 已有上报任务在执行或排队，跳过重复触发");
+            return;
+        }
+        try {
         reportExecutor.execute(() -> {
-            if (!reportInFlight.compareAndSet(false, true)) {
-                FileLogger.log(TrackingService.this, "REPORT", "⏭ 已有上报在执行，跳过本次");
-                return;
-            }
             boolean success = false;
+            // ★ 2026-11-20 [低危1] 记录本次上报体携带的指令回执 id，服务端确认（HTTP 200）后本地回收
+            final java.util.Set<String> sentAckIds = new java.util.LinkedHashSet<>();
             if (enableWifiLock && wifiLock != null && !wifiLock.isHeld()) {
                 try { wifiLock.acquire(); } catch (Exception e) { FileLogger.log(TrackingService.this, "REPORT", "⚠️ WifiLock acquire 失败: " + e.getMessage()); }
             }
@@ -2018,6 +2091,7 @@ public class TrackingService extends Service implements LocationListener {
                         JSONArray execArr = new JSONArray();
                         for (String id : executedIds) execArr.put(id);
                         json.put("last_executed_cmd_ids", execArr);
+                        sentAckIds.addAll(executedIds); // ★ 2026-11-20 [低危1] 随体上报，成功后回收
                     }
                 } catch (Exception e) {
                     FileLogger.log(TrackingService.this, "HTTP_CMD", "⚠️ 上报 executedIds 失败: " + e.getMessage());
@@ -2040,6 +2114,23 @@ public class TrackingService extends Service implements LocationListener {
                     } catch (Exception ignored) {}
                 }
 
+                // ★ 2026-11-20 补丁3①：服务端过载退避拦截 + 找回特权直通
+                //   本方法无 reason 参数，但所有高优触发源（短信/UDP唤醒/运动/低电量临终/远程指令/手动/强制）
+                //   均以 sendReport(..., force=true) 进入；overrideUrl 直连（换址校验/临时探测）同样视为高优。
+                boolean isHighPriority = force || (overrideUrl != null);
+                long nowMs = System.currentTimeMillis();
+                if (isHighPriority && serverBackoffUntilMs > nowMs) {
+                    // 找回特权：立即解除退避，抢占发包（保证找回/定位类指令永不被退避拖慢）
+                    serverBackoffUntilMs = 0L;
+                    consecutiveServerBusyCount = 0;
+                    FileLogger.log(TrackingService.this, "REPORT", "⚡ 高优/找回触发，立即破除过载退避并抢占发包");
+                } else if (!isHighPriority && nowMs < serverBackoffUntilMs) {
+                    long remainMin = Math.max(1, (serverBackoffUntilMs - nowMs) / 60000);
+                    FileLogger.log(TrackingService.this, "REPORT", "⏳ 服务端过载退避中（约 " + remainMin + " 分钟后重试），本次跳过发包直接并入离线队列");
+                    if (overrideUrl == null) queuePendingReport(json);
+                    return;
+                }
+
                 URL url = new URL(activeUrl);
                 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("POST");
@@ -2059,12 +2150,22 @@ public class TrackingService extends Service implements LocationListener {
                     long httpCost = System.currentTimeMillis() - httpStart;
 
                     if (httpCode == 200) {
+                        // ★ 2026-11-20 补丁3②：收到 200，恢复常态并清零退避状态
+                        if (consecutiveServerBusyCount > 0 || serverBackoffUntilMs > 0) {
+                            consecutiveServerBusyCount = 0;
+                            serverBackoffUntilMs = 0L;
+                        }
                         BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream()));
                         StringBuilder sb = new StringBuilder(); String line;
                         while ((line = br.readLine()) != null) sb.append(line);
                         br.close();
-                        if (overrideUrl == null) parseResponse(new JSONObject(sb.toString()));
-                        success = true;
+                        success = true; // HTTP 200 已确认上报成功，与下行响应解析分离
+                        if (overrideUrl == null) {
+                            try { parseResponse(new JSONObject(sb.toString())); }
+                            catch (Exception responseParseError) {
+                                FileLogger.log(TrackingService.this, "REPORT", "⚠️ 上报已成功，但下行响应解析失败: " + responseParseError.getMessage());
+                            }
+                        }
 
                         String locDesc;
                         if (loc != null) {
@@ -2075,6 +2176,14 @@ public class TrackingService extends Service implements LocationListener {
                         } else locDesc = "无定位";
                         FileLogger.log(TrackingService.this, "REPORT", "✅ 上报成功 " + locDesc + " (耗时 " + httpCost + "ms)");
                     } else {
+                        // ★ 2026-11-20 补丁3②：仅对网关/服务端过载(502/503/504/429)触发指数退避；普通网络异常不退避
+                        if (httpCode == 502 || httpCode == 503 || httpCode == 504 || httpCode == 429) {
+                            consecutiveServerBusyCount++;
+                            long backoffMs = Math.min(SERVER_BACKOFF_MAX_MS,
+                                    SERVER_BACKOFF_BASE_MS * (1L << Math.min(consecutiveServerBusyCount - 1, 2)));
+                            serverBackoffUntilMs = System.currentTimeMillis() + backoffMs;
+                            FileLogger.log(TrackingService.this, "REPORT", "🛡️ 服务端过载 (HTTP " + httpCode + ")，触发退避冷却 " + (backoffMs / 60000) + " 分钟");
+                        }
                         FileLogger.log(TrackingService.this, "REPORT", "⚠️ 上报返回非200: HTTP " + httpCode + " (耗时 " + httpCost + "ms) | " + activeUrl);
                         if (overrideUrl == null) queuePendingReport(json);
                     }
@@ -2108,6 +2217,11 @@ public class TrackingService extends Service implements LocationListener {
             }
 
             if (success) {
+                // ★ 2026-11-20 [低危1] 修复：服务端已确认这批回执（会从下行队列删除），本地同步回收。
+                //   旧版只有 load/save（只追加），executed_cmd_ids 永不清空 → 每条上报永久多带最多
+                //   EXECUTED_CMD_IDS_MAX=100 个历史 id（约 2KB），白白消耗弱网带宽。
+                //   overrideUrl 直连（换址校验/临时探测）的对端不一定是正式服务端，故不回收。
+                if (overrideUrl == null && !sentAckIds.isEmpty()) removeExecutedCmdIds(sentAckIds);
                 consecutiveFailures = 0;
                 // ★ [核心优化] 2026-11-04 将成功时间写入 SharedPreferences，持久化状态，防进程被杀看门狗失效
                 getSharedPreferences("device_finder_prefs", MODE_PRIVATE)
@@ -2120,7 +2234,15 @@ public class TrackingService extends Service implements LocationListener {
                 }
             }
         });
+        } catch (java.util.concurrent.RejectedExecutionException rejected) {
+            reportInFlight.set(false);
+            FileLogger.log(this, "REPORT", "⚠️ 上报任务队列已满/执行器关闭，安排延迟重试: " + rejected.getMessage());
+            if (!serviceDestroyed) handler.postDelayed(() -> {
+                if (!serviceDestroyed) sendReport(withNearbyWifi, force, overrideUrl);
+            }, 6000L);
+        }
     }
+
 
     private String getNetworkTypeDesc(NetworkInfo activeNet) {
         String typeName = activeNet.getTypeName();
@@ -2202,153 +2324,480 @@ public class TrackingService extends Service implements LocationListener {
         }
     }
 
+    // ★ 2026-11-20 补丁4：离线入队升级为“静止防抖合并”——15 分钟窗口内、位移<50米、电量变化<=2%、
+    //   且无指令回执时，覆盖最后一条静止记录；一旦发生位移或带回执则追加新行，保证移动轨迹不丢失。
+    //   注意：上报体中定位嵌套在 location.latitude/longitude、电量嵌套在 battery.level，须按嵌套路径读取，
+    //   不能按补丁原文的顶层 lat/lng/battery 读取（否则位移恒判为 0，会误覆盖丢失轨迹）。
+
+    /** 原子替换队列文件：先写同目录临时文件，再 rename，避免截断重写导致断电损坏。 */
+    private void writeQueueAtomically(java.io.File queueFile, List<String> lines) throws Exception {
+        java.io.File tmp = new java.io.File(queueFile.getParentFile(), queueFile.getName() + ".tmp");
+        try (java.io.BufferedWriter writer = new java.io.BufferedWriter(
+                new java.io.OutputStreamWriter(new java.io.FileOutputStream(tmp, false), "UTF-8"))) {
+            for (String line : lines) { writer.write(line); writer.newLine(); }
+            writer.flush();
+        }
+        try (java.io.FileOutputStream fos = new java.io.FileOutputStream(tmp, true)) { fos.getFD().sync(); }
+        if (!tmp.renameTo(queueFile)) {
+            // ★ 2026-11-20 [低危3] rename 失败（跨文件系统 / 权限 / 瞬时 IO 抖动）时：
+            //   ① 绝不用空文件覆盖旧队列（原语义保留）；② 顺手清理 .tmp 残留，避免垃圾文件堆积；
+            //   ③ 抛出后由调用方决定降级策略（入队路径降级为追加写，补发路径留待下一轮重试）。
+            try { tmp.delete(); } catch (Exception ignored) {}
+            throw new java.io.IOException("队列原子重命名失败: " + tmp.getAbsolutePath());
+        }
+    }
+
+    private List<String> enforceQueueLimits(List<String> source) {
+        List<String> kept = new ArrayList<>();
+        long bytes = 0L;
+        // ★ 2026-11-20 [低危4] 修复：原先三类超限一律静默 continue，事后无法解释「记录为什么少了」。
+        //   判定顺序与语义完全不变（仍是「从最新往旧扫、超限跳过该行而非中断」），仅补分类计数与留痕日志。
+        int droppedByCount = 0;      // 条数超上限（300 条）
+        int droppedOversize = 0;     // 单行本身超过队列字节预算
+        int droppedByBudget = 0;     // 累计字节超预算
+        for (int i = source.size() - 1; i >= 0; i--) {
+            String line = source.get(i);
+            long lineBytes = line.getBytes(java.nio.charset.Charset.forName("UTF-8")).length + 1L;
+            if (kept.size() >= 300) { droppedByCount++; continue; }
+            if (lineBytes > PENDING_QUEUE_MAX_BYTES) { droppedOversize++; continue; }
+            if (bytes + lineBytes > PENDING_QUEUE_MAX_BYTES) { droppedByBudget++; continue; }
+            kept.add(0, line);
+            bytes += lineBytes;
+        }
+        int dropped = droppedByCount + droppedOversize + droppedByBudget;
+        if (dropped > 0) {
+            FileLogger.log(this, "REPORT", "⚠️ 离线队列超限裁剪：丢弃 " + dropped + " 条"
+                    + "（条数超上限 " + droppedByCount + " / 单行超预算 " + droppedOversize
+                    + " / 总量超预算 " + droppedByBudget + "），保留最新 " + kept.size() + " 条 / "
+                    + bytes + "B（预算 " + PENDING_QUEUE_MAX_BYTES + "B）");
+        }
+        return kept;
+    }
+
     private void queuePendingReport(JSONObject json) {
+        if (json == null) return;
         // ★ [修复] 2026-11-04 并发保护：写入文件必须与 flushPendingReports 互斥
         synchronized (FILE_LOCK) {
             try {
                 java.io.File dir = getExternalFilesDir(null);
                 if (dir == null) return;
                 java.io.File queueFile = new java.io.File(dir, PENDING_REPORTS_FILE);
-                if (queueFile.exists() && queueFile.length() > PENDING_QUEUE_MAX_BYTES) {
-                    FileLogger.log(this, "REPORT", "⚠️ 离线队列已满，裁剪保留最近 100 条");
-                    truncateQueueFile(queueFile, 100);
+
+                java.util.List<String> lines = new java.util.ArrayList<>();
+                if (queueFile.exists() && queueFile.length() > 0) {
+                    java.io.BufferedReader br = new java.io.BufferedReader(
+                            new java.io.InputStreamReader(new java.io.FileInputStream(queueFile), "UTF-8"));
+                    String line;
+                    while ((line = br.readLine()) != null) {
+                        if (!line.trim().isEmpty()) lines.add(line);
+                    }
+                    br.close();
                 }
-                java.io.FileWriter fw = new java.io.FileWriter(queueFile, true);
-                fw.write(json.toString() + "\n");
-                fw.close();
-                FileLogger.log(this, "REPORT", "📥 离线排队一条上报（队列 " + (queueFile.length() / 1024) + "KB）");
+
+                JSONObject queuedJson = new JSONObject(json.toString());
+                if (!queuedJson.has("_queue_id")) queuedJson.put("_queue_id", java.util.UUID.randomUUID().toString());
+                String jsonLine = queuedJson.toString();
+                boolean merged = false;
+                if (!lines.isEmpty()) {
+                    try {
+                        JSONObject lastObj = new JSONObject(lines.get(lines.size() - 1));
+                        JSONObject currObj = json;
+
+                        long lastTs = lastObj.optLong("timestamp", 0L);
+                        long currTs = currObj.optLong("timestamp", System.currentTimeMillis());
+                        // 兼容秒级与毫秒级时间戳
+                        long diffMs = (currTs > 10_000_000_000L ? currTs - lastTs : (currTs - lastTs) * 1000L);
+
+                        JSONObject lastLoc = lastObj.optJSONObject("location");
+                        JSONObject currLoc = currObj.optJSONObject("location");
+                        double lastLat = lastLoc != null ? lastLoc.optDouble("latitude", 0.0) : 0.0;
+                        double lastLng = lastLoc != null ? lastLoc.optDouble("longitude", 0.0) : 0.0;
+                        double currLat = currLoc != null ? currLoc.optDouble("latitude", 0.0) : 0.0;
+                        double currLng = currLoc != null ? currLoc.optDouble("longitude", 0.0) : 0.0;
+
+                        boolean sameLocation = false;
+                        if (lastLat == 0.0 && lastLng == 0.0 && currLat == 0.0 && currLng == 0.0) {
+                            sameLocation = true;                      // 双端均无有效定位（关机/无 fix），视为静止
+                        } else if (lastLat != 0.0 && currLat != 0.0) {
+                            float[] results = new float[1];
+                            android.location.Location.distanceBetween(lastLat, lastLng, currLat, currLng, results);
+                            sameLocation = results[0] < OFFLINE_MERGE_DIST_M;
+                        } // else 一端有定位一端无 -> 判为发生位移，不合并
+
+                        JSONObject lastBat = lastObj.optJSONObject("battery");
+                        JSONObject currBat = currObj.optJSONObject("battery");
+                        int lastBatLvl = lastBat != null ? lastBat.optInt("level", 0) : 0;
+                        int currBatLvl = currBat != null ? currBat.optInt("level", 0) : 0;
+                        int batDiff = Math.abs(currBatLvl - lastBatLvl);
+
+                        JSONArray ackIds = currObj.optJSONArray("last_executed_cmd_ids");
+                        boolean hasCmdAck = (ackIds != null && ackIds.length() > 0);
+                        // ★ 2026-11-20 [C3] 修复：合并判定原先只检查「新行」有没有回执，没检查「被覆盖的旧行」。
+                        //   旧行带回执、新行无回执时 lines.set() 会把回执直接覆盖掉 → 服务端指令滞留队列直到 TTL
+                        //   （展示类 2 小时、其它 24 小时），控制台一直显示「待发」。旧行有回执同样禁止合并。
+                        JSONArray lastAckIds = lastObj.optJSONArray("last_executed_cmd_ids");
+                        boolean lastHasCmdAck = (lastAckIds != null && lastAckIds.length() > 0);
+
+                        // 15分钟内 + 位移<50米 + 电量变化<=2% + 新旧两行均无指令回执 => 覆盖最后一条静止记录
+                        if (diffMs >= 0 && diffMs < OFFLINE_MERGE_WINDOW_MS && sameLocation && batDiff <= 2
+                                && !hasCmdAck && !lastHasCmdAck) {
+                            lines.set(lines.size() - 1, jsonLine);
+                            merged = true;
+                        }
+                    } catch (Exception ignored) {
+                        // 解析异常则安全回退为追加模式
+                    }
+                }
+
+                if (!merged) lines.add(jsonLine);
+
+                // 同时严格限制条数和 UTF-8 实际字节数；保留最新记录。
+                lines = enforceQueueLimits(lines);
+                int finalCount = lines.size();
+                try {
+                    writeQueueAtomically(queueFile, lines);
+                } catch (Exception rewriteError) {
+                    // ★ 2026-11-20 [低危3] 修复：原实现把 renameTo 失败一路抛到外层 catch，
+                    //   结果是「旧队列保住了、本次新记录直接丢失」且只有一条笼统失败日志。
+                    //   现降级为对原文件追加写：宁可本轮少一次裁剪/合并，也绝不丢点。
+                    FileLogger.log(this, "REPORT", "⚠️ 队列原子重写失败(" + rewriteError.getMessage()
+                            + ")，降级为追加写保数据");
+                    try (java.io.BufferedWriter appender = new java.io.BufferedWriter(
+                            new java.io.OutputStreamWriter(new java.io.FileOutputStream(queueFile, true), "UTF-8"))) {
+                        appender.write(jsonLine);
+                        appender.newLine();
+                        appender.flush();
+                        finalCount = lines.size() + 1;   // 旧行仍在 + 本次追加 1 行
+                    } catch (Exception appendError) {
+                        FileLogger.log(this, "REPORT", "❌ 降级追加写同样失败，本次记录丢失: " + appendError.getMessage());
+                        throw appendError;
+                    }
+                }
+
+                long kb = Math.max(1, queueFile.length() / 1024);
+                FileLogger.log(this, "REPORT", (merged ? "♻️ 离线静止合并更新" : "📥 离线排队一条上报")
+                        + "（队列 " + kb + "KB，共 " + finalCount + " 条）");
             } catch (Exception e) {
-                FileLogger.log(this, "REPORT", "❌ 离线排队失败: " + e.getMessage());
+                FileLogger.log(this, "REPORT", "❌ 离线排队写入失败: " + e.getMessage());
             }
         }
     }
 
-    private void truncateQueueFile(java.io.File queueFile, int keepLines) {
-        // ★ 强力补丁：虽然外层 queuePendingReport 已经加了锁，但在这里独立加锁可防未来重构引发隐患
-        synchronized (FILE_LOCK) {
-            try {
-                java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader(queueFile));
-                java.util.List<String> lines = new java.util.ArrayList<>();
+    // ★ 2026-11-20 [低危5] 原 truncateQueueFile(File, int) 已移除：全文件无任何调用点（纯死代码），
+    //   而文件头架构说明第 6 条仍宣称「队列裁剪 (truncateQueueFile) 被纳入 FILE_LOCK 矩阵」，注释与实现不符。
+    //   队列裁剪职责实际由 enforceQueueLimits 承担（入队时按「300 条 + PENDING_QUEUE_MAX_BYTES」双上限
+    //   保留最新记录，本轮并已补齐裁剪留痕日志），同样在 FILE_LOCK 内执行；架构说明第 6 条已同步校正。
+
+    // ==================== [离线补发：批量优先 + 逐条降级] ====================
+    // ★ 2026-11-20 新增：弱网恢复时优先把多条离线记录打包成一次 /api/report_batch 往返，
+    //   批量接口不可用（404/405/501）或部分接收时自动回退到原有 postReportDirectly 逐条补发，
+    //   保证向后兼容。复用 reportExecutor 线程池 + flushInFlight 防重入 + 连续失败熔断。
+
+    private String buildReportBatchUrl(String baseUrl) {
+        if (!isValidUrl(baseUrl)) return null;
+        try {
+            android.net.Uri uri = android.net.Uri.parse(baseUrl);
+            String scheme = uri.getScheme();
+            String host = uri.getHost();
+            if (scheme == null || host == null || host.isEmpty()) return null;
+            int port = uri.getPort();
+            String authority = port > 0 ? (host + ":" + port) : host;
+            return scheme + "://" + authority + "/api/report_batch";
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 批量上报结果封装：
+     * - statusCode == 200 且解析成功时视为批量接口可用
+     * - statusCode == 404 / 405 / 501 表示服务端未实现 /api/report_batch，需降级逐条补发
+     */
+    private static final class BatchPostResult {
+        final int httpCode;
+        final boolean endpointUnsupported;
+        final int acceptedCount;
+        final JSONObject responseJson;
+
+        BatchPostResult(int httpCode, boolean endpointUnsupported, int acceptedCount, JSONObject responseJson) {
+            this.httpCode = httpCode;
+            this.endpointUnsupported = endpointUnsupported;
+            this.acceptedCount = acceptedCount;
+            this.responseJson = responseJson;
+        }
+    }
+
+    private BatchPostResult postReportBatchDirectly(List<JSONObject> batchItems, String batchUrl) {
+        HttpURLConnection conn = null;
+        try {
+            if (batchUrl == null || batchUrl.isEmpty() || batchItems == null || batchItems.isEmpty()) {
+                return new BatchPostResult(-1, true, 0, null);
+            }
+
+            JSONArray arr = new JSONArray();
+            for (JSONObject item : batchItems) {
+                if (item != null) arr.put(item);
+            }
+            if (arr.length() == 0) {
+                return new BatchPostResult(-1, true, 0, null);
+            }
+
+            JSONObject bodyJson = new JSONObject();
+            bodyJson.put("token", AUTH_TOKEN);
+            bodyJson.put("device_id", getUniqueDeviceId());
+            bodyJson.put("protocol_version", BuildInfo.PROTOCOL_VERSION);
+            bodyJson.put("build_version", BuildInfo.BUILD_VERSION);
+            bodyJson.put("reports", arr);
+
+            byte[] payloadBytes = bodyJson.toString().getBytes("UTF-8");
+
+            URL url = new URL(batchUrl);
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            conn.setConnectTimeout(8000);   // [P0-3] 快速失败，防弱网长时间阻塞
+            conn.setReadTimeout(10000);     // 批量包略放宽读超时
+            conn.setDoOutput(true);
+            conn.setFixedLengthStreamingMode(payloadBytes.length);
+            conn.setRequestProperty("Connection", "close");
+
+            OutputStream os = conn.getOutputStream();
+            os.write(payloadBytes);
+            os.flush();
+            os.close();
+
+            int code = conn.getResponseCode();
+            boolean unsupported = (code == 404 || code == 405 || code == 501);
+
+            if (code == 200) {
+                BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
+                StringBuilder sb = new StringBuilder();
                 String line;
-                while ((line = br.readLine()) != null) lines.add(line);
+                while ((line = br.readLine()) != null) sb.append(line);
                 br.close();
 
-                int start = Math.max(0, lines.size() - keepLines);
-                java.io.FileWriter fw = new java.io.FileWriter(queueFile, false);
-                for (int i = start; i < lines.size(); i++) {
-                    fw.write(lines.get(i) + "\n");
+                JSONObject resJson;
+                int accepted = 0;
+                try {
+                    resJson = new JSONObject(sb.toString());
+                    // 只有服务端明确声明“按顺序接受前 N 条”才允许按数量确认。
+                    // 若服务端返回 accepted_ids，则在 flush 阶段逐条匹配；本兼容客户端不猜测其语义。
+                    if (resJson.optBoolean("accepted_is_prefix", false) && resJson.has("accepted")) {
+                        accepted = Math.max(0, Math.min(arr.length(), resJson.optInt("accepted", 0)));
+                    }
+                } catch (Exception parseError) {
+                    // HTTP 200 但响应不可解析：不能据此删除任何本地记录。
+                    return new BatchPostResult(code, false, 0, null);
                 }
-                fw.close();
-            } catch (Exception ignored) {}
+                return new BatchPostResult(code, false, accepted, resJson);
+            }
+
+            return new BatchPostResult(code, unsupported, 0, null);
+        } catch (Exception e) {
+            return new BatchPostResult(-1, false, 0, null);
+        } finally {
+            if (conn != null) {
+                try { conn.disconnect(); } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    private String queueEntryIdentity(String raw, java.util.Map<String, Integer> occurrences) {
+        try {
+            JSONObject obj = new JSONObject(raw);
+            String id = obj.optString("_queue_id", "");
+            if (!id.isEmpty()) return "id:" + id;
+        } catch (Exception ignored) {
+            // 损坏行按原始字节内容和出现序号标识，允许精准跳过且不误删其他行。
+        }
+        int occurrence = occurrences.containsKey(raw) ? occurrences.get(raw) : 0;
+        occurrences.put(raw, occurrence + 1);
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(raw.getBytes("UTF-8"));
+            StringBuilder hex = new StringBuilder();
+            for (byte b : digest) hex.append(String.format(java.util.Locale.US, "%02x", b));
+            return "legacy:" + hex + ":" + occurrence;
+        } catch (Exception e) {
+            return "legacy:" + raw.hashCode() + ":" + occurrence;
         }
     }
 
     private void flushPendingReports() {
-        new Thread(() -> {
-          // ★ H1b 修复 2026-11-07：flush 之间串行化，防止两个触发点并发重复发送。
-          //   注意缩进：synchronized 内保留原三段锁逻辑，结束前关闭大括号。
-          synchronized (FLUSH_LOCK) {
-            // ★ H1 修复 2026-11-07：拆三段锁，网络发送移到锁外。
-            //   原问题：synchronized (FILE_LOCK) 内做 HTTP 请求，最坏持锁 8 秒（超时），
-            //   期间 queuePendingReport 无法写入，弱网时 reportExecutor 有界队列满会触发
-            //   DiscardOldestPolicy 丢弃离线新上报。改为：锁内读快照 → 锁外发送 → 锁内重写。
-            java.util.List<String> snapshotLines = null;
+        if (serviceDestroyed) return;
+        if (!flushInFlight.compareAndSet(false, true)) {
+            FileLogger.log(this, "REPORT", "⏭ 离线补发正在进行，跳过重复触发");
+            return;
+        }
 
-            // ===== 阶段 1：持锁读快照 =====
-            synchronized (FILE_LOCK) {
-                java.io.BufferedReader br = null;
+        try {
+            reportExecutor.execute(() -> {
+                // ★ 2026-11-20 [B1] 本轮是否仍有未送出的残留（供 finally 里自我续跑判断）
+                final boolean[] hasMorePending = {false};
                 try {
-                    java.io.File dir = getExternalFilesDir(null);
-                    if (dir == null) return;
-                    java.io.File queueFile = new java.io.File(dir, PENDING_REPORTS_FILE);
-                    if (!queueFile.exists() || queueFile.length() == 0) return;
-
-                    snapshotLines = new java.util.ArrayList<>();
-                    br = new java.io.BufferedReader(new java.io.FileReader(queueFile));
-                    String line;
-                    while ((line = br.readLine()) != null) snapshotLines.add(line);
-                    br.close();
-                    br = null;
-
-                    if (snapshotLines.isEmpty()) {
-                        queueFile.delete();
-                        return;
-                    }
-                } catch (Exception e) {
-                    FileLogger.log(this, "REPORT", "⚠️ 离线队列读取异常: " + e.getMessage());
-                    return;
-                } finally {
-                    if (br != null) { try { br.close(); } catch (Exception ignored) {} }
-                }
-            }
-
-            final java.util.List<String> lines = snapshotLines;
-
-            // ===== 阶段 2：锁外发送（不持 FILE_LOCK，queuePendingReport 可正常入队） =====
-            String serverUrl = getCurrentServerUrl();
-            int sent = 0;
-            for (String l : lines) {
-                try {
-                    JSONObject json = new JSONObject(l);
-                    if (postReportDirectly(json, serverUrl)) {
-                        sent++;
-                    } else {
-                        break;
-                    }
-                } catch (Exception parseEx) {
-                    sent++;  // 解析失败：丢弃这一条
-                }
-            }
-
-            // ===== 阶段 3：持锁重写（保留未发送的 + 发送期间新追加的） =====
-            final int sentFinal = sent;
-            synchronized (FILE_LOCK) {
-                java.io.BufferedReader br = null;
-                try {
-                    java.io.File dir = getExternalFilesDir(null);
-                    if (dir == null) return;
-                    java.io.File queueFile = new java.io.File(dir, PENDING_REPORTS_FILE);
-                    if (!queueFile.exists()) return;
-
-                    java.util.List<String> currentLines = new java.util.ArrayList<>();
-                    br = new java.io.BufferedReader(new java.io.FileReader(queueFile));
-                    String line;
-                    while ((line = br.readLine()) != null) currentLines.add(line);
-                    br.close();
-                    br = null;
-
-                    // 正常：currentLines.size() >= lines.size()（发送期间可能有新追加）。
-                    // 前 lines.size() 行对应快照，删除已发送的 sentFinal 行，其余全部保留。
-                    if (currentLines.size() < lines.size()) {
-                        // 罕见：文件被外部截断（truncateQueueFile 并发），保守放弃重写，避免丢数据。
-                        FileLogger.log(this, "REPORT", "⚠️ 补发期间队列被异常修改，本次不重写 (current="
-                                + currentLines.size() + ", snapshot=" + lines.size() + ")");
-                        return;
-                    }
-
-                    int keepFrom = sentFinal;
-                    if (keepFrom >= currentLines.size()) {
-                        queueFile.delete();
-                    } else {
-                        java.io.FileWriter fw = new java.io.FileWriter(queueFile, false);
-                        for (int i = keepFrom; i < currentLines.size(); i++) {
-                            fw.write(currentLines.get(i) + "\n");
+                    synchronized (FLUSH_LOCK) {
+                        final List<String> snapshotLines = new ArrayList<>();
+                        synchronized (FILE_LOCK) {
+                            java.io.File dir = getExternalFilesDir(null);
+                            if (dir == null) return;
+                            java.io.File queueFile = new java.io.File(dir, PENDING_REPORTS_FILE);
+                            if (!queueFile.exists() || queueFile.length() == 0) return;
+                            try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.InputStreamReader(
+                                    new java.io.FileInputStream(queueFile), "UTF-8"))) {
+                                String line;
+                                while ((line = br.readLine()) != null) if (!line.trim().isEmpty()) snapshotLines.add(line);
+                            }
                         }
-                        fw.close();
-                    }
+                        if (snapshotLines.isEmpty()) return;
 
-                    int remain = currentLines.size() - keepFrom;
-                    if (sentFinal > 0 || remain > 0) {
-                        FileLogger.log(this, "REPORT", "📤 离线队列补发: 成功 " + sentFinal + " 条，剩余 " + remain + " 条");
+                        final java.util.Map<String, Integer> snapshotOccurrences = new java.util.HashMap<>();
+                        final List<String> snapshotKeys = new ArrayList<>();
+                        final List<String> corruptKeys = new ArrayList<>();
+                        final List<JSONObject> validItems = new ArrayList<>();
+                        final List<String> validKeys = new ArrayList<>();
+                        int limit = Math.min(snapshotLines.size(), FLUSH_BATCH_MAX);
+                        for (int i = 0; i < limit; i++) {
+                            String raw = snapshotLines.get(i);
+                            String key = queueEntryIdentity(raw, snapshotOccurrences);
+                            snapshotKeys.add(key);
+                            try {
+                                JSONObject obj = new JSONObject(raw);
+                                if (!obj.has("token")) obj.put("token", AUTH_TOKEN);
+                                if (!obj.has("device_id")) obj.put("device_id", getUniqueDeviceId());
+                                validItems.add(obj);
+                                validKeys.add(key);
+                            } catch (Exception malformed) {
+                                corruptKeys.add(key);
+                            }
+                        }
+
+                        java.util.Set<String> removeKeys = new java.util.HashSet<>(corruptKeys);
+                        int sent = 0;
+                        boolean needFallback = false;
+                        String serverUrl = getCurrentServerUrl();
+                        String batchUrl = buildReportBatchUrl(serverUrl);
+                        if (!validItems.isEmpty() && batchUrl != null) {
+                            BatchPostResult batch = postReportBatchDirectly(validItems, batchUrl);
+                            if (batch.httpCode == 200 && batch.acceptedCount > 0) {
+                                // acceptedCount 仅在服务端显式 accepted_is_prefix=true 时才有意义。
+                                for (int i = 0; i < batch.acceptedCount; i++) removeKeys.add(validKeys.get(i));
+                                sent += batch.acceptedCount;
+                                if (batch.responseJson != null) {
+                                    // ★ 2026-11-20 [B3] 修复：下行响应解析留在本工作线程，与单条上报路径
+                                    //   （postReportDirectly 内直接 parseResponse）保持一致。parseResponse 会同步
+                                    //   执行 dispatchHttpCommand —— 内含 clearMessageHistory()/saveChatToHistory()
+                                    //   （SharedPreferences + 文件 IO）、LauncherIconUtils 组件开关（PackageManager
+                                    //   binder 慢调用）、startLocationUpdates()；原先 handler.post 到主线程有 ANR 风险。
+                                    //   其中真正需要主线程的动作（startLocationUpdates / scheduleNextReport）
+                                    //   在 parseResponse 内部已自行 handler.post，无需在此上抛。
+                                    try {
+                                        parseResponse(batch.responseJson);
+                                    } catch (Exception respError) {
+                                        FileLogger.log(TrackingService.this, "REPORT",
+                                                "⚠️ 批量补发成功，但下行响应解析失败: " + respError.getMessage());
+                                    }
+                                }
+                                needFallback = batch.acceptedCount < validItems.size();
+                            } else {
+                                needFallback = true;
+                            }
+                        } else if (!validItems.isEmpty()) {
+                            needFallback = true;
+                        }
+
+                        if (needFallback) {
+                            int failStreak = 0;
+                            for (int i = 0; i < validItems.size(); i++) {
+                                if (removeKeys.contains(validKeys.get(i))) continue;
+                                if (postReportDirectly(validItems.get(i), serverUrl)) {
+                                    removeKeys.add(validKeys.get(i));
+                                    sent++;
+                                    failStreak = 0;
+                                } else if (++failStreak >= FLUSH_MAX_CONSECUTIVE_FAILS) {
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (sent > 0) {
+                            getSharedPreferences("device_finder_prefs", MODE_PRIVATE).edit()
+                                    .putLong(PREF_LAST_SUCCESS_REPORT_TIME, System.currentTimeMillis()).apply();
+
+                            // ★ 2026-11-20 [低危1] 补发路径同样回收已确认回执：本轮被服务端接收（进 removeKeys）
+                            //   的那些行里携带的 last_executed_cmd_ids，服务端已处理，可从本地集合删除。
+                            java.util.Set<String> ackedIds = new java.util.LinkedHashSet<>();
+                            for (int i = 0; i < validItems.size(); i++) {
+                                if (!removeKeys.contains(validKeys.get(i))) continue;
+                                JSONArray ackArr = validItems.get(i).optJSONArray("last_executed_cmd_ids");
+                                if (ackArr == null) continue;
+                                for (int j = 0; j < ackArr.length(); j++) {
+                                    String ackId = ackArr.optString(j, "");
+                                    if (!ackId.isEmpty()) ackedIds.add(ackId);
+                                }
+                            }
+                            if (!ackedIds.isEmpty()) removeExecutedCmdIds(ackedIds);
+                        }
+
+                        // 按稳定 ID/原始行身份精确删除本轮已确认项；保留失败项和补发期间新追加的行。
+                        synchronized (FILE_LOCK) {
+                            java.io.File dir = getExternalFilesDir(null);
+                            if (dir == null) return;
+                            java.io.File queueFile = new java.io.File(dir, PENDING_REPORTS_FILE);
+                            if (!queueFile.exists()) return;
+                            List<String> currentLines = new ArrayList<>();
+                            try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.InputStreamReader(
+                                    new java.io.FileInputStream(queueFile), "UTF-8"))) {
+                                String line;
+                                while ((line = br.readLine()) != null) if (!line.trim().isEmpty()) currentLines.add(line);
+                            }
+                            java.util.Map<String, Integer> currentOccurrences = new java.util.HashMap<>();
+                            List<String> retained = new ArrayList<>();
+                            int removed = 0;
+                            for (String raw : currentLines) {
+                                String key = queueEntryIdentity(raw, currentOccurrences);
+                                if (removeKeys.contains(key)) removed++;
+                                else retained.add(raw);
+                            }
+                            if (removed > 0) {
+                                if (retained.isEmpty()) {
+                                    if (!queueFile.delete()) writeQueueAtomically(queueFile, retained);
+                                } else {
+                                    writeQueueAtomically(queueFile, retained);
+                                }
+                            }
+                            // ★ 2026-11-20 [B1] 修复：FLUSH_BATCH_MAX=30，而 flushPendingReports 只有网络
+                            //   onAvailable 与自身拒绝重试两个触发点，上报成功/入队/定时任务里都不补发。
+                            //   离线攒了上百条时网络恢复一次只送 30 条，剩余 70 条要等「下一次网络状态变化」，
+                            //   网络长期稳定时可能几小时不补。本轮有实际进展(sent>0)且仍有残留时标记续跑。
+                            //   仅在 sent>0 时续跑：全失败（仍离线）时不空转烧电，交由 onAvailable / 上报失败路径重试。
+                            hasMorePending[0] = (sent > 0) && (!retained.isEmpty() || snapshotLines.size() > limit);
+                            FileLogger.log(TrackingService.this, "REPORT", "📤 离线队列补发: 成功 " + sent
+                                    + " 条，清理损坏 " + corruptKeys.size() + " 条，精确移除 " + removed
+                                    + " 条，剩余 " + retained.size() + " 条");
+                        }
                     }
                 } catch (Exception e) {
-                    FileLogger.log(this, "REPORT", "⚠️ 离线队列重写异常: " + e.getMessage());
+                    FileLogger.log(TrackingService.this, "REPORT", "❌ 离线队列补发异常: " + e.getMessage());
                 } finally {
-                    if (br != null) { try { br.close(); } catch (Exception ignored) {} }
+                    flushInFlight.set(false);
+                    // ★ 2026-11-20 [B1] 修复：队列未清空且本轮有进展 → 3 秒后自动续跑下一批，
+                    //   直到队列清空（每轮最多 FLUSH_BATCH_MAX 条），不再依赖网络状态变化才继续补发。
+                    if (hasMorePending[0] && !serviceDestroyed) {
+                        FileLogger.log(TrackingService.this, "REPORT", "⏩ 离线队列仍有残留，"
+                                + (FLUSH_CONTINUE_DELAY_MS / 1000L) + " 秒后自动续跑下一批");
+                        handler.postDelayed(() -> {
+                            if (!serviceDestroyed) flushPendingReports();
+                        }, FLUSH_CONTINUE_DELAY_MS);
+                    }
                 }
-            }
-          }  // ★ H1b: synchronized (FLUSH_LOCK) 结束
-        }).start();
+            });
+        } catch (java.util.concurrent.RejectedExecutionException rejected) {
+            flushInFlight.set(false);
+            FileLogger.log(this, "REPORT", "⚠️ 离线补发任务未入队，安排延迟重试: " + rejected.getMessage());
+            if (!serviceDestroyed) handler.postDelayed(() -> {
+                if (!serviceDestroyed) flushPendingReports();
+            }, 5000L);
+        }
     }
 
     private boolean postReportDirectly(JSONObject json, String serverUrl) {
@@ -3060,16 +3509,23 @@ public class TrackingService extends Service implements LocationListener {
     private void parseResponse(JSONObject res) {
         JSONObject cfg = res.optJSONObject("config");
         if (cfg != null) {
-            long newInterval = cfg.optLong("report_interval_seconds", 1800) * 1000L;
-            String newAccuracy = cfg.optString("accuracy_mode", "coarse");
-            boolean newEnableWifiLock = cfg.optBoolean("enable_wifi_lock", true);
-            boolean newEnableMotionTrigger = cfg.optBoolean("enable_motion_trigger", true);
+            long newInterval = reportIntervalMs;
+            if (cfg.has("report_interval_seconds")) {
+                long intervalSeconds = cfg.optLong("report_interval_seconds", 1800L);
+                intervalSeconds = Math.max(60L, Math.min(7L * 24L * 60L * 60L, intervalSeconds));
+                newInterval = TimeUnit.SECONDS.toMillis(intervalSeconds);
+            }
+            String newAccuracy = cfg.optString("accuracy_mode", accuracyMode);
+            boolean newEnableWifiLock = cfg.optBoolean("enable_wifi_lock", enableWifiLock);
+            boolean newEnableMotionTrigger = cfg.optBoolean("enable_motion_trigger", enableMotionTrigger);
             if (newEnableWifiLock != enableWifiLock || newEnableMotionTrigger != enableMotionTrigger) {
                 enableWifiLock = newEnableWifiLock;
                 enableMotionTrigger = newEnableMotionTrigger;
                 toggleMotionSensor(enableMotionTrigger);
             }
             if (newInterval != reportIntervalMs || !newAccuracy.equals(accuracyMode)) {
+                // 远端配置同样执行边界校验，避免负数/超大值及乘法溢出。
+                newInterval = Math.max(60_000L, Math.min(7L * 24L * 60L * 60L * 1000L, newInterval));
                 reportIntervalMs = newInterval;
                 accuracyMode = newAccuracy;
                 handler.post(() -> { startLocationUpdates(); if (reportCount.get() >= 3) scheduleNextReport(); });
@@ -3108,12 +3564,16 @@ public class TrackingService extends Service implements LocationListener {
                             continue;
                         }
 
-                        dispatchHttpCommand(cmdType, cmdPayload);
-                        recentExecutions.put(dk, now);
-                        executedIds.add(cmdId);
-                        executedCount++;
-                        FileLogger.log(TrackingService.this, "HTTP_CMD",
-                                "✅ 执行 HTTP 指令: " + cmdType + "(" + cmdId + ")");
+                        if (dispatchHttpCommand(cmdType, cmdPayload)) {
+                            recentExecutions.put(dk, now);
+                            executedIds.add(cmdId);
+                            executedCount++;
+                            FileLogger.log(TrackingService.this, "HTTP_CMD",
+                                    "✅ 执行 HTTP 指令: " + cmdType + "(" + cmdId + ")");
+                        } else {
+                            FileLogger.log(TrackingService.this, "HTTP_CMD",
+                                    "⚠️ 指令执行未确认成功，保留待重试: " + cmdType + "(" + cmdId + ")");
+                        }
                     } catch (Exception e) {
                         FileLogger.log(TrackingService.this, "HTTP_CMD", "⚠️ 解析指令失败: " + e.getMessage());
                     }
@@ -3139,53 +3599,82 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private java.util.Set<String> loadExecutedCmdIds() {
-        java.util.LinkedHashSet<String> result = new java.util.LinkedHashSet<>();
-        try {
-            SharedPreferences sp = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
-            String json = sp.getString(PREF_EXECUTED_CMD_IDS, "");
-            if (json != null && !json.isEmpty()) {
-                JSONArray arr = new JSONArray(json);
-                for (int i = 0; i < arr.length(); i++) {
-                    String id = arr.optString(i, "");
-                    if (!id.isEmpty()) result.add(id);
+        // ★ 2026-11-20 [低危1] 加锁：与 removeExecutedCmdIds 的「读-改-写」互斥，防丢更新
+        synchronized (executedCmdIdsLock) {
+            java.util.LinkedHashSet<String> result = new java.util.LinkedHashSet<>();
+            try {
+                SharedPreferences sp = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
+                String json = sp.getString(PREF_EXECUTED_CMD_IDS, "");
+                if (json != null && !json.isEmpty()) {
+                    JSONArray arr = new JSONArray(json);
+                    for (int i = 0; i < arr.length(); i++) {
+                        String id = arr.optString(i, "");
+                        if (!id.isEmpty()) result.add(id);
+                    }
                 }
+            } catch (Exception e) {
+                FileLogger.log(this, "HTTP_CMD", "⚠️ 加载 executedCmdIds 失败: " + e.getMessage());
             }
-        } catch (Exception e) {
-            FileLogger.log(this, "HTTP_CMD", "⚠️ 加载 executedCmdIds 失败: " + e.getMessage());
+            return result;
         }
-        return result;
     }
 
     private void saveExecutedCmdIds(java.util.Set<String> ids) {
-        try {
-            java.util.LinkedHashSet<String> trimmed = new java.util.LinkedHashSet<>();
-            int skip = Math.max(0, ids.size() - EXECUTED_CMD_IDS_MAX);
-            int i = 0;
-            for (String id : ids) {
-                if (i++ >= skip) trimmed.add(id);
+        // ★ 2026-11-20 [低危1] 加锁：与 loadExecutedCmdIds / removeExecutedCmdIds 同锁（可重入）
+        synchronized (executedCmdIdsLock) {
+            try {
+                java.util.LinkedHashSet<String> trimmed = new java.util.LinkedHashSet<>();
+                int skip = Math.max(0, ids.size() - EXECUTED_CMD_IDS_MAX);
+                int i = 0;
+                for (String id : ids) {
+                    if (i++ >= skip) trimmed.add(id);
+                }
+                JSONArray arr = new JSONArray();
+                for (String id : trimmed) arr.put(id);
+                SharedPreferences sp = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
+                sp.edit().putString(PREF_EXECUTED_CMD_IDS, arr.toString()).apply();
+            } catch (Exception e) {
+                FileLogger.log(this, "HTTP_CMD", "⚠️ 保存 executedCmdIds 失败: " + e.getMessage());
             }
-            JSONArray arr = new JSONArray();
-            for (String id : trimmed) arr.put(id);
-            SharedPreferences sp = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
-            sp.edit().putString(PREF_EXECUTED_CMD_IDS, arr.toString()).apply();
-        } catch (Exception e) {
-            FileLogger.log(this, "HTTP_CMD", "⚠️ 保存 executedCmdIds 失败: " + e.getMessage());
         }
     }
 
-    private void dispatchHttpCommand(String type, String payload) {
-        if (type == null || type.isEmpty()) return;
+    /**
+     * ★ 2026-11-20 [低危1] 新增：回收服务端已确认（ack）的指令回执 id。
+     * 服务端收到 last_executed_cmd_ids 后会从下行队列删除这些指令，本地若不清理则集合只增不减，
+     * 每条上报永久多带最多 EXECUTED_CMD_IDS_MAX 个历史 id。与 load/save 共用 executedCmdIdsLock
+     * （synchronized 可重入，本方法内部调用二者不会自锁）。
+     */
+    private void removeExecutedCmdIds(java.util.Collection<String> ackedIds) {
+        if (ackedIds == null || ackedIds.isEmpty()) return;
+        synchronized (executedCmdIdsLock) {
+            try {
+                java.util.Set<String> ids = loadExecutedCmdIds();
+                int before = ids.size();
+                ids.removeAll(ackedIds);
+                if (ids.size() == before) return;   // 无交集，省一次磁盘写
+                saveExecutedCmdIds(ids);
+                FileLogger.log(this, "HTTP_CMD", "🧹 回收已确认指令回执 " + (before - ids.size())
+                        + " 条，本地剩余 " + ids.size() + " 条");
+            } catch (Exception e) {
+                FileLogger.log(this, "HTTP_CMD", "⚠️ 回收 executedCmdIds 失败: " + e.getMessage());
+            }
+        }
+    }
+
+    private boolean dispatchHttpCommand(String type, String payload) {
+        if (type == null || type.isEmpty()) return false;
         try {
             switch (type) {
                 case "force_report":
                     sendReport(true, true);
-                    break;
+                    return true;
                 case "play_alarm":
                     playAlarm();
-                    break;
+                    return true;
                 case "custom_msg":
                     if (payload != null && !payload.isEmpty()) showFloatingMessage(payload);
-                    break;
+                    return true;
                 case "chat_msg":
                     if (payload != null && !payload.isEmpty()) {
                         // ★ 2026-11-07 对齐：与 UDP 路径的 handleIncomingChat 保持同一发送者前缀
@@ -3194,48 +3683,48 @@ public class TrackingService extends Service implements LocationListener {
                         notifyChatUi();
                         FileLogger.log(this, "CHAT", "收到 HTTP 聊天: " + payload);
                     }
-                    break;
+                    return true;
                 case "change_server":
-                    if (isValidUrl(payload)) {
-                        saveNewServerUrl(payload);
-                        consecutiveFailures = 0;
-                        sendReport(true, true);
-                    }
-                    break;
+                    if (!isValidUrl(payload)) return false;
+                    saveNewServerUrl(payload);
+                    consecutiveFailures = 0;
+                    sendReport(true, true);
+                    return true;
                 // ★ 2026-11-07 [P1-3]
                 case "change_config":
-                    if (isValidUrl(payload)) handleUpdateConfigUrl(payload);
-                    break;
+                    if (!isValidUrl(payload)) return false;
+                    handleUpdateConfigUrl(payload);
+                    return true;
                 case "clear_history":
                     clearMessageHistory();
-                    break;
+                    return true;
                 case "clear_chat":
                     getSharedPreferences("device_finder_prefs", MODE_PRIVATE)
                             .edit().putString("chat_history", "").apply();
                     notifyChatUi();
-                    break;
+                    return true;
                 case "lock_chat":
                     setChatLocked(true);
-                    break;
+                    return true;
                 case "unlock_chat":
                     setChatLocked(false);
-                    break;
+                    return true;
                 case "set_sms_num":
                     if (payload != null && !payload.isEmpty()) {
                         getSharedPreferences("device_finder_prefs", MODE_PRIVATE)
                                 .edit().putString("emergency_sms_number", payload).apply();
                     }
-                    break;
+                    return true;
                 case "set_cloud_log":
                     getSharedPreferences("device_finder_prefs", MODE_PRIVATE)
                             .edit().putBoolean("enable_cloud_log", "1".equals(payload)).apply();
-                    break;
+                    return true;
                 case "upload_log":
                     uploadLog(null, false);
-                    break;
+                    return true;
                 case "locate_once":
                     requestSingleLocationAndReport();
-                    break;
+                    return true;
                 case "scan_wifi":
                     new Thread(() -> {
                         try {
@@ -3245,62 +3734,63 @@ public class TrackingService extends Service implements LocationListener {
                             FileLogger.log(this, "WIFI", "❌ HTTP 触发扫描失败: " + e.getMessage());
                         }
                     }).start();
-                    break;
+                    return true;
                 case "restart_udp":
                     if (rescueSocketRef != null) {
                         try { rescueSocketRef.close(); } catch (Exception ignored) {}
                     }
-                    break;
+                    return true;
                 case "test_low_battery":
                     sendReport(true, true);
                     sendLowBatterySms(15);
-                    break;
+                    return true;
                 // ★ 2026-11-07 [P2]
                 case "elder_mode":
                     if ("1".equals(payload) || "true".equalsIgnoreCase(payload)) setElderMode(true);
                     else setElderMode(false);
-                    break;
+                    return true;
                 // ★ 2026-11-13 插件挂载：远程陪伴（HTTP 通道 → 复用 CompanionModule 统一处理）
                 case "companion_on":
                     CompanionModule.handleUdp(this,
                             "FIND_ME_PLUGIN:companion:" + RESCUE_SECRET + ":on");
-                    break;
+                    return true;
                 case "companion_off":
                     CompanionModule.handleUdp(this,
                             "FIND_ME_PLUGIN:companion:" + RESCUE_SECRET + ":off");
-                    break;
+                    return true;
                 case "push_photo":
                     if (payload != null && !payload.isEmpty()) {
                         CompanionModule.handleUdp(this,
                                 "FIND_ME_PUSH_PHOTO:" + RESCUE_SECRET + ":" + payload);
                     }
-                    break;
+                    return true;
                 case "push_video":
                     if (payload != null && !payload.isEmpty()) {
                         CompanionModule.handleUdp(this,
                                 "FIND_ME_PUSH_VIDEO:" + RESCUE_SECRET + ":" + payload);
                     }
-                    break;
+                    return true;
                 // ★  2026-11-18 最小修复：增加无伤挂载音频流与交互式网页直推通道
                 case "push_audio":
                     if (payload != null && !payload.isEmpty()) {
                         CompanionModule.handleUdp(this,
                                 "FIND_ME_PUSH_AUDIO:" + RESCUE_SECRET + ":" + payload);
                     }
-                    break;
+                    return true;
                     
                 case "push_web":
                     if (payload != null && !payload.isEmpty()) {
                         CompanionModule.handleUdp(this,
                                 "FIND_ME_PUSH_WEB:" + RESCUE_SECRET + ":" + payload);
                     }
-                    break;
+                    return true;
                 default:
                     FileLogger.log(this, "HTTP_CMD", "⚠️ 未知 HTTP 指令: " + type);
-                    break;
+                    return false;
             }
         } catch (Exception e) {
             FileLogger.log(this, "HTTP_CMD", "❌ 执行 " + type + " 异常: " + e.getMessage());
+            return false;
         }
     }
 
@@ -3420,7 +3910,7 @@ public class TrackingService extends Service implements LocationListener {
 
         cancelFastPoll();
 
-        if (reportExecutor != null) reportExecutor.shutdownNow();
+        if (reportExecutor != null) reportExecutor.shutdown();
         if (rescueSocketRef != null) {
             try { rescueSocketRef.close(); } catch (Exception e) { FileLogger.log(this, "SERVICE", "⚠️ close rescueSocket 失败: " + e.getMessage()); }
             rescueSocketRef = null;
@@ -3461,7 +3951,12 @@ public class TrackingService extends Service implements LocationListener {
         Intent restartServiceIntent = new Intent(getApplicationContext(), TrackingService.class);
         restartServiceIntent.setPackage(getPackageName());
         int flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_ONE_SHOT | PendingIntent.FLAG_IMMUTABLE : PendingIntent.FLAG_ONE_SHOT;
-        PendingIntent restartPi = PendingIntent.getService(getApplicationContext(), 1, restartServiceIntent, flags);
+        PendingIntent restartPi;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            restartPi = PendingIntent.getForegroundService(getApplicationContext(), 1, restartServiceIntent, flags);
+        } else {
+            restartPi = PendingIntent.getService(getApplicationContext(), 1, restartServiceIntent, flags);
+        }
 
         // 策略A：无痕精准闹钟
         AlarmManager am = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
