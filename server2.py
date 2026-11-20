@@ -2,11 +2,12 @@
 ============================================================
 server2.py — 全功能同步服务（v2 协议稳定版）
 ------------------------------------------------------------
-构建批次 : 20261117-1000
+构建批次 : 20261120-1340
 协议版本 : v2
-最后修改 : 2026-11-19 23:59（v2.2 远程陪伴面板折叠化，与对讲机交互统一，上报未收集全）
+最后修改 : 2026-11-20 13:40（v2.5.0 新增 /api/report_batch 批量落库 + HTTP指令队列可视化撤回 + 陪伴状态历史明细查询）
 ------------------------------------------------------------
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
+  2026-11-20 13:40  v2.5.0 闭环增强：新增 POST /api/report_batch 批量上报落库；新增「📬 指令队列」查看/单条撤回/清空；新增 GET /api/companion_status 陪伴状态与历史明细查询
   2026-11-19 23:15  v2.4.4 健壮落库：纠正 POST /api/upload_media 降级防御中未定义变量的引用，掐断偶发 500 引发的线程憋死通道
   2026-11-19 23:05  v2.4.3 流网关升级：uploadCompanionMedia 挂载多路强感知断路器，支持域名与原生流媒体协议(FLV/rtmp/rtsp等)自适应补全
   2026-11-19 22:30  v2.4.1 嗅探闭环：MIME_BY_EXT 拓宽多媒体映射，强力并入 sniff_media_ext 物理魔数校验，阻断因伪造后缀导致手机原生解码闪退
@@ -40,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor
 ============================================================
 DeviceFinder server2.py — 全功能同步服务（终极稳健版）
 ============================================================
-版本发布 : 2026-11-17
+版本发布 : 2026-11-20
 核心架构 : 原生 Socket + 多线程 (ThreadPoolExecutor)  |  本轮复核: 2026-11-19 server2_fixed_4
 ============================================================
 
@@ -172,7 +173,7 @@ USING_DEFAULT_CREDENTIALS = (CONTROL_TOKEN == DEFAULT_DEVICE_TOKEN)
 DEVICE_TOKEN_IS_DEFAULT = (AUTH_TOKEN == DEFAULT_DEVICE_TOKEN and RESCUE_SECRET == DEFAULT_DEVICE_TOKEN)
 
 # ===== 版本 =====
-BUILD_VERSION = "20261117-1000"
+BUILD_VERSION = "20261120-1340"
 PROTOCOL_VERSION = 2
 
 GLOBAL_DEFAULT_CONFIG = {
@@ -455,14 +456,30 @@ def save_report(dev_id, data, source_ip):
         try: raw_json = json.dumps(data, ensure_ascii=False)[:REPORTS_RAW_MAX_BYTES]
         except Exception: pass
 
+        # 1) declared_keys 增加 5 个陪伴字段，避免重复存入 ext_json
         declared_keys = {
             "device_id", "timestamp", "received_at", "battery", "network",
             "location", "nearby_wifi", "recent_locations", "is_screen_on",
             "chat_locked", "elder_mode", "os_version", "uptime_ms",
             "sim_state", "sim_operator", "ringer_mode", "volume_alarm",
             "unlock_count_since_boot", "is_screen_locked", "airplane_mode",
-            "token", "last_executed_cmd_ids"
+            "token", "last_executed_cmd_ids",
+            "companion_enabled", "push_photo_url", "push_video_url",
+            "push_audio_url", "push_web_url"
         }
+        # 放在 save_report() 构造各字段的位置（如 os_version / uptime_ms 附近）
+        companion_enabled = _parse_bool_val(data.get("companion_enabled"))
+
+        def _clean_url_str(v):
+            if isinstance(v, str):
+                s = v.strip()
+                return s if s else None
+            return None
+
+        push_photo_url = _clean_url_str(data.get("push_photo_url"))
+        push_video_url = _clean_url_str(data.get("push_video_url"))
+        push_audio_url = _clean_url_str(data.get("push_audio_url"))
+        push_web_url   = _clean_url_str(data.get("push_web_url"))
         extra = {k: v for k, v in data.items() if k not in declared_keys}
         ext_json = None
         if extra:
@@ -474,6 +491,7 @@ def save_report(dev_id, data, source_ip):
             conn = sqlite3.connect('track_history.db', timeout=10)
             try:
                 conn.execute("PRAGMA busy_timeout=10000")
+                # 2) INSERT 语句补齐 5 列与 5 个 ?
                 conn.execute("""INSERT INTO reports
                     (device_id, timestamp, received_at, day_str, hour, weekday,
                      battery_level, is_charging, battery_temp_c, battery_voltage_mv,
@@ -486,8 +504,9 @@ def save_report(dev_id, data, source_ip):
                      lat, lng, accuracy, location_provider, location_time, location_age_s,
                      recent_locations_json,
                      nearby_wifi_count, nearby_wifi_json, raw_json, ext_json,
-                     build_version, protocol_version)
-                    VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?, ?,?,?, ?,?, ?,?,?, ?,?,?, ?,?,?,?, ?,?,?,?,?,?, ?, ?,?,?,?, ?,?)""", (
+                     build_version, protocol_version,
+                     companion_enabled, push_photo_url, push_video_url, push_audio_url, push_web_url)
+                    VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?, ?,?,?, ?,?, ?,?,?, ?,?,?, ?,?,?,?, ?,?,?,?,?,?, ?, ?,?,?,?, ?,?, ?,?,?,?,?)""", (
                     dev_id, ts, received_at, dt.strftime("%Y-%m-%d"), dt.hour, dt.weekday(),
                     batt_level, is_charging, batt_temp, batt_volt,
                     wifi_ssid or None, wifi_bssid, wifi_rssi, local_ip, source_ip,
@@ -506,6 +525,7 @@ def save_report(dev_id, data, source_ip):
                     len(nearby), nearby_json, raw_json, ext_json,
                     data.get("build_version"),
                     data.get("protocol_version"),
+                    companion_enabled, push_photo_url, push_video_url, push_audio_url, push_web_url,
                 ))
                 conn.commit()
             finally:
@@ -721,6 +741,36 @@ def cleanup_expired_commands():
             if valid: PENDING_COMMANDS[dev_id] = valid
             else: PENDING_COMMANDS.pop(dev_id, None)
 
+def clear_pending_commands(dev_id=None):
+    """清空指定设备或全部设备的 HTTP 待执行指令队列，返回移除条数"""
+    removed = 0
+    with _cmd_lock:
+        if dev_id:
+            q = PENDING_COMMANDS.pop(dev_id, [])
+            removed = len(q)
+        else:
+            for q in PENDING_COMMANDS.values():
+                removed += len(q)
+            PENDING_COMMANDS.clear()
+    return removed
+
+
+def remove_command_by_id(dev_id, cmd_id):
+    """按 cmd_id 撤回单条待发指令，返回是否成功移除"""
+    if not dev_id or not cmd_id:
+        return False
+    with _cmd_lock:
+        q = PENDING_COMMANDS.get(dev_id)
+        if not q:
+            return False
+        new_q = [c for c in q if c.get("id") != cmd_id]
+        if len(new_q) == len(q):
+            return False
+        if new_q:
+            PENDING_COMMANDS[dev_id] = new_q
+        else:
+            PENDING_COMMANDS.pop(dev_id, None)
+        return True
 
 def cmd_cleaner():
     """
@@ -1120,6 +1170,9 @@ def _channel_badge_html(ch, gap_min):
     return ""
 
 
+BATCH_REPORT_MAX_ITEMS = 100  # 2026-11-20 POST /api/report_batch 单批最大条数，防大包拖慢 worker
+
+
 def handle_client(client_conn, client_addr):
     try:
         client_conn.settimeout(3.0)
@@ -1163,6 +1216,125 @@ def handle_client(client_conn, client_addr):
         if header_text.startswith("OPTIONS"):
             client_conn.sendall(b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: POST, GET, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             return
+
+        # ===== POST /api/report_batch =====
+        # ★ 2026-11-20 批量上报入口：手机端离线补发在弱网恢复时把多条记录打包成一次 HTTP 往返。
+        #   必须放在 POST /api/report 之前判定 —— 否则 "POST /api/report" 是
+        #   "POST /api/report_batch" 的子串，会被单条分支抢先匹配吞掉。
+        elif "POST /api/report_batch" in header_text:
+            try:
+                batch_data = json.loads(body_part.decode('utf-8', errors='ignore'))
+                if not isinstance(batch_data, dict):
+                    client_conn.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    return
+                if batch_data.get("token") != AUTH_TOKEN:
+                    client_conn.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    return
+
+                reports_list = batch_data.get("reports")
+                if not isinstance(reports_list, list):
+                    client_conn.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    return
+
+                # 单批上限保护：超限直接 400，避免一次性包体过大拖慢 worker
+                if len(reports_list) > BATCH_REPORT_MAX_ITEMS:
+                    err_bytes = json.dumps({"status": "error", "msg": "单批上限 %d 条" % BATCH_REPORT_MAX_ITEMS}, ensure_ascii=False).encode('utf-8')
+                    client_conn.sendall(
+                        ("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(err_bytes)).encode('utf-8') + err_bytes)
+                    return
+
+                now_ms = int(datetime.datetime.now().timestamp() * 1000)
+                batch_dev_id = batch_data.get("device_id", "unknown_device")
+                accepted = 0
+                all_executed_ids = []
+
+                # 按 timestamp 升序处理，使最新状态最后覆盖 ALL_DEVICES_STATUS
+                sorted_items = sorted(
+                    reports_list,
+                    key=lambda x: (x.get("timestamp", 0) if isinstance(x, dict) and isinstance(x.get("timestamp"), (int, float)) else 0)
+                )
+
+                for item in sorted_items:
+                    if not isinstance(item, dict):
+                        continue
+                    item_token = item.get("token") or batch_data.get("token")
+                    if item_token != AUTH_TOKEN:
+                        continue
+
+                    dev_id = item.get("device_id") or batch_dev_id or "unknown_device"
+                    if item.get("network") is None: item["network"] = {}
+                    if item.get("battery") is None: item["battery"] = {}
+                    if item.get("location") is None: item["location"] = {}
+                    if item.get("nearby_wifi") is None: item["nearby_wifi"] = []
+
+                    executed_ids = item.pop("last_executed_cmd_ids", [])
+                    if isinstance(executed_ids, list) and executed_ids:
+                        all_executed_ids.extend(executed_ids)
+
+                    item["received_at"] = now_ms
+
+                    # v2.0 补丁：通道健康度判定（服务端算，客户端不填）
+                    ch = item.get("channel") or {}
+                    if ch:
+                        qsize = ch.get("offline_queue_size")
+                        if qsize is None or (isinstance(qsize, int) and qsize < 0):
+                            ch["health"] = "degraded"  # 队列状态未知，保守降级
+                        elif (ch.get("udp_listening") and
+                              qsize == 0 and
+                              (ch.get("consecutive_failures", 0) or 0) == 0):
+                            ch["health"] = "good"
+                        else:
+                            ch["health"] = "degraded"
+                        item["channel"] = ch
+
+                    with state_lock:
+                        if dev_id not in ALL_DEVICES_STATUS:
+                            ALL_DEVICES_STATUS[dev_id] = {}
+                        prev_info = dict(ALL_DEVICES_STATUS[dev_id])
+                        prev_udp_ip = prev_info.get("udp_source_ip")
+                        if "cloud_logs" in item:
+                            prev_info["cloud_logs"] = item["cloud_logs"]
+                            prev_info["cloud_logs_time"] = item["received_at"]
+                        elif "cloud_logs" in prev_info:
+                            item["cloud_logs"] = prev_info["cloud_logs"]
+                            item["cloud_logs_time"] = prev_info.get("cloud_logs_time", 0)
+                        item["source_ip"] = client_addr[0]
+                        item["local_ip"] = (item.get("network") or {}).get("local_ip", "")
+                        # ★ 2026-11-07 [P4.4]
+                        item["build_version"] = item.get("build_version") or "旧版"
+                        item["protocol_version"] = item.get("protocol_version") or 1
+                        if prev_udp_ip:
+                            item["udp_source_ip"] = prev_udp_ip
+                        if prev_info.get("last_chat"):
+                            item["last_chat"] = prev_info["last_chat"]
+                        ALL_DEVICES_STATUS[dev_id] = item
+
+                    loc = item.get('location') or {}
+                    lat, lng = loc.get('latitude'), loc.get('longitude')
+                    if lat is not None and lng is not None:
+                        save_history(dev_id, lat, lng, item.get("timestamp") or now_ms)
+                    save_report(dev_id, item, client_addr[0])
+                    accepted += 1
+
+                if all_executed_ids:
+                    process_executed_commands(batch_dev_id, all_executed_ids)
+
+                pending = get_pending_commands(batch_dev_id)
+                next_poll = 30 if pending else 0
+                response_body = json.dumps({
+                    "status": "success",
+                    "accepted": accepted,
+                    "config": GLOBAL_DEFAULT_CONFIG,
+                    "pending_commands": pending,
+                    "next_poll_seconds": next_poll
+                }, ensure_ascii=False)
+                response_bytes = response_body.encode('utf-8')
+                client_conn.sendall(
+                    f"HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {len(response_bytes)}\r\nConnection: close\r\n\r\n".encode('utf-8') + response_bytes)
+            except Exception as e:
+                with print_lock: print(f"❌ POST /api/report_batch 异常: {e}")
+                try: client_conn.sendall(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                except Exception: pass
 
         # ===== POST /api/report =====
         if "POST /api/report" in header_text:
@@ -1505,7 +1677,7 @@ def handle_client(client_conn, client_addr):
                         "wifi_ssid": wifi_ssid,
                         "network_type": net_type,
                         "location": loc_obj,
-                        "commands": [{"id": c["id"], "type": c["type"], "age_s": max(0, int(now - c["ts"]))} for c in queue[:10]],
+                        "commands": [{"id": c["id"], "type": c["type"], "payload": str(c.get("payload", ""))[:60], "age_s": max(0, int(now - c["ts"]))} for c in queue[:10]],
                         # ★ 2026-11-07 [P4.8]
                         "build_version": info.get("build_version", "旧版"),
                         "protocol_version": info.get("protocol_version", 1),
@@ -1516,6 +1688,82 @@ def handle_client(client_conn, client_addr):
                     f"HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {len(resp_bytes)}\r\nConnection: close\r\n\r\n".encode('utf-8') + resp_bytes)
             except Exception as e:
                 with print_lock: print(f"❌ GET /api/cmd_status 异常: {e}")
+                try: client_conn.sendall(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                except Exception: pass
+
+        # ===== GET /api/companion_status (按 device_id 查询 reports 表陪伴状态与历史明细) =====
+        # ★ 2026-11-20 供 Web 控制台「陪伴状态与历史明细查询」面板调用。
+        elif "GET /api/companion_status" in header_text:
+            try:
+                req_line = header_text.split("\r\n")[0]
+                path_with_query = req_line.split(" ")[1] if len(req_line.split(" ")) > 1 else ""
+                params = parse_qs(urlparse(path_with_query).query)
+                dev_id = (params.get("device_id", [""])[0] or "").strip()
+                try:
+                    limit = int(params.get("limit", ["30"])[0])
+                except Exception:
+                    limit = 30
+                limit = max(1, min(limit, 200))
+
+                if not dev_id:
+                    err_body = json.dumps({"status": "error", "msg": "缺少 device_id 参数"}, ensure_ascii=False).encode('utf-8')
+                    client_conn.sendall(
+                        f"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {len(err_body)}\r\nConnection: close\r\n\r\n".encode('utf-8') + err_body)
+                    return
+
+                conn = sqlite3.connect('track_history.db', timeout=10)
+                try:
+                    conn.row_factory = sqlite3.Row
+                    c = conn.cursor()
+                    rows = c.execute("""
+                        SELECT id, device_id, timestamp, received_at,
+                               companion_enabled, push_photo_url, push_video_url,
+                               push_audio_url, push_web_url,
+                               battery_level, is_charging, network_type, wifi_ssid,
+                               lat, lng, is_screen_on, elder_mode, build_version
+                        FROM reports
+                        WHERE device_id = ?
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT ?
+                    """, (dev_id, limit)).fetchall()
+                finally:
+                    conn.close()
+
+                history_items = []
+                for r in rows:
+                    history_items.append({
+                        "id": r["id"],
+                        "device_id": r["device_id"],
+                        "timestamp": r["timestamp"],
+                        "received_at": r["received_at"],
+                        "companion_enabled": r["companion_enabled"],
+                        "push_photo_url": r["push_photo_url"] or "",
+                        "push_video_url": r["push_video_url"] or "",
+                        "push_audio_url": r["push_audio_url"] or "",
+                        "push_web_url": r["push_web_url"] or "",
+                        "battery_level": r["battery_level"],
+                        "is_charging": r["is_charging"],
+                        "network_type": r["network_type"] or "",
+                        "wifi_ssid": r["wifi_ssid"] or "",
+                        "lat": r["lat"],
+                        "lng": r["lng"],
+                        "is_screen_on": r["is_screen_on"],
+                        "elder_mode": r["elder_mode"],
+                        "build_version": r["build_version"] or ""
+                    })
+
+                latest_state = history_items[0] if history_items else None
+                resp = json.dumps({
+                    "status": "ok",
+                    "device_id": dev_id,
+                    "latest": latest_state,
+                    "history": history_items
+                }, ensure_ascii=False)
+                resp_bytes = resp.encode('utf-8')
+                client_conn.sendall(
+                    f"HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {len(resp_bytes)}\r\nConnection: close\r\n\r\n".encode('utf-8') + resp_bytes)
+            except Exception as e:
+                with print_lock: print(f"❌ GET /api/companion_status 异常: {e}")
                 try: client_conn.sendall(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 except Exception: pass
 
@@ -1687,6 +1935,27 @@ def handle_client(client_conn, client_addr):
                         extra_msg = f"清理了 {len(to_delete)} 台设备（>{threshold_h}小时未活动）" if to_delete else f"没有符合条件的设备（>{threshold_h}小时未活动）"
                     except Exception as e:
                         success = False; extra_msg = f"清理失败: {e}"
+                # 2026-11-20 13:38 在 POST /api/control 的 action 分支中补充：
+                elif action == "clear_cmd_queue":
+                    target_dev = (cmd_data.get("target_device_id") or (payload if isinstance(payload, str) else "")).strip()
+                    if target_dev and target_dev != "all":
+                        cnt = clear_pending_commands(target_dev)
+                        success = True
+                        extra_msg = f"已清空设备 {target_dev} 的 {cnt} 条待发指令"
+                    else:
+                        cnt = clear_pending_commands(None)
+                        success = True
+                        extra_msg = f"已清空全部设备的 {cnt} 条待发指令"
+
+                elif action == "cancel_cmd":
+                    # payload 可传 "dev_id:cmd_id" 或 dict/单独字段 target_device_id + cmd_id
+                    t_dev = (cmd_data.get("target_device_id") or "").strip()
+                    c_id = (cmd_data.get("cmd_id") or "").strip()
+                    if (not t_dev or not c_id) and isinstance(payload, str) and ":" in payload:
+                        t_dev, c_id = payload.split(":", 1)
+                    ok = remove_command_by_id(t_dev.strip(), c_id.strip())
+                    success = ok
+                    extra_msg = f"已撤回指令 {c_id}" if ok else "未找到对应的待发指令（可能已执行或已过期）"
 
                 queued_count = len(target_devs) if action in HTTP_SUPPORTED_ACTIONS else 0
                 # ★ FIX-7 2026-11-18：UDP 无送达确认，"包发出去了" != "设备执行了"。
@@ -1891,6 +2160,8 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
         <button onclick="toggleChatBox()" style="color:#0969da; border-color:#0969da;">🗣️ 局域网对讲机</button>
         <!-- ★ v2.2 新增：远程陪伴按钮，与对讲机交互一致（点击展开/收起下方独立面板） -->
         <button onclick="toggleCompanionBox()" style="color:#0969da; border-color:#0969da;">👨‍👩‍👧 远程陪伴</button>
+        <!-- ★ 2026-11-20 新增：HTTP 下行指令队列查看/清空/撤回入口 -->
+        <button onclick="showCommandQueue()">📬 指令队列</button>
     </div>
     <details style="margin-top: 16px; border-top: 1px solid var(--color-border-muted); padding-top: 12px;">
         <summary>⚙️ 高级设置与系统工具</summary>
@@ -1957,6 +2228,16 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
 
         <div style="color: var(--color-fg-muted); font-size: 12px; margin-top: 8px;">
             * 提示：推送前请先点击“开启陪伴模式”。选择照片或短视频后点击推送，老人屏幕会全屏展示。
+        </div>
+
+        <!-- ★ 2026-11-20 新增：陪伴状态与历史明细查询（按 device_id 查询 reports 表） -->
+        <div style="margin-top: 14px; padding: 10px; border-top: 1px dashed #9ec5fe; background: #fff; border-radius: 6px;">
+            <div style="font-weight: 600; font-size: 13px; color: #0969da; margin-bottom: 8px;">📊 陪伴状态与历史明细查询（reports 表）</div>
+            <div class="input-row" style="margin-top: 0;">
+                <input type="text" id="companionQueryDevId" placeholder="输入或选择 device_id（如 Pixel_6_a1b2）...">
+                <button onclick="queryCompanionByDevice()">🔍 查询陪伴明细</button>
+            </div>
+            <div id="companionQueryResult" style="margin-top: 10px; font-size: 13px; color: var(--color-fg-default);"></div>
         </div>
     </div>
 </div>
@@ -2073,6 +2354,7 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
 
                         html += f"<button class='btn-sm' onclick=\"showTrack('{dev_id}')\">轨迹</button>"
                         html += f"<button class='btn-sm' onclick=\"showCloudLogs('{dev_id}')\">📄 日志</button>"
+                        html += f"<button class='btn-sm' onclick=\"fillCompanionDevId('{html_lib.escape(dev_id, quote=True)}')\">👨‍👩‍👧 陪伴</button>"
                         html += f"</td></tr>"
                     except Exception as e:
                         with print_lock:
@@ -2766,6 +3048,204 @@ function uploadCompanionMedia() {
 }
 
 
+
+// ==================== [HTTP 下行指令队列：查看 / 撤回 / 清空] ====================
+// ★ 2026-11-20 新增：拉取 /api/cmd_status 的 commands 明细，支持单条撤回(cancel_cmd)、
+//   按设备清空与清空全部(clear_cmd_queue)，全部经由受 CONTROL_TOKEN 保护的 POST /api/control。
+function showCommandQueue() {
+    fetch('/api/cmd_status')
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        var devIds = Object.keys(data || {});
+        var totalPending = 0;
+        var bodyHtml = '';
+
+        devIds.forEach(function(devId) {
+            var d = data[devId] || {};
+            var cmds = d.commands || [];
+            if (!cmds.length && (!d.pending || d.pending <= 0)) return;
+            totalPending += (d.pending || cmds.length);
+
+            bodyHtml += '<div style="border:1px solid var(--color-border-default);border-radius:6px;padding:12px 14px;margin-bottom:12px;background:#fafbfc;">' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;">' +
+                    '<b>' + escapeHtml(devId) + ' <span style="color:#57606a;font-weight:400;font-size:12px;">(' + (d.pending || cmds.length) + ' 条待发)</span></b>' +
+                    '<button class="btn-sm btn-danger" onclick="clearDeviceQueue(\'' + escapeHtml(devId).replace(/'/g, "\\'") + '\')">清空该设备队列</button>' +
+                '</div>';
+
+            if (!cmds.length) {
+                bodyHtml += '<div style="color:#57606a;font-size:12px;">暂无明细</div>';
+            } else {
+                cmds.forEach(function(c) {
+                    var cid = String(c.id || '');
+                    var ctype = String(c.type || '');
+                    var cpay = String(c.payload || '');
+                    var ageTxt = (c.age_s || 0) + 's 前';
+                    bodyHtml += '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-top:1px dashed var(--color-border-muted);font-size:12px;">' +
+                        '<div style="overflow:hidden;text-overflow:ellipsis;">' +
+                            '<b>' + escapeHtml(ctype) + '</b> ' +
+                            '<span style="color:#8c959f;">[' + escapeHtml(cid) + ' · ' + escapeHtml(ageTxt) + ']</span>' +
+                            (cpay ? '<div style="color:#57606a;word-break:break-all;">载荷: ' + escapeHtml(cpay) + '</div>' : '') +
+                        '</div>' +
+                        '<button class="btn-sm" onclick="cancelSingleCmd(\'' + escapeHtml(devId).replace(/'/g, "\\'") + '\', \'' + escapeHtml(cid).replace(/'/g, "\\'") + '\')">撤回</button>' +
+                    '</div>';
+                });
+            }
+            bodyHtml += '</div>';
+        });
+
+        var headerBar = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">' +
+            '<span style="font-size:13px;color:#57606a;">当前累计待发：<b>' + totalPending + '</b> 条</span>' +
+            '<button class="btn-sm btn-danger" onclick="clearAllQueues()">🧹 清空全部队列</button>' +
+        '</div>';
+
+        document.getElementById('modalTitle').innerText = '📬 HTTP 下行指令队列';
+        document.getElementById('msgList').innerHTML = headerBar + (bodyHtml || '<p style="color:var(--color-fg-muted);">当前没有待下发的指令。</p>');
+        document.getElementById('msgModal').style.display = 'block';
+    })
+    .catch(function(e) { showToast("获取指令队列失败: " + e.message); });
+}
+
+function cancelSingleCmd(devId, cmdId) {
+    fetch('/api/control', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            token: ADMIN_TOKEN,
+            action: 'cancel_cmd',
+            target_device_id: devId,
+            cmd_id: cmdId
+        })
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        showToast(data.msg || (data.status === 'ok' ? '已撤回' : '撤回失败'));
+        if (data.status === 'ok') setTimeout(showCommandQueue, 200);
+    })
+    .catch(function(e) { showToast("撤回请求失败: " + e.message); });
+}
+
+function clearDeviceQueue(devId) {
+    if (!confirm("确认清空设备 [" + devId + "] 的全部待发指令？")) return;
+    fetch('/api/control', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            token: ADMIN_TOKEN,
+            action: 'clear_cmd_queue',
+            target_device_id: devId
+        })
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        showToast(data.msg || (data.status === 'ok' ? '已清空' : '清空失败'));
+        if (data.status === 'ok') setTimeout(showCommandQueue, 200);
+    })
+    .catch(function(e) { showToast("清空请求失败: " + e.message); });
+}
+
+function clearAllQueues() {
+    if (!confirm("确认清空【所有设备】的待发指令队列？")) return;
+    fetch('/api/control', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            token: ADMIN_TOKEN,
+            action: 'clear_cmd_queue',
+            target_device_id: 'all'
+        })
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        showToast(data.msg || (data.status === 'ok' ? '已清空全部' : '清空失败'));
+        if (data.status === 'ok') setTimeout(showCommandQueue, 200);
+    })
+    .catch(function(e) { showToast("清空全部失败: " + e.message); });
+}
+
+// ==================== [陪伴状态与历史明细查询] ====================
+// ★ 2026-11-20 新增：按 device_id 查询 reports 表陪伴开关与各推送 URL 落库明细。
+function fillCompanionDevId(devId) {
+    var inp = document.getElementById('companionQueryDevId');
+    if (inp) { inp.value = devId || ''; }
+    if (!isCompanionVisible) { toggleCompanionBox(); }
+    queryCompanionByDevice();
+}
+
+function formatTsMs(ts) {
+    if (!ts) return '-';
+    try { return new Date(Number(ts)).toLocaleString(); }
+    catch (e) { return String(ts); }
+}
+
+function queryCompanionByDevice() {
+    var inp = document.getElementById('companionQueryDevId');
+    var out = document.getElementById('companionQueryResult');
+    if (!inp || !out) return;
+    var devId = inp.value ? inp.value.trim() : '';
+    if (!devId) { showToast("请输入要查询的 device_id！"); return; }
+
+    out.innerHTML = '<div style="color:var(--color-fg-muted);">正在查询 ' + escapeHtml(devId) + ' 的陪伴状态与历史明细...</div>';
+
+    fetch('/api/companion_status?device_id=' + encodeURIComponent(devId) + '&limit=30')
+    .then(function(res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+    })
+    .then(function(data) {
+        if (!data || data.status !== 'ok') {
+            out.innerHTML = '<div style="color:#cf222e;">查询失败: ' + escapeHtml((data && data.msg) || '未知错误') + '</div>';
+            return;
+        }
+        var latest = data.latest;
+        var history = data.history || [];
+        if (!latest || history.length === 0) {
+            out.innerHTML = '<div style="color:var(--color-fg-muted);">reports 表中暂无设备 <b>' + escapeHtml(devId) + '</b> 的记录。</div>';
+            return;
+        }
+
+        var enabledBadge = latest.companion_enabled === 1
+            ? '<span style="color:#2da44e;font-weight:600;">🟢 已开启 (1)</span>'
+            : (latest.companion_enabled === 0
+                ? '<span style="color:#57606a;font-weight:600;">⚪ 已关闭 (0)</span>'
+                : '<span style="color:#8c959f;">未知 (null)</span>');
+
+        var html = '<div style="background:#f6f8fa;border:1px solid var(--color-border-default);border-radius:6px;padding:10px 12px;margin-bottom:10px;">' +
+            '<div style="font-weight:600;margin-bottom:6px;">最新陪伴状态 — ' + escapeHtml(devId) + '（更新时间: ' + escapeHtml(formatTsMs(latest.timestamp)) + '）</div>' +
+            '<div>总开关: ' + enabledBadge + ' | 网络: ' + escapeHtml(latest.network_type || '-') + (latest.wifi_ssid ? ' (' + escapeHtml(latest.wifi_ssid) + ')' : '') + ' | 电量: ' + (latest.battery_level !== null && latest.battery_level !== undefined ? latest.battery_level + '%' : '-') + '</div>' +
+            '<div style="margin-top:4px;word-break:break-all;">图片URL: ' + escapeHtml(latest.push_photo_url || '-') + '</div>' +
+            '<div style="word-break:break-all;">视频URL: ' + escapeHtml(latest.push_video_url || '-') + '</div>' +
+            '<div style="word-break:break-all;">音频URL: ' + escapeHtml(latest.push_audio_url || '-') + '</div>' +
+            '<div style="word-break:break-all;">网页URL: ' + escapeHtml(latest.push_web_url || '-') + '</div>' +
+        '</div>';
+
+        html += '<div style="overflow-x:auto;border:1px solid var(--color-border-default);border-radius:6px;">' +
+            '<table style="min-width:680px;font-size:12px;">' +
+            '<tr><th>上报时间</th><th>开关</th><th>图/影/音/网 URL</th><th>网络/电量</th></tr>';
+
+        for (var i = 0; i < history.length; i++) {
+            var h = history[i];
+            var stTxt = h.companion_enabled === 1 ? '🟢 开' : (h.companion_enabled === 0 ? '⚪ 关' : '-');
+            var urls = [];
+            if (h.push_photo_url) urls.push('图: ' + h.push_photo_url);
+            if (h.push_video_url) urls.push('影: ' + h.push_video_url);
+            if (h.push_audio_url) urls.push('音: ' + h.push_audio_url);
+            if (h.push_web_url) urls.push('网: ' + h.push_web_url);
+            var urlSummary = urls.length > 0 ? urls.join(' | ') : '-';
+
+            html += '<tr>' +
+                '<td style="padding:8px 10px;">' + escapeHtml(formatTsMs(h.timestamp)) + '</td>' +
+                '<td style="padding:8px 10px;">' + stTxt + '</td>' +
+                '<td style="padding:8px 10px;word-break:break-all;">' + escapeHtml(urlSummary) + '</td>' +
+                '<td style="padding:8px 10px;">' + escapeHtml(h.network_type || '-') + ' / ' + (h.battery_level !== null && h.battery_level !== undefined ? h.battery_level + '%' : '-') + '</td>' +
+            '</tr>';
+        }
+        html += '</table></div>';
+        out.innerHTML = html;
+    })
+    .catch(function(err) {
+        out.innerHTML = '<div style="color:#cf222e;">查询异常: ' + escapeHtml(err.message) + '</div>';
+    });
+}
 
 function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, function(c) {
