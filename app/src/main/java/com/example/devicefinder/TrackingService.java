@@ -1885,11 +1885,8 @@ public class TrackingService extends Service implements LocationListener {
         if (!serviceDestroyed) {
             long now = System.currentTimeMillis();
             if (now - lastAlarmTriggerTime < 2000) { // 与硬件闹钟 2 秒内撞车时自动防重
-                // ★ 2026-11-20 [C2] 修复：原先撞车即 return，内存级计时器链条就此终止。若硬件闹钟那一路
-                //   又因去重窗口 / ROM 限流没有走到 scheduleNextReport，双保险会同时熄火、周期上报静默断裂。
-                //   改为按完整周期自我续期（scheduleNextReport 自带 removeCallbacks，重复排期安全无堆积）。
                 FileLogger.log(TrackingService.this, "ALARM", "⏭ 内存级计时器与硬件闹钟撞车，已按完整周期自我续期，防双保险熄火");
-                if (!serviceDestroyed) handler.postDelayed(inMemoryReportRunnable, reportIntervalMs);
+                scheduleNextReport();
                 return;
             }
             lastAlarmTriggerTime = now;
