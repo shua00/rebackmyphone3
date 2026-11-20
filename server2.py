@@ -2,11 +2,28 @@
 ============================================================
 server2.py — 全功能同步服务（v2 协议稳定版）
 ------------------------------------------------------------
-构建批次 : 20261120-1340
+构建批次 : 20261121-0045
 协议版本 : v2
-最后修改 : 2026-11-20 13:40（v2.5.0 新增 /api/report_batch 批量落库 + HTTP指令队列可视化撤回 + 陪伴状态历史明细查询）
+最后修改 : 2026-11-21 00:45（v2.5.11 管理台导航、页面内列表与地图定位细节优化）
 ------------------------------------------------------------
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
+  2026-11-21 00:45  v2.5.11 管理台细节优化：①设备维护卡片自动收起无操作项的空卡片，按钮统一网格对齐；②二级导航去除左侧竖线并提高导航字号；③云端留言与指令队列改为页面内展示，不再弹出通用模态框；④地图保留原始默认中心与缩放，进入地图不自动跳转设备位置，悬浮定位按钮仅在用户点击时定位到最近上报设备，手机端同步显示；⑤不修改 API、数据库及 Android 协议
+  2026-11-21 02:30  v2.5.10 地图与页面视觉整理：①实时地图增加设备最新上报位置圆点标记与悬浮定位按钮，定位到最近上报设备；②地图显示全部有有效坐标设备并支持点击查看设备/定位时间；③陪护、对讲、地图、定位、留言和队列页面统一中性卡片样式，弱化彩色描边与高饱和按钮；④移除页面内装饰性 emoji 图标，保留导航与必要状态信息；⑤不使用管理端浏览器 GPS，不改变设备定位授权、API、数据库及 Android 协议
+  2026-11-21 01:00  v2.5.9 手机端导航重构：①手机端顶部精简栏+侧滑抽屉，取消常驻整块导航；②增加底部常用入口；③抽屉遮罩、ESC/菜单点击关闭与页面切换自动关闭；④桌面端维持左侧导航；⑤保留原页面、业务函数、API、数据库与 Android 协议
+  2026-11-21 00:05  v2.5.7 管理台二级导航：①对讲机、远程陪护、云端留言、指令队列拆为独立工作页；②实时地图与定位管理分开；③定位/维护页共享设备范围选择器；④切换页面自动收起非当前沟通面板，复用原 API 和业务函数
+  2026-11-20 23:30  v2.5.5 管理台结构升级：①借鉴 OpenWrt LuCI 分区导航，增加左侧主导航与独立工作区；②仪表盘、设备管理、陪护沟通、设备维护、地图分区；③运动健康增加明确的规划占位页，不启动采集；④保留原有 DOM、按钮函数、API 与 v2 协议，采用前端渐进式重组
+  2026-11-20 23:00  v2.5.4 前端脚本解析修复：①修正媒体 URL 协议正则中的斜杠转义；②修正媒体文件扩展名正则中的点号转义；③修正域名路径正则；④避免单个正则语法错误导致整段脚本中止、按钮函数全部未定义
+  2026-11-20 22:30  v2.5.3 管理台统一操作框架：①高级设置新增独立设备范围选择器，不再借用陪伴面板勾选状态；
+                    ②新增 sendAdminCmd 统一入口，单设备/多设备共用参数与结果处理；③通用 sendCmd 默认目标改为显式全局，陪伴操作明确使用陪伴选择器；
+                    ④设备选择器初次加载与刷新独立渲染，保留对讲机/陪伴原有选择状态；⑤保留原有 API、协议与业务按钮
+  2026-11-20 22:00  v2.5.2 P0/P1 稳定性加固：①[P0] reports/history 落库成功后才确认 accepted，重复 queue_id 按已接收处理；
+                    ②[P0] HTTP 下行指令写入 SQLite，服务重启后恢复未过期队列；③[P0] HTTP 头/请求体长度校验、拒绝不支持的 chunked；
+                    ④[P1] report_batch 强制单设备归属，避免跨设备混批和指令 ACK 错位；⑤[P1] reports + history 同事务提交；
+                    ⑥[P1] health 增加 DB/UDP 状态，迁移与索引错误可见
+  2026-11-20 21:10  v2.5.1 一致性修复：①[致命] POST /api/report_batch 处理完穿透再执行一遍 POST /api/report
+                    （补 return + if→elif，消除子串抢匹配）；②[C1] history 表时间基准两端统一为客户端 timestamp；
+                    ③[B2] reports 新增 queue_id 列 + history 四元组判重，按客户端 _queue_id 做补发幂等去重；
+                    ④[低危2] _queue_id 不再泄漏进 raw_json / ext_json
   2026-11-20 13:40  v2.5.0 闭环增强：新增 POST /api/report_batch 批量上报落库；新增「📬 指令队列」查看/单条撤回/清空；新增 GET /api/companion_status 陪伴状态与历史明细查询
   2026-11-19 23:15  v2.4.4 健壮落库：纠正 POST /api/upload_media 降级防御中未定义变量的引用，掐断偶发 500 引发的线程憋死通道
   2026-11-19 23:05  v2.4.3 流网关升级：uploadCompanionMedia 挂载多路强感知断路器，支持域名与原生流媒体协议(FLV/rtmp/rtsp等)自适应补全
@@ -144,6 +161,10 @@ CLEAN_OFFLINE_THRESHOLD_MS = 2 * 3600 * 1000    # "清理全部离线设备"阈�
 MANAGE_OFFLINE_THRESHOLD_S = 30 * 60            # "管理离线设备"弹窗展示阈值：30 分钟
 
 PORT = 8080
+# ★ 2026-11-20 [P0] HTTP 请求边界：请求头与请求体分别限额，避免慢速/超大请求长期占用 worker。
+HTTP_MAX_HEADER_BYTES = 64 * 1024
+HTTP_MAX_BODY_BYTES = 32 * 1024 * 1024  # 媒体上传仍可用，统一上限 32MB
+UDP_LISTENING = False
 # ★★ FIX-1B 2026-11-19：把"设备口令"与"控制口令"彻底拆开。
 #   FIX-1 的坑：DF_AUTH_TOKEN 一个变量同时管三处——
 #     ① 设备上报（/api/report、/api/message、/api/upload_log）
@@ -173,7 +194,7 @@ USING_DEFAULT_CREDENTIALS = (CONTROL_TOKEN == DEFAULT_DEVICE_TOKEN)
 DEVICE_TOKEN_IS_DEFAULT = (AUTH_TOKEN == DEFAULT_DEVICE_TOKEN and RESCUE_SECRET == DEFAULT_DEVICE_TOKEN)
 
 # ===== 版本 =====
-BUILD_VERSION = "20261120-1340"
+BUILD_VERSION = "20261121-0045"
 PROTOCOL_VERSION = 2
 
 GLOBAL_DEFAULT_CONFIG = {
@@ -300,7 +321,11 @@ REPORTS_COLUMNS = [
     ("push_photo_url",         "TEXT"),    # 当前全屏挂载的图片 URL 地址
     ("push_video_url",         "TEXT"),    # 当前循环播放的视频/直播源 URL 地址
     ("push_audio_url",         "TEXT"),    # 当前后台硬解的纯音频/网络广播 URL 地址
-    ("push_web_url",           "TEXT")     # 当前全屏常驻的网页/H5 看板 URL 地址
+    ("push_web_url",           "TEXT"),    # 当前全屏常驻的网页/H5 看板 URL 地址
+
+    # ★ 2026-11-20 [B2/低危2] 新增：客户端离线队列幂等键（原混在 ext_json / raw_json 里白占截断预算，
+    #   现独立成列并建索引，用于「整批重发」场景的前向去重）。init_db 会自动 ALTER TABLE 补列。
+    ("queue_id",               "TEXT")
 ]
 
 # ★ 修复：补上缺失的 REPORTS_INDEXES 定义（原代码在 init_db 中遍历它却从未定义，导致启动即 NameError）
@@ -308,6 +333,7 @@ REPORTS_INDEXES = [
     ("idx_reports_device_ts", "ON reports (device_id, timestamp)"),
     ("idx_reports_timestamp", "ON reports (timestamp)"),
     ("idx_reports_day_str",   "ON reports (day_str)"),
+    ("idx_reports_queue_id",  "ON reports (device_id, queue_id)"),   # ★ 2026-11-20 [B2/P1] 设备维度幂等查重用
 ]
 
 def _parse_bool_val(v):
@@ -326,8 +352,16 @@ def init_db():
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS history
                  (device_id TEXT, lat REAL, lng REAL, timestamp INTEGER)''')
+    # ★ 2026-11-20 [B2] 配套 save_history 幂等查重的索引，避免去重 SELECT 退化为全表扫描
+    # ★ 2026-11-20 [P1] 索引创建失败不能静默吞掉：启动日志必须暴露数据库结构问题。
+    c.execute("CREATE INDEX IF NOT EXISTS idx_history_device_ts ON history (device_id, timestamp)")
     c.execute('''CREATE TABLE IF NOT EXISTS messages
                  (device_id TEXT, msg_time TEXT, message TEXT, timestamp INTEGER)''')
+    # ★ 2026-11-20 [P0] HTTP 下行指令持久化：进程重启后恢复未过期、未确认的指令。
+    c.execute('''CREATE TABLE IF NOT EXISTS pending_commands
+                 (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, action TEXT NOT NULL,
+                  payload TEXT, created_at REAL NOT NULL)''')
+    c.execute("CREATE INDEX IF NOT EXISTS idx_pending_commands_device ON pending_commands (device_id, created_at)")
     col_defs = ", ".join(f"{name} {typ}" for name, typ in REPORTS_COLUMNS)
     c.execute(f"CREATE TABLE IF NOT EXISTS reports ({col_defs})")
     try:
@@ -346,8 +380,18 @@ def init_db():
     for idx_name, idx_def in REPORTS_INDEXES:
         try:
             c.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} {idx_def}")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"❌ [reports] 索引 {idx_name} 创建失败: {e}")
+            raise
+    # ★ 2026-11-20 [P1] 旧版 idx_reports_queue_id 只有 queue_id 单列；升级为设备+幂等键联合索引。
+    try:
+        queue_index_cols = [row[2] for row in c.execute("PRAGMA index_info(idx_reports_queue_id)").fetchall()]
+        if queue_index_cols != ["device_id", "queue_id"]:
+            c.execute("DROP INDEX IF EXISTS idx_reports_queue_id")
+            c.execute("CREATE INDEX idx_reports_queue_id ON reports (device_id, queue_id)")
+    except Exception as e:
+        print(f"❌ [reports] queue_id 联合索引迁移失败: {e}")
+        raise
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=10000")
@@ -364,8 +408,20 @@ init_db()
 
 # ==================== save_report ====================
 
+def _insert_history_with_conn(conn, dev_id, lat, lng, ts):
+    """★ 2026-11-20 [P1] 在当前 reports 事务内写入轨迹点，避免两张表一成一败。"""
+    if lat is None or lng is None:
+        return
+    dup = conn.execute(
+        "SELECT 1 FROM history WHERE device_id=? AND timestamp=? AND lat=? AND lng=? LIMIT 1",
+        (dev_id, ts, lat, lng)).fetchone()
+    if not dup:
+        conn.execute("INSERT INTO history (device_id, lat, lng, timestamp) VALUES (?, ?, ?, ?)",
+                      (dev_id, lat, lng, ts))
+
+
 def save_report(dev_id, data, source_ip):
-    """完整上报落库。失败不影响 /api/report 的 200 响应。"""
+    """完整上报落库；True=新写入或幂等重复（均可确认），False=确实未落库。"""
     try:
         received_at = data.get("received_at", 0) or int(datetime.datetime.now().timestamp() * 1000)
         ts = data.get("timestamp", 0) or 0
@@ -452,8 +508,17 @@ def save_report(dev_id, data, source_ip):
             try: nearby_json = json.dumps(nearby, ensure_ascii=False)[:8000]
             except Exception: pass
 
+        # ★ 2026-11-20 [低危2] _queue_id 是客户端离线队列的本地字段，只用于补发幂等去重，
+        #   不再随 raw_json 落库（旧版把它当业务字段存进原始列，白占截断预算）
+        queue_id = data.get("_queue_id")
+        if not isinstance(queue_id, str) or not queue_id.strip():
+            queue_id = None
+        else:
+            queue_id = queue_id.strip()[:64]
+
+        raw_src = {k: v for k, v in data.items() if k != "_queue_id"} if queue_id else data
         raw_json = None
-        try: raw_json = json.dumps(data, ensure_ascii=False)[:REPORTS_RAW_MAX_BYTES]
+        try: raw_json = json.dumps(raw_src, ensure_ascii=False)[:REPORTS_RAW_MAX_BYTES]
         except Exception: pass
 
         # 1) declared_keys 增加 5 个陪伴字段，避免重复存入 ext_json
@@ -463,7 +528,7 @@ def save_report(dev_id, data, source_ip):
             "chat_locked", "elder_mode", "os_version", "uptime_ms",
             "sim_state", "sim_operator", "ringer_mode", "volume_alarm",
             "unlock_count_since_boot", "is_screen_locked", "airplane_mode",
-            "token", "last_executed_cmd_ids",
+            "token", "last_executed_cmd_ids", "_queue_id",  # ★ 2026-11-20 [低危2] 本地幂等键不入 ext_json
             "companion_enabled", "push_photo_url", "push_video_url",
             "push_audio_url", "push_web_url"
         }
@@ -491,6 +556,22 @@ def save_report(dev_id, data, source_ip):
             conn = sqlite3.connect('track_history.db', timeout=10)
             try:
                 conn.execute("PRAGMA busy_timeout=10000")
+                # ★ 2026-11-20 [B2] 幂等去重：客户端批量补发在「服务端已入库但响应超时 / JSON 不可解析」
+                #   时会把整批再发一遍（postReportBatchDirectly 返回 accepted=0 → 逐条降级重发），
+                #   reports 此前没有任何幂等键 → 同一条记录重复入库。现按客户端入队时注入的
+                #   _queue_id 前向查重，命中即跳过写入（对客户端仍按 accepted 确认，语义不变）。
+                dup = None
+                if queue_id:
+                    dup = conn.execute("SELECT 1 FROM reports WHERE device_id=? AND queue_id=? LIMIT 1",
+                                       (dev_id, queue_id)).fetchone()
+                if dup:
+                    # 幂等重复仍属于“服务端已接收”，并顺手补齐旧版本可能缺失的 history 点。
+                    if lat is not None and lng is not None:
+                        _insert_history_with_conn(conn, dev_id, lat, lng, resolve_history_ts(data, received_at))
+                    conn.commit()
+                    with print_lock:
+                        print(f"♻️ [reports] 幂等命中，确认已接收 {dev_id} queue_id={queue_id}")
+                    return True
                 # 2) INSERT 语句补齐 5 列与 5 个 ?
                 conn.execute("""INSERT INTO reports
                     (device_id, timestamp, received_at, day_str, hour, weekday,
@@ -505,8 +586,9 @@ def save_report(dev_id, data, source_ip):
                      recent_locations_json,
                      nearby_wifi_count, nearby_wifi_json, raw_json, ext_json,
                      build_version, protocol_version,
-                     companion_enabled, push_photo_url, push_video_url, push_audio_url, push_web_url)
-                    VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?, ?,?,?, ?,?, ?,?,?, ?,?,?, ?,?,?,?, ?,?,?,?,?,?, ?, ?,?,?,?, ?,?, ?,?,?,?,?)""", (
+                     companion_enabled, push_photo_url, push_video_url, push_audio_url, push_web_url,
+                     queue_id)
+                    VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?, ?,?,?, ?,?, ?,?,?, ?,?,?, ?,?,?,?, ?,?,?,?,?,?, ?, ?,?,?,?, ?,?, ?,?,?,?, ?, ?)""", (
                     dev_id, ts, received_at, dt.strftime("%Y-%m-%d"), dt.hour, dt.weekday(),
                     batt_level, is_charging, batt_temp, batt_volt,
                     wifi_ssid or None, wifi_bssid, wifi_rssi, local_ip, source_ip,
@@ -526,13 +608,19 @@ def save_report(dev_id, data, source_ip):
                     data.get("build_version"),
                     data.get("protocol_version"),
                     companion_enabled, push_photo_url, push_video_url, push_audio_url, push_web_url,
+                    queue_id,
                 ))
+                # ★ 2026-11-20 [P1] reports 与 history 同一连接、同一事务提交；任一失败整体回滚。
+                if lat is not None and lng is not None:
+                    _insert_history_with_conn(conn, dev_id, lat, lng, resolve_history_ts(data, received_at))
                 conn.commit()
+                return True   # ★ 2026-11-20 [P0] 明确返回“已接收”，只有 commit 成功才允许 ACK
             finally:
                 conn.close()
     except Exception as e:
         with print_lock:
             print(f"⚠️ [reports] 写入失败 {dev_id}: {e}")
+        return False  # ★ 2026-11-20 [P0] 失败必须向 HTTP 层传递，禁止假成功
 
 
 def cleanup_old_reports():
@@ -677,6 +765,56 @@ def _build_version_aware_commands(target_devs, action_name, payload):
 
 # ==================== HTTP 下行队列 ====================
 
+# ★ 2026-11-20 [P0] 指令队列持久化辅助函数。调用方持有 _cmd_lock，内部再取得 db_write_lock。
+def _persist_command_queue_locked(dev_id):
+    queue = PENDING_COMMANDS.get(dev_id, [])
+    with db_write_lock:
+        conn = sqlite3.connect('track_history.db', timeout=10)
+        try:
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("DELETE FROM pending_commands WHERE device_id=?", (dev_id,))
+            if queue:
+                conn.executemany(
+                    "INSERT INTO pending_commands (id, device_id, action, payload, created_at) VALUES (?, ?, ?, ?, ?)",
+                    [(c["id"], dev_id, c["type"], json.dumps(c.get("payload", ""), ensure_ascii=False), float(c["ts"])) for c in queue])
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _load_pending_commands():
+    """启动时恢复未过期指令；过期记录同时从持久化表清理。"""
+    now = time.time()
+    loaded = {}
+    with db_write_lock:
+        conn = sqlite3.connect('track_history.db', timeout=10)
+        try:
+            rows = conn.execute("SELECT id, device_id, action, payload, created_at FROM pending_commands ORDER BY created_at, id").fetchall()
+            expired_ids = []
+            for cmd_id, dev_id, action, payload, created_at in rows:
+                if now - float(created_at) >= cmd_ttl_for(action):
+                    expired_ids.append((cmd_id,))
+                    continue
+                try:
+                    restored_payload = json.loads(payload) if payload is not None else ""
+                except Exception:
+                    restored_payload = payload or ""
+                loaded.setdefault(dev_id, []).append({"id": cmd_id, "type": action,
+                                                       "payload": restored_payload, "ts": float(created_at)})
+            if expired_ids:
+                conn.executemany("DELETE FROM pending_commands WHERE id=?", expired_ids)
+                conn.commit()
+        finally:
+            conn.close()
+    with _cmd_lock:
+        PENDING_COMMANDS.clear()
+        PENDING_COMMANDS.update(loaded)
+    total = sum(len(q) for q in loaded.values())
+    if total:
+        with print_lock:
+            print(f"♻️ [HTTP队列] 已从数据库恢复 {total} 条待执行指令")
+
+
 def enqueue_command(dev_id, action, payload):
     global CMD_SEQ
     if not dev_id: return
@@ -687,6 +825,7 @@ def enqueue_command(dev_id, action, payload):
         for i, c in enumerate(queue):
             if c["type"] == action and c["payload"] == payload_str:
                 queue[i] = {"id": c["id"], "type": action, "payload": payload_str, "ts": now}
+                _persist_command_queue_locked(dev_id)
                 with print_lock:
                     print(f"📋 [HTTP队列] {dev_id} ~{action}({c['id']}) 去重（延后过期）")
                 return
@@ -696,6 +835,7 @@ def enqueue_command(dev_id, action, payload):
         while len(queue) >= CMD_MAX_PER_DEVICE:
             queue.pop(0); dropped += 1
         queue.append({"id": cmd_id, "type": action, "payload": payload_str, "ts": now})
+        _persist_command_queue_locked(dev_id)
     with print_lock:
         if dropped:
             print(f"📋 [HTTP队列] {dev_id} +{action}({cmd_id}) 队列满丢弃 {dropped} 条旧指令")
@@ -715,6 +855,7 @@ def process_executed_commands(dev_id, executed_ids):
         removed = len(queue) - len(new_queue)
         if new_queue: PENDING_COMMANDS[dev_id] = new_queue
         else: PENDING_COMMANDS.pop(dev_id, None)
+        _persist_command_queue_locked(dev_id)
     if removed > 0:
         with print_lock:
             print(f"✅ [HTTP队列] {dev_id} 已确认执行 {removed} 条")
@@ -729,6 +870,7 @@ def get_pending_commands(dev_id):
         if len(valid) != len(queue):
             if valid: PENDING_COMMANDS[dev_id] = valid
             else: PENDING_COMMANDS.pop(dev_id, None)
+            _persist_command_queue_locked(dev_id)
         return [dict(c) for c in valid]
 
 
@@ -740,6 +882,7 @@ def cleanup_expired_commands():
             valid = [c for c in queue if now - c["ts"] < cmd_ttl_for(c.get("type", ""))]
             if valid: PENDING_COMMANDS[dev_id] = valid
             else: PENDING_COMMANDS.pop(dev_id, None)
+            _persist_command_queue_locked(dev_id)
 
 def clear_pending_commands(dev_id=None):
     """清空指定设备或全部设备的 HTTP 待执行指令队列，返回移除条数"""
@@ -748,10 +891,14 @@ def clear_pending_commands(dev_id=None):
         if dev_id:
             q = PENDING_COMMANDS.pop(dev_id, [])
             removed = len(q)
+            _persist_command_queue_locked(dev_id)
         else:
+            dev_ids = list(PENDING_COMMANDS.keys())
             for q in PENDING_COMMANDS.values():
                 removed += len(q)
             PENDING_COMMANDS.clear()
+            for queued_dev in dev_ids:
+                _persist_command_queue_locked(queued_dev)
     return removed
 
 
@@ -770,7 +917,12 @@ def remove_command_by_id(dev_id, cmd_id):
             PENDING_COMMANDS[dev_id] = new_q
         else:
             PENDING_COMMANDS.pop(dev_id, None)
+        _persist_command_queue_locked(dev_id)
         return True
+
+# ★ 2026-11-20 [P0] 模块初始化完成后恢复磁盘队列；启动时 init_db 已先创建表。
+_load_pending_commands()
+
 
 def cmd_cleaner():
     """
@@ -796,11 +948,13 @@ def cmd_cleaner():
 # ==================== UDP 监听 ====================
 
 def udp_listener():
+    global UDP_LISTENING
     while True:
         udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             udp_sock.bind(('0.0.0.0', 8888))
+            UDP_LISTENING = True
             print("🎧 UDP 监听已启动，等待局域网对讲机消息...")
             while True:
                 try:
@@ -864,6 +1018,7 @@ def udp_listener():
             time.sleep(5)
             continue
         finally:
+            UDP_LISTENING = False
             try: udp_sock.close()
             except Exception: pass
 
@@ -914,6 +1069,22 @@ def offline_detector():
 
 
 
+def resolve_history_ts(data, now_ms):
+    """★ 2026-11-20 [C1] 修复：history 表时间基准两端统一。
+    旧版单条分支用 received_at（服务端接收时刻）、批量分支用 timestamp（客户端采集时刻），
+    同一条离线记录走批量还是走降级逐条，落进 history 的时间可相差数小时 → 轨迹回放时序错乱。
+    统一口径：优先采用客户端 timestamp，缺失/越界才回落到服务端时刻，并兼容秒级时间戳。"""
+    ts = data.get("timestamp")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return int(now_ms)
+    ts = int(ts)
+    if 0 < ts < 10000000000:                  # 秒级时间戳兼容
+        ts *= 1000
+    if ts <= 0 or ts > now_ms + 86400000:     # 0 / 未来超过 1 天，视为不可信
+        return int(now_ms)
+    return ts
+
+
 def save_history(dev_id, lat, lng, ts):
     if lat is None or lng is None: return
     with db_write_lock:
@@ -921,6 +1092,14 @@ def save_history(dev_id, lat, lng, ts):
         try:
             conn = sqlite3.connect('track_history.db', timeout=10)
             c = conn.cursor()
+            # ★ 2026-11-20 [B2] 幂等去重：客户端「服务端已入库但响应超时 / JSON 不可解析」时会整批重发，
+            #   history 此前没有任何幂等键 → 写出完全重复的轨迹点。此处按
+            #   (device_id, timestamp, lat, lng) 四元组全等判重：只有真正重复的「同一时刻同一坐标」
+            #   才被跳过，正常移动轨迹（时刻或坐标任一不同）完全不受影响。
+            dup = c.execute("SELECT 1 FROM history WHERE device_id=? AND timestamp=? AND lat=? AND lng=? LIMIT 1",
+                            (dev_id, ts, lat, lng)).fetchone()
+            if dup:
+                return
             c.execute("INSERT INTO history VALUES (?, ?, ?, ?)", (dev_id, lat, lng, ts))
             conn.commit()
         except Exception: 
@@ -1183,34 +1362,68 @@ def handle_client(client_conn, client_addr):
         if not first_chunk: return
 
         client_conn.settimeout(10.0)
-        raw = first_chunk
+        raw = bytearray(first_chunk)
+        # ★ 2026-11-20 [P0] 请求头单独限长；不完整头或超长头直接拒绝，避免无界拼接。
         while b"\r\n\r\n" not in raw:
-            chunk = client_conn.recv(65536)
+            if len(raw) > HTTP_MAX_HEADER_BYTES:
+                client_conn.sendall(b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                return
+            chunk = client_conn.recv(8192)
             if not chunk: break
-            raw += chunk
-            if len(raw) > 10 * 1024 * 1024: break
-        header_part, _, body_part = raw.partition(b"\r\n\r\n")
-        header_text = header_part.decode('utf-8', errors='ignore')
+            raw.extend(chunk)
+        if b"\r\n\r\n" not in raw:
+            client_conn.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return
+        header_part, _, body_part = bytes(raw).partition(b"\r\n\r\n")
+        if len(header_part) > HTTP_MAX_HEADER_BYTES:
+            client_conn.sendall(b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return
+        header_text = header_part.decode('iso-8859-1', errors='replace')
+        headers = {}
+        for line in header_text.split("\r\n")[1:]:
+            if not line: continue
+            if ":" not in line:
+                client_conn.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                return
+            key, value = line.split(":", 1)
+            key = key.strip().lower()
+            value = value.strip()
+            if key in headers and key in ("content-length", "transfer-encoding"):
+                client_conn.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                return
+            headers[key] = value
 
+        # ★ 2026-11-20 [P0] 原生 Socket 入口明确只接收 Content-Length；拒绝未实现的 chunked，禁止误解析半截数据。
+        transfer_encoding = headers.get("transfer-encoding", "").lower()
+        if transfer_encoding:
+            client_conn.sendall(b"HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return
         content_length = 0
-        for line in header_text.split("\r\n"):
-            if line.lower().startswith("content-length:"):
-                try: content_length = int(line.split(":", 1)[1].strip())
-                except Exception: pass
-                break
-        if content_length > 0:
-            while len(body_part) < content_length:
-                try:
-                    chunk = client_conn.recv(65536)
-                except socket.timeout:
-                    break
-                if not chunk: break
-                body_part += chunk
-                if len(raw) > 30 * 1024 * 1024: break
+        if "content-length" in headers:
+            raw_length = headers["content-length"]
+            if not raw_length.isdigit():
+                client_conn.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                return
+            content_length = int(raw_length)
+        if content_length > HTTP_MAX_BODY_BYTES:
+            client_conn.sendall(b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return
+        body_part = bytearray(body_part)
+        if len(body_part) > content_length:
             body_part = body_part[:content_length]
-        # ★ 2026-11-18 修复：记录截断标记。旧版把半张图当完整文件落盘，
-        # 手机端 BitmapFactory.decodeStream 返回 null —— 典型症状“推送图片手机端不显示”。
-        BODY_TRUNCATED = (content_length > 0 and len(body_part) < content_length)
+        while len(body_part) < content_length:
+            try:
+                chunk = client_conn.recv(min(65536, content_length - len(body_part)))
+            except socket.timeout:
+                client_conn.sendall(b"HTTP/1.1 408 Request Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                return
+            if not chunk: break
+            body_part.extend(chunk)
+        BODY_TRUNCATED = (len(body_part) != content_length)
+        if BODY_TRUNCATED:
+            client_conn.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return
+        body_part = bytes(body_part)
         if not header_text: return
 
         if header_text.startswith("OPTIONS"):
@@ -1244,32 +1457,38 @@ def handle_client(client_conn, client_addr):
                     return
 
                 now_ms = int(datetime.datetime.now().timestamp() * 1000)
-                batch_dev_id = batch_data.get("device_id", "unknown_device")
+                batch_dev_id = batch_data.get("device_id")
+                if not batch_dev_id and reports_list and isinstance(reports_list[0], dict):
+                    batch_dev_id = reports_list[0].get("device_id")
+                batch_dev_id = batch_dev_id or "unknown_device"
+                if not isinstance(batch_dev_id, str) or not batch_dev_id.strip():
+                    client_conn.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    return
+                batch_dev_id = batch_dev_id.strip()
                 accepted = 0
                 all_executed_ids = []
 
-                # 按 timestamp 升序处理，使最新状态最后覆盖 ALL_DEVICES_STATUS
-                sorted_items = sorted(
-                    reports_list,
-                    key=lambda x: (x.get("timestamp", 0) if isinstance(x, dict) and isinstance(x.get("timestamp"), (int, float)) else 0)
-                )
-
-                for item in sorted_items:
+                # ★ 2026-11-20 20:32 严格按客户端发送顺序前缀入库：遇到首条无效记录立即 break，
+                #   确保 accepted_is_prefix=True 时客户端按前 N 条删除与服务端入库 100% 一一对应
+                for item in reports_list:
                     if not isinstance(item, dict):
-                        continue
+                        break
                     item_token = item.get("token") or batch_data.get("token")
                     if item_token != AUTH_TOKEN:
-                        continue
+                        break
 
-                    dev_id = item.get("device_id") or batch_dev_id or "unknown_device"
+                    dev_id = item.get("device_id") or batch_dev_id
+                    # ★ 2026-11-20 [P1] 一个 batch 只允许一个设备；避免跨设备写状态/错确认指令。
+                    if not isinstance(dev_id, str) or dev_id.strip() != batch_dev_id:
+                        break
                     if item.get("network") is None: item["network"] = {}
                     if item.get("battery") is None: item["battery"] = {}
                     if item.get("location") is None: item["location"] = {}
                     if item.get("nearby_wifi") is None: item["nearby_wifi"] = []
 
                     executed_ids = item.pop("last_executed_cmd_ids", [])
-                    if isinstance(executed_ids, list) and executed_ids:
-                        all_executed_ids.extend(executed_ids)
+                    if not isinstance(executed_ids, list):
+                        executed_ids = []
 
                     item["received_at"] = now_ms
 
@@ -1286,6 +1505,10 @@ def handle_client(client_conn, client_addr):
                         else:
                             ch["health"] = "degraded"
                         item["channel"] = ch
+
+                    # ★ 2026-11-20 [P0] 必须先确认数据库事务成功；失败即停止前缀，客户端保留本条及后续队列。
+                    if not save_report(dev_id, item, client_addr[0]):
+                        break
 
                     with state_lock:
                         if dev_id not in ALL_DEVICES_STATUS:
@@ -1308,12 +1531,7 @@ def handle_client(client_conn, client_addr):
                         if prev_info.get("last_chat"):
                             item["last_chat"] = prev_info["last_chat"]
                         ALL_DEVICES_STATUS[dev_id] = item
-
-                    loc = item.get('location') or {}
-                    lat, lng = loc.get('latitude'), loc.get('longitude')
-                    if lat is not None and lng is not None:
-                        save_history(dev_id, lat, lng, item.get("timestamp") or now_ms)
-                    save_report(dev_id, item, client_addr[0])
+                    all_executed_ids.extend(executed_ids)
                     accepted += 1
 
                 if all_executed_ids:
@@ -1324,20 +1542,31 @@ def handle_client(client_conn, client_addr):
                 response_body = json.dumps({
                     "status": "success",
                     "accepted": accepted,
+                    "accepted_is_prefix": True,
                     "config": GLOBAL_DEFAULT_CONFIG,
                     "pending_commands": pending,
                     "next_poll_seconds": next_poll
                 }, ensure_ascii=False)
+
                 response_bytes = response_body.encode('utf-8')
                 client_conn.sendall(
                     f"HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {len(response_bytes)}\r\nConnection: close\r\n\r\n".encode('utf-8') + response_bytes)
+                # ★ 2026-11-20 [致命 B0] 修复：批量分支处理完毕必须显式 return。
+                #   旧版此处与 except 分支均无 return，而 "POST /api/report" 恰好是
+                #   "POST /api/report_batch" 的子串 → 每一次批量上报都会再落入下方单条分支：
+                #   ① 把整个批量信封当上报体写出 1 条脏行（timestamp=now、陪伴字段全 NULL）；
+                #   ② ALL_DEVICES_STATUS[dev_id] 被信封覆盖，位置/电量/信道健康度全部丢失；
+                #   ③ 同一 TCP 连接写出第二个 HTTP 响应（客户端只读第一个，第二个触发 BrokenPipe）。
+                return
             except Exception as e:
                 with print_lock: print(f"❌ POST /api/report_batch 异常: {e}")
                 try: client_conn.sendall(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 except Exception: pass
 
         # ===== POST /api/report =====
-        if "POST /api/report" in header_text:
+        # ★ 2026-11-20 [致命 B0] 修复：if → elif，让单条分支与上方批量分支同属一条 if/elif 链，
+        #   从根上消除「子串抢匹配 + 分支穿透」两类隐患（上一处 return 作为双保险保留）。
+        elif "POST /api/report" in header_text:
             try:
                 data = json.loads(body_part.decode('utf-8', errors='ignore'))
                 if data.get("token") != AUTH_TOKEN:
@@ -1351,8 +1580,8 @@ def handle_client(client_conn, client_addr):
                 if data.get("nearby_wifi") is None: data["nearby_wifi"] = []
 
                 executed_ids = data.pop("last_executed_cmd_ids", [])
-                if executed_ids:
-                    process_executed_commands(dev_id, executed_ids)
+                if not isinstance(executed_ids, list):
+                    executed_ids = []
                 data["received_at"] = int(datetime.datetime.now().timestamp() * 1000)
 
                 # v2.0 补丁：通道健康度判定（服务端算，客户端不填）
@@ -1368,6 +1597,20 @@ def handle_client(client_conn, client_addr):
                     else:
                         ch["health"] = "degraded"
                     data["channel"] = ch
+
+                # 保留旧版 cloud_logs 延续展示语义：先从状态快照补齐，再提交上报数据。
+                with state_lock:
+                    prev_info = dict(ALL_DEVICES_STATUS.get(dev_id, {}))
+                if "cloud_logs" not in data and "cloud_logs" in prev_info:
+                    data["cloud_logs"] = prev_info["cloud_logs"]
+                    data["cloud_logs_time"] = prev_info.get("cloud_logs_time", 0)
+
+                # ★ 2026-11-20 [P0/P1] 数据库事务成功后才更新在线状态、确认客户端 ACK。
+                if not save_report(dev_id, data, client_addr[0]):
+                    client_conn.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    return
+                if executed_ids:
+                    process_executed_commands(dev_id, executed_ids)
 
                 with state_lock:
                     if dev_id not in ALL_DEVICES_STATUS:
@@ -1390,12 +1633,6 @@ def handle_client(client_conn, client_addr):
                     if prev_info.get("last_chat"):
                         data["last_chat"] = prev_info["last_chat"]
                     ALL_DEVICES_STATUS[dev_id] = data
-
-                loc = data.get('location') or {}
-                lat, lng = loc.get('latitude'), loc.get('longitude')
-                if lat is not None and lng is not None:
-                    save_history(dev_id, lat, lng, data["received_at"])
-                save_report(dev_id, data, client_addr[0])
 
                 pending = get_pending_commands(dev_id)
                 next_poll = 30 if pending else 0
@@ -1913,6 +2150,7 @@ def handle_client(client_conn, client_addr):
                             ALL_DEVICES_STATUS.pop(target_dev_id, None)
                         with _cmd_lock:
                             PENDING_COMMANDS.pop(target_dev_id, None)
+                            _persist_command_queue_locked(target_dev_id)
                         success = existed
                         extra_msg = f"已删除 {target_dev_id}" if existed else f"设备 {target_dev_id} 不存在（可能已清理）"
 
@@ -1930,6 +2168,7 @@ def handle_client(client_conn, client_addr):
                         with _cmd_lock:
                             for k in to_delete:
                                 PENDING_COMMANDS.pop(k, None)
+                                _persist_command_queue_locked(k)
                         success = len(to_delete) > 0
                         threshold_h = CLEAN_OFFLINE_THRESHOLD_MS // 3600000
                         extra_msg = f"清理了 {len(to_delete)} 台设备（>{threshold_h}小时未活动）" if to_delete else f"没有符合条件的设备（>{threshold_h}小时未活动）"
@@ -2063,7 +2302,7 @@ def handle_client(client_conn, client_addr):
 
                 html = """<!DOCTYPE html>
 <html><head><meta charset='utf-8'>
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>终端设备管理</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -2129,10 +2368,89 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
 #companionBox { display: none; margin-top: 24px; }
 
 .device-selector { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px; border-top: 1px solid var(--color-border-muted); background: #fff; }
+/* ★ v2.5.3：高级设置使用独立设备选择器，避免与陪伴/对讲机选择状态串扰 */
+.admin-device-selector { display:flex; flex-wrap:wrap; gap:6px; padding:10px 12px; margin-top:10px; border:1px solid var(--color-border-muted); border-radius:6px; background:#fff; }
+.admin-device-selector .device-tag span { border-radius:6px; }
+.admin-scope-hint { color:var(--color-fg-muted); font-size:12px; margin-top:6px; }
+
 .device-tag { position: relative; cursor: pointer; }
 .device-tag input { position: absolute; opacity: 0; cursor: pointer; height: 0; width: 0; }
 .device-tag span { display: inline-block; padding: 4px 10px; font-size: 12px; border-radius: 20px; border: 1px solid var(--color-border-default); background: #fff; color: var(--color-fg-default); transition: 0.2s; user-select: none; }
 .device-tag input:checked ~ span { background: #24292f; color: #fff; border-color: #24292f; box-shadow: inset 0 1px 3px rgba(0,0,0,0.5); }
+
+
+/* ★ v2.5.5 管理台结构升级：借鉴 OpenWrt LuCI 的分区导航与工作区布局 */
+.admin-shell { display:grid; grid-template-columns:220px minmax(0,1fr); gap:18px; align-items:start; max-width:1600px; margin:0 auto; }
+.admin-sidebar { position:sticky; top:16px; background:#fff; border:1px solid var(--color-border-default); border-radius:10px; padding:12px; }
+.admin-brand { font-size:14px; font-weight:700; padding:8px 10px 14px; border-bottom:1px solid var(--color-border-muted); margin-bottom:10px; }
+.admin-nav-group { margin:14px 0 7px; padding:0 10px; color:var(--color-fg-muted); font-size:12px; font-weight:700; letter-spacing:.04em; }
+.admin-nav { display:flex; flex-direction:column; gap:4px; }
+.admin-nav button { width:100%; text-align:left; border:1px solid transparent; background:transparent; padding:10px 10px; border-radius:7px; white-space:normal; font-size:15px; }
+.admin-nav button:hover { background:var(--color-canvas-subtle); }
+.admin-nav button.active { color:#0969da; background:#eef5ff; border-color:#c8dcf8; font-weight:650; }
+.admin-workspace { min-width:0; }
+.admin-page { display:none; min-width:0; }
+.admin-page.active { display:block; }
+.admin-page-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin:2px 0 14px; }
+.admin-page-head h3 { margin:0; font-size:19px; }
+.admin-page-desc { color:var(--color-fg-muted); font-size:12px; margin-top:5px; }
+.admin-page .panel { margin-bottom:16px; }
+.admin-page .table-responsive { margin-top:0; }
+.admin-health-placeholder { border:1px dashed #9aa4af; border-radius:10px; padding:28px; background:#fff; }
+.admin-health-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-top:16px; }
+.admin-health-card { border:1px solid var(--color-border-default); border-radius:8px; padding:14px; background:var(--color-canvas-subtle); }
+/* ★ v2.5.7：二级导航与独立工作页，避免沟通面板纵向堆叠 */
+.admin-nav-sub { display:flex; flex-direction:column; gap:3px; margin:2px 0 8px 10px; padding-left:0; border-left:0; }
+.admin-nav-sub button { font-size:14px; padding:8px 10px; color:var(--color-fg-muted); }
+.admin-nav-sub button.active { color:#0969da; background:#eef5ff; border-color:#c8dcf8; }
+.admin-global-scope { display:none; margin:0 0 14px; }
+.admin-global-scope.active { display:block; }
+.admin-subpage-intro { margin-bottom:12px; }
+.admin-subpage-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.admin-subpage-actions button { margin:0; }
+#admin-page-talk #chatBox, #admin-page-companion #companionBox { margin-top:0; }
+#admin-page-map #mapContainer { margin-top:0; }
+/* ★ v2.5.6：维护页卡片化，降低按钮密度并建立视觉层级 */
+.admin-page#admin-page-maintenance > .panel { padding:14px 16px; }
+#admin-page-maintenance details { border:0 !important; margin:0 !important; padding:0 !important; }
+#admin-page-maintenance details > summary { list-style:none; cursor:default; font-size:17px; font-weight:700; padding:4px 0 12px; border-bottom:1px solid var(--color-border-muted); }
+#admin-page-maintenance details > summary::-webkit-details-marker { display:none; }
+.admin-scope-panel { display:flex; align-items:center; gap:16px; margin:14px 0 16px !important; padding:12px 14px !important; background:#fff !important; border:1px solid var(--color-border-default) !important; border-radius:9px; }
+.admin-scope-panel > div:first-child { flex:0 0 130px; }
+.admin-scope-panel .admin-scope-hint { margin-top:3px; font-size:11px; color:var(--color-fg-muted); }
+.admin-scope-panel .admin-device-selector { flex:1; min-height:0; padding:0 !important; border:0 !important; background:transparent !important; }
+.admin-tool-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+.admin-tool-card { min-width:0; border:1px solid var(--color-border-default); border-radius:9px; padding:13px 14px; background:#fff; }
+.admin-tool-card-head { display:flex; flex-direction:column; gap:3px; margin-bottom:10px; }
+.admin-tool-card-head b { font-size:14px; }
+.admin-tool-card-head span { color:var(--color-fg-muted); font-size:11px; }
+.admin-tool-actions { display:flex; flex-wrap:wrap; gap:7px; }
+.admin-tool-actions button { margin:0; min-height:34px; padding:6px 10px; font-size:12px; }
+.admin-tool-card.is-empty { display:none !important; }
+.admin-tool-actions { display:grid; grid-template-columns:repeat(auto-fit,minmax(112px,1fr)); align-content:start; align-items:stretch; }
+.admin-tool-actions button { min-height:38px; display:flex; align-items:center; justify-content:center; text-align:center; line-height:1.35; }
+.admin-sms-row { display:grid; grid-template-columns:minmax(180px,1fr) minmax(220px,2fr) auto; align-items:center; gap:10px; margin-top:14px !important; padding:12px 14px; border:1px solid var(--color-border-default); border-radius:9px; background:#fff; }
+.admin-sms-title { display:flex; flex-direction:column; gap:3px; font-size:13px; }
+.admin-sms-title span { color:var(--color-fg-muted); font-size:11px; }
+.admin-sms-row input { min-width:0; }
+@media (max-width: 1000px) { .admin-tool-grid { grid-template-columns:1fr; } }
+@media (max-width: 700px) {
+ .admin-scope-panel { align-items:flex-start; flex-direction:column; gap:8px; }
+ .admin-scope-panel > div:first-child { flex-basis:auto; }
+ .admin-sms-row { grid-template-columns:1fr; }
+ .admin-sms-row button { width:100%; }
+}
+.admin-mobile-title { display:none; }
+@media (max-width: 900px) {
+  .admin-shell { grid-template-columns:1fr; gap:10px; }
+  .admin-sidebar { position:static; padding:8px; }
+  .admin-brand { display:none; }
+  .admin-nav-group { display:none; }
+  .admin-nav { flex-direction:row; overflow-x:auto; padding-bottom:3px; }
+  .admin-nav button { width:auto; min-width:max-content; text-align:center; padding:8px 12px; }
+  .admin-mobile-title { display:block; font-weight:700; margin:2px 0 8px; }
+  .admin-health-grid { grid-template-columns:1fr; }
+}
 
 @media (max-width: 768px) {
     body { margin: 12px; }
@@ -2145,6 +2463,176 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
     .hide-mobile { display: none !important; }
     .chat-input-area input { min-width: 100px; }
 }
+
+/* ★ v2.5.8：手机端专用布局。桌面端维持原有侧栏+工作区结构 */
+@media (max-width: 600px) {
+    body { margin:8px; padding-bottom:calc(12px + env(safe-area-inset-bottom)); }
+    body > h2 { font-size:17px; line-height:1.35; margin:4px 2px 12px; }
+    .admin-shell { display:flex; flex-direction:column; gap:10px; width:100%; }
+    .admin-sidebar { position:static; width:100%; box-sizing:border-box; padding:9px; border-radius:9px; }
+    .admin-brand { display:block; font-size:13px; padding:4px 5px 8px; margin-bottom:7px; }
+    /* 分组标题不再隐藏；主入口和二级入口在手机上按分组排列 */
+    .admin-nav { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px; overflow:visible; padding:0; }
+    .admin-nav-group { display:block; grid-column:1 / -1; margin:8px 2px 1px; padding:0 3px; font-size:10px; }
+    .admin-nav > button { width:100%; min-width:0; min-height:40px; box-sizing:border-box; padding:8px 7px; text-align:left; white-space:normal; font-size:13px; }
+    .admin-nav-sub { display:grid; grid-column:1 / -1; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px; margin:0; padding:0; border:0; }
+    .admin-nav-sub button { width:100%; min-width:0; min-height:38px; box-sizing:border-box; padding:7px 6px; text-align:left; white-space:normal; font-size:12px; }
+    .admin-workspace { width:100%; min-width:0; }
+    .admin-mobile-title { display:none; }
+    .admin-page-head { margin:3px 2px 10px; }
+    .admin-page-head h3 { font-size:18px; }
+    .admin-page .panel, .panel { padding:11px; margin-bottom:12px; }
+    .admin-page#admin-page-maintenance > .panel { padding:11px; }
+    .admin-tool-grid { grid-template-columns:minmax(0,1fr); gap:9px; }
+    .admin-tool-card { padding:11px; }
+    .admin-tool-actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; }
+    .admin-tool-actions button { width:100%; min-width:0; min-height:42px; padding:8px 6px; white-space:normal; line-height:1.3; font-size:12px; }
+    .admin-scope-panel { padding:10px !important; gap:7px; }
+    .admin-device-selector { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; width:100%; box-sizing:border-box; }
+    .admin-device-selector .device-tag span { display:block; min-height:34px; box-sizing:border-box; padding:8px 7px; text-align:center; overflow-wrap:anywhere; }
+    .admin-scope-panel .admin-device-selector { display:grid; }
+    .admin-sms-row { display:grid; grid-template-columns:minmax(0,1fr); gap:8px; padding:10px; }
+    .admin-sms-row input, input[type="text"], .input-row input[type="text"] { width:100%; min-width:0; min-height:42px; box-sizing:border-box; font-size:16px; }
+    button { min-height:40px; max-width:100%; white-space:normal; }
+    .admin-subpage-actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; }
+    .admin-subpage-actions button { width:100%; min-height:42px; white-space:normal; }
+    #chatBox { height:min(62vh,560px); min-height:360px; }
+    #chatMessages { padding:10px; }
+    .chat-input-area { padding:9px; }
+    .chat-input-area input { flex:1 1 100%; min-width:0; min-height:42px; font-size:16px; }
+    .chat-input-area button { flex:1 1 calc(50% - 8px); min-height:42px; }
+    #companionBox { margin-top:0; }
+    #mapContainer { margin-top:10px; }
+    #map { height:58vh; min-height:320px; max-height:680px; }
+    #msgContent { width:calc(100% - 20px); max-height:calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)); box-sizing:border-box; }
+    .modal-header, .modal-body { padding:12px; }
+    .table-responsive { max-width:100%; -webkit-overflow-scrolling:touch; }
+    table { min-width:760px; }
+    th, td { padding:9px 10px; font-size:12px; }
+    #toast { min-width:0; width:calc(100% - 32px); bottom:calc(16px + env(safe-area-inset-bottom)); box-sizing:border-box; }
+}
+@media (min-width: 601px) and (max-width: 900px) {
+    body { margin:14px; }
+    .admin-shell { grid-template-columns:190px minmax(0,1fr); gap:12px; }
+    .admin-sidebar { padding:9px; }
+    .admin-nav button { padding:8px 7px; font-size:13px; }
+}
+
+/* ★ v2.5.9：手机端采用 LuCI 风格抽屉导航 + 底部快捷栏；桌面端侧栏保持不变 */
+.admin-mobile-topbar, .admin-mobile-backdrop, .admin-mobile-bottom { display:none; }
+@media (max-width: 600px) {
+  html, body { width:100%; min-width:0; overflow-x:hidden; }
+  body { margin:0 !important; padding:0 0 calc(68px + env(safe-area-inset-bottom)) !important; }
+  body > h2 { display:none !important; }
+  .admin-mobile-topbar {
+    display:flex; position:sticky; top:0; z-index:1200; min-height:52px;
+    align-items:center; justify-content:space-between; gap:10px;
+    padding:calc(5px + env(safe-area-inset-top)) 14px 5px;
+    background:#fff; border-bottom:1px solid var(--color-border-default);
+    box-shadow:0 2px 8px rgba(31,41,55,.06);
+  }
+  .admin-mobile-topbar .mobile-brand { min-width:0; font-size:15px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .admin-mobile-topbar button { min-width:42px; min-height:40px; padding:7px 11px; font-size:18px; }
+  .admin-mobile-topbar .mobile-page-name { flex:1; min-width:0; text-align:right; color:var(--color-fg-muted); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .admin-shell { display:block !important; width:100%; margin:0; padding:12px 12px 18px; box-sizing:border-box; }
+  .admin-sidebar {
+    display:block !important; position:fixed !important; z-index:1400; top:0; bottom:0; left:0;
+    width:84vw !important; max-width:320px; max-height:100vh; max-height:100dvh; overflow-y:auto; overscroll-behavior:contain;
+    box-sizing:border-box; padding:calc(14px + env(safe-area-inset-top)) 12px calc(18px + env(safe-area-inset-bottom));
+    border-radius:0 14px 14px 0; border:0; box-shadow:0 12px 40px rgba(0,0,0,.22);
+    transform:translateX(-105%); visibility:hidden; transition:transform .22s ease, visibility .22s ease;
+  }
+  .admin-sidebar.mobile-open { transform:translateX(0); visibility:visible; }
+  .admin-brand { display:block !important; font-size:14px; padding:8px 8px 13px; margin-bottom:12px; }
+  .admin-nav { display:flex !important; flex-direction:column !important; gap:4px; overflow:visible !important; }
+  .admin-nav-group { display:block !important; margin:15px 0 7px; padding:0 9px; font-size:12px; }
+  .admin-nav > button, .admin-nav-sub button { width:100% !important; min-width:0 !important; min-height:46px; padding:10px 11px !important; text-align:left !important; font-size:15px !important; }
+  .admin-nav-sub { display:flex !important; flex-direction:column; gap:3px; margin:2px 0 8px 8px; padding-left:0; border-left:0; }
+  .admin-mobile-backdrop { display:block; position:fixed; inset:0; z-index:1300; background:rgba(15,23,42,.42); opacity:0; visibility:hidden; transition:opacity .2s ease,visibility .2s ease; }
+  .admin-mobile-backdrop.visible { opacity:1; visibility:visible; }
+  .admin-mobile-bottom {
+    display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); position:fixed; z-index:1250;
+    left:0; right:0; bottom:0; min-height:56px; padding:5px 5px calc(5px + env(safe-area-inset-bottom));
+    background:rgba(255,255,255,.97); border-top:1px solid var(--color-border-default);
+    box-shadow:0 -3px 12px rgba(31,41,55,.07); backdrop-filter:blur(12px);
+  }
+  .admin-mobile-bottom button { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; min-width:0; min-height:48px; padding:4px 2px; border:0; background:transparent; font-size:10px; line-height:1.2; color:var(--color-fg-muted); }
+  .admin-mobile-bottom button .nav-ico { font-size:18px; line-height:1.1; }
+  .admin-mobile-bottom button.active { color:#0969da; font-weight:700; background:#eef5ff; border-radius:9px; }
+  .admin-workspace { width:100%; min-width:0; }
+  .admin-mobile-title { display:none !important; }
+  .admin-page-head { margin:1px 1px 12px; align-items:center; }
+  .admin-page-head h3 { font-size:19px; }
+  .admin-page-desc { line-height:1.5; }
+  .admin-page .panel, .panel { border-radius:10px; }
+  #map { height:calc(100dvh - 190px); min-height:340px; max-height:none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .admin-sidebar, .admin-mobile-backdrop { transition:none !important; }
+}
+
+
+/* ★ v2.5.10：管理工作页统一采用运动健康页的低装饰中性视觉 */
+.admin-page .panel,
+#admin-page-talk #chatBox,
+#admin-page-companion #companionBox,
+#admin-page-map #mapContainer,
+#admin-page-location .panel,
+#admin-page-messages .panel,
+#admin-page-queue .panel {
+  border:1px solid var(--color-border-default) !important;
+  border-radius:10px !important;
+  background:#fff !important;
+  box-shadow:none !important;
+}
+#admin-page-companion #companionBox > div:first-child {
+  padding:16px !important; background:#fff !important;
+  border:1px solid var(--color-border-default) !important; border-radius:10px !important;
+}
+#admin-page-companion #companionBox h3,
+#admin-page-companion #companionBox [style*="color: #0969da"],
+#admin-page-companion #companionBox [style*="color:#0969da"] { color:var(--color-fg-default) !important; }
+#admin-page-companion #companionSelector,
+#admin-page-talk .device-selector { background:var(--color-canvas-subtle) !important; border:1px solid var(--color-border-muted); border-radius:8px; }
+#admin-page-companion .btn-group,
+#admin-page-companion .input-row { background:transparent !important; }
+#admin-page-companion button,
+#admin-page-talk button,
+#admin-page-messages button,
+#admin-page-queue button,
+#admin-page-location button,
+#admin-page-map button {
+  background:var(--color-btn-bg) !important; color:var(--color-fg-default) !important;
+  border:1px solid var(--color-border-default) !important; box-shadow:none !important;
+}
+#admin-page-companion button.btn-primary,
+#admin-page-talk button.btn-primary { background:#24292f !important; color:#fff !important; border-color:#24292f !important; }
+#admin-page-companion .btn-danger { color:var(--color-fg-default) !important; }
+#admin-page-companion input[type="text"],
+#admin-page-talk input[type="text"] { border-color:var(--color-border-default) !important; box-shadow:none !important; }
+#admin-page-companion [style*="border-top: 1px dashed"],
+#admin-page-companion [style*="border-top:1px dashed"] { border:1px solid var(--color-border-muted) !important; border-radius:8px !important; }
+#admin-page-companion #companionQueryResult { color:var(--color-fg-muted) !important; }
+#admin-page-map #mapContainer { position:relative; margin-top:10px; overflow:hidden; }
+#mapLocateBtn {
+  position:absolute; z-index:1000; right:14px; bottom:22px; width:48px; height:48px;
+  display:flex; align-items:center; justify-content:center; border-radius:50% !important;
+  background:#fff !important; border:1px solid #c9d1d9 !important;
+  box-shadow:0 2px 9px rgba(0,0,0,.18) !important; color:#24292f !important;
+  font-size:22px; padding:0 !important; cursor:pointer; touch-action:manipulation;
+}
+.device-current-dot { width:18px; height:18px; border-radius:50%; background:#1677ff; border:3px solid #fff; box-shadow:0 1px 7px rgba(0,0,0,.38); }
+.device-current-dot.latest { width:22px; height:22px; background:#0969da; }
+.admin-page .admin-subpage-intro { background:#fff !important; border-color:var(--color-border-default) !important; }
+@media (max-width:600px) {
+  #admin-page-companion #companionBox > div:first-child { padding:12px !important; }
+  #admin-page-companion .btn-group { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  #admin-page-companion .btn-group button { min-height:44px; white-space:normal; }
+  #admin-page-companion .input-row { display:flex; flex-direction:column; align-items:stretch; }
+  #admin-page-companion .input-row button { width:100%; }
+  #mapLocateBtn { display:flex !important; right:12px; bottom:16px; width:50px; height:50px; z-index:1000; }
+}
+
 </style>
 </head>
 <body>
@@ -2165,28 +2653,37 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
     </div>
     <details style="margin-top: 16px; border-top: 1px solid var(--color-border-muted); padding-top: 12px;">
         <summary>⚙️ 高级设置与系统工具</summary>
-        <div class="btn-group" style="margin-top: 12px;">
-            <button onclick="sendCmd('lock_chat')">🔒 锁定聊天</button>
-            <button onclick="sendCmd('unlock_chat')">🔓 解锁聊天</button>
-            <button onclick="sendCmd('set_cloud_log', '1')">☁️ 开启云端日志</button>
-            <button onclick="sendCmd('set_cloud_log', '0')">☁️ 关闭云端日志</button>
-            <button class="btn-danger" onclick="sendCmd('play_alarm')">全局测试音频</button>
-            <button id="toggleMapBtn" onclick="toggleMap()">🗺️ 展开地图</button>
-            <button onclick="showOfflineManager()">🗑️ 管理离线设备</button>
-            <button onclick="sendCmd('clear_history')">清空手机历史</button>
-            <button class="btn-danger" onclick="sendCmd('clear_chat')">🧹 清空手机聊天</button>
+        <!-- ★ v2.5.3 管理台统一操作框架：高级设置目标与陪伴/对讲机选择器彻底隔离 -->
+        <div style="margin-top:12px;padding:10px 12px;border:1px solid var(--color-border-default);border-radius:6px;background:var(--color-canvas-subtle);">
+            <div style="font-weight:600;font-size:13px;">🎯 高级设置操作范围</div>
+            <div class="admin-scope-hint">先选择目标设备，再执行下方设备操作。选择“全部设备”才会全局执行；此选择不会影响对讲机和远程陪伴。</div>
+            <div class="admin-device-selector" id="adminDeviceSelector">
+                <label class="device-tag"><input type="checkbox" class="admin-target-cb" value="all"><span>全部设备</span></label>
+                <span style="font-size:12px;color:var(--color-fg-muted);">正在加载设备列表…</span>
+            </div>
         </div>
         <div class="btn-group" style="margin-top: 12px;">
-            <button onclick="sendCmd('upload_log')">📤 拉取日志(主服务器)</button>
+            <button onclick="sendAdminCmd('lock_chat')">🔒 锁定聊天</button>
+            <button onclick="sendAdminCmd('unlock_chat')">🔓 解锁聊天</button>
+            <button onclick="sendAdminCmd('set_cloud_log', '1')">☁️ 开启云端日志</button>
+            <button onclick="sendAdminCmd('set_cloud_log', '0')">☁️ 关闭云端日志</button>
+            <button class="btn-danger" onclick="sendAdminCmd('play_alarm')">🔊 选定设备测试音频</button>
+            <button id="toggleMapBtn" onclick="toggleMap()">🗺️ 展开地图</button>
+            <button onclick="showOfflineManager()">🗑️ 管理离线设备</button>
+            <button onclick="sendAdminCmd('clear_history')">清空手机历史</button>
+            <button class="btn-danger" onclick="sendAdminCmd('clear_chat')">🧹 清空手机聊天</button>
+        </div>
+        <div class="btn-group" style="margin-top: 12px;">
+            <button onclick="sendAdminCmd('upload_log')">📤 拉取日志(主服务器)</button>
             <button onclick="showLogs()">📋 查看手机日志</button>
-            <button onclick="sendCmd('locate_once')">📍 手动定位一次</button>
-            <button onclick="sendCmd('scan_wifi')">📡 手动扫描 WiFi</button>
-            <button onclick="sendCmd('restart_udp')">🔄 重启 UDP 监听</button>
-            <button class="btn-danger" onclick="sendCmd('test_low_battery')">🧪 模拟低电量</button>
+            <button onclick="sendAdminCmd('locate_once')">📍 手动定位一次</button>
+            <button onclick="sendAdminCmd('scan_wifi')">📡 手动扫描 WiFi</button>
+            <button onclick="sendAdminCmd('restart_udp')">🔄 重启设备 UDP 监听</button>
+            <button class="btn-danger" onclick="sendAdminCmd('test_low_battery')">🧪 模拟低电量</button>
         </div>
         <div class="input-row" style="margin-top: 12px;">
             <input type="text" id="smsNumText" placeholder="输入紧急接收短信的手机号...">
-            <button onclick="sendSmsNum('255.255.255.255')">📱 设置报警号码</button>
+            <button onclick="sendAdminSmsNum()">📱 设置报警号码</button>
         </div>
     </details>
 </div>
@@ -2204,13 +2701,13 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
 
 <!-- ★ v2.2 新增：远程陪伴面板独立容器，默认隐藏，与 #chatBox 平级 -->
 <div id="companionBox">
-    <div style="padding: 16px; background: #f0f7ff; border: 1px solid #0969da; border-radius: 6px;">
-        <h3 style="margin-top: 0; color: #0969da; font-size: 16px;">👨‍👩‍👧 远程陪伴 (给老人推照片/视频)</h3>
+    <div style="padding: 16px; background: #fff; border: 1px solid #d0d7de; border-radius: 10px;">
+        <h3 style="margin-top: 0; color: #24292f; font-size: 16px;">远程陪护</h3>
         <!-- ★ 2026-11-18 补丁C：陪伴面板自带设备勾选区（原先勾选框只在"对讲机"面板里，推图时无处可选） -->
         <div class="device-selector" id="companionSelector"><label class="device-tag"><input type="checkbox" class="companion-cb" value="all" checked><span>所有人 (群发)</span></label></div>
         <div class="btn-group" style="margin-top: 8px;">
-            <button class="btn-primary" onclick="sendCmd('companion_on')">🟢 开启陪伴模式</button>
-            <button onclick="sendCmd('companion_off')">⚪ 关闭陪伴模式</button>
+            <button class="btn-primary" onclick="sendCmd('companion_on', '', mediaTarget())">开启陪护模式</button>
+            <button onclick="sendCmd('companion_off', '', mediaTarget())">关闭陪护模式</button>
         </div>
         
         <!-- ★ v2.5 终极无痕镜像网关：一个可视输入框承载双模，外接幽灵隐藏文件选择器 -->
@@ -2223,7 +2720,7 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
             <!-- 幽灵隐藏真实选择器：完全不可见，只在后台提供本地文件字节流支持 -->
             <!-- ★ v2.7 完美镜像双模输入框：移除内部注释，规避 HTML 标签解析死锁 -->
 <input type="file" id="companionFileReal" accept="image/*,video/*" style="display: none;" onchange="if(this.files && this.files.length > 0) { document.getElementById('companionFileFake').value = this.files[0].name; document.getElementById('companionFileFake').style.color='#24292f'; }">        
-            <button class="btn-primary" onclick="uploadCompanionMedia()">🚀 推送到电视/手机</button>
+            <button class="btn-primary" onclick="uploadCompanionMedia()">推送到设备</button>
         </div>
 
         <div style="color: var(--color-fg-muted); font-size: 12px; margin-top: 8px;">
@@ -2231,11 +2728,11 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
         </div>
 
         <!-- ★ 2026-11-20 新增：陪伴状态与历史明细查询（按 device_id 查询 reports 表） -->
-        <div style="margin-top: 14px; padding: 10px; border-top: 1px dashed #9ec5fe; background: #fff; border-radius: 6px;">
-            <div style="font-weight: 600; font-size: 13px; color: #0969da; margin-bottom: 8px;">📊 陪伴状态与历史明细查询（reports 表）</div>
+        <div style="margin-top: 14px; padding: 10px; border: 1px solid #d8dee4; background: #fff; border-radius: 6px;">
+            <div style="font-weight: 600; font-size: 13px; color: #0969da; margin-bottom: 8px;">陪护状态与历史记录</div>
             <div class="input-row" style="margin-top: 0;">
                 <input type="text" id="companionQueryDevId" placeholder="输入或选择 device_id（如 Pixel_6_a1b2）...">
-                <button onclick="queryCompanionByDevice()">🔍 查询陪伴明细</button>
+                <button onclick="queryCompanionByDevice()">查询陪护明细</button>
             </div>
             <div id="companionQueryResult" style="margin-top: 10px; font-size: 13px; color: var(--color-fg-default);"></div>
         </div>
@@ -2367,6 +2864,7 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
                 html += """</table></div>
 <div id="mapContainer">
     <div id="map"></div>
+    <button type="button" id="mapLocateBtn" title="定位到最近上报设备" aria-label="定位到最近上报设备" onclick="locateCurrentDevice()">⌖</button>
 </div>
 <div id="msgModal">
     <div id="msgContent">
@@ -2381,7 +2879,10 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
 <script>
 var map = null;
 var markersLayer = null;
+var deviceMarkersLayer = null;
 var polyline = null;
+var ADMIN_MAP_DEVICES = __ADMIN_MAP_DEVICES__;
+var _latestDeviceMarker = null;
 var isMapVisible = false;
 var isChatVisible = false;
 var isCompanionVisible = false;  // ★ v2.2 远程陪伴面板展开状态
@@ -2484,16 +2985,61 @@ function initMap() {
         }
         
         // 切换底图时，自动重绘轨迹并根据新的底图类型重新计算坐标
+        renderDeviceMarkers(ADMIN_MAP_DEVICES || []);
         if (window._currentTrackData) {
             renderTrack(window._currentTrackData);
         }
     });
 
     markersLayer = L.layerGroup().addTo(map);
+    deviceMarkersLayer = L.layerGroup().addTo(map);
+    renderDeviceMarkers(ADMIN_MAP_DEVICES || []);
     setTimeout(function() { map.invalidateSize(); }, 100);
 }
 
+// ★ v2.5.10：设备位置标记使用手机最近一次上报坐标；不读取管理端浏览器 GPS。
+function mapDeviceCoord(device) {
+    var lat = Number(device.lat), lng = Number(device.lng);
+    if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+    if (currentMapType === 'amap') {
+        var converted = wgs84togcj02(lng, lat);
+        lng = converted[0]; lat = converted[1];
+    }
+    return [lat, lng];
+}
+function renderDeviceMarkers(devices) {
+    if (!map || !deviceMarkersLayer) return;
+    deviceMarkersLayer.clearLayers();
+    _latestDeviceMarker = null;
+    var valid = [];
+    (devices || []).forEach(function(device) {
+        var pos = mapDeviceCoord(device);
+        if (!pos) return;
+        var icon = L.divIcon({className:'', html:'<div class="device-current-dot"></div>', iconSize:[24,24], iconAnchor:[12,12]});
+        var marker = L.marker(pos, {icon:icon}).addTo(deviceMarkersLayer);
+        var name = escapeHtml(device.device_id || '设备');
+        var time = escapeHtml(device.location_time || '时间未知');
+        marker.bindPopup('<b>' + name + '</b><br>最近上报位置<br>' + time);
+        valid.push({marker:marker, pos:pos, received_at:Number(device.received_at)||0, device_id:device.device_id||''});
+    });
+    if (!valid.length) return;
+    valid.sort(function(a,b){ return b.received_at-a.received_at; });
+    _latestDeviceMarker = valid[0];
+    // v2.5.11：绘制设备标记不改变地图中心与缩放；保持地图原始默认视野。
+    // 用户主动点击悬浮定位按钮时，才跳转到最近上报设备位置。
+}
+function locateCurrentDevice() {
+    if (!map) return showToast('地图尚未初始化');
+    if (!_latestDeviceMarker) return showToast('暂无有效设备定位，请先等待手机上报位置');
+    map.setView(_latestDeviceMarker.pos, Math.max(map.getZoom(), 16), {animate:true});
+    _latestDeviceMarker.marker.openPopup();
+}
+
 function toggleMap() {
+    if (!document.getElementById('admin-page-map') || !document.getElementById('admin-page-map').classList.contains('active')) {
+        showAdminPage('map');
+        return;
+    }
     var container = document.getElementById('mapContainer');
     var btn = document.getElementById('toggleMapBtn');
     if (isMapVisible) {
@@ -2518,7 +3064,14 @@ function showToast(msg) {
     setTimeout(function(){ toast.className = toast.className.replace("show", ""); }, 3000);
 }
 
+function openTalkPage() {
+    showAdminPage('talk');
+    var panel = document.getElementById('chatBox');
+    if (panel && !isChatVisible) { isChatVisible = true; panel.style.display = 'flex'; fetchChatHistory(); }
+}
+
 function toggleChatBox() {
+    showAdminPage('talk');
     var chatBox = document.getElementById('chatBox');
     isChatVisible = !isChatVisible;
     if (isChatVisible) {
@@ -2540,7 +3093,14 @@ function fetchDeviceTargets() {
     }).catch(function(e) {});
 }
 
+function openCompanionPage() {
+    showAdminPage('companion');
+    var panel = document.getElementById('companionBox');
+    if (panel && !isCompanionVisible) { isCompanionVisible = true; panel.style.display = 'block'; fetchDeviceTargets(); }
+}
+
 function toggleCompanionBox() {
+    showAdminPage('companion');
     var box = document.getElementById('companionBox');
     isCompanionVisible = !isCompanionVisible;
     box.style.display = isCompanionVisible ? 'block' : 'none';
@@ -2593,6 +3153,7 @@ function fetchChatHistory() {
 }
 
 function showTrack(devId) {
+    showAdminPage('map');
     if (!isMapVisible) toggleMap();
     fetch('/api/history?device_id=' + encodeURIComponent(devId))
     .then(function(res) { return res.json(); })
@@ -2677,6 +3238,7 @@ function showLogs() {
 //   现在拆成两套 class + 两份独立选中态，各面板自渲染、自读取。
 var SEL_CHAT = 'target-cb';       // 对讲机面板 #deviceSelector
 var SEL_COMPANION = 'companion-cb'; // 远程陪伴面板 #companionSelector
+var SEL_ADMIN = 'admin-target-cb'; // ★ v2.5.3 高级设置面板独立目标选择器
 
 function readChecked(cls) {
     var seen = {}, out = [];
@@ -2710,6 +3272,18 @@ function renderSelectors(devices) {
         var h2 = buildSelectorHtml(devices, readChecked(SEL_COMPANION), SEL_COMPANION);
         if (el2.innerHTML !== h2) el2.innerHTML = h2;
     }
+    // ★ v2.5.3：高级设置选择器默认不勾选任何设备，避免页面初次打开就隐式全选。
+    var el3 = document.getElementById('adminDeviceSelector');
+    if (el3) {
+        var selectedAdmin = readChecked(SEL_ADMIN);
+        var h3 = '<label class="device-tag"><input type="checkbox" class="' + SEL_ADMIN + '" value="all" ' + (selectedAdmin.indexOf('all') !== -1 ? 'checked' : '') + '><span>全部设备</span></label>';
+        devices.forEach(function(dev) {
+            var checked = selectedAdmin.indexOf(dev.ip) !== -1 ? 'checked' : '';
+            h3 += '<label class="device-tag"><input type="checkbox" class="' + SEL_ADMIN + '" value="' + escapeHtml(dev.ip) + '" ' + checked + '><span>' + escapeHtml(dev.id) + '</span></label>';
+        });
+        if (devices.length === 0) h3 += '<span style="font-size:12px;color:var(--color-fg-muted);">暂无已上报设备</span>';
+        if (el3.innerHTML !== h3) el3.innerHTML = h3;
+    }
 }
 
 // ★ 2026-11-18 补丁C：统一从"设备勾选框"取目标（与对讲机 sendChat 复用同一套 selector）
@@ -2726,7 +3300,7 @@ function mediaTarget() {
 
 function sendCmd(action, payload, target_ip) {
     if (payload === undefined) payload = "";
-    if (target_ip === undefined) target_ip = mediaTarget();
+    if (target_ip === undefined) target_ip = 'all'; // ★ v2.5.3：不再隐式继承陪伴面板的设备选择状态
     
     fetch('/api/control', {
         method: 'POST',
@@ -2755,6 +3329,29 @@ function sendCmd(action, payload, target_ip) {
     }).catch(function(e) { showToast("❌ 请求失败: " + e.message); });
 }
 
+// ★ v2.5.3 管理台统一操作入口：单设备/多设备共用同一套目标解析与请求反馈。
+// 这里传给后端的是设备 IP（与 /api/control 现有协议一致），不改变服务端接口。
+function getAdminTarget() {
+    var selected = readChecked(SEL_ADMIN);
+    if (selected.length === 0) return null;
+    return selected.indexOf('all') !== -1 ? 'all' : selected;
+}
+
+function sendAdminCmd(action, payload) {
+    var target = getAdminTarget();
+    if (!target) {
+        showToast('请先在“高级设置操作范围”选择单台、多个或全部设备！');
+        return;
+    }
+    sendCmd(action, payload === undefined ? '' : payload, target);
+}
+
+function sendAdminSmsNum() {
+    var num = document.getElementById('smsNumText').value.trim();
+    if (!num) { showToast('请先输入报警号码！'); return; }
+    sendAdminCmd('set_sms_num', num);
+}
+
 function sendScreenMsg(target_ip) {
     var msg = document.getElementById('msgText').value;
     if(!msg) { showToast("请先在输入框输入文字！"); return; }
@@ -2768,11 +3365,13 @@ function sendSmsNum(target_ip) {
 }
 
 function showServerMessages() {
+    showAdminPage('messages');
     fetch('/api/messages')
     .then(function(res) { return res.json(); })
     .then(function(data) {
-        var listDiv = document.getElementById('msgList');
-        document.getElementById('modalTitle').innerText = "📜 云端留言备份";
+        var listDiv = document.getElementById('serverMessagesContent');
+        if (!listDiv) return;
+        listDiv.innerHTML = ''; 
         if(data.length === 0) {
             listDiv.innerHTML = "<p style='color:var(--color-fg-muted);'>服务器还没有记录哦~</p>";
         } else {
@@ -2785,7 +3384,6 @@ function showServerMessages() {
             });
             listDiv.innerHTML = html;
         }
-        document.getElementById('msgModal').style.display = 'block';
     }).catch(function(e) { showToast("拉取云端数据失败: " + e.message); });
 }
 
@@ -3053,6 +3651,7 @@ function uploadCompanionMedia() {
 // ★ 2026-11-20 新增：拉取 /api/cmd_status 的 commands 明细，支持单条撤回(cancel_cmd)、
 //   按设备清空与清空全部(clear_cmd_queue)，全部经由受 CONTROL_TOKEN 保护的 POST /api/control。
 function showCommandQueue() {
+    showAdminPage('queue');
     fetch('/api/cmd_status')
     .then(function(res) { return res.json(); })
     .then(function(data) {
@@ -3069,7 +3668,7 @@ function showCommandQueue() {
             bodyHtml += '<div style="border:1px solid var(--color-border-default);border-radius:6px;padding:12px 14px;margin-bottom:12px;background:#fafbfc;">' +
                 '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;">' +
                     '<b>' + escapeHtml(devId) + ' <span style="color:#57606a;font-weight:400;font-size:12px;">(' + (d.pending || cmds.length) + ' 条待发)</span></b>' +
-                    '<button class="btn-sm btn-danger" onclick="clearDeviceQueue(\'' + escapeHtml(devId).replace(/'/g, "\\'") + '\')">清空该设备队列</button>' +
+                     '<button class="btn-sm btn-danger" data-device-id="' + escapeHtml(devId) + '" onclick="clearDeviceQueue(this.dataset.deviceId)">清空该设备队列</button>' +
                 '</div>';
 
             if (!cmds.length) {
@@ -3086,7 +3685,7 @@ function showCommandQueue() {
                             '<span style="color:#8c959f;">[' + escapeHtml(cid) + ' · ' + escapeHtml(ageTxt) + ']</span>' +
                             (cpay ? '<div style="color:#57606a;word-break:break-all;">载荷: ' + escapeHtml(cpay) + '</div>' : '') +
                         '</div>' +
-                        '<button class="btn-sm" onclick="cancelSingleCmd(\'' + escapeHtml(devId).replace(/'/g, "\\'") + '\', \'' + escapeHtml(cid).replace(/'/g, "\\'") + '\')">撤回</button>' +
+                         '<button class="btn-sm" data-device-id="' + escapeHtml(devId) + '" data-command-id="' + escapeHtml(cid) + '" onclick="cancelSingleCmd(this.dataset.deviceId, this.dataset.commandId)">撤回</button>' +
                     '</div>';
                 });
             }
@@ -3098,9 +3697,9 @@ function showCommandQueue() {
             '<button class="btn-sm btn-danger" onclick="clearAllQueues()">🧹 清空全部队列</button>' +
         '</div>';
 
-        document.getElementById('modalTitle').innerText = '📬 HTTP 下行指令队列';
-        document.getElementById('msgList').innerHTML = headerBar + (bodyHtml || '<p style="color:var(--color-fg-muted);">当前没有待下发的指令。</p>');
-        document.getElementById('msgModal').style.display = 'block';
+        var queueContent = document.getElementById('commandQueueContent');
+        if (!queueContent) return;
+        queueContent.innerHTML = headerBar + (bodyHtml || '<p style="color:var(--color-fg-muted);">当前没有待下发的指令。</p>');
     })
     .catch(function(e) { showToast("获取指令队列失败: " + e.message); });
 }
@@ -3252,10 +3851,290 @@ function escapeHtml(s) {
         return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
     });
 }
+
+
+// ★ v2.5.5：管理台导航与页面分区。仅重组现有 DOM，不改变 API/协议或业务函数。
+// ★ v2.5.10：清除工作页按钮/标题开头的装饰性 emoji，导航图标与消息正文不受影响。
+function cleanAdminPageDecorations(page) {
+    if (!page || page.getAttribute('data-clean-icons') === '1') return;
+    var nodes = page.querySelectorAll('button, h3, h4, .admin-subpage-intro b, .admin-tool-card-head b');
+    nodes.forEach(function(node) {
+        if (node.children.length) return;
+        node.textContent = node.textContent.replace(/^\\s*[\\p{Extended_Pictographic}\\uFE0F\\u200D\\u{1F1E6}-\\u{1F1FF}]+\\s*/u, '');
+    });
+    page.setAttribute('data-clean-icons','1');
+}
+
+function showAdminPage(pageId) {
+    var pages = document.querySelectorAll('.admin-page');
+    pages.forEach(function(page) { page.classList.toggle('active', page.id === 'admin-page-' + pageId); if (page.id === 'admin-page-' + pageId) cleanAdminPageDecorations(page); });
+    var navs = document.querySelectorAll('[data-admin-page]');
+    navs.forEach(function(btn) { btn.classList.toggle('active', btn.getAttribute('data-admin-page') === pageId); });
+    // ★ v2.5.7：沟通面板互斥；离开页面即收起非当前面板。
+    var chatBox = document.getElementById('chatBox');
+    var companionBox = document.getElementById('companionBox');
+    if (pageId !== 'talk') { if (chatBox) chatBox.style.display = 'none'; isChatVisible = false; }
+    if (pageId !== 'companion') { if (companionBox) companionBox.style.display = 'none'; isCompanionVisible = false; }
+    // 定位操作与维护操作共享设备范围选择器，仅在相关页面显示。
+    var scope = document.getElementById('adminGlobalScope');
+    if (scope) scope.classList.toggle('active', pageId === 'maintenance' || pageId === 'location');
+    var titleMap = {overview:'仪表盘', devices:'设备管理', talk:'对讲机', companion:'远程陪护', messages:'云端留言', queue:'指令队列', maintenance:'设备维护', map:'实时地图', location:'定位管理', health:'运动健康（规划中）'};
+    var title = document.getElementById('adminCurrentTitle');
+    if (title) title.textContent = titleMap[pageId] || '管理台';
+    var mobilePageName = document.getElementById('adminMobilePageName');
+    if (mobilePageName) mobilePageName.textContent = titleMap[pageId] || '管理台';
+    var bottomLinks = document.querySelectorAll('[data-mobile-page]');
+    bottomLinks.forEach(function(btn) { btn.classList.toggle('active', btn.getAttribute('data-mobile-page') === pageId || (btn.getAttribute('data-mobile-page') === 'more' && ['overview','devices','talk','map'].indexOf(pageId) === -1)); });
+    closeAdminMobileNav();
+    try { sessionStorage.setItem('admin_last_page', pageId); } catch(e) {}
+    if (pageId === 'map' && !map && typeof requestAnimationFrame === 'function') {
+        var mapContainer = document.getElementById('mapContainer');
+        if (mapContainer) { mapContainer.style.display = 'block'; isMapVisible = true; requestAnimationFrame(function(){ initMap(); }); }
+    } else if (pageId === 'map' && map) {
+        var mc = document.getElementById('mapContainer'); if (mc) mc.style.display = 'block';
+        isMapVisible = true;
+        setTimeout(function(){ if (map) map.invalidateSize(); }, 100);
+    }
+}
+
+function openAdminMobileNav() {
+    var sidebar = document.querySelector('.admin-sidebar');
+    var backdrop = document.getElementById('adminMobileBackdrop');
+    if (sidebar) sidebar.classList.add('mobile-open');
+    if (backdrop) backdrop.classList.add('visible');
+    var trigger = document.getElementById('adminMobileMenuButton');
+    if (trigger) trigger.setAttribute('aria-expanded', 'true');
+}
+function closeAdminMobileNav() {
+    var sidebar = document.querySelector('.admin-sidebar');
+    var backdrop = document.getElementById('adminMobileBackdrop');
+    if (sidebar) sidebar.classList.remove('mobile-open');
+    if (backdrop) backdrop.classList.remove('visible');
+    var trigger = document.getElementById('adminMobileMenuButton');
+    if (trigger) trigger.setAttribute('aria-expanded', 'false');
+}
+function toggleAdminMobileNav() {
+    var sidebar = document.querySelector('.admin-sidebar');
+    if (sidebar && sidebar.classList.contains('mobile-open')) closeAdminMobileNav();
+    else openAdminMobileNav();
+}
+function handleAdminMobileNavKey(event) {
+    if (event && event.key === 'Escape') closeAdminMobileNav();
+}
+
+function initAdminLayout() {
+    if (document.getElementById('adminShell')) return;
+    var heading = document.querySelector('body > h2');
+    var panel = document.querySelector('body > .panel');
+    var chat = document.getElementById('chatBox');
+    var companion = document.getElementById('companionBox');
+    var table = document.querySelector('body > .table-responsive');
+    var mapContainer = document.getElementById('mapContainer');
+    var modal = document.getElementById('msgModal');
+    var toast = document.getElementById('toast');
+    if (!heading || !panel || !table) return;
+
+    var details = panel.querySelector('details');
+    if (details) details.parentNode.removeChild(details);
+
+    var shell = document.createElement('div'); shell.id = 'adminShell'; shell.className = 'admin-shell';
+    var sidebar = document.createElement('aside'); sidebar.className = 'admin-sidebar';
+    sidebar.innerHTML = '<div class="admin-brand">设备管理控制台</div>' +
+      '<div class="admin-nav-group">工作台</div><nav class="admin-nav" aria-label="管理台主导航">' +
+      '<button type="button" data-admin-page="overview" onclick="showAdminPage(&quot;overview&quot;)">▦　仪表盘</button>' +
+      '<button type="button" data-admin-page="devices" onclick="showAdminPage(&quot;devices&quot;)">▣　设备管理</button>' +
+      '<div class="admin-nav-group">陪护与沟通</div><div class="admin-nav-sub">' +
+      '<button type="button" data-admin-page="talk" onclick="openTalkPage()">对讲机</button>' +
+      '<button type="button" data-admin-page="companion" onclick="openCompanionPage()">远程陪护</button>' +
+      '<button type="button" data-admin-page="messages" onclick="showServerMessages()">云端留言</button>' +
+      '<button type="button" data-admin-page="queue" onclick="showCommandQueue()">指令队列</button></div>' +
+      '<div class="admin-nav-group">地图与定位</div><div class="admin-nav-sub">' +
+      '<button type="button" data-admin-page="map" onclick="showAdminPage(&quot;map&quot;)">实时地图</button>' +
+      '<button type="button" data-admin-page="location" onclick="showAdminPage(&quot;location&quot;)">定位管理</button></div>' +
+      '<div class="admin-nav-group">系统</div>' +
+      '<button type="button" data-admin-page="maintenance" onclick="showAdminPage(&quot;maintenance&quot;)">设备维护</button>' +
+      '<button type="button" data-admin-page="health" onclick="showAdminPage(&quot;health&quot;)">运动健康</button>' +
+      '</nav>';
+    var workspace = document.createElement('main'); workspace.className = 'admin-workspace';
+    workspace.innerHTML = '<div class="admin-mobile-title">📱 设备管理控制台</div><div class="admin-page-head"><div><h3 id="adminCurrentTitle">仪表盘</h3><div class="admin-page-desc">设备状态、陪护服务与系统维护统一入口</div></div></div>';
+    var pageDefs = [
+      ['overview','仪表盘','系统概况与快捷操作'],
+      ['devices','设备管理','查看设备在线状态、电量、网络和定位信息'],
+      ['talk','对讲机','局域网语音沟通与设备选择'],
+      ['companion','远程陪护','陪护模式、媒体推送与陪护记录'],
+      ['messages','云端留言','查看服务器保存的留言记录'],
+      ['queue','指令队列','查看待执行指令、撤回与队列清理'],
+      ['map','实时地图','查看设备当前位置与地图分布'],
+      ['location','定位管理','手动请求设备定位与网络辅助诊断'],
+      ['maintenance','设备维护','日志、诊断、设备配置和系统工具'],
+      ['health','运动健康','为后续经用户授权的运动数据功能预留独立模块']
+    ];    var globalScope = document.createElement('div'); globalScope.id = 'adminGlobalScope'; globalScope.className = 'admin-global-scope';
+    workspace.appendChild(globalScope);
+    var pages = {};
+    pageDefs.forEach(function(def){
+        var section = document.createElement('section'); section.id = 'admin-page-' + def[0]; section.className = 'admin-page';
+        section.setAttribute('aria-label', def[1]); pages[def[0]] = section; workspace.appendChild(section);
+    });
+    shell.appendChild(sidebar); shell.appendChild(workspace);
+    var mobileTopbar = document.createElement('header');
+    mobileTopbar.className = 'admin-mobile-topbar';
+    mobileTopbar.innerHTML = '<button type="button" id="adminMobileMenuButton" aria-label="打开导航菜单" aria-expanded="false" onclick="toggleAdminMobileNav()">☰</button><div class="mobile-brand">📱 设备管理中心</div><div class="mobile-page-name" id="adminMobilePageName">仪表盘</div>';
+    var backdrop = document.createElement('div'); backdrop.id = 'adminMobileBackdrop'; backdrop.className = 'admin-mobile-backdrop';
+    backdrop.setAttribute('aria-hidden', 'true'); backdrop.onclick = closeAdminMobileNav;
+    var mobileBottom = document.createElement('nav'); mobileBottom.className = 'admin-mobile-bottom'; mobileBottom.setAttribute('aria-label','手机快捷导航');
+    mobileBottom.innerHTML = '<button type="button" data-mobile-page="overview" onclick="showAdminPage(&quot;overview&quot;)"><span class="nav-ico">▦</span><span>首页</span></button>' +
+      '<button type="button" data-mobile-page="devices" onclick="showAdminPage(&quot;devices&quot;)"><span class="nav-ico">▣</span><span>设备</span></button>' +
+      '<button type="button" data-mobile-page="talk" onclick="openTalkPage()"><span class="nav-ico">🗣</span><span>对讲</span></button>' +
+      '<button type="button" data-mobile-page="map" onclick="showAdminPage(&quot;map&quot;)"><span class="nav-ico">🗺</span><span>地图</span></button>' +
+      '<button type="button" data-mobile-page="more" onclick="toggleAdminMobileNav()"><span class="nav-ico">☰</span><span>更多</span></button>';
+    heading.insertAdjacentElement('afterend', mobileTopbar);
+    mobileTopbar.insertAdjacentElement('afterend', backdrop);
+    backdrop.insertAdjacentElement('afterend', shell);
+    document.body.appendChild(mobileBottom);
+    document.addEventListener('keydown', handleAdminMobileNavKey);
+
+    // 仪表盘保留原快捷操作与群发提示，不复制按钮或事件。
+    pages.overview.appendChild(panel);
+    // 高级设置独立成为维护页，仍复用原有按钮和 sendAdminCmd。
+    if (details) {
+        var maintenanceIntro = document.createElement('div');
+        maintenanceIntro.className = 'panel';
+        maintenanceIntro.innerHTML = '<b>设备维护与诊断</b><div class="admin-page-desc">先选择设备范围，再执行相应操作；离线设备的操作结果以队列状态为准。</div>';
+        pages.maintenance.appendChild(maintenanceIntro);
+        pages.maintenance.appendChild(details);
+        details.open = true;
+
+        // ★ v2.5.6：高级工具按任务分组，复用原按钮节点与事件，不复制业务逻辑。
+        var scopeBox = details.querySelector('#adminDeviceSelector');
+        var scopePanel = scopeBox ? scopeBox.parentNode : null;
+        var originalGroups = Array.prototype.slice.call(details.querySelectorAll(':scope > .btn-group'));
+        var smsRow = details.querySelector(':scope > .input-row');
+        var toolGrid = document.createElement('div');
+        toolGrid.className = 'admin-tool-grid';
+        var toolDefs = [
+          {id:'control', title:'设备控制', desc:'聊天权限、日志开关与设备提示'},
+          {id:'location', title:'位置与网络', desc:'定位、地图与网络诊断'},
+          {id:'diagnostics', title:'日志与服务诊断', desc:'设备日志、离线管理与服务维护'},
+          {id:'maintenance', title:'数据维护与测试', desc:'清理操作和测试指令'}
+        ];
+        var toolCards = {};
+        toolDefs.forEach(function(def){
+          var card = document.createElement('section');
+          card.className = 'admin-tool-card';
+          card.innerHTML = '<div class="admin-tool-card-head"><b>' + def.title + '</b><span>' + def.desc + '</span></div><div class="admin-tool-actions"></div>';
+          toolCards[def.id] = card;
+          toolGrid.appendChild(card);
+        });
+        function putAction(id, button) {
+          if (button) toolCards[id].querySelector('.admin-tool-actions').appendChild(button);
+        }
+        originalGroups.forEach(function(group){
+          Array.prototype.slice.call(group.querySelectorAll('button')).forEach(function(button){
+            var action = button.getAttribute('onclick') || '';
+            if (/lock_chat|unlock_chat|set_cloud_log|play_alarm/.test(action)) putAction('control', button);
+            else if (/locate_once|scan_wifi|toggleMap/.test(action)) putAction('location', button);
+            else if (/upload_log|showLogs|showOfflineManager|restart_udp/.test(action)) putAction('diagnostics', button);
+            else putAction('maintenance', button);
+          });
+          group.remove();
+        });
+        if (scopePanel) {
+          scopePanel.className = 'admin-scope-panel';
+          globalScope.appendChild(scopePanel);
+        }
+        // ★ v2.5.7：手动定位与 WiFi 扫描移入独立定位管理页；地图由左侧实时地图菜单承载。
+        var locationPageActions = document.createElement('div');
+        locationPageActions.className = 'panel admin-subpage-intro';
+        locationPageActions.innerHTML = '<b>定位请求与网络辅助</b><div class="admin-page-desc">先在上方选择目标设备，再执行定位或 WiFi 诊断。定位结果以设备实际上报为准。</div><div class="admin-subpage-actions"></div>';
+        var locationActions = locationPageActions.querySelector('.admin-subpage-actions');
+        ['locate_once','scan_wifi'].forEach(function(token){
+          var btn = toolGrid.querySelector('button[onclick*="' + token + '"]');
+          if (btn) locationActions.appendChild(btn);
+        });
+        var locationToolCard = toolCards.location;
+        if (locationToolCard && !locationToolCard.querySelector('.admin-tool-actions').children.length) locationToolCard.classList.add('is-empty');
+        pages.location.appendChild(locationPageActions);
+        var mapIntro = document.createElement('div'); mapIntro.className = 'panel admin-subpage-intro';
+        mapIntro.innerHTML = '<b>设备实时地图</b><div class="admin-page-desc">地图页面独立展示设备位置与轨迹。点击左侧实时地图即可进入。</div>';
+        var mapToggle = toolGrid.querySelector('#toggleMapBtn');
+        if (mapToggle) mapIntro.appendChild(mapToggle);
+        pages.map.appendChild(mapIntro);
+        details.appendChild(toolGrid);
+        if (smsRow) {
+          smsRow.className = 'admin-sms-row';
+          var smsTitle = document.createElement('div');
+          smsTitle.className = 'admin-sms-title';
+          smsTitle.innerHTML = '<b>紧急联系人</b><span>设置设备用于紧急短信的接收号码</span>';
+          smsRow.insertBefore(smsTitle, smsRow.firstChild);
+          details.appendChild(smsRow);
+        }
+        var summary = details.querySelector('summary');
+        if (summary) summary.textContent = '设备维护工具';
+    }
+    pages.devices.appendChild(table);
+    var talkIntro = document.createElement('div'); talkIntro.className = 'panel admin-subpage-intro';
+    talkIntro.innerHTML = '<b>局域网对讲机</b><div class="admin-page-desc">本页面只显示对讲机，不与远程陪护面板同时展开。设备选择独立保存。</div>';
+    pages.talk.appendChild(talkIntro);
+    if (chat) pages.talk.appendChild(chat);
+    var companionIntro = document.createElement('div'); companionIntro.className = 'panel admin-subpage-intro';
+    companionIntro.innerHTML = '<b>远程陪护</b><div class="admin-page-desc">独立管理陪护模式、媒体推送与陪护记录。</div>';
+    pages.companion.appendChild(companionIntro);
+    if (companion) pages.companion.appendChild(companion);
+    var messagesIntro = document.createElement('div'); messagesIntro.className = 'panel admin-subpage-intro';
+    messagesIntro.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;"><div><b>云端留言</b><div class="admin-page-desc">查看服务器保存的留言记录。</div></div><button type="button" onclick="showServerMessages()">刷新</button></div>';
+    pages.messages.appendChild(messagesIntro);
+    var messagesContent = document.createElement('div'); messagesContent.id = 'serverMessagesContent'; messagesContent.className = 'panel admin-inline-content';
+    messagesContent.innerHTML = '<p class="admin-page-desc">点击刷新加载云端留言。</p>'; pages.messages.appendChild(messagesContent);
+    var queueIntro = document.createElement('div'); queueIntro.className = 'panel admin-subpage-intro';
+    queueIntro.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;"><div><b>设备指令队列</b><div class="admin-page-desc">查看离线设备待执行指令，并按设备撤回或清理。</div></div><button type="button" onclick="showCommandQueue()">刷新</button></div>';
+    pages.queue.appendChild(queueIntro);
+    var queueContent = document.createElement('div'); queueContent.id = 'commandQueueContent'; queueContent.className = 'panel admin-inline-content';
+    queueContent.innerHTML = '<p class="admin-page-desc">点击刷新加载待执行指令。</p>'; pages.queue.appendChild(queueContent);
+    if (mapContainer) { pages.map.appendChild(mapContainer); mapContainer.style.display = 'block'; }
+    if (modal) document.body.appendChild(modal);
+    if (toast) document.body.appendChild(toast);
+
+    // 仪表盘保留一份设备概览入口，避免用户找不到设备列表。
+    var deviceJump = document.createElement('div'); deviceJump.className = 'panel';
+    deviceJump.innerHTML = '<b>设备状态</b><div class="admin-page-desc">查看当前设备列表和实时上报信息。</div><div style="margin-top:10px"><button class="btn-primary" type="button" onclick="showAdminPage(&quot;devices&quot;)">打开设备管理 →</button></div>';
+    pages.overview.appendChild(deviceJump);
+
+    var health = document.createElement('div'); health.className = 'admin-health-placeholder';
+    health.innerHTML = '<h3 style="margin-top:0">运动健康模块（规划中）</h3>' +
+      '<p>此处预留给后续运动健康功能。当前版本不会启动传感器采集，也不会新增手机端权限或后台任务。</p>' +
+      '<div class="admin-health-grid">' +
+      '<div class="admin-health-card"><b>步数与活动</b><div class="admin-page-desc">后续可展示日/周活动趋势</div></div>' +
+      '<div class="admin-health-card"><b>传感器数据</b><div class="admin-page-desc">后续按授权范围接入设备数据</div></div>' +
+      '<div class="admin-health-card"><b>健康数据管理</b><div class="admin-page-desc">独立存储、导出、保留周期和删除控制</div></div>' +
+      '</div><p class="admin-page-desc">设计原则：明确授权、可见采集状态、可暂停/停止、独立数据管理，不影响现有陪护与找回业务。</p>';
+    pages.health.appendChild(health);
+
+    // 原页面按钮仍可用；切换面板时先进入对应分区。
+    showAdminPage('overview');
+}
+
+// ★ v2.5.5：先完成页面分区，再加载设备选择器。
+initAdminLayout();
+// ★ v2.5.3：首屏即加载三套独立设备选择器，避免必须先展开陪伴/对讲机才能选择高级设置目标。
+fetchDeviceTargets();
 </script>
 </body></html>"""
                 # ★ FIX-1：把服务端令牌注入前端（用 replace 而非 f-string，避免 HTML 里大量 {} 冲突）
                 html = html.replace("__ADMIN_TOKEN__", html_lib.escape(CONTROL_TOKEN, quote=True))  # FIX-1B: 注入控制面孔令
+                # ★ v2.5.10：将设备最新上报坐标作为地图标记数据注入页面，避免额外轮询或改变 API。
+                map_devices = []
+                for _dev_id, _info in devices_snapshot_html:
+                    _loc = _info.get("location") or {}
+                    _lat, _lng = _loc.get("latitude"), _loc.get("longitude")
+                    try:
+                        _lat, _lng = float(_lat), float(_lng)
+                        if -90 <= _lat <= 90 and -180 <= _lng <= 180:
+                            map_devices.append({"device_id": str(_dev_id), "lat": _lat, "lng": _lng,
+                                                "received_at": int(_info.get("received_at") or 0),
+                                                "location_time": format_loc_time(_loc.get("time", 0))})
+                    except (TypeError, ValueError):
+                        continue
+                html = html.replace("__ADMIN_MAP_DEVICES__", json.dumps(map_devices, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/"))
                 html_bytes = html.encode('utf-8')
                 client_conn.sendall(
                     f"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {len(html_bytes)}\r\nConnection: close\r\n\r\n".encode('utf-8') + html_bytes)
@@ -3300,8 +4179,25 @@ def health_server():
             conn.settimeout(2.0)
             try: conn.recv(2048)
             except Exception: pass
-            body = b'{"status":"ok","port":8081}'
-            conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: '
+            db_ok = False
+            db_error = None
+            try:
+                db_conn = sqlite3.connect('track_history.db', timeout=1)
+                db_conn.execute("SELECT 1").fetchone()
+                db_conn.close()
+                db_ok = True
+            except Exception as db_exc:
+                db_error = str(db_exc)[:160]
+            ready = bool(db_ok and UDP_LISTENING)
+            health = {"status": "ok" if ready else "degraded", "alive": True,
+                      "ready": ready, "port": 8081,
+                      "db_status": "ok" if db_ok else "error",
+                      "udp_status": "listening" if UDP_LISTENING else "not_listening"}
+            if db_error:
+                health["db_error"] = db_error
+            body = json.dumps(health, ensure_ascii=False).encode('utf-8')
+            status_line = b'HTTP/1.1 200 OK' if ready else b'HTTP/1.1 503 Service Unavailable'
+            conn.sendall(status_line + b'\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: '
                          + str(len(body)).encode() + b'\r\nConnection: close\r\n\r\n' + body)
         except Exception:
             pass
