@@ -26,6 +26,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 WEB_PORT = 8082
 UDP_PORT = 8888
 RESCUE_SECRET = "your_private_secret_key"  # ⚠️ 必须与手机端一致
+PEER_NODE_ID = f"chat.py-{uuid.uuid4().hex[:12]}"  # 本次进程的唯一 LAN 会话 ID
 SERVER2_URL = "http://127.0.0.1:8080"      # server2.py 的地址
 # ==========================================
 
@@ -182,7 +183,7 @@ def udp_listener():
             if msg.startswith("FIND_ME_PEER_HELLO:"):
                 parts = msg.split(":", 3)
                 if len(parts) == 4 and parts[1] == RESCUE_SECRET:
-                    response = f"FIND_ME_PEER_ACK:{RESCUE_SECRET}:{parts[3]}:chat.py".encode("utf-8")
+                    response = f"FIND_ME_PEER_ACK:{RESCUE_SECRET}:{parts[3]}:{PEER_NODE_ID}".encode("utf-8")
                     try: udp_sock.sendto(response, addr)
                     except OSError: pass
             elif msg.startswith("FIND_ME_CHAT:"):
