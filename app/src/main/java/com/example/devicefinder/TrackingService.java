@@ -3598,6 +3598,37 @@ public class TrackingService extends Service implements LocationListener {
                 }
                 return true;
             }
+            if (message.startsWith(FIND_ME_CHAT_MSG + ":")) {
+                String[] chatParts = message.split(":", 5);
+                if (chatParts.length == 5 && RESCUE_SECRET.equals(chatParts[1])) {
+                    String senderId = chatParts[2].trim();
+                    String messageId = chatParts[3].trim();
+                    String content = chatParts[4].trim();
+                    // 本机广播回环不回 ACK、不入库；有效远端消息先立即 ACK。
+                    if (senderId.isEmpty() || senderId.equals(getUniqueDeviceId())) {
+                        FileLogger.logD("CHAT", "忽略本机/空 sender 的 LAN 回环消息: " + messageId);
+                        return true;
+                    }
+                    sendChatAck(socket, packet.getAddress(), packet.getPort(), messageId);
+                    long now = System.currentTimeMillis();
+                    Long previous = receivedChatMessageIds.putIfAbsent(senderId + ":" + messageId, now);
+                    if (previous == null) {
+                        if (receivedChatMessageIds.size() > 500) {
+                            long cutoff = now - 10 * 60 * 1000L;
+                            receivedChatMessageIds.entrySet().removeIf(e -> e.getValue() < cutoff);
+                        }
+                        String dk = buildDedupKey("chat_msg", senderId + ":" + messageId, null);
+                        if (!isRecentlyExecuted(dk)) {
+                            final String incomingSenderId = senderId;
+                            final String incomingContent = content;
+                            handler.post(() -> {
+                                if (!serviceDestroyed) handleIncomingChat(incomingSenderId, incomingContent);
+                            });
+                        }
+                    }
+                }
+                return true;
+            }
         } catch (Exception e) {
             FileLogger.logD("UDP", "LAN realtime packet handling failed: "
                     + e.getClass().getSimpleName());
@@ -3894,40 +3925,6 @@ public class TrackingService extends Service implements LocationListener {
                             if (!isRecentlyExecuted(dk)) {
                                 showFloatingMessage(content);
                                 // ★ 改动1：删除冗余 recentExecutions.put，isRecentlyExecuted 内 putIfAbsent 已写
-                            }
-                        }
-                    }
-                    // ===== [P0-1] 聊天：v2 新前缀 =====
-                    else if (message.startsWith(FIND_ME_CHAT_MSG + ":")) {
-                        String[] chatParts = message.split(":", 5);
-                        if (chatParts.length == 5 && RESCUE_SECRET.equals(chatParts[1])) {
-                            String senderId = chatParts[2].trim();
-                            String messageId = chatParts[3].trim();
-                            String content = chatParts[4].trim();
-                            // 广播回环可能把本机发出的包送回本机；必须在 ACK/去重/入库之前过滤。
-                            if (senderId.isEmpty() || senderId.equals(getUniqueDeviceId())) {
-                                FileLogger.logD("CHAT", "忽略本机/空 sender 的 LAN 回环消息: " + messageId);
-                                continue;
-                            }
-                            // 仅对有效 v2 消息 ACK；同一 message_id 重发时再次 ACK，但只显示一次。
-                            FileLogger.log(this, "CHAT", "⏱️ P2P 收到手机消息，message_id=" + messageId);
-                            sendChatAck(rescueSocket, packet.getAddress(), packet.getPort(), messageId);
-                            long now = System.currentTimeMillis();
-                            Long previous = receivedChatMessageIds.putIfAbsent(senderId + ":" + messageId, now);
-                            if (previous == null) {
-                                if (receivedChatMessageIds.size() > 500) {
-                                    long cutoff = now - 10 * 60 * 1000L;
-                                    receivedChatMessageIds.entrySet().removeIf(e -> e.getValue() < cutoff);
-                                }
-                                String dk = buildDedupKey("chat_msg", senderId + ":" + messageId, null);
-                                if (!isRecentlyExecuted(dk)) {
-                                    // ACK 已在上方立即发出；历史与 UI 在主线程 FIFO 中串行处理，避免阻塞 UDP 收包。
-                                    final String incomingSenderId = senderId;
-                                    final String incomingContent = content;
-                                    handler.post(() -> {
-                                        if (!serviceDestroyed) handleIncomingChat(incomingSenderId, incomingContent);
-                                    });
-                                }
                             }
                         }
                     }
