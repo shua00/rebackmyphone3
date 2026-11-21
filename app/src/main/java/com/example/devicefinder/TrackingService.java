@@ -3,8 +3,8 @@
  *  TrackingService.java — 设备同步与可靠通信服务
  * ------------------------------------------------------------
  *  构建批次 : 20261122-0210-r4
- *  源码版本 : v2.5.13-r4（基于 r3；协议 v2 / v2.2，向后兼容）
- *  最后修改 : 2026-11-22 2:10
+ *  源码版本 : v2.5.13-r5（协议 v2-only / v2.3 LAN P2P 基础收敛）
+ *  最后修改 : 2026-11-22
  *  体积目标 : 以现有约 140 KB APK 为基线；本轮不新增第三方库/运行时依赖
  *  性能原则 : 复用系统 API、既有回调/线程/上报链；无新增高频轮询、扫描或常驻线程
  * ------------------------------------------------------------
@@ -14,6 +14,8 @@
  *    - 网络指纹仅用于诊断/候选筛选，不证明 UDP 可达；不以私网 IP、CIDR、SSID/BSSID 授权单播。
  *    - UDP Challenge/Response、跨 NAT ICE、TURN/Relay 仅预留扩展约定，本版本不启动探测、不增加流量。
  *    - 路由不可确认时由服务端使用现有 HTTP 持久队列；不影响定位、离线补发、聊天监听及其他业务。
+ *  本轮约束 : 移除 FIND_ME_MSG v1 双发/接收；保留现有 UDP 8888 监听、广播发送与所有非聊天业务。
+ *  P2P 状态 : 本提交只完成协议收敛；成员发现、消息 ID、ACK/重试和离线队列仍待实现与验证。
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
  *    2026-11-22 r4 轻量网络状态代数：网络快照关键字段变化时递增 network_generation；补齐头部架构/依赖/扩展边界说明，无新增第三方依赖。
  *    2026-11-21 09:30  网络与反馈扩展：默认网络快照（类型/IP/CIDR/接口/验证状态）；command_feedback 本地持久化、断网补交与服务端明确确认后回收；保留旧 executed_ids 和原离线补发机制
@@ -213,9 +215,6 @@ public class TrackingService extends Service implements LocationListener {
     private static final String FIND_ME_FLOAT_MSG = "FIND_ME_FLOAT";
     /** v2 聊天：FIND_ME_CHAT:secret:sender:content */
     private static final String FIND_ME_CHAT_MSG  = "FIND_ME_CHAT";
-    // [COMPAT-20261105-v1] 旧前缀常量，v1 全部下线后删除本行
-    private static final String FIND_ME_MSG_LEGACY = "FIND_ME_MSG";
-    // [/COMPAT-20261105-v1]
 
     private static long lastConfigFetchTime = 0;
     private static final String PREF_BUBBLE = "bubble_pos_prefs";
@@ -3266,11 +3265,7 @@ public class TrackingService extends Service implements LocationListener {
                 String myId = getUniqueDeviceId();
                 // v2 新前缀
                 String chatPayload   = FIND_ME_CHAT_MSG + ":" + RESCUE_SECRET + ":" + myId + ":" + message;
-                // [COMPAT-20261105-v1] 旧 4 段前缀双发，v1 全部下线后删除本行 + 下方 legacyBuf 发送
-                String legacyPayload = FIND_ME_MSG_LEGACY + ":" + RESCUE_SECRET + ":" + myId + ":" + message;
-                // [/COMPAT-20261105-v1]
-                byte[] chatBuf   = chatPayload.getBytes("UTF-8");
-                byte[] legacyBuf = legacyPayload.getBytes("UTF-8");
+                byte[] chatBuf = chatPayload.getBytes("UTF-8");
 
                 String subnetBcast = getWifiBroadcastAddress();
                 String[] targets = subnetBcast.equals("255.255.255.255")
@@ -3290,16 +3285,6 @@ public class TrackingService extends Service implements LocationListener {
                         FileLogger.log(TrackingService.this, "UDP",
                                 "⚠️ CHAT 发往 " + target + " 失败: " + e.getMessage());
                     }
-                    // [COMPAT-20261105-v1] 旧前缀兜底（旧 APK 只认这个），v1 全部下线后删除本段
-                    try {
-                        java.net.DatagramPacket p = new java.net.DatagramPacket(
-                                legacyBuf, legacyBuf.length, java.net.InetAddress.getByName(target), 8888);
-                        socket.send(p);
-                    } catch (Exception e) {
-                        FileLogger.log(TrackingService.this, "UDP",
-                                "⚠️ LEGACY 发往 " + target + " 失败: " + e.getMessage());
-                    }
-                    // [/COMPAT-20261105-v1]
                 }
             } catch (Exception e) {
                 Log.e("TrackingService", "UDP 发送失败: " + e.toString());
@@ -3456,7 +3441,7 @@ public class TrackingService extends Service implements LocationListener {
 
                     if (message.startsWith("FIND_ME_ALARM:")
                             || message.startsWith("FIND_ME_TEST_LOW_BATTERY:")
-                            || message.startsWith("FIND_ME_MSG:")) {
+                            ) {
                         String dedupKey = message.length() > 64 ? message.substring(0, 64) : message;
                         long nowMs = System.currentTimeMillis();
                         Long last = udpCmdDedup.get(dedupKey);
@@ -3548,27 +3533,6 @@ public class TrackingService extends Service implements LocationListener {
                             }
                         }
                     }
-                    // [COMPAT-20261105-v1] 旧 FIND_ME_MSG 前缀兼容
-                    else if (message.startsWith(FIND_ME_MSG_LEGACY + ":")) {
-                        String[] legacyParts = message.split(":", 4);
-                        if (legacyParts.length == 3 && RESCUE_SECRET.equals(legacyParts[1])) {
-                            String content = legacyParts[2].trim();
-                            String dk = buildDedupKey("custom_msg", content, null);
-                            if (!isRecentlyExecuted(dk)) {
-                                showFloatingMessage(content);
-                                // ★ 改动1：删除冗余 recentExecutions.put
-                            }
-                        } else if (legacyParts.length == 4 && RESCUE_SECRET.equals(legacyParts[1])) {
-                            String senderId = legacyParts[2].trim();
-                            String content = legacyParts[3].trim();
-                            String dk = buildDedupKey("chat_msg", content, null);
-                            if (!isRecentlyExecuted(dk)) {
-                                handleIncomingChat(senderId, content);
-                                // ★ 改动1：删除冗余 recentExecutions.put
-                            }
-                        }
-                    }
-                    // [/COMPAT-20261105-v1]
                     else if (message.startsWith("FIND_ME_CLEAR_HISTORY:")) {
                         String[] parts = message.split(":", 2);
                         if (parts.length == 2 && RESCUE_SECRET.equals(parts[1])) {
