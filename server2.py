@@ -230,13 +230,10 @@ def _claim_chat_message(sender, message_id):
             finally:
                 conn.close()
     except Exception as e:
-        fallback_key = str(sender) + ":" + key
-        if now - LAST_MSG_INFO.get(fallback_key, 0) < 10.0:
-            return False
-        LAST_MSG_INFO[fallback_key] = now
+        # 持久化失败不能确认新消息已可靠接收；返回 None 让接收端暂不 ACK。
         with print_lock:
-            print(f"⚠️ 聊天持久化去重暂不可用，使用短时内存去重: {type(e).__name__}")
-        return True
+            print(f"⚠️ 聊天持久化去重失败，本条消息暂不确认: {type(e).__name__}")
+        return None
 
 # ===== 版本 =====
 BUILD_VERSION = "20261122-1200-r3"
@@ -1196,13 +1193,16 @@ def udp_listener():
                         sender = parts[2]
                         message_id = parts[3]
                         content = parts[4]
-                        if message_id:
-                            ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:{PEER_NODE_ID}".encode("utf-8")
-                            try: udp_sock.sendto(ack, addr)
-                            except OSError: pass
                         if sender not in ["Web_Console", "PC_Terminal"]:
-                            if not _claim_chat_message(sender, message_id or content):
-                                continue
+                            claim_result = _claim_chat_message(sender, message_id or content)
+                            if claim_result is None:
+                                continue  # 持久化失败：不 ACK，允许发送端重试
+                            if message_id:
+                                ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:{PEER_NODE_ID}".encode("utf-8")
+                                try: udp_sock.sendto(ack, addr)
+                                except OSError: pass
+                            if not claim_result:
+                                continue  # 重复消息仍 ACK，但不重复展示
                             now_ms = int(datetime.datetime.now().timestamp() * 1000)
                             ts = datetime.datetime.now().strftime("%H:%M:%S")
                             # ★ 合并为单个锁块，消除一切嵌套疑虑
