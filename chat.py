@@ -194,7 +194,7 @@ def udp_listener():
                     message_id = parts[3]
                     content = parts[4]
                     if message_id:
-                        ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:chat.py".encode("utf-8")
+                        ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:{PEER_NODE_ID}".encode("utf-8")
                         try: udp_sock.sendto(ack, addr)
                         except OSError: pass
                     # 保留原有过滤：浏览器网页自身发送的 Guest_xxx 消息已在 do_POST 中本地追加，
