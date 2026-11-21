@@ -3498,7 +3498,7 @@ public class TrackingService extends Service implements LocationListener {
                 // 没有经过 challenge 的 peer 时仅广播一次；首个匹配 messageId 的认证 ACK
                 // 只证明至少一个接收端已收到，不把该来源加入 verifiedChatPeers。
                 for (String target : broadcasts) {
-                    for (int peerPort : new int[]{8888, 8889, 8890}) {
+                    for (int peerPort : new int[]{8888, 8887, 8889, 8890}) {
                         try {
                             DatagramPacket p = new DatagramPacket(data, data.length,
                                     java.net.InetAddress.getByName(target), peerPort);
