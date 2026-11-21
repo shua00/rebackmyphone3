@@ -6,7 +6,7 @@ rescue2.py — 局域网救援/调试终端（Ultimate v2 协议）
 ------------------------------------------------------------
 构建批次 : 20261111-2000
 协议版本 : v2-only
-最后修改 : 2026-11-22（v2-only 对讲信令收敛）
+最后修改 : 2026-11-22（v2-only 对讲与 P2P ACK）
 ------------------------------------------------------------
 本轮约束 : 保留救援、ADB、日志与陪护能力；聊天统一 FIND_ME_CHAT，不再双发旧前缀。
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
@@ -448,10 +448,15 @@ def udp_listener():
                 data, addr = sock.recvfrom(4096)
                 msg = data.decode('utf-8', errors='ignore')
                 if msg.startswith("FIND_ME_CHAT:"):
-                    parts = msg.split(":", 3)
-                    if len(parts) >= 3 and parts[1] == RESCUE_SECRET:
+                    parts = msg.split(":", 4)
+                    if len(parts) in (4, 5) and parts[1] == RESCUE_SECRET:
                         sender = parts[2]
-                        content = parts[3] if len(parts) == 4 else ""
+                        message_id = parts[3] if len(parts) == 5 else ""
+                        content = parts[4] if len(parts) == 5 else parts[3]
+                        if message_id:
+                            ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:rescue2".encode("utf-8")
+                            try: sock.sendto(ack, addr)
+                            except OSError: pass
                         if sender in ("PC_Terminal", "Web_Console", "Guest_"): continue
                         dedup_key = (sender, content)
                         now_ts = time.time()
