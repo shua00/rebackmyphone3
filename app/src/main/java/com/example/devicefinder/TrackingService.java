@@ -3,7 +3,7 @@
  *  TrackingService.java — 设备同步与可靠通信服务
  * ------------------------------------------------------------
  *  构建批次 : 20261122-0210-r4
- *  源码版本 : v2.5.13-r7（协议 v2-only / v2.5 LAN P2P peer verification）
+ *  源码版本 : v2.5.13-r8（协议 v2-only / v2.6 network-bound peer lease）
  *  最后修改 : 2026-11-22
  *  体积目标 : 以现有约 140 KB APK 为基线；本轮不新增第三方库/运行时依赖
  *  性能原则 : 复用系统 API、既有回调/线程/上报链；无新增高频轮询、扫描或常驻线程
@@ -15,8 +15,8 @@
  *    - UDP Challenge/Response、跨 NAT ICE、TURN/Relay 仅预留扩展约定，本版本不启动探测、不增加流量。
  *    - 路由不可确认时由服务端使用现有 HTTP 持久队列；不影响定位、离线补发、聊天监听及其他业务。
  *  本轮约束 : 移除 FIND_ME_MSG v1 双发/接收；保留现有 UDP 8888 监听、广播发送与所有非聊天业务。
- *  P2P 状态 : 增加按需 PEER_HELLO/PEER_ACK 双向挑战；缓存 120 秒内验证过的 8888 endpoint，优先单播；无验证 peer 时退回广播。聊天含 UUID message_id、接收去重、ACK 与最多 3 次重试。逐成员送达统计、离线待发队列和实机验证仍待完成。
- *  本轮改动 : 增加按需 peer challenge/response、120 秒 endpoint 租约、验证 peer 单播、message_id、接收去重、ACK 回程与最多 3 次有限重试；发送复用 8888 监听 socket。
+ *  P2P 状态 : 按需 PEER_HELLO/PEER_ACK 挑战；缓存 120 秒验证过的 8888 endpoint，网络回调变化立即清空，优先单播；无验证 peer 时广播。CHAT_ACK 必须匹配已验证 peer 的 ID/IP/端口。逐成员送达统计、离线待发队列和实机验证仍待完成。
+ *  本轮改动 : 增加按需 peer challenge/response、120 秒 endpoint 租约、网络变化撤销、验证 peer 单播、ACK 来源 ID/IP/端口校验、message_id、接收去重与最多 3 次有限重试；发送复用 8888 监听 socket。
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
  *    2026-11-22 r4 轻量网络状态代数：网络快照关键字段变化时递增 network_generation；补齐头部架构/依赖/扩展边界说明，无新增第三方依赖。
  *    2026-11-21 09:30  网络与反馈扩展：默认网络快照（类型/IP/CIDR/接口/验证状态）；command_feedback 本地持久化、断网补交与服务端明确确认后回收；保留旧 executed_ids 和原离线补发机制
@@ -251,6 +251,14 @@ public class TrackingService extends Service implements LocationListener {
             new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CountDownLatch> pendingPeerChallenges =
             new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 网络路径变化立即撤销旧 LAN endpoint，避免跨子网沿用旧 IP。 */
+    private void invalidateVerifiedChatPeers(String reason) {
+        verifiedChatPeers.clear();
+        verifiedChatPeerSeen.clear();
+        pendingPeerChallenges.clear();
+        FileLogger.log(this, "CHAT", "LAN P2P peer 路由已失效，等待重新发现: " + reason);
+    }
     private final Object rescueLock = new Object();
     // 多路唤醒若从不同线程同时进入自愈，只允许一个自愈检查在途。
     private final java.util.concurrent.atomic.AtomicBoolean selfHealInFlight =
@@ -1776,6 +1784,7 @@ public class TrackingService extends Service implements LocationListener {
                     public void onAvailable(Network network) {
                         super.onAvailable(network);
                         // onAvailable 可能先于 LinkProperties/默认网络切换稳定；稍作合并后再上报。
+                        invalidateVerifiedChatPeers("network available/switch");
                         FileLogger.log(TrackingService.this, "NETWORK", "✅ 网络可用/发生切换，刷新默认网络信息");
                         handler.removeCallbacks(networkRefreshRunnable);
                         handler.postDelayed(networkRefreshRunnable, 1200L);
@@ -1785,6 +1794,7 @@ public class TrackingService extends Service implements LocationListener {
                     public void onLost(Network network) {
                         super.onLost(network);
                         // onLost 可能只是链路变化，不直接认定设备断网；延迟读取当前默认网络再判断。
+                        invalidateVerifiedChatPeers("network lost");
                         FileLogger.log(TrackingService.this, "NETWORK", "ℹ️ 网络链路变化，重新检查当前默认网络");
                         handler.removeCallbacks(networkRefreshRunnable);
                         handler.postDelayed(networkRefreshRunnable, 1500L);
@@ -1792,12 +1802,14 @@ public class TrackingService extends Service implements LocationListener {
                     @Override
                     public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
                         super.onCapabilitiesChanged(network, capabilities);
+                        invalidateVerifiedChatPeers("network capabilities changed");
                         handler.removeCallbacks(networkRefreshRunnable);
                         handler.postDelayed(networkRefreshRunnable, 800L);
                     }
                     @Override
                     public void onLinkPropertiesChanged(Network network, LinkProperties linkProperties) {
                         super.onLinkPropertiesChanged(network, linkProperties);
+                        invalidateVerifiedChatPeers("link properties changed");
                         handler.removeCallbacks(networkRefreshRunnable);
                         handler.postDelayed(networkRefreshRunnable, 800L);
                     }
@@ -3551,7 +3563,14 @@ public class TrackingService extends Service implements LocationListener {
                         String[] ackParts = message.split(":", 4);
                         if (ackParts.length == 4 && RESCUE_SECRET.equals(ackParts[1])) {
                             java.util.concurrent.CountDownLatch latch = pendingChatAcks.get(ackParts[2]);
-                            if (latch != null) latch.countDown();
+                            String peerId = ackParts[3].trim();
+                            java.net.InetSocketAddress verified = verifiedChatPeers.get(peerId);
+                            if (latch != null && verified != null
+                                    && verified.getAddress().equals(packet.getAddress())
+                                    && verified.getPort() == packet.getPort()) {
+                                verifiedChatPeerSeen.put(peerId, System.currentTimeMillis());
+                                latch.countDown();
+                            }
                         }
                     } else if (message.startsWith("FIND_ME_SERVER:")) {
                         String[] parts = message.split(":", 3);
