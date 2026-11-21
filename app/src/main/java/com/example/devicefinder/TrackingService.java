@@ -275,6 +275,9 @@ public class TrackingService extends Service implements LocationListener {
     // 有效 peer 存在时也定期重新发现，纳入后来上线/加入局域网的设备。
     private volatile long lastPeerDiscoveryAt = 0L;
     private static final long PEER_DISCOVERY_REFRESH_MS = 30_000L;
+    // 多条消息并发到达时只允许一个线程执行广播发现，避免重复探测和额外等待。
+    private final java.util.concurrent.atomic.AtomicBoolean peerDiscoveryInFlight =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
     // 与 buildNetworkSnapshot 的关键路径代数对齐；普通 capabilities/link 回调不应清空有效 peer。
     private volatile long lastPeerRouteGeneration = -1L;
 
@@ -3444,8 +3447,10 @@ public class TrackingService extends Service implements LocationListener {
                 verifiedChatPeers.remove(e.getKey());
             }
         }
-        boolean shouldDiscoverPeers = verifiedChatPeers.isEmpty()
+        boolean discoveryDue = verifiedChatPeers.isEmpty()
                 || now - lastPeerDiscoveryAt >= PEER_DISCOVERY_REFRESH_MS;
+        boolean shouldDiscoverPeers = discoveryDue
+                && peerDiscoveryInFlight.compareAndSet(false, true);
         if (shouldDiscoverPeers) {
             lastPeerDiscoveryAt = now;
             String nonce = java.util.UUID.randomUUID().toString();
@@ -3478,6 +3483,7 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.log(this, "CHAT", "⚠️ P2P 发现失败: " + e.getMessage());
             } finally {
                 pendingPeerChallenges.remove(nonce);
+                peerDiscoveryInFlight.set(false);
             }
         }
         String payload = "FIND_ME_CHAT:" + RESCUE_SECRET + ":" + myId + ":" + messageId + ":" + message;
