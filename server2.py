@@ -2,9 +2,9 @@
 ============================================================
 server2.py — 全功能同步服务（v2 协议稳定版）
 ------------------------------------------------------------
-构建批次 : 20261122-P2P-r2
+构建批次 : 20261122-P2P-r3
 协议版本 : v2-only / v2.7 LAN P2P peer discovery and per-peer ACK
-最后修改 : 2026-11-22（v2-only 信令；peer challenge；带 message_id 的聊天 ACK）
+最后修改 : 2026-11-22（v2-only 信令；消息 ACK 闭环；跨进程重启持久化去重）
 ------------------------------------------------------------
 本轮改动 : v2-only；custom_msg 仅发 FIND_ME_FLOAT，chat_msg 仅发带 message_id 的 FIND_ME_CHAT；响应 Android peer challenge 与消息 ACK；每次进程启动生成唯一会话 peer ID。
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
@@ -198,8 +198,48 @@ CONTROL_IP_ALLOWLIST = [x.strip() for x in os.environ.get("DF_CONTROL_ALLOW_IPS"
 USING_DEFAULT_CREDENTIALS = (CONTROL_TOKEN == DEFAULT_DEVICE_TOKEN)
 DEVICE_TOKEN_IS_DEFAULT = (AUTH_TOKEN == DEFAULT_DEVICE_TOKEN and RESCUE_SECRET == DEFAULT_DEVICE_TOKEN)
 
+def _claim_chat_message(sender, message_id):
+    """跨进程/重启的消息幂等；重复消息仍由 UDP 接收分支先回 ACK。"""
+    global CHAT_DEDUP_OPS
+    key = str(message_id or "")
+    if not key:
+        return True
+    now = time.time()
+    try:
+        with CHAT_DEDUP_LOCK:
+            conn = sqlite3.connect(CHAT_DEDUP_DB, timeout=3)
+            try:
+                conn.execute("PRAGMA busy_timeout=3000")
+                conn.execute("""CREATE TABLE IF NOT EXISTS received_chat_ids (
+                    sender TEXT NOT NULL,
+                    message_key TEXT NOT NULL,
+                    received_at REAL NOT NULL,
+                    PRIMARY KEY(sender, message_key)
+                )""")
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO received_chat_ids(sender,message_key,received_at) VALUES(?,?,?)",
+                    (str(sender), key, now))
+                CHAT_DEDUP_OPS += 1
+                if CHAT_DEDUP_OPS % 128 == 0:
+                    conn.execute("DELETE FROM received_chat_ids WHERE received_at < ?", (now - 7 * 86400,))
+                    conn.execute("""DELETE FROM received_chat_ids
+                        WHERE rowid IN (SELECT rowid FROM received_chat_ids
+                        ORDER BY received_at DESC LIMIT -1 OFFSET 10000)""")
+                conn.commit()
+                return cur.rowcount == 1
+            finally:
+                conn.close()
+    except Exception as e:
+        fallback_key = str(sender) + ":" + key
+        if now - LAST_MSG_INFO.get(fallback_key, 0) < 10.0:
+            return False
+        LAST_MSG_INFO[fallback_key] = now
+        with print_lock:
+            print(f"⚠️ 聊天持久化去重暂不可用，使用短时内存去重: {type(e).__name__}")
+        return True
+
 # ===== 版本 =====
-BUILD_VERSION = "20261121-0930"
+BUILD_VERSION = "20261122-1200-r3"
 PROTOCOL_VERSION = 2
 
 GLOBAL_DEFAULT_CONFIG = {
@@ -221,6 +261,9 @@ db_write_lock = threading.Lock()
 LAST_MSG_INFO = {}
 LAST_MSG_INFO_MAX = 100
 LAST_MSG_INFO_TTL = 10.0
+CHAT_DEDUP_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3")
+CHAT_DEDUP_LOCK = threading.Lock()
+CHAT_DEDUP_OPS = 0
 
 UPLOAD_LOG_DIR = "uploads/logs"
 os.makedirs(UPLOAD_LOG_DIR, exist_ok=True)
@@ -1158,15 +1201,8 @@ def udp_listener():
                             try: udp_sock.sendto(ack, addr)
                             except OSError: pass
                         if sender not in ["Web_Console", "PC_Terminal"]:
-                            dedup_key = sender + ":" + (message_id or content)
-                            now_ts = time.time()
-                            if now_ts - LAST_MSG_INFO.get(dedup_key, 0) < 3.0:
+                            if not _claim_chat_message(sender, message_id or content):
                                 continue
-                            LAST_MSG_INFO[dedup_key] = now_ts
-                            if len(LAST_MSG_INFO) > LAST_MSG_INFO_MAX:
-                                cutoff = now_ts - LAST_MSG_INFO_TTL
-                                stale = [k for k, v in list(LAST_MSG_INFO.items()) if v < cutoff]
-                                for k in stale: LAST_MSG_INFO.pop(k, None)
                             now_ms = int(datetime.datetime.now().timestamp() * 1000)
                             ts = datetime.datetime.now().strftime("%H:%M:%S")
                             # ★ 合并为单个锁块，消除一切嵌套疑虑

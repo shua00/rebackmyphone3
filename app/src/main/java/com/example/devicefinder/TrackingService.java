@@ -2,8 +2,8 @@
  * ============================================================
  *  TrackingService.java — 设备同步与可靠通信服务
  * ------------------------------------------------------------
- *  构建批次 : 20261122-P2P-r20
- *  源码版本 : v2.5.20-r20（协议 v2-only / LAN send-path latency diagnostics）
+ *  构建批次 : 20261122-P2P-r21
+ *  源码版本 : v2.5.21-r21（协议 v2-only / broadcast ACK completion and diagnostics）
  *  最后修改 : 2026-11-22
  *  体积目标 : 以现有约 140 KB APK 为基线；本轮不新增第三方库/运行时依赖
  *  性能原则 : 复用系统 API、既有回调/线程/上报链；无新增高频轮询、扫描或常驻线程
@@ -16,8 +16,9 @@
  *    - 当前验证仅适用于同一可互通 LAN；跨 NAT ICE、TURN/Relay 仍为未来扩展。
  *  本轮约束 : 移除 FIND_ME_MSG v1 双发/接收；保留现有 UDP 8888 监听、广播发送与所有非聊天业务。
  *  P2P 状态 : 按需 PEER_HELLO/PEER_ACK 挑战；缓存 120 秒验证过的 8888 endpoint，仅默认网络身份/IP/前缀/接口/网关等关键路径签名变化时清空；已验证成员逐成员单播；CHAT_ACK 必须匹配已验证 peer 的 ID/IP/端口；无 peer 时子网广播一次并保留待确认队列；消息接收先过滤自身 sender，再 ACK/去重；实机验证仍待完成。
- *  本轮改动 : 在 r19 实时收包快路径基础上，增加 UDP socket 锁等待、实际 send 耗时、ACK 等待轮数/总耗时的阈值诊断；不改变 ACK 重试次数、等待窗口、peer 验证或消息队列语义。
+ *  本轮改动 : 修复无已验证 peer 时广播 ACK 无法完成待确认消息的问题；广播 ACK 仅对当前 messageId 接受首个共享密钥认证的 8888 来源，不将其升级为已验证单播 peer；保留重试队列与逐 peer 严格 ACK。增加握手结果诊断。
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
+ *    - 2026-11-22 r21 广播 ACK 闭环：无 peer 时等待一个匹配 messageId 的认证 ACK，确认后回收该条待确认消息；未确认继续保留；不把广播 ACK 伪装成已验证 peer。
  *    - 2026-11-22 r20 发送路径诊断：记录异常 socket 锁等待、UDP send 耗时和 ACK 等待轮数/总耗时，不改变发送策略。
  *    - 2026-11-22 r19 聊天收包快路径：CHAT_MSG 提前到实时分发，先 ACK 后去重并异步处理历史/UI。
  *    - 2026-11-22 r18 接收循环减负：去掉普通包逐包 logcat；聊天 ACK 立即回包后再 FIFO 处理历史/UI；陪伴与警报命令转主线程串行执行。
@@ -249,6 +250,9 @@ public class TrackingService extends Service implements LocationListener {
             new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.Set<String>> pendingChatAckPeers =
             new java.util.concurrent.ConcurrentHashMap<>();
+    // 无已验证 peer 时，允许当前广播消息由首个共享密钥认证 ACK 完成；不学习/授权该 endpoint。
+    private final java.util.Set<String> pendingBroadcastChatAckIds =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final java.util.concurrent.ConcurrentHashMap<String, Long> pendingChatAckStartedAt =
             new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, Long> receivedChatMessageIds =
@@ -3453,8 +3457,12 @@ public class TrackingService extends Service implements LocationListener {
                     }
                 }
                 // 首次发现仍保留完整收集窗口，确保群聊成员不会因首个 ACK 而漏发现。
+                long discoveryStartedAt = android.os.SystemClock.elapsedRealtime();
                 try { Thread.sleep(500L); }
                 catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+                FileLogger.logD("CHAT", "P2P discovery finished peers=" + verifiedChatPeers.size()
+                        + " elapsedMs="
+                        + (android.os.SystemClock.elapsedRealtime() - discoveryStartedAt));
             } catch (Exception e) {
                 FileLogger.log(this, "CHAT", "⚠️ P2P 发现失败: " + e.getMessage());
             } finally {
@@ -3472,7 +3480,8 @@ public class TrackingService extends Service implements LocationListener {
         final int totalPeerCount = awaitingPeerIds.size();
         // 无已验证成员时没有可合法计数的 ACK；避免人为塞入 1 导致 deliveredPeers 为 -1。
         java.util.concurrent.CountDownLatch ack =
-                new java.util.concurrent.CountDownLatch(totalPeerCount);
+                new java.util.concurrent.CountDownLatch(totalPeerCount == 0 ? 1 : totalPeerCount);
+        if (totalPeerCount == 0) pendingBroadcastChatAckIds.add(messageId);
         pendingChatAckPeers.put(messageId, awaitingPeerIds);
         pendingChatAckStartedAt.put(messageId, android.os.SystemClock.elapsedRealtime());
         pendingChatAcks.put(messageId, ack);
@@ -3481,8 +3490,8 @@ public class TrackingService extends Service implements LocationListener {
         int ackRounds = 0;
         try {
             if (totalPeerCount == 0 && !socket.isClosed()) {
-                // 首次发现窗口内没有经过 challenge 验证的成员：只广播一次。
-                // 未验证来源的 ACK 不计为送达，消息继续保留在本地队列等待后续补发。
+                // 没有经过 challenge 的 peer 时仅广播一次；首个匹配 messageId 的认证 ACK
+                // 只证明至少一个接收端已收到，不把该来源加入 verifiedChatPeers。
                 for (String target : broadcasts) {
                     try {
                         DatagramPacket p = new DatagramPacket(data, data.length,
@@ -3492,14 +3501,13 @@ public class TrackingService extends Service implements LocationListener {
                         FileLogger.log(this, "CHAT", "⚠️ P2P 广播失败: " + e.getMessage());
                     }
                 }
-                FileLogger.log(this, "CHAT", "ℹ️ 暂无已验证成员，已广播一次并保留待确认队列: " + messageId);
-            }
-            for (int attempt = 1; attempt <= 3 && ack.getCount() > 0; attempt++) {
-                ackRounds = attempt;
-                if (socket.isClosed()) break;
-                if (awaitingPeerIds.isEmpty()) {
-                    break;
-                } else {
+                ackRounds = 1;
+                try { ack.await(250, TimeUnit.MILLISECONDS); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            } else {
+                for (int attempt = 1; attempt <= 3 && ack.getCount() > 0; attempt++) {
+                    ackRounds = attempt;
+                    if (socket.isClosed()) break;
                     for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
                         java.net.InetSocketAddress peer = verifiedChatPeers.get(peerId);
                         if (peer == null) {
@@ -3514,9 +3522,9 @@ public class TrackingService extends Service implements LocationListener {
                             FileLogger.log(this, "CHAT", "⚠️ P2P 单播失败: " + e.getMessage());
                         }
                     }
+                    try { ack.await(250, TimeUnit.MILLISECONDS); }
+                    catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
                 }
-                try { ack.await(250, TimeUnit.MILLISECONDS); }
-                catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
             }
             long ackLoopElapsed = android.os.SystemClock.elapsedRealtime() - ackLoopStartedAt;
             if (ackLoopElapsed >= 400L) {
@@ -3526,7 +3534,14 @@ public class TrackingService extends Service implements LocationListener {
             }
             int deliveredPeers = totalPeerCount - (int) ack.getCount();
             if (totalPeerCount == 0) {
-                // 广播模式没有经过验证的 ACK 目标；不报告虚假的送达数，也不清除持久化队列。
+                if (ack.getCount() == 0) {
+                    removePendingLanChat(messageId);
+                    FileLogger.log(this, "CHAT", "✅ P2P 广播 ACK 已确认至少一个接收端，消息 "
+                            + messageId);
+                } else {
+                    FileLogger.log(this, "CHAT", "⚠️ P2P 广播暂未收到 ACK，消息保留待确认队列: "
+                            + messageId);
+                }
             } else if (deliveredPeers == totalPeerCount) {
                 removePendingLanChat(messageId);
                 FileLogger.log(this, "CHAT", "✅ P2P 所有已发现成员 ACK: "
@@ -3545,6 +3560,7 @@ public class TrackingService extends Service implements LocationListener {
             pendingChatAcks.remove(messageId);
             pendingChatAckPeers.remove(messageId);
             pendingChatAckStartedAt.remove(messageId);
+            pendingBroadcastChatAckIds.remove(messageId);
         }
     }
 
@@ -3600,6 +3616,8 @@ public class TrackingService extends Service implements LocationListener {
                         verifiedChatPeers.put(peerId,
                                 new java.net.InetSocketAddress(packet.getAddress(), packet.getPort()));
                         verifiedChatPeerSeen.put(peerId, System.currentTimeMillis());
+                        FileLogger.logD("CHAT", "P2P peer challenge accepted peer=" + peerId
+                                + " from=" + packet.getAddress().getHostAddress());
                         latch.countDown();
                     }
                 }
@@ -3613,7 +3631,8 @@ public class TrackingService extends Service implements LocationListener {
                     java.util.concurrent.CountDownLatch latch = pendingChatAcks.get(messageId);
                     java.net.InetSocketAddress verified = verifiedChatPeers.get(peerId);
                     java.util.Set<String> expectedPeers = pendingChatAckPeers.get(messageId);
-                    if (latch != null && expectedPeers != null && verified != null
+                    if (!acceptBroadcastChatAck(messageId, peerId, packet)
+                            && latch != null && expectedPeers != null && verified != null
                             && verified.getAddress().equals(packet.getAddress())
                             && verified.getPort() == packet.getPort()
                             && expectedPeers.remove(peerId)) {
@@ -3666,6 +3685,30 @@ public class TrackingService extends Service implements LocationListener {
             return true;
         }
         return false;
+    }
+
+    /**
+     * 无已验证 peer 的广播发送只接受当前 messageId 的首个 ACK。
+     * 共享 RESCUE_SECRET + 随机 messageId + UDP 8888 来源完成消息级确认；
+     * 此 ACK 不授予单播路由权限，单播仍必须经过独立 PEER_HELLO challenge。
+     */
+    private boolean acceptBroadcastChatAck(String messageId, String peerId,
+                                           DatagramPacket packet) {
+        if (packet.getPort() != 8888 || peerId == null || peerId.isEmpty()
+                || peerId.equals(getUniqueDeviceId())
+                || !pendingBroadcastChatAckIds.contains(messageId)) {
+            return false;
+        }
+        java.util.concurrent.CountDownLatch latch = pendingChatAcks.get(messageId);
+        if (latch == null || !pendingBroadcastChatAckIds.remove(messageId)) return false;
+        Long startedAt = pendingChatAckStartedAt.get(messageId);
+        if (startedAt != null) {
+            FileLogger.log(this, "CHAT", "P2P 广播 ACK matched peer=" + peerId
+                    + " elapsedMs="
+                    + (android.os.SystemClock.elapsedRealtime() - startedAt));
+        }
+        latch.countDown();
+        return true;
     }
 
     private void sendChatAck(DatagramSocket socket, java.net.InetAddress address, int port,
@@ -3876,7 +3919,8 @@ public class TrackingService extends Service implements LocationListener {
                             String peerId = ackParts[3].trim();
                             java.net.InetSocketAddress verified = verifiedChatPeers.get(peerId);
                             java.util.Set<String> expectedPeers = pendingChatAckPeers.get(ackParts[2]);
-                            if (latch != null && expectedPeers != null && verified != null
+                            if (!acceptBroadcastChatAck(ackParts[2], peerId, packet)
+                                    && latch != null && expectedPeers != null && verified != null
                                     && verified.getAddress().equals(packet.getAddress())
                                     && verified.getPort() == packet.getPort()
                                     && expectedPeers.remove(peerId)) {

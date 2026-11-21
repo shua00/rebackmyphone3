@@ -4,7 +4,7 @@
 ============================================================
 rescue2.py — 局域网救援/调试终端（Ultimate v2 协议）
 ------------------------------------------------------------
-构建批次 : 20261122-P2P-r2
+构建批次 : 20261122-P2P-r3
 协议版本 : v2-only
 最后修改 : 2026-11-22（v2-only；peer challenge；消息 ID/ACK）
 ------------------------------------------------------------
@@ -70,6 +70,7 @@ Termux 运行前强烈建议执行：termux-wake-lock
 
 import socket
 import time
+import sqlite3
 import uuid
 import sys
 import json as _json
@@ -150,7 +151,51 @@ RECEIVER_OK = False
 UDP_OK = False
 _LAST_UDP_MSG = {}
 _LAST_UDP_MSG_TTL = 10
+_CHAT_DEDUP_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3")
+_CHAT_DEDUP_LOCK = threading.Lock()
+_CHAT_DEDUP_OPS = 0
 print_lock = threading.Lock()  # v2.0.2 补丁：全局打印锁，防多线程输出错乱
+
+def _claim_chat_message(sender, message_id):
+    """跨进程/重启的消息幂等；重复消息仍由 UDP 接收分支先回 ACK。"""
+    global _CHAT_DEDUP_OPS
+    key = str(message_id or "")
+    if not key:
+        return True
+    now = time.time()
+    try:
+        with _CHAT_DEDUP_LOCK:
+            conn = sqlite3.connect(_CHAT_DEDUP_DB, timeout=3)
+            try:
+                conn.execute("PRAGMA busy_timeout=3000")
+                conn.execute("""CREATE TABLE IF NOT EXISTS received_chat_ids (
+                    sender TEXT NOT NULL,
+                    message_key TEXT NOT NULL,
+                    received_at REAL NOT NULL,
+                    PRIMARY KEY(sender, message_key)
+                )""")
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO received_chat_ids(sender,message_key,received_at) VALUES(?,?,?)",
+                    (str(sender), key, now))
+                _CHAT_DEDUP_OPS += 1
+                if _CHAT_DEDUP_OPS % 128 == 0:
+                    conn.execute("DELETE FROM received_chat_ids WHERE received_at < ?", (now - 7 * 86400,))
+                    conn.execute("""DELETE FROM received_chat_ids
+                        WHERE rowid IN (SELECT rowid FROM received_chat_ids
+                        ORDER BY received_at DESC LIMIT -1 OFFSET 10000)""")
+                conn.commit()
+                return cur.rowcount == 1
+            finally:
+                conn.close()
+    except Exception as e:
+        # 磁盘/SQLite 暂时不可用时降级到进程内短窗，优先保证消息可见。
+        fallback_key = (str(sender), key)
+        if now - _LAST_UDP_MSG.get(fallback_key, 0) < 10.0:
+            return False
+        _LAST_UDP_MSG[fallback_key] = now
+        with print_lock:
+            print(f"{I.warn} 聊天持久化去重暂不可用，使用短时内存去重: {type(e).__name__}")
+        return True
 
 # ===== 环境检测 =====
 def is_termux():
@@ -466,14 +511,7 @@ def udp_listener():
                             try: sock.sendto(ack, addr)
                             except OSError: pass
                         if sender in ("PC_Terminal", "Web_Console", "Guest_"): continue
-                        dedup_key = (sender, message_id or content)
-                        now_ts = time.time()
-                        if now_ts - _LAST_UDP_MSG.get(dedup_key, 0) < 5.0: continue
-                        _LAST_UDP_MSG[dedup_key] = now_ts
-                        if len(_LAST_UDP_MSG) > 100:
-                            # v2.0.2 补丁：利用字典有序性，超限时直接踢掉最老的记录，防内存泄漏
-                            while len(_LAST_UDP_MSG) > 100:
-                                _LAST_UDP_MSG.pop(next(iter(_LAST_UDP_MSG)))
+                        if not _claim_chat_message(sender, message_id or content): continue
                         print(f"\n{I.chat} [{sender}] {content}  (来自 {addr[0]})")
                         with _state_lock:
                             info = DISCOVERED_DEVICES.setdefault(sender, {})
