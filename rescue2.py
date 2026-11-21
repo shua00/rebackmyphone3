@@ -5,9 +5,10 @@
 rescue2.py — 局域网救援/调试终端（Ultimate v2 协议）
 ------------------------------------------------------------
 构建批次 : 20261111-2000
-协议版本 : v2
-最后修改 : 2026-11-20 1:30（v2.0.3 远程陪伴特权推流）
+协议版本 : v2-only
+最后修改 : 2026-11-22（v2-only 对讲信令收敛）
 ------------------------------------------------------------
+本轮约束 : 保留救援、ADB、日志与陪护能力；聊天统一 FIND_ME_CHAT，不再双发旧前缀。
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
   2026-11-20 1:30  v2.0.2 新增p远程陪伴特权推流
   2026-11-13 00:30  v2.0.2 紧急三连击 + ADB 安装工具箱 + 并发防弹
@@ -28,14 +29,14 @@ DeviceFinder 局域网救援/调试终端 (Ultimate 终极完全体)
 - 局域网扫描：ARP 表优先 + 全网段探测，多网卡场景遍历所有本机网段
 - 多设备定向：单播 / 子网广播 / 全局广播 三档，按 IP 或设备编号选择
 - 拉日志：并发下发 + 统一等待 30s，结果汇总缺失清单
-- 对讲机：FLOAT/CHAT 双前缀发送与接收，PC 自身消息不记入设备列表
+- 对讲机：FIND_ME_CHAT v2-only，PC 自身消息不记入设备列表
 - UDP 8888 监听：断线自愈，指数退避重试，避免端口被占用后永久失聪
 
-【二、协议兼容 v1/v2 双发】
-- custom_msg：发 FIND_ME_FLOAT（v2）+ FIND_ME_MSG（v1，内容不含冒号才发）
+【二、协议 v2-only】
+- custom_msg：仅发 FIND_ME_FLOAT
               含冒号时只发 FLOAT，避免 v1 手机的 legacy 4 段被误判为 chat
-- chat_msg  ：同时发 FIND_ME_CHAT（v2）+ FIND_ME_MSG（v1）
-- 接收侧    ：认 FIND_ME_CHAT / FIND_ME_MSG 双前缀，5 秒去重
+- chat_msg  ：仅发 FIND_ME_CHAT
+- 接收侧    ：仅认 FIND_ME_CHAT，按发送者和内容短时去重
 - 版本上报  ：_handle_report 记录 build_version / protocol_version 到 DISCOVERED_DEVICES
 - 设备列表  ：show_devices / 选择目标列表 显示 build_version，便于分辨新旧 APK
 
@@ -446,7 +447,7 @@ def udp_listener():
             while True:
                 data, addr = sock.recvfrom(4096)
                 msg = data.decode('utf-8', errors='ignore')
-                if msg.startswith("FIND_ME_MSG:") or msg.startswith("FIND_ME_CHAT:"):
+                if msg.startswith("FIND_ME_CHAT:"):
                     parts = msg.split(":", 3)
                     if len(parts) >= 3 and parts[1] == RESCUE_SECRET:
                         sender = parts[2]
@@ -1262,7 +1263,6 @@ def menu_c_message_cleanup(local_ip):
             msg = input("悬浮文字内容: ").strip()
             if msg:
                 send_udp(f"FIND_ME_FLOAT:{RESCUE_SECRET}:{msg}", choose_targets_multi())
-                if ":" not in msg: send_udp(f"FIND_ME_MSG:{RESCUE_SECRET}:{msg}", choose_targets_multi())
         elif c == '2': send_udp(f"FIND_ME_CLEAR_HISTORY:{RESCUE_SECRET}", choose_targets_multi())
         elif c == '3':
             num = input("报警短信手机号: ").strip()
@@ -1407,7 +1407,6 @@ def main():
             chat = input("对讲消息内容: ").strip()
             if chat:
                 send_udp(f"FIND_ME_CHAT:{RESCUE_SECRET}:PC_Terminal:{chat}", choose_targets_multi())
-                send_udp(f"FIND_ME_MSG:{RESCUE_SECRET}:PC_Terminal:{chat}", choose_targets_multi())
         # 2026-11-20 ：1:45 精准插入以下独立特权流处理分支：
         elif choice == 'P':
             input_val = input("\n请输入远程陪伴媒体 URL / 直播源 / H5 网页地址: ").strip()
