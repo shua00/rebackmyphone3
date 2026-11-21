@@ -199,7 +199,7 @@ USING_DEFAULT_CREDENTIALS = (CONTROL_TOKEN == DEFAULT_DEVICE_TOKEN)
 DEVICE_TOKEN_IS_DEFAULT = (AUTH_TOKEN == DEFAULT_DEVICE_TOKEN and RESCUE_SECRET == DEFAULT_DEVICE_TOKEN)
 
 def _claim_chat_message(sender, message_id):
-    """跨进程/重启的消息幂等；重复消息仍由 UDP 接收分支先回 ACK。"""
+    """跨进程/重启的消息幂等；仅在持久化成功（新消息或重复消息）后确认。"""
     global CHAT_DEDUP_OPS
     key = str(message_id or "")
     if not key:
@@ -1193,8 +1193,13 @@ def udp_listener():
                         sender = parts[2]
                         message_id = parts[3]
                         content = parts[4]
-                        if sender not in ["Web_Console", "PC_Terminal"]:
-                            claim_result = _claim_chat_message(sender, message_id or content)
+                        if sender in ["Web_Console", "PC_Terminal"]:
+                            if message_id:
+                                ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:{PEER_NODE_ID}".encode("utf-8")
+                                try: udp_sock.sendto(ack, addr)
+                                except OSError: pass
+                            continue
+                        claim_result = _claim_chat_message(sender, message_id or content)
                             if claim_result is None:
                                 continue  # 持久化失败：不 ACK，允许发送端重试
                             if message_id:
