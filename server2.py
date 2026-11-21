@@ -1141,7 +1141,13 @@ def udp_listener():
                 msg = data.decode('utf-8', errors='ignore')
                 source_ip = addr[0]
                 # v2-only：只接收 FIND_ME_CHAT
-                if msg.startswith("FIND_ME_CHAT:"):
+                if msg.startswith("FIND_ME_PEER_HELLO:"):
+                    parts = msg.split(":", 3)
+                    if len(parts) == 4 and parts[1] == RESCUE_SECRET:
+                        response = f"FIND_ME_PEER_ACK:{RESCUE_SECRET}:{parts[3]}:server2".encode("utf-8")
+                        try: udp_sock.sendto(response, addr)
+                        except OSError: pass
+                elif msg.startswith("FIND_ME_CHAT:"):
                     parts = msg.split(":", 4)
                     if len(parts) in (4, 5) and parts[1] == RESCUE_SECRET:
                         sender = parts[2]
