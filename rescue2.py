@@ -8,7 +8,7 @@ rescue2.py — 局域网救援/调试终端（Ultimate v2 协议）
 协议版本 : v2-only
 最后修改 : 2026-11-22（v2-only 对讲与 P2P ACK）
 ------------------------------------------------------------
-本轮约束 : 保留救援、ADB、日志与陪护能力；聊天统一 FIND_ME_CHAT，不再双发旧前缀。
+本轮约束 : 保留救援、ADB、日志与陪护能力；聊天统一带 message_id 的 FIND_ME_CHAT v2 帧，并响应 peer challenge。
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
   2026-11-20 1:30  v2.0.2 新增p远程陪伴特权推流
   2026-11-13 00:30  v2.0.2 紧急三连击 + ADB 安装工具箱 + 并发防弹
@@ -456,10 +456,10 @@ def udp_listener():
                         except OSError: pass
                 elif msg.startswith("FIND_ME_CHAT:"):
                     parts = msg.split(":", 4)
-                    if len(parts) in (4, 5) and parts[1] == RESCUE_SECRET:
+                    if len(parts) == 5 and parts[1] == RESCUE_SECRET:
                         sender = parts[2]
-                        message_id = parts[3] if len(parts) == 5 else ""
-                        content = parts[4] if len(parts) == 5 else parts[3]
+                        message_id = parts[3]
+                        content = parts[4]
                         if message_id:
                             ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:rescue2".encode("utf-8")
                             try: sock.sendto(ack, addr)
