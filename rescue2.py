@@ -70,6 +70,7 @@ Termux 运行前强烈建议执行：termux-wake-lock
 
 import socket
 import time
+import uuid
 import sys
 import json as _json
 import gzip
@@ -1411,7 +1412,7 @@ def main():
         elif choice == '6':
             chat = input("对讲消息内容: ").strip()
             if chat:
-                send_udp(f"FIND_ME_CHAT:{RESCUE_SECRET}:PC_Terminal:{chat}", choose_targets_multi())
+                send_udp(f"FIND_ME_CHAT:{RESCUE_SECRET}:PC_Terminal:{uuid.uuid4()}:{chat}", choose_targets_multi())
         # 2026-11-20 ：1:45 精准插入以下独立特权流处理分支：
         elif choice == 'P':
             input_val = input("\n请输入远程陪伴媒体 URL / 直播源 / H5 网页地址: ").strip()
