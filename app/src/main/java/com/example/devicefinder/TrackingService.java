@@ -1,13 +1,21 @@
 /*
  * ============================================================
- *  TrackingService.java — 全内核高并发后台同步与常驻常活引擎
+ *  TrackingService.java — 设备同步与可靠通信服务
  * ------------------------------------------------------------
- *  构建批次 : 20261121-0930
- *  协议版本 : v2 / v2.1 网络状态与指令反馈扩展（兼容旧服务端）
- *  最后修改 : 2026-11-21 09:30（以 TrackingService_optimized.java 为基线，增加网络快照与指令反馈持久化补交）
- *  运行功耗 : 极轻量级 (深度适配低内存设备)
+ *  构建批次 : 20261122-0210-r4
+ *  源码版本 : v2.5.13-r4（基于 r3；协议 v2 / v2.2，向后兼容）
+ *  最后修改 : 2026-11-22 2:10
+ *  体积目标 : 以现有约 140 KB APK 为基线；本轮不新增第三方库/运行时依赖
+ *  性能原则 : 复用系统 API、既有回调/线程/上报链；无新增高频轮询、扫描或常驻线程
  * ------------------------------------------------------------
+ *  本轮网络路由轻量化：
+ *    - 复用 ConnectivityManager.NetworkCallback 与现有网络快照，不引入 Tailscale/Pion/libp2p/WebRTC。
+ *    - 网络快照增加 network_generation：网络关键指纹变化时递增，供服务端识别旧路径失效。
+ *    - 网络指纹仅用于诊断/候选筛选，不证明 UDP 可达；不以私网 IP、CIDR、SSID/BSSID 授权单播。
+ *    - UDP Challenge/Response、跨 NAT ICE、TURN/Relay 仅预留扩展约定，本版本不启动探测、不增加流量。
+ *    - 路由不可确认时由服务端使用现有 HTTP 持久队列；不影响定位、离线补发、聊天监听及其他业务。
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
+ *    2026-11-22 r4 轻量网络状态代数：网络快照关键字段变化时递增 network_generation；补齐头部架构/依赖/扩展边界说明，无新增第三方依赖。
  *    2026-11-21 09:30  网络与反馈扩展：默认网络快照（类型/IP/CIDR/接口/验证状态）；command_feedback 本地持久化、断网补交与服务端明确确认后回收；保留旧 executed_ids 和原离线补发机制
  *    2026-11-20 21:10  可靠性修复：[B1] 离线补发>FLUSH_BATCH_MAX 条时自我续跑（不再等网络状态变化）；
  *                      [B3] 批量下行响应解析由主线程 handler.post 移回工作线程（消除 ANR 风险）；
@@ -105,6 +113,7 @@ import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.LinkProperties;
 import android.net.LinkAddress;
+import android.net.RouteInfo;
 import android.net.NetworkInfo;
 import android.net.NetworkRequest;
 import android.net.TrafficStats;
@@ -256,8 +265,11 @@ public class TrackingService extends Service implements LocationListener {
     // executing 状态在进程重启后无法判断是否已产生副作用；仅对本进程仍在执行的命令允许继续等待。
     private final java.util.Set<String> commandsInFlight = java.util.Collections.newSetFromMap(
             new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+    // 网络快照状态仅用于标识本机网络路径代数；不作为 UDP 可达性的证明。
+    private static final Object NETWORK_STATE_LOCK = new Object();
     private static volatile String lastNetworkSignature = "";
     private static volatile long lastNetworkChangedAt = 0L;
+    private static volatile long networkGeneration = 0L;
     private static final int FAST_POLL_BATTERY_THRESHOLD = 20;
     private static final int FAST_POLL_MAX_CONSECUTIVE = 5;
     private static final long CMD_TIME_WINDOW_MS = 60 * 1000L;
@@ -1806,8 +1818,13 @@ public class TrackingService extends Service implements LocationListener {
     };
 
     /**
-     * 获取当前默认网络的可验证快照。SSID 仅作展示信息，不参与同网判定；
+     * 获取当前默认网络的轻量快照。SSID/BSSID 仅作可选诊断信息，不参与同网授权；
      * 子网前缀由 LinkProperties 的真实 IPv4 地址/前缀长度生成。
+     *
+     * 扩展预留（当前不执行）：未来若实现 UDP 通路验证，应在独立的 RouteProbe
+     * 适配层中使用随机 nonce + 设备身份认证 + 超时/重放保护完成 challenge/response，
+     * 验证成功后由服务端签发短租约；网络 generation 变化立即使旧租约失效。
+     * 不要在此方法中扫描 Wi-Fi、发 UDP 探测、创建线程或引入第三方网络库。
      */
     private JSONObject buildNetworkSnapshot() {
         JSONObject out = new JSONObject();
@@ -1840,8 +1857,20 @@ public class TrackingService extends Service implements LocationListener {
             String localIp = "";
             String subnetPrefix = "";
             String interfaceName = "";
+            String gatewayIp = "";
             if (links != null) {
                 interfaceName = links.getInterfaceName() != null ? links.getInterfaceName() : "";
+                try {
+                    List<RouteInfo> routes = links.getRoutes();
+                    if (routes != null) {
+                        for (RouteInfo route : routes) {
+                            if (route != null && route.isDefault() && route.getGateway() instanceof Inet4Address) {
+                                gatewayIp = route.getGateway().getHostAddress();
+                                if (gatewayIp != null && !gatewayIp.isEmpty()) break;
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {}
                 List<LinkAddress> addresses = links.getLinkAddresses();
                 if (addresses != null) {
                     for (LinkAddress la : addresses) {
@@ -1866,16 +1895,22 @@ public class TrackingService extends Service implements LocationListener {
             out.put("local_ip", localIp);
             out.put("subnet_prefix", subnetPrefix);
             out.put("interface_name", interfaceName);
+            if (!gatewayIp.isEmpty()) out.put("gateway_ip", gatewayIp);
             out.put("has_internet", hasInternet ? 1 : 0);
             out.put("validated", validated ? 1 : 0);
             out.put("network_subtype", "MOBILE".equals(transport) ? "cellular" : transport.toLowerCase(java.util.Locale.US));
             String signature = transport + "|" + localIp + "|" + subnetPrefix + "|" + interfaceName
-                    + "|" + hasInternet + "|" + validated;
-            if (!signature.equals(lastNetworkSignature)) {
-                lastNetworkSignature = signature;
-                lastNetworkChangedAt = System.currentTimeMillis();
+                    + "|" + gatewayIp + "|" + hasInternet + "|" + validated;
+            synchronized (NETWORK_STATE_LOCK) {
+                if (!signature.equals(lastNetworkSignature)) {
+                    lastNetworkSignature = signature;
+                    lastNetworkChangedAt = System.currentTimeMillis();
+                    networkGeneration++;
+                    if (networkGeneration <= 0L) networkGeneration = 1L;
+                }
+                out.put("changed_at", lastNetworkChangedAt);
+                out.put("network_generation", networkGeneration);
             }
-            out.put("changed_at", lastNetworkChangedAt);
         } catch (Exception e) {
             try { out.put("transport", "UNKNOWN"); out.put("network_type", "UNKNOWN"); } catch (Exception ignored) {}
             FileLogger.log(this, "NETWORK", "⚠️ 构建网络快照失败: " + e.getMessage());
@@ -2219,6 +2254,8 @@ public class TrackingService extends Service implements LocationListener {
                 JSONObject netObj = buildNetworkSnapshot();
                 netObj.put("wifi_ssid", wifi[0]);
                 netObj.put("wifi_bssid", wifi[1]);
+                if (wifi[1] != null && !wifi[1].isEmpty() && !"UNKNOWN".equalsIgnoreCase(wifi[1]))
+                    netObj.put("ap_bssid", wifi[1]);
                 try { netObj.put("wifi_rssi", Integer.parseInt(wifi[2])); }
                 catch (Exception ignored) { netObj.put("wifi_rssi", -127); }
                 if (ip != null && !ip.isEmpty() && netObj.optString("local_ip", "").isEmpty())
