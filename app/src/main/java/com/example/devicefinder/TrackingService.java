@@ -2,8 +2,8 @@
  * ============================================================
  *  TrackingService.java — 设备同步与可靠通信服务
  * ------------------------------------------------------------
- *  构建批次 : 20261122-P2P-r17
- *  源码版本 : v2.5.17-r17（协议 v2-only / LAN realtime ACK fast path）
+ *  构建批次 : 20261122-P2P-r18
+ *  源码版本 : v2.5.18-r18（协议 v2-only / UDP receive-loop latency reduction）
  *  最后修改 : 2026-11-22
  *  体积目标 : 以现有约 140 KB APK 为基线；本轮不新增第三方库/运行时依赖
  *  性能原则 : 复用系统 API、既有回调/线程/上报链；无新增高频轮询、扫描或常驻线程
@@ -16,8 +16,9 @@
  *    - 当前验证仅适用于同一可互通 LAN；跨 NAT ICE、TURN/Relay 仍为未来扩展。
  *  本轮约束 : 移除 FIND_ME_MSG v1 双发/接收；保留现有 UDP 8888 监听、广播发送与所有非聊天业务。
  *  P2P 状态 : 按需 PEER_HELLO/PEER_ACK 挑战；缓存 120 秒验证过的 8888 endpoint，仅默认网络身份/IP/前缀/接口/网关等关键路径签名变化时清空；已验证成员逐成员单播；CHAT_ACK 必须匹配已验证 peer 的 ID/IP/端口；无 peer 时子网广播一次并保留待确认队列；消息接收先过滤自身 sender，再 ACK/去重；实机验证仍待完成。
- *  本轮改动 : 将 PEER_HELLO/PEER_ACK/CHAT_ACK 前置为轻量实时快路径；UDP 常规日志仅记类型/来源/长度，避免认证字段与聊天正文泄露；慢分支诊断仅记录命令类型。保留既有路由、队列、ACK 重试和聊天 UI 行为。
+ *  本轮改动 : 保留 PEER_HELLO/PEER_ACK/CHAT_ACK 实时快路径；移除普通 UDP 包逐包同步 logcat；聊天 ACK 后将历史写入/通知排入主线程 FIFO；陪伴和警报命令移出 UDP 接收循环。保留既有命令内容、去重和执行顺序。
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
+ *    - 2026-11-22 r18 接收循环减负：去掉普通包逐包 logcat；聊天 ACK 立即回包后再 FIFO 处理历史/UI；陪伴与警报命令转主线程串行执行。
  *    - 2026-11-22 r17 实时 ACK 快路径：握手/聊天 ACK 优先处理；移除完整 UDP 包日志，防止协议认证字段和聊天内容进入日志。
  *    - 2026-11-22 r16 LAN P2P 修复：单子网广播；自身回环包提前过滤；ACK 空成员计数修正；按真实网络路径代数失效 peer；UDP 慢分支诊断。
  *    2026-11-22 r15 后台持久化与时延诊断：同步 commit 移出 Service 主线程，增加持久化、UDP发送、ACK、接收时间日志。\n *    2026-11-22 r14 LAN P2P 快速发送：复用 120 秒已验证 peer endpoint，连续消息跳过重复 500ms 发现窗口；ACK 等待缩短为 250ms/轮，失败后撤销旧路由并在后续消息重新发现。\n *    2026-11-22 r4 轻量网络状态代数：网络快照关键字段变化时递增 network_generation；补齐头部架构/依赖/扩展边界说明，无新增第三方依赖。
@@ -3763,9 +3764,7 @@ public class TrackingService extends Service implements LocationListener {
                     // 只记录命令前缀与来源，不记录认证字段、聊天正文或完整协议包。
                     int typeEnd = message.indexOf(':');
                     String packetType = typeEnd > 0 ? message.substring(0, typeEnd) : "UNKNOWN";
-                    FileLogger.logD("UDP", "收到 UDP 包 type=" + packetType
-                            + " from=" + packet.getAddress().getHostAddress()
-                            + ":" + packet.getPort() + " bytes=" + packet.getLength());
+                    // 不逐包写 logcat；仅在下方达到慢处理阈值时记录安全的命令类型。
 
                     if (message.startsWith("FIND_ME_ALARM:")
                             || message.startsWith("FIND_ME_TEST_LOW_BATTERY:")
@@ -3871,14 +3870,18 @@ public class TrackingService extends Service implements LocationListener {
                         }
                     // ★ 插件旁路挂载：远程陪伴
                     } else if (message.startsWith("FIND_ME_PUSH_") || message.startsWith("FIND_ME_PLUGIN:companion:")) {
-                        CompanionModule.handleUdp(this, message);
+                        final String companionMessage = message;
+                        handler.post(() -> {
+                            if (!serviceDestroyed) CompanionModule.handleUdp(TrackingService.this, companionMessage);
+                        });
                     } else if (message.startsWith("FIND_ME_ALARM:")) {
                         String[] parts = message.split(":", 2);
                         if (parts.length == 2 && RESCUE_SECRET.equals(parts[1])) {
                             // ★ 改动2：判重拦截，多包不会连环响铃
                             String dk = buildDedupKey("play_alarm", null, null);
                             if (!isRecentlyExecuted(dk)) {
-                                playAlarm();
+                                // 音频系统调用不占用 UDP 接收线程。
+                                handler.post(() -> { if (!serviceDestroyed) playAlarm(); });
                             }
                         }
                     }
@@ -3917,7 +3920,14 @@ public class TrackingService extends Service implements LocationListener {
                                     receivedChatMessageIds.entrySet().removeIf(e -> e.getValue() < cutoff);
                                 }
                                 String dk = buildDedupKey("chat_msg", senderId + ":" + messageId, null);
-                                if (!isRecentlyExecuted(dk)) handleIncomingChat(senderId, content);
+                                if (!isRecentlyExecuted(dk)) {
+                                    // ACK 已在上方立即发出；历史与 UI 在主线程 FIFO 中串行处理，避免阻塞 UDP 收包。
+                                    final String incomingSenderId = senderId;
+                                    final String incomingContent = content;
+                                    handler.post(() -> {
+                                        if (!serviceDestroyed) handleIncomingChat(incomingSenderId, incomingContent);
+                                    });
+                                }
                             }
                         }
                     }
