@@ -6,7 +6,7 @@ chat.py — 局域网对讲机 Web 前端（代理/独立双模，v2-only）
 协议版本 : v2-only
 最后修改 : 2026-11-22（v2-only 收敛；聊天安全文本渲染）
 ------------------------------------------------------------
-本轮约束 : 不依赖 server2 才能运行独立聊天；兼容 v2 基础消息与带 message_id 的 v2 ACK 消息。
+本轮约束 : 不依赖 server2 才能运行独立聊天；严格使用带 message_id 的 v2 聊天帧，并响应 peer challenge。
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
   2026-11-12 22:45  v2.0 通道可视化 + v2.0.1 架构优化 + 修复版本常量
   2026-11-11 19:45  注释规范统一（无逻辑改动）
@@ -188,10 +188,10 @@ def udp_listener():
             elif msg.startswith("FIND_ME_CHAT:"):
                 # v2-only：聊天统一使用 FIND_ME_CHAT，不再接收旧 FIND_ME_MSG
                 parts = msg.split(":", 4)
-                if len(parts) in (4, 5) and parts[1] == RESCUE_SECRET:
+                if len(parts) == 5 and parts[1] == RESCUE_SECRET:
                     sender = parts[2]
-                    message_id = parts[3] if len(parts) == 5 else ""
-                    content = parts[4] if len(parts) == 5 else parts[3]
+                    message_id = parts[3]
+                    content = parts[4]
                     if message_id:
                         ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:chat.py".encode("utf-8")
                         try: udp_sock.sendto(ack, addr)
