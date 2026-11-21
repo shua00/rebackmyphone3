@@ -3765,7 +3765,7 @@ public class TrackingService extends Service implements LocationListener {
                     String packetType = typeEnd > 0 ? message.substring(0, typeEnd) : "UNKNOWN";
                     FileLogger.logD("UDP", "收到 UDP 包 type=" + packetType
                             + " from=" + packet.getAddress().getHostAddress()
-                            + ":" + packet.getPort() + " bytes=" + packet.length);
+                            + ":" + packet.getPort() + " bytes=" + packet.getLength());
 
                     if (message.startsWith("FIND_ME_ALARM:")
                             || message.startsWith("FIND_ME_TEST_LOW_BATTERY:")
