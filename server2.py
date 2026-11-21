@@ -1141,10 +1141,15 @@ def udp_listener():
                 source_ip = addr[0]
                 # v2-only：只接收 FIND_ME_CHAT
                 if msg.startswith("FIND_ME_CHAT:"):
-                    parts = msg.split(":", 3)
-                    if len(parts) == 4 and parts[1] == RESCUE_SECRET:
+                    parts = msg.split(":", 4)
+                    if len(parts) in (4, 5) and parts[1] == RESCUE_SECRET:
                         sender = parts[2]
-                        content = parts[3]
+                        message_id = parts[3] if len(parts) == 5 else ""
+                        content = parts[4] if len(parts) == 5 else parts[3]
+                        if message_id:
+                            ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:server2".encode("utf-8")
+                            try: udp_sock.sendto(ack, addr)
+                            except OSError: pass
                         if sender not in ["Web_Console", "PC_Terminal"]:
                             dedup_key = sender + ":" + content
                             now_ts = time.time()
