@@ -188,14 +188,10 @@ def _claim_chat_message(sender, message_id):
             finally:
                 conn.close()
     except Exception as e:
-        # 磁盘/SQLite 暂时不可用时降级到进程内短窗，优先保证消息可见。
-        fallback_key = (str(sender), key)
-        if now - _LAST_UDP_MSG.get(fallback_key, 0) < 10.0:
-            return False
-        _LAST_UDP_MSG[fallback_key] = now
+        # 持久化失败不能确认新消息已可靠接收；返回 None 让接收端暂不 ACK。
         with print_lock:
-            print(f"{I.warn} 聊天持久化去重暂不可用，使用短时内存去重: {type(e).__name__}")
-        return True
+            print(f"{I.warn} 聊天持久化去重失败，本条消息暂不确认: {type(e).__name__}")
+        return None
 
 # ===== 环境检测 =====
 def is_termux():
@@ -506,12 +502,16 @@ def udp_listener():
                         sender = parts[2]
                         message_id = parts[3]
                         content = parts[4]
+                        if sender in ("PC_Terminal", "Web_Console", "Guest_"): continue
+                        claim_result = _claim_chat_message(sender, message_id or content)
+                        if claim_result is None:
+                            continue  # 持久化失败：不 ACK，允许发送端重试
                         if message_id:
                             ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:{PEER_NODE_ID}".encode("utf-8")
                             try: sock.sendto(ack, addr)
                             except OSError: pass
-                        if sender in ("PC_Terminal", "Web_Console", "Guest_"): continue
-                        if not _claim_chat_message(sender, message_id or content): continue
+                        if not claim_result:
+                            continue  # 重复消息仍 ACK，但不重复展示
                         print(f"\n{I.chat} [{sender}] {content}  (来自 {addr[0]})")
                         with _state_lock:
                             info = DISCOVERED_DEVICES.setdefault(sender, {})
