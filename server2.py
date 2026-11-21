@@ -1152,7 +1152,7 @@ def udp_listener():
                             try: udp_sock.sendto(ack, addr)
                             except OSError: pass
                         if sender not in ["Web_Console", "PC_Terminal"]:
-                            dedup_key = sender + ":" + content
+                            dedup_key = sender + ":" + (message_id or content)
                             now_ts = time.time()
                             if now_ts - LAST_MSG_INFO.get(dedup_key, 0) < 3.0:
                                 continue
