@@ -2,8 +2,8 @@
  * ============================================================
  *  TrackingService.java — 设备同步与可靠通信服务
  * ------------------------------------------------------------
- *  构建批次 : 20261122-P2P-r11
- *  源码版本 : v2.5.13-r12（协议 v2-only / v2.10 serialized chat retry）
+ *  构建批次 : 20261122-P2P-r12
+ *  源码版本 : v2.5.13-r13（协议 v2-only / v2.11 multi-peer discovery window）
  *  最后修改 : 2026-11-22
  *  体积目标 : 以现有约 140 KB APK 为基线；本轮不新增第三方库/运行时依赖
  *  性能原则 : 复用系统 API、既有回调/线程/上报链；无新增高频轮询、扫描或常驻线程
@@ -16,7 +16,7 @@
  *    - 当前验证仅适用于同一可互通 LAN；跨 NAT ICE、TURN/Relay 仍为未来扩展。
  *  本轮约束 : 移除 FIND_ME_MSG v1 双发/接收；保留现有 UDP 8888 监听、广播发送与所有非聊天业务。
  *  P2P 状态 : 按需 PEER_HELLO/PEER_ACK 挑战；缓存 120 秒验证过的 8888 endpoint，网络回调变化立即清空，优先逐成员单播；CHAT_ACK 必须匹配已验证 peer 的 ID/IP/端口；待确认消息使用 SharedPreferences 同步落盘、最多 50 条，网络恢复后按原 message_id 每次补发最多 3 条。实机验证仍待完成。
- *  本轮改动 : 增加按需 peer challenge/response、120 秒 endpoint 租约、网络变化撤销、逐成员单播与 ACK 统计、ACK 来源 ID/IP/端口校验、message_id、接收去重及未确认成员最多 3 次有限重试；消息先同步持久化，网络恢复/服务重启后按原 ID 限量补发；同一消息禁止并发重发；队列满时拒绝覆盖旧消息。
+ *  本轮改动 : 增加按需 peer challenge/response、500ms 多成员收集窗口、120 秒 endpoint 租约、网络变化撤销、逐成员单播与 ACK 统计、ACK 来源 ID/IP/端口校验、message_id、接收去重及未确认成员最多 3 次有限重试；消息先同步持久化，网络恢复/服务重启后按原 ID 限量补发；同一消息禁止并发重发；队列满时拒绝覆盖旧消息。
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
  *    2026-11-22 r4 轻量网络状态代数：网络快照关键字段变化时递增 network_generation；补齐头部架构/依赖/扩展边界说明，无新增第三方依赖。
  *    2026-11-21 09:30  网络与反馈扩展：默认网络快照（类型/IP/CIDR/接口/验证状态）；command_feedback 本地持久化、断网补交与服务端明确确认后回收；保留旧 executed_ids 和原离线补发机制
@@ -3408,7 +3408,8 @@ public class TrackingService extends Service implements LocationListener {
                     FileLogger.log(this, "CHAT", "⚠️ P2P 发现广播失败: " + e.getMessage());
                 }
             }
-            try { peerLatch.await(350, TimeUnit.MILLISECONDS); }
+            // 固定收集窗口：不能在第一个 peer 回应时提前结束，否则群聊只发现一台设备。
+            try { Thread.sleep(500L); }
             catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
         } catch (Exception e) {
             FileLogger.log(this, "CHAT", "⚠️ P2P 发现失败: " + e.getMessage());
