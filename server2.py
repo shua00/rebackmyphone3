@@ -59,6 +59,8 @@ from urllib.parse import urlparse, parse_qs
 # ★ 新增ThreadPoolExecutor 补丁： 2026-11-05 13:50
 from concurrent.futures import ThreadPoolExecutor
 
+PEER_NODE_ID = f"server2-{uuid.uuid4().hex[:12]}"  # 本次进程唯一 LAN 会话 ID
+
 """
 ============================================================
 DeviceFinder server2.py — 全功能同步服务（终极稳健版）
