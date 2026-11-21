@@ -3939,11 +3939,7 @@ public class TrackingService extends Service implements LocationListener {
                             }
                         }
                     }
-                    long udpDispatchCostMs = android.os.SystemClock.elapsedRealtime() - udpReceiveElapsedMs;
-                    if (udpDispatchCostMs >= 200L) {
-                        FileLogger.log(this, "UDP", "⚠️ UDP 接收分支处理偏慢: " + udpDispatchCostMs
-                                + "ms, prefix=" + (message.length() > 48 ? message.substring(0, 48) : message));
-                    } else if (message.startsWith("FIND_ME_SCAN_WIFI:")) {
+ else if (message.startsWith("FIND_ME_SCAN_WIFI:")) {
                         String[] parts = message.split(":", 2);
                         if (parts.length == 2 && RESCUE_SECRET.equals(parts[1])) {
                             // ★ 2026-11-07 [P1-1]
@@ -3972,6 +3968,11 @@ public class TrackingService extends Service implements LocationListener {
                                 sendLowBatterySms(15);
                             }
                         }
+                    }
+                    long udpDispatchCostMs = android.os.SystemClock.elapsedRealtime() - udpReceiveElapsedMs;
+                    if (udpDispatchCostMs >= 200L) {
+                        FileLogger.log(this, "UDP", "⚠️ UDP 接收分支处理偏慢: " + udpDispatchCostMs
+                                + "ms, prefix=" + (message.length() > 48 ? message.substring(0, 48) : message));
                     }
                 }
             } catch (java.net.BindException be) {
