@@ -1864,7 +1864,7 @@ public class TrackingService extends Service implements LocationListener {
                     List<RouteInfo> routes = links.getRoutes();
                     if (routes != null) {
                         for (RouteInfo route : routes) {
-                            if (route != null && route.isDefault() && route.getGateway() instanceof Inet4Address) {
+                            if (route != null && route.isDefaultRoute() && route.getGateway() instanceof Inet4Address) {
                                 gatewayIp = route.getGateway().getHostAddress();
                                 if (gatewayIp != null && !gatewayIp.isEmpty()) break;
                             }
