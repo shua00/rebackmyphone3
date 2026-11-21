@@ -18,6 +18,7 @@ import threading
 import datetime
 import json
 import time                                      # [F1] 子网广播重试间隔需要
+import uuid
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -277,7 +278,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": content})
                         if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
 
-                    payload = f"FIND_ME_CHAT:{RESCUE_SECRET}:{sender}:{content}"
+                    payload = f"FIND_ME_CHAT:{RESCUE_SECRET}:{sender}:{uuid.uuid4()}:{content}"
                     # [F1] 子网 + 全局双发，每目标 3 次
                     broadcast_chat_message(payload)
 
