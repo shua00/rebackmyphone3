@@ -2,18 +2,18 @@
  * ============================================================
  *  TrackingService.java — 设备同步与可靠通信服务
  * ------------------------------------------------------------
- *  构建批次 : 20261122-0210-r4
+ *  构建批次 : 20261122-P2P-r8
  *  源码版本 : v2.5.13-r8（协议 v2-only / v2.6 network-bound peer lease）
  *  最后修改 : 2026-11-22
  *  体积目标 : 以现有约 140 KB APK 为基线；本轮不新增第三方库/运行时依赖
  *  性能原则 : 复用系统 API、既有回调/线程/上报链；无新增高频轮询、扫描或常驻线程
  * ------------------------------------------------------------
- *  本轮网络路由轻量化：
+ *  本轮 LAN P2P 路由：
  *    - 复用 ConnectivityManager.NetworkCallback 与现有网络快照，不引入 Tailscale/Pion/libp2p/WebRTC。
- *    - 网络快照增加 network_generation：网络关键指纹变化时递增，供服务端识别旧路径失效。
- *    - 网络指纹仅用于诊断/候选筛选，不证明 UDP 可达；不以私网 IP、CIDR、SSID/BSSID 授权单播。
- *    - UDP Challenge/Response、跨 NAT ICE、TURN/Relay 仅预留扩展约定，本版本不启动探测、不增加流量。
- *    - 路由不可确认时由服务端使用现有 HTTP 持久队列；不影响定位、离线补发、聊天监听及其他业务。
+ *    - 按需广播随机 nonce challenge，只有收到对应 response 才记录对端 UDP endpoint；租约 120 秒。
+ *    - 已验证 endpoint 优先单播；无已验证 peer 时广播；网络回调变化立即清空 peer 表。
+ *    - 网络指纹仅用于诊断，不授权单播；不以私网 IP、CIDR、SSID/BSSID 作为可达证明。
+ *    - 当前验证仅适用于同一可互通 LAN；跨 NAT ICE、TURN/Relay 仍为未来扩展。
  *  本轮约束 : 移除 FIND_ME_MSG v1 双发/接收；保留现有 UDP 8888 监听、广播发送与所有非聊天业务。
  *  P2P 状态 : 按需 PEER_HELLO/PEER_ACK 挑战；缓存 120 秒验证过的 8888 endpoint，网络回调变化立即清空，优先单播；无验证 peer 时广播。CHAT_ACK 必须匹配已验证 peer 的 ID/IP/端口。逐成员送达统计、离线待发队列和实机验证仍待完成。
  *  本轮改动 : 增加按需 peer challenge/response、120 秒 endpoint 租约、网络变化撤销、验证 peer 单播、ACK 来源 ID/IP/端口校验、message_id、接收去重与最多 3 次有限重试；发送复用 8888 监听 socket。
