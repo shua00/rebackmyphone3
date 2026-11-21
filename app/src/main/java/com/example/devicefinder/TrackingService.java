@@ -3450,7 +3450,7 @@ public class TrackingService extends Service implements LocationListener {
                 for (String target : broadcasts) {
                     // server2/chat.py 使用 8888；rescue2 独立监听 8889。
                     // 分端口发现后，单播路由才能唯一对应到实际接收进程。
-                    for (int peerPort : new int[]{8888, 8889}) {
+                    for (int peerPort : new int[]{8888, 8889, 8890}) {
                         try {
                             DatagramPacket p = new DatagramPacket(hello, hello.length,
                                     java.net.InetAddress.getByName(target), peerPort);
@@ -3498,12 +3498,15 @@ public class TrackingService extends Service implements LocationListener {
                 // 没有经过 challenge 的 peer 时仅广播一次；首个匹配 messageId 的认证 ACK
                 // 只证明至少一个接收端已收到，不把该来源加入 verifiedChatPeers。
                 for (String target : broadcasts) {
-                    try {
-                        DatagramPacket p = new DatagramPacket(data, data.length,
-                                java.net.InetAddress.getByName(target), 8888);
-                        sendLanUdpPacket(socket, p, "CHAT_BROADCAST");
-                    } catch (Exception e) {
-                        FileLogger.log(this, "CHAT", "⚠️ P2P 广播失败: " + e.getMessage());
+                    for (int peerPort : new int[]{8888, 8889, 8890}) {
+                        try {
+                            DatagramPacket p = new DatagramPacket(data, data.length,
+                                    java.net.InetAddress.getByName(target), peerPort);
+                            sendLanUdpPacket(socket, p, "CHAT_BROADCAST_" + peerPort);
+                        } catch (Exception e) {
+                            FileLogger.log(this, "CHAT", "⚠️ P2P 广播失败 port="
+                                    + peerPort + ": " + e.getMessage());
+                        }
                     }
                 }
                 ackRounds = 1;
@@ -3694,12 +3697,12 @@ public class TrackingService extends Service implements LocationListener {
 
     /**
      * 无已验证 peer 的广播发送只接受当前 messageId 的首个 ACK。
-     * 共享 RESCUE_SECRET + 随机 messageId + UDP 8888 来源完成消息级确认；
+     * 共享 RESCUE_SECRET + 随机 messageId + 独立 UDP 端口来源完成消息级确认；
      * 此 ACK 不授予单播路由权限，单播仍必须经过独立 PEER_HELLO challenge。
      */
     private boolean acceptBroadcastChatAck(String messageId, String peerId,
                                            DatagramPacket packet) {
-        if (packet.getPort() != 8888 || peerId == null || peerId.isEmpty()
+        if ((packet.getPort() != 8888 && packet.getPort() != 8889 && packet.getPort() != 8890) || peerId == null || peerId.isEmpty()
                 || peerId.equals(getUniqueDeviceId())
                 || !pendingBroadcastChatAckIds.contains(messageId)) {
             return false;
