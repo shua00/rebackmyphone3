@@ -2,8 +2,8 @@
  * ============================================================
  *  TrackingService.java — 设备同步与可靠通信服务
  * ------------------------------------------------------------
- *  构建批次 : 20261122-P2P-r9
- *  源码版本 : v2.5.13-r10（协议 v2-only / v2.8 persistent LAN chat queue）
+ *  构建批次 : 20261122-P2P-r10
+ *  源码版本 : v2.5.13-r11（协议 v2-only / v2.9 persistent queue recovery）
  *  最后修改 : 2026-11-22
  *  体积目标 : 以现有约 140 KB APK 为基线；本轮不新增第三方库/运行时依赖
  *  性能原则 : 复用系统 API、既有回调/线程/上报链；无新增高频轮询、扫描或常驻线程
@@ -16,7 +16,7 @@
  *    - 当前验证仅适用于同一可互通 LAN；跨 NAT ICE、TURN/Relay 仍为未来扩展。
  *  本轮约束 : 移除 FIND_ME_MSG v1 双发/接收；保留现有 UDP 8888 监听、广播发送与所有非聊天业务。
  *  P2P 状态 : 按需 PEER_HELLO/PEER_ACK 挑战；缓存 120 秒验证过的 8888 endpoint，网络回调变化立即清空，优先逐成员单播；CHAT_ACK 必须匹配已验证 peer 的 ID/IP/端口；待确认消息使用 SharedPreferences 同步落盘、最多 50 条，网络恢复后按原 message_id 每次补发最多 3 条。实机验证仍待完成。
- *  本轮改动 : 增加按需 peer challenge/response、120 秒 endpoint 租约、网络变化撤销、逐成员单播与 ACK 统计、ACK 来源 ID/IP/端口校验、message_id、接收去重及未确认成员最多 3 次有限重试；消息先同步持久化，网络恢复时按原 ID 限量补发。
+ *  本轮改动 : 增加按需 peer challenge/response、120 秒 endpoint 租约、网络变化撤销、逐成员单播与 ACK 统计、ACK 来源 ID/IP/端口校验、message_id、接收去重及未确认成员最多 3 次有限重试；消息先同步持久化，网络恢复/服务重启后按原 ID 限量补发；队列满时拒绝覆盖旧消息。
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
  *    2026-11-22 r4 轻量网络状态代数：网络快照关键字段变化时递增 network_generation；补齐头部架构/依赖/扩展边界说明，无新增第三方依赖。
  *    2026-11-21 09:30  网络与反馈扩展：默认网络快照（类型/IP/CIDR/接口/验证状态）；command_feedback 本地持久化、断网补交与服务端明确确认后回收；保留旧 executed_ids 和原离线补发机制
@@ -1843,7 +1843,8 @@ public class TrackingService extends Service implements LocationListener {
             if ("WIFI".equals(state) || "ETHERNET".equals(state)) {
                 flushPendingReports();
                 if (changed) triggerRescueListener();
-                if (changed) retryPendingLanChatMessages();
+                // 首次启动、网络回调重建或服务重启也要恢复待确认消息，不只依赖指纹变化。
+                retryPendingLanChatMessages();
             }
         } catch (Exception e) {
             FileLogger.log(TrackingService.this, "NETWORK", "⚠️ 刷新网络状态失败: " + e.getMessage());
@@ -1854,10 +1855,8 @@ public class TrackingService extends Service implements LocationListener {
      * 获取当前默认网络的轻量快照。SSID/BSSID 仅作可选诊断信息，不参与同网授权；
      * 子网前缀由 LinkProperties 的真实 IPv4 地址/前缀长度生成。
      *
-     * 扩展预留（当前不执行）：未来若实现 UDP 通路验证，应在独立的 RouteProbe
-     * 适配层中使用随机 nonce + 设备身份认证 + 超时/重放保护完成 challenge/response，
-     * 验证成功后由服务端签发短租约；网络 generation 变化立即使旧租约失效。
-     * 不要在此方法中扫描 Wi-Fi、发 UDP 探测、创建线程或引入第三方网络库。
+     * LAN P2P 的按需 UDP challenge/response 在聊天发送路径中独立执行，不在网络快照构建时探测。
+     * 本快照仅记录系统提供的当前默认网络信息；不扫描 Wi-Fi、不将网段指纹作为可达证明。
      */
     private JSONObject buildNetworkSnapshot() {
         JSONObject out = new JSONObject();
@@ -3301,7 +3300,11 @@ public class TrackingService extends Service implements LocationListener {
             try {
                 SharedPreferences prefs = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
                 JSONArray queue = new JSONArray(prefs.getString(PREF_LAN_CHAT_QUEUE, "[]"));
-                while (queue.length() >= LAN_CHAT_QUEUE_MAX) queue.remove(0);
+                if (queue.length() >= LAN_CHAT_QUEUE_MAX) {
+                    FileLogger.log(this, "CHAT", "⚠️ LAN 聊天待确认队列已满（" + LAN_CHAT_QUEUE_MAX
+                            + " 条），保留已有消息并拒绝覆盖旧消息");
+                    return false;
+                }
                 JSONObject item = new JSONObject();
                 item.put("message_id", messageId);
                 item.put("content", content);
