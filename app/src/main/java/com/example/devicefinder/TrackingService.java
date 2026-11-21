@@ -2,8 +2,8 @@
  * ============================================================
  *  TrackingService.java — 设备同步与可靠通信服务
  * ------------------------------------------------------------
- *  构建批次 : 20261122-P2P-r16
- *  源码版本 : v2.5.16-r16（协议 v2-only / LAN route + ACK hardening）
+ *  构建批次 : 20261122-P2P-r17
+ *  源码版本 : v2.5.17-r17（协议 v2-only / LAN realtime ACK fast path）
  *  最后修改 : 2026-11-22
  *  体积目标 : 以现有约 140 KB APK 为基线；本轮不新增第三方库/运行时依赖
  *  性能原则 : 复用系统 API、既有回调/线程/上报链；无新增高频轮询、扫描或常驻线程
@@ -16,8 +16,9 @@
  *    - 当前验证仅适用于同一可互通 LAN；跨 NAT ICE、TURN/Relay 仍为未来扩展。
  *  本轮约束 : 移除 FIND_ME_MSG v1 双发/接收；保留现有 UDP 8888 监听、广播发送与所有非聊天业务。
  *  P2P 状态 : 按需 PEER_HELLO/PEER_ACK 挑战；缓存 120 秒验证过的 8888 endpoint，仅默认网络身份/IP/前缀/接口/网关等关键路径签名变化时清空；已验证成员逐成员单播；CHAT_ACK 必须匹配已验证 peer 的 ID/IP/端口；无 peer 时子网广播一次并保留待确认队列；消息接收先过滤自身 sender，再 ACK/去重；实机验证仍待完成。
- *  本轮改动 : 修复双目标广播重复包、无 peer 时 ACK latch 负数、接收自身消息仍 ACK、网络回调无条件清 peer；增加 UDP 分支耗时诊断。保留先落盘后发送、120 秒 peer 快路径、首次发现 500ms 多成员窗口、250ms×最多3轮 ACK、失败撤销未确认路由；不改聊天 UI。
+ *  本轮改动 : 将 PEER_HELLO/PEER_ACK/CHAT_ACK 前置为轻量实时快路径；UDP 常规日志仅记类型/来源/长度，避免认证字段与聊天正文泄露；慢分支诊断仅记录命令类型。保留既有路由、队列、ACK 重试和聊天 UI 行为。
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
+ *    - 2026-11-22 r17 实时 ACK 快路径：握手/聊天 ACK 优先处理；移除完整 UDP 包日志，防止协议认证字段和聊天内容进入日志。
  *    - 2026-11-22 r16 LAN P2P 修复：单子网广播；自身回环包提前过滤；ACK 空成员计数修正；按真实网络路径代数失效 peer；UDP 慢分支诊断。
  *    2026-11-22 r15 后台持久化与时延诊断：同步 commit 移出 Service 主线程，增加持久化、UDP发送、ACK、接收时间日志。\n *    2026-11-22 r14 LAN P2P 快速发送：复用 120 秒已验证 peer endpoint，连续消息跳过重复 500ms 发现窗口；ACK 等待缩短为 250ms/轮，失败后撤销旧路由并在后续消息重新发现。\n *    2026-11-22 r4 轻量网络状态代数：网络快照关键字段变化时递增 network_generation；补齐头部架构/依赖/扩展边界说明，无新增第三方依赖。
  *    2026-11-21 09:30  网络与反馈扩展：默认网络快照（类型/IP/CIDR/接口/验证状态）；command_feedback 本地持久化、断网补交与服务端明确确认后回收；保留旧 executed_ids 和原离线补发机制
@@ -3535,6 +3536,75 @@ public class TrackingService extends Service implements LocationListener {
         }
     }
 
+    /**
+     * 实时 LAN 控制包快路径：握手和聊天 ACK 在普通控制指令分发之前完成。
+     * 返回 true 表示该包已处理；不创建线程、不做磁盘 I/O、不执行 UI/业务命令。
+     */
+    private boolean handleLanRealtimePacket(DatagramSocket socket, DatagramPacket packet,
+                                             String message) {
+        try {
+            if (message.startsWith("FIND_ME_PEER_HELLO:")) {
+                String[] parts = message.split(":", 4);
+                if (parts.length == 4 && RESCUE_SECRET.equals(parts[1])
+                        && !parts[2].equals(getUniqueDeviceId())) {
+                    String response = "FIND_ME_PEER_ACK:" + RESCUE_SECRET + ":"
+                            + parts[3] + ":" + getUniqueDeviceId();
+                    byte[] bytes = response.getBytes("UTF-8");
+                    DatagramPacket reply = new DatagramPacket(bytes, bytes.length,
+                            packet.getAddress(), packet.getPort());
+                    synchronized (socket) {
+                        if (!socket.isClosed()) socket.send(reply);
+                    }
+                }
+                return true;
+            }
+            if (message.startsWith("FIND_ME_PEER_ACK:")) {
+                String[] parts = message.split(":", 4);
+                if (parts.length == 4 && RESCUE_SECRET.equals(parts[1])
+                        && packet.getPort() == 8888) {
+                    java.util.concurrent.CountDownLatch latch = pendingPeerChallenges.get(parts[2]);
+                    String peerId = parts[3].trim();
+                    if (latch != null && !peerId.isEmpty() && !peerId.equals(getUniqueDeviceId())) {
+                        verifiedChatPeers.put(peerId,
+                                new java.net.InetSocketAddress(packet.getAddress(), packet.getPort()));
+                        verifiedChatPeerSeen.put(peerId, System.currentTimeMillis());
+                        latch.countDown();
+                    }
+                }
+                return true;
+            }
+            if (message.startsWith("FIND_ME_CHAT_ACK:")) {
+                String[] parts = message.split(":", 4);
+                if (parts.length == 4 && RESCUE_SECRET.equals(parts[1])) {
+                    String messageId = parts[2];
+                    String peerId = parts[3].trim();
+                    java.util.concurrent.CountDownLatch latch = pendingChatAcks.get(messageId);
+                    java.net.InetSocketAddress verified = verifiedChatPeers.get(peerId);
+                    java.util.Set<String> expectedPeers = pendingChatAckPeers.get(messageId);
+                    if (latch != null && expectedPeers != null && verified != null
+                            && verified.getAddress().equals(packet.getAddress())
+                            && verified.getPort() == packet.getPort()
+                            && expectedPeers.remove(peerId)) {
+                        verifiedChatPeerSeen.put(peerId, System.currentTimeMillis());
+                        Long startedAt = pendingChatAckStartedAt.get(messageId);
+                        if (startedAt != null) {
+                            FileLogger.logD("CHAT", "P2P ACK matched elapsed="
+                                    + (android.os.SystemClock.elapsedRealtime() - startedAt)
+                                    + "ms message=" + messageId);
+                        }
+                        latch.countDown();
+                    }
+                }
+                return true;
+            }
+        } catch (Exception e) {
+            FileLogger.logD("UDP", "LAN realtime packet handling failed: "
+                    + e.getClass().getSimpleName());
+            return true;
+        }
+        return false;
+    }
+
     private void sendChatAck(DatagramSocket socket, java.net.InetAddress address, int port,
                              String messageId) {
         try {
@@ -3686,8 +3756,16 @@ public class TrackingService extends Service implements LocationListener {
                     }
                     long udpReceiveElapsedMs = android.os.SystemClock.elapsedRealtime();
                     String message = new String(packet.getData(), 0, packet.getLength());
-                    // 【诊断】任何 UDP 包到达都打日志，证明 socket 收到了
-                    FileLogger.log(this, "UDP", "📥 收到 UDP 包: " + message + " (来自 " + packet.getAddress() + ")");
+                    // ACK/握手优先快路径：不经过普通命令分发和完整包日志，尽快释放发送端等待。
+                    if (handleLanRealtimePacket(rescueSocket, packet, message)) {
+                        continue;
+                    }
+                    // 只记录命令前缀与来源，不记录认证字段、聊天正文或完整协议包。
+                    int typeEnd = message.indexOf(':');
+                    String packetType = typeEnd > 0 ? message.substring(0, typeEnd) : "UNKNOWN";
+                    FileLogger.logD("UDP", "收到 UDP 包 type=" + packetType
+                            + " from=" + packet.getAddress().getHostAddress()
+                            + ":" + packet.getPort() + " bytes=" + packet.length);
 
                     if (message.startsWith("FIND_ME_ALARM:")
                             || message.startsWith("FIND_ME_TEST_LOW_BATTERY:")
@@ -3972,7 +4050,7 @@ public class TrackingService extends Service implements LocationListener {
                     long udpDispatchCostMs = android.os.SystemClock.elapsedRealtime() - udpReceiveElapsedMs;
                     if (udpDispatchCostMs >= 200L) {
                         FileLogger.log(this, "UDP", "⚠️ UDP 接收分支处理偏慢: " + udpDispatchCostMs
-                                + "ms, prefix=" + (message.length() > 48 ? message.substring(0, 48) : message));
+                                + "ms, type=" + packetType);
                     }
                 }
             } catch (java.net.BindException be) {
