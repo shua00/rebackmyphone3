@@ -3,7 +3,7 @@
  *  TrackingService.java — 设备同步与可靠通信服务
  * ------------------------------------------------------------
  *  构建批次 : 20261122-P2P-r8
- *  源码版本 : v2.5.13-r8（协议 v2-only / v2.6 network-bound peer lease）
+ *  源码版本 : v2.5.13-r9（协议 v2-only / v2.7 per-peer ACK）
  *  最后修改 : 2026-11-22
  *  体积目标 : 以现有约 140 KB APK 为基线；本轮不新增第三方库/运行时依赖
  *  性能原则 : 复用系统 API、既有回调/线程/上报链；无新增高频轮询、扫描或常驻线程
@@ -15,8 +15,8 @@
  *    - 网络指纹仅用于诊断，不授权单播；不以私网 IP、CIDR、SSID/BSSID 作为可达证明。
  *    - 当前验证仅适用于同一可互通 LAN；跨 NAT ICE、TURN/Relay 仍为未来扩展。
  *  本轮约束 : 移除 FIND_ME_MSG v1 双发/接收；保留现有 UDP 8888 监听、广播发送与所有非聊天业务。
- *  P2P 状态 : 按需 PEER_HELLO/PEER_ACK 挑战；缓存 120 秒验证过的 8888 endpoint，网络回调变化立即清空，优先单播；无验证 peer 时广播。CHAT_ACK 必须匹配已验证 peer 的 ID/IP/端口。逐成员送达统计、离线待发队列和实机验证仍待完成。
- *  本轮改动 : 增加按需 peer challenge/response、120 秒 endpoint 租约、网络变化撤销、验证 peer 单播、ACK 来源 ID/IP/端口校验、message_id、接收去重与最多 3 次有限重试；发送复用 8888 监听 socket。
+ *  P2P 状态 : 按需 PEER_HELLO/PEER_ACK 挑战；缓存 120 秒验证过的 8888 endpoint，网络回调变化立即清空，优先逐成员单播；CHAT_ACK 必须匹配已验证 peer 的 ID/IP/端口，按成员统计 ACK 并仅重试未确认成员。离线待发队列和实机验证仍待完成。
+ *  本轮改动 : 增加按需 peer challenge/response、120 秒 endpoint 租约、网络变化撤销、逐成员单播与 ACK 统计、ACK 来源 ID/IP/端口校验、message_id、接收去重及未确认成员最多 3 次有限重试；发送复用 8888 监听 socket。
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
  *    2026-11-22 r4 轻量网络状态代数：网络快照关键字段变化时递增 network_generation；补齐头部架构/依赖/扩展边界说明，无新增第三方依赖。
  *    2026-11-21 09:30  网络与反馈扩展：默认网络快照（类型/IP/CIDR/接口/验证状态）；command_feedback 本地持久化、断网补交与服务端明确确认后回收；保留旧 executed_ids 和原离线补发机制
@@ -241,6 +241,8 @@ public class TrackingService extends Service implements LocationListener {
     private volatile DatagramSocket rescueSocketRef = null;
     // LAN P2P v2：消息 ACK 等待表。每条消息只保留一个短时 latch，不启动常驻线程。
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CountDownLatch> pendingChatAcks =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.Set<String>> pendingChatAckPeers =
             new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, Long> receivedChatMessageIds =
             new java.util.concurrent.ConcurrentHashMap<>();
@@ -3324,15 +3326,19 @@ public class TrackingService extends Service implements LocationListener {
             byte[] data;
             try { data = payload.getBytes("UTF-8"); }
             catch (Exception e) { return; }
-            java.util.concurrent.CountDownLatch ack = new java.util.concurrent.CountDownLatch(1);
+            java.util.Set<String> awaitingPeerIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
+            for (java.util.Map.Entry<String, java.net.InetSocketAddress> entry : verifiedChatPeers.entrySet()) {
+                awaitingPeerIds.add(entry.getKey());
+            }
+            java.util.concurrent.CountDownLatch ack =
+                    new java.util.concurrent.CountDownLatch(awaitingPeerIds.isEmpty() ? 1 : awaitingPeerIds.size());
+            pendingChatAckPeers.put(messageId, awaitingPeerIds);
             pendingChatAcks.put(messageId, ack);
-            boolean confirmed = false;
             try {
-                java.util.List<java.net.InetSocketAddress> peers =
-                        new java.util.ArrayList<>(verifiedChatPeers.values());
-                for (int attempt = 1; attempt <= 3 && !confirmed; attempt++) {
+                for (int attempt = 1; attempt <= 3 && ack.getCount() > 0; attempt++) {
                     if (socket.isClosed()) break;
-                    if (peers.isEmpty()) {
+                    if (awaitingPeerIds.isEmpty()) {
+                        // 没有完成 challenge 的成员时只能广播兜底；不把未验证回包计为可靠送达。
                         for (String target : broadcasts) {
                             try {
                                 DatagramPacket p = new DatagramPacket(data, data.length,
@@ -3343,7 +3349,13 @@ public class TrackingService extends Service implements LocationListener {
                             }
                         }
                     } else {
-                        for (java.net.InetSocketAddress peer : peers) {
+                        for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
+                            java.net.InetSocketAddress peer = verifiedChatPeers.get(peerId);
+                            if (peer == null) {
+                                awaitingPeerIds.remove(peerId);
+                                ack.countDown();
+                                continue;
+                            }
                             try {
                                 DatagramPacket p = new DatagramPacket(data, data.length,
                                         peer.getAddress(), peer.getPort());
@@ -3353,14 +3365,18 @@ public class TrackingService extends Service implements LocationListener {
                             }
                         }
                     }
-                    try { confirmed = ack.await(700, TimeUnit.MILLISECONDS); }
+                    try { ack.await(700, TimeUnit.MILLISECONDS); }
                     catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
                 }
+                int totalPeers = awaitingPeerIds.size();
+                int deliveredPeers = totalPeers - (int) ack.getCount();
                 FileLogger.log(TrackingService.this, "CHAT",
-                        confirmed ? "✅ P2P 消息至少收到一个 ACK: " + messageId
-                                  : "⚠️ P2P 消息未获 ACK（已有限重试）: " + messageId);
+                        deliveredPeers > 0
+                                ? "✅ P2P 成员 ACK: " + deliveredPeers + "/" + totalPeers + "，消息 " + messageId
+                                : "⚠️ P2P 尚无成员 ACK；广播兜底/有限重试已结束: " + messageId);
             } finally {
                 pendingChatAcks.remove(messageId);
+                pendingChatAckPeers.remove(messageId);
             }
         }, "LAN-P2P-ChatSend").start();
     }
@@ -3565,7 +3581,9 @@ public class TrackingService extends Service implements LocationListener {
                             java.util.concurrent.CountDownLatch latch = pendingChatAcks.get(ackParts[2]);
                             String peerId = ackParts[3].trim();
                             java.net.InetSocketAddress verified = verifiedChatPeers.get(peerId);
-                            if (latch != null && verified != null
+                            java.util.Set<String> expectedPeers = pendingChatAckPeers.get(ackParts[2]);
+                            if (latch != null && expectedPeers != null && expectedPeers.remove(peerId)
+                                    && verified != null
                                     && verified.getAddress().equals(packet.getAddress())
                                     && verified.getPort() == packet.getPort()) {
                                 verifiedChatPeerSeen.put(peerId, System.currentTimeMillis());
