@@ -2,12 +2,13 @@
  * ============================================================
  *  TrackingService.java — 全内核高并发后台同步与常驻常活引擎
  * ------------------------------------------------------------
- *  构建批次 : 20261120-2110
- *  协议版本 : v2
- *  最后修改 : 2026-11-20 21:10（与服务端 v2.5.1 对齐的一致性修复：补发自我续跑 / 幂等回执回收 / 主线程解析下移 / 双保险续期 等 9 处）
+ *  构建批次 : 20261121-0930
+ *  协议版本 : v2 / v2.1 网络状态与指令反馈扩展（兼容旧服务端）
+ *  最后修改 : 2026-11-21 09:30（以 TrackingService_optimized.java 为基线，增加网络快照与指令反馈持久化补交）
  *  运行功耗 : 极轻量级 (深度适配低内存设备)
  * ------------------------------------------------------------
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
+ *    2026-11-21 09:30  网络与反馈扩展：默认网络快照（类型/IP/CIDR/接口/验证状态）；command_feedback 本地持久化、断网补交与服务端明确确认后回收；保留旧 executed_ids 和原离线补发机制
  *    2026-11-20 21:10  可靠性修复：[B1] 离线补发>FLUSH_BATCH_MAX 条时自我续跑（不再等网络状态变化）；
  *                      [B3] 批量下行响应解析由主线程 handler.post 移回工作线程（消除 ANR 风险）；
  *                      [C2] 内存级计时器撞车抑制时自我续期 + sendReport 去重抑制时补排下一轮，防周期链断裂；
@@ -102,6 +103,8 @@ import android.location.LocationManager;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.net.LinkProperties;
+import android.net.LinkAddress;
 import android.net.NetworkInfo;
 import android.net.NetworkRequest;
 import android.net.TrafficStats;
@@ -133,6 +136,7 @@ import java.io.FileInputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.DatagramPacket;
+import java.net.Inet4Address;
 import java.net.DatagramSocket;
 import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
@@ -244,6 +248,16 @@ public class TrackingService extends Service implements LocationListener {
     // ★ 2026-11-20 [低危1] 回执集合「读-改-写」互斥锁：上报线程（回收已确认回执）与
     //   parseResponse（追加新回执）可能在不同工作线程并发，无锁会造成丢更新。
     private final Object executedCmdIdsLock = new Object();
+    // ★ v2.5.13-r1：设备端指令反馈单独持久化；HTTP 200 只有在服务端明确回报 feedback_accepted 后才回收。
+    //   旧版 server2 未返回该字段时，反馈继续保留并重试，避免升级期间丢失执行结果。
+    private static final String PREF_COMMAND_FEEDBACK = "command_feedback_v1";
+    private static final int COMMAND_FEEDBACK_MAX = 100;
+    private static final Object COMMAND_FEEDBACK_LOCK = new Object();
+    // executing 状态在进程重启后无法判断是否已产生副作用；仅对本进程仍在执行的命令允许继续等待。
+    private final java.util.Set<String> commandsInFlight = java.util.Collections.newSetFromMap(
+            new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+    private static volatile String lastNetworkSignature = "";
+    private static volatile long lastNetworkChangedAt = 0L;
     private static final int FAST_POLL_BATTERY_THRESHOLD = 20;
     private static final int FAST_POLL_MAX_CONSECUTIVE = 5;
     private static final long CMD_TIME_WINDOW_MS = 60 * 1000L;
@@ -1733,36 +1747,140 @@ public class TrackingService extends Service implements LocationListener {
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
             if (cm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                NetworkRequest request = new NetworkRequest.Builder()
-                        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                        .build();
                 networkCallback = new ConnectivityManager.NetworkCallback() {
                     @Override
                     public void onAvailable(Network network) {
                         super.onAvailable(network);
-                        String oldSsid = DeviceInfoUtils.cachedSsid;
-                        String[] wifiInfo = DeviceInfoUtils.getWifiInfo(TrackingService.this);
-                        String newSsid = wifiInfo[0];
-                        if (!newSsid.equals("UNKNOWN") && !newSsid.equals("<unknown ssid>")
-                                && !oldSsid.equals(newSsid) && !oldSsid.equals("UNKNOWN")) {
-                            FileLogger.log(TrackingService.this, "NETWORK", "✅ WiFi 连接: SSID=" + newSsid + ", IP=" + DeviceInfoUtils.getLocalIpAddress());
-                            sendReport(true, false);
-                            triggerRescueListener();
-                        }
+                        // onAvailable 可能先于 LinkProperties/默认网络切换稳定；稍作合并后再上报。
+                        FileLogger.log(TrackingService.this, "NETWORK", "✅ 网络可用/发生切换，刷新默认网络信息");
+                        handler.removeCallbacks(networkRefreshRunnable);
+                        handler.postDelayed(networkRefreshRunnable, 1200L);
                         flushPendingReports();
                     }
                     @Override
                     public void onLost(Network network) {
                         super.onLost(network);
-                        FileLogger.log(TrackingService.this, "NETWORK", "❌ WiFi 断开");
-                        sendReport(true, false);
+                        // onLost 可能只是链路变化，不直接认定设备断网；延迟读取当前默认网络再判断。
+                        FileLogger.log(TrackingService.this, "NETWORK", "ℹ️ 网络链路变化，重新检查当前默认网络");
+                        handler.removeCallbacks(networkRefreshRunnable);
+                        handler.postDelayed(networkRefreshRunnable, 1500L);
+                    }
+                    @Override
+                    public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
+                        super.onCapabilitiesChanged(network, capabilities);
+                        handler.removeCallbacks(networkRefreshRunnable);
+                        handler.postDelayed(networkRefreshRunnable, 800L);
+                    }
+                    @Override
+                    public void onLinkPropertiesChanged(Network network, LinkProperties linkProperties) {
+                        super.onLinkPropertiesChanged(network, linkProperties);
+                        handler.removeCallbacks(networkRefreshRunnable);
+                        handler.postDelayed(networkRefreshRunnable, 800L);
                     }
                 };
-                cm.registerNetworkCallback(request, networkCallback);
+                // Android 7.0+ 使用默认网络回调，避免把同时存在的非默认网络误判为当前出口。
+                cm.registerDefaultNetworkCallback(networkCallback);
             }
         } catch (Exception e) {
             FileLogger.log(this, "NETWORK", "❌ 注册网络回调失败: " + e.getMessage());
         }
+    }
+
+    private final Runnable networkRefreshRunnable = () -> {
+        try {
+            long previousChangedAt = lastNetworkChangedAt;
+            JSONObject snapshot = buildNetworkSnapshot();
+            boolean changed = snapshot.optLong("changed_at", 0L) != previousChangedAt;
+            String state = snapshot.optString("transport", "UNKNOWN");
+            String ip = snapshot.optString("local_ip", "");
+            FileLogger.log(TrackingService.this, "NETWORK", "网络状态更新: " + state + " | IP=" + ip
+                    + " | 前缀=" + snapshot.optString("subnet_prefix", "-"));
+            if (changed) sendReport(true, false);
+            if ("WIFI".equals(state) || "ETHERNET".equals(state)) {
+                flushPendingReports();
+                if (changed) triggerRescueListener();
+            }
+        } catch (Exception e) {
+            FileLogger.log(TrackingService.this, "NETWORK", "⚠️ 刷新网络状态失败: " + e.getMessage());
+        }
+    };
+
+    /**
+     * 获取当前默认网络的可验证快照。SSID 仅作展示信息，不参与同网判定；
+     * 子网前缀由 LinkProperties 的真实 IPv4 地址/前缀长度生成。
+     */
+    private JSONObject buildNetworkSnapshot() {
+        JSONObject out = new JSONObject();
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            Network active = null;
+            NetworkCapabilities caps = null;
+            LinkProperties links = null;
+            if (cm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                active = cm.getActiveNetwork();
+                if (active != null) {
+                    caps = cm.getNetworkCapabilities(active);
+                    links = cm.getLinkProperties(active);
+                }
+            }
+            String transport = "OFFLINE";
+            if (caps != null) {
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) transport = "WIFI";
+                else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) transport = "MOBILE";
+                else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) transport = "ETHERNET";
+                else transport = "OTHER";
+            } else if (cm != null) {
+                NetworkInfo ni = cm.getActiveNetworkInfo();
+                if (ni != null && ni.isConnected()) {
+                    if (ni.getType() == ConnectivityManager.TYPE_WIFI) transport = "WIFI";
+                    else if (ni.getType() == ConnectivityManager.TYPE_MOBILE) transport = "MOBILE";
+                    else transport = "OTHER";
+                }
+            }
+            String localIp = "";
+            String subnetPrefix = "";
+            String interfaceName = "";
+            if (links != null) {
+                interfaceName = links.getInterfaceName() != null ? links.getInterfaceName() : "";
+                List<LinkAddress> addresses = links.getLinkAddresses();
+                if (addresses != null) {
+                    for (LinkAddress la : addresses) {
+                        if (la == null || !(la.getAddress() instanceof Inet4Address)) continue;
+                        String candidate = la.getAddress().getHostAddress();
+                        if (candidate == null || candidate.startsWith("127.") || candidate.startsWith("169.254.")) continue;
+                        localIp = candidate;
+                        subnetPrefix = candidate + "/" + la.getPrefixLength();
+                        break;
+                    }
+                }
+            }
+            if (localIp.isEmpty()) {
+                String fallbackIp = DeviceInfoUtils.getLocalIpAddress();
+                if (fallbackIp != null && !fallbackIp.isEmpty()) localIp = fallbackIp;
+            }
+            boolean hasInternet = caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+            boolean validated = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && caps != null
+                    && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+            out.put("transport", transport);
+            out.put("network_type", transport);
+            out.put("local_ip", localIp);
+            out.put("subnet_prefix", subnetPrefix);
+            out.put("interface_name", interfaceName);
+            out.put("has_internet", hasInternet ? 1 : 0);
+            out.put("validated", validated ? 1 : 0);
+            out.put("network_subtype", "MOBILE".equals(transport) ? "cellular" : transport.toLowerCase(java.util.Locale.US));
+            String signature = transport + "|" + localIp + "|" + subnetPrefix + "|" + interfaceName
+                    + "|" + hasInternet + "|" + validated;
+            if (!signature.equals(lastNetworkSignature)) {
+                lastNetworkSignature = signature;
+                lastNetworkChangedAt = System.currentTimeMillis();
+            }
+            out.put("changed_at", lastNetworkChangedAt);
+        } catch (Exception e) {
+            try { out.put("transport", "UNKNOWN"); out.put("network_type", "UNKNOWN"); } catch (Exception ignored) {}
+            FileLogger.log(this, "NETWORK", "⚠️ 构建网络快照失败: " + e.getMessage());
+        }
+        return out;
     }
 
     private void startLocationUpdates() {
@@ -2098,7 +2216,14 @@ public class TrackingService extends Service implements LocationListener {
 
                 PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE); json.put("is_screen_on", pm != null && pm.isInteractive()); json.put("uptime_ms", SystemClock.elapsedRealtime());
                 JSONObject battObj = new JSONObject(); battObj.put("level", battery[0]); battObj.put("is_charging", battery[1] == 1); json.put("battery", battObj);
-                JSONObject netObj = new JSONObject(); netObj.put("wifi_ssid", wifi[0]); netObj.put("wifi_bssid", wifi[1]); netObj.put("wifi_rssi", Integer.parseInt(wifi[2])); netObj.put("local_ip", ip); json.put("network", netObj);
+                JSONObject netObj = buildNetworkSnapshot();
+                netObj.put("wifi_ssid", wifi[0]);
+                netObj.put("wifi_bssid", wifi[1]);
+                try { netObj.put("wifi_rssi", Integer.parseInt(wifi[2])); }
+                catch (Exception ignored) { netObj.put("wifi_rssi", -127); }
+                if (ip != null && !ip.isEmpty() && netObj.optString("local_ip", "").isEmpty())
+                    netObj.put("local_ip", ip);
+                json.put("network", netObj);
 
                 JSONObject locObj = new JSONObject();
                 if (loc != null) {
@@ -2131,6 +2256,12 @@ public class TrackingService extends Service implements LocationListener {
                     }
                 } catch (Exception e) {
                     FileLogger.log(TrackingService.this, "HTTP_CMD", "⚠️ 上报 executedIds 失败: " + e.getMessage());
+                }
+                try {
+                    JSONArray feedback = loadCommandFeedback();
+                    if (feedback.length() > 0) json.put("command_feedback", feedback);
+                } catch (Exception e) {
+                    FileLogger.log(TrackingService.this, "HTTP_CMD", "⚠️ 上报 command_feedback 失败: " + e.getMessage());
                 }
 
                 if (!isOnline && overrideUrl == null) {
@@ -2197,7 +2328,11 @@ public class TrackingService extends Service implements LocationListener {
                         br.close();
                         success = true; // HTTP 200 已确认上报成功，与下行响应解析分离
                         if (overrideUrl == null) {
-                            try { parseResponse(new JSONObject(sb.toString())); }
+                            try {
+                                JSONObject responseJson = new JSONObject(sb.toString());
+                                ackCommandFeedbackIfConfirmed(json, responseJson);
+                                parseResponse(responseJson);
+                            }
                             catch (Exception responseParseError) {
                                 FileLogger.log(TrackingService.this, "REPORT", "⚠️ 上报已成功，但下行响应解析失败: " + responseParseError.getMessage());
                             }
@@ -2719,6 +2854,15 @@ public class TrackingService extends Service implements LocationListener {
                                 for (int i = 0; i < batch.acceptedCount; i++) removeKeys.add(validKeys.get(i));
                                 sent += batch.acceptedCount;
                                 if (batch.responseJson != null) {
+                                    int feedbackExpected = 0;
+                                    for (int i = 0; i < batch.acceptedCount; i++) {
+                                        JSONArray f = validItems.get(i).optJSONArray("command_feedback");
+                                        if (f != null) feedbackExpected += f.length();
+                                    }
+                                    if (feedbackExpected > 0 && batch.responseJson.optInt("feedback_accepted", 0) >= feedbackExpected) {
+                                        for (int i = 0; i < batch.acceptedCount; i++) ackCommandFeedbackIfConfirmed(validItems.get(i), batch.responseJson);
+                                    }
+
                                     // ★ 2026-11-20 [B3] 修复：下行响应解析留在本工作线程，与单条上报路径
                                     //   （postReportDirectly 内直接 parseResponse）保持一致。parseResponse 会同步
                                     //   执行 dispatchHttpCommand —— 内含 clearMessageHistory()/saveChatToHistory()
@@ -2856,6 +3000,15 @@ public class TrackingService extends Service implements LocationListener {
                 // ★ [核心优化] 2026-11-04 补发成功也更新持久化时间
                 getSharedPreferences("device_finder_prefs", MODE_PRIVATE)
                         .edit().putLong(PREF_LAST_SUCCESS_REPORT_TIME, System.currentTimeMillis()).apply();
+                try (BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"))) {
+                    StringBuilder sb = new StringBuilder(); String line;
+                    while ((line = br.readLine()) != null) sb.append(line);
+                    JSONObject response = new JSONObject(sb.toString());
+                    ackCommandFeedbackIfConfirmed(json, response);
+                } catch (Exception responseError) {
+                    // HTTP 已接收但反馈确认字段缺失/解析失败：保留本地反馈，下次继续幂等补交。
+                    FileLogger.log(this, "HTTP_CMD", "ℹ️ 离线补发成功但反馈确认不可读，保留 command_feedback");
+                }
                 return true;
             }
             return false;
@@ -3590,23 +3743,49 @@ public class TrackingService extends Service implements LocationListener {
                         if (cmdId.isEmpty() || cmdType.isEmpty()) continue;
 
                         if (executedIds.contains(cmdId)) continue;
+                        // 并发的普通上报与离线补发可能同时解析同一队列；同一进程内只允许一个执行入口。
+                        if (commandsInFlight.contains(cmdId)) continue;
+
+                        // 本地反馈已到 accepted/最终状态时，即使进程在保存 executed_ids 前重启，也不能重复执行。
+                        String priorFeedback = getCommandFeedbackStatus(cmdId);
+                        if ("accepted".equals(priorFeedback) || "uncertain".equals(priorFeedback)
+                                || "succeeded".equals(priorFeedback) || "failed".equals(priorFeedback)) {
+                            executedIds.add(cmdId);
+                            continue;
+                        }
+                        if ("executing".equals(priorFeedback)) {
+                            if (commandsInFlight.contains(cmdId)) continue;
+                            // 上次进程在执行阶段中断，结果无法确定；不自动重放可能已有副作用的指令。
+                            recordCommandFeedback(cmdId, cmdType, "uncertain", "进程在执行阶段中断，结果无法确认；为避免重复执行，不自动重放");
+                            executedIds.add(cmdId);
+                            continue;
+                        }
+                        recordCommandFeedback(cmdId, cmdType, "received", "设备已收到服务端下发指令");
 
                         // [P0-2] 用 buildDedupKey 生成 Key，同类型不同 payload 不再互相误杀
                         String dk = buildDedupKey(cmdType, cmdPayload, cmdId);
                         if (isRecentlyExecuted(dk)) {
                             executedIds.add(cmdId);
+                            recordCommandFeedback(cmdId, cmdType, "accepted", "检测到同一指令已通过 UDP 通道处理，跳过重复执行");
                             FileLogger.log(TrackingService.this, "HTTP_CMD",
                                     "⏭ 跳过 " + cmdType + "(" + cmdId + ")（60秒内已通过UDP执行, key=" + dk + "）");
                             continue;
                         }
 
-                        if (dispatchHttpCommand(cmdType, cmdPayload)) {
+                        commandsInFlight.add(cmdId);
+                        recordCommandFeedback(cmdId, cmdType, "executing", "正在调用设备端指令处理入口");
+                        boolean commandAccepted;
+                        try { commandAccepted = dispatchHttpCommand(cmdType, cmdPayload); }
+                        finally { commandsInFlight.remove(cmdId); }
+                        if (commandAccepted) {
                             recentExecutions.put(dk, now);
                             executedIds.add(cmdId);
                             executedCount++;
+                            recordCommandFeedback(cmdId, cmdType, "accepted", "设备端处理入口已接受；异步任务最终结果如有回调将另行更新");
                             FileLogger.log(TrackingService.this, "HTTP_CMD",
                                     "✅ 执行 HTTP 指令: " + cmdType + "(" + cmdId + ")");
                         } else {
+                            recordCommandFeedback(cmdId, cmdType, "retry_wait", "本次处理入口未接受，保留队列等待后续重试");
                             FileLogger.log(TrackingService.this, "HTTP_CMD",
                                     "⚠️ 指令执行未确认成功，保留待重试: " + cmdType + "(" + cmdId + ")");
                         }
@@ -3694,6 +3873,113 @@ public class TrackingService extends Service implements LocationListener {
                         + " 条，本地剩余 " + ids.size() + " 条");
             } catch (Exception e) {
                 FileLogger.log(this, "HTTP_CMD", "⚠️ 回收 executedCmdIds 失败: " + e.getMessage());
+            }
+        }
+    }
+
+    /** 服务端明确确认已写入 command_feedback 后，才回收本次上报的反馈。 */
+    private void ackCommandFeedbackIfConfirmed(JSONObject sentReport, JSONObject response) {
+        if (sentReport == null || response == null) return;
+        JSONArray sent = sentReport.optJSONArray("command_feedback");
+        if (sent == null || sent.length() == 0) return;
+        if (response.optInt("feedback_accepted", 0) < sent.length()) {
+            FileLogger.log(this, "HTTP_CMD", "ℹ️ 服务端未明确确认全部 command_feedback，保留本地反馈待下次补交");
+            return;
+        }
+        synchronized (COMMAND_FEEDBACK_LOCK) {
+            try {
+                JSONArray current = loadCommandFeedback();
+                JSONArray kept = new JSONArray();
+                for (int i = 0; i < current.length(); i++) {
+                    JSONObject item = current.optJSONObject(i);
+                    if (item == null) continue;
+                    boolean acknowledged = false;
+                    String id = item.optString("command_id", "");
+                    String status = item.optString("status", "");
+                    long updatedAt = item.optLong("updated_at", 0L);
+                    for (int j = 0; j < sent.length(); j++) {
+                        JSONObject ack = sent.optJSONObject(j);
+                        if (ack != null && id.equals(ack.optString("command_id", ""))
+                                && status.equals(ack.optString("status", ""))
+                                && updatedAt == ack.optLong("updated_at", 0L)) {
+                            acknowledged = true;
+                            break;
+                        }
+                    }
+                    if (!acknowledged) kept.put(item);
+                }
+                getSharedPreferences("device_finder_prefs", MODE_PRIVATE).edit()
+                        .putString(PREF_COMMAND_FEEDBACK, kept.toString()).commit();
+            } catch (Exception e) {
+                FileLogger.log(this, "HTTP_CMD", "⚠️ 清理已确认 command_feedback 失败: " + e.getMessage());
+            }
+        }
+    }
+
+    private JSONArray loadCommandFeedback() {
+        synchronized (COMMAND_FEEDBACK_LOCK) {
+            try {
+                SharedPreferences sp = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
+                String raw = sp.getString(PREF_COMMAND_FEEDBACK, "[]");
+                return new JSONArray(raw != null && !raw.isEmpty() ? raw : "[]");
+            } catch (Exception e) {
+                FileLogger.log(this, "HTTP_CMD", "⚠️ 读取 command_feedback 失败: " + e.getMessage());
+                return new JSONArray();
+            }
+        }
+    }
+
+    private String getCommandFeedbackStatus(String commandId) {
+        if (commandId == null || commandId.isEmpty()) return "";
+        synchronized (COMMAND_FEEDBACK_LOCK) {
+            JSONArray old = loadCommandFeedback();
+            for (int i = 0; i < old.length(); i++) {
+                JSONObject item = old.optJSONObject(i);
+                if (item != null && commandId.equals(item.optString("command_id", "")))
+                    return item.optString("status", "");
+            }
+        }
+        return "";
+    }
+
+    /** 同一 command_id 只保留最新反馈；commit 确保断网/进程重启后仍可补交。 */
+    private void recordCommandFeedback(String commandId, String action, String status, String detail) {
+        if (commandId == null || commandId.isEmpty()) return;
+        synchronized (COMMAND_FEEDBACK_LOCK) {
+            try {
+                JSONArray old = loadCommandFeedback();
+                JSONArray next = new JSONArray();
+                boolean replaced = false;
+                JSONObject entry = new JSONObject();
+                entry.put("command_id", commandId);
+                entry.put("action", action != null ? action : "");
+                entry.put("status", status != null ? status : "received");
+                entry.put("detail", detail != null ? detail : "");
+                entry.put("updated_at", System.currentTimeMillis());
+                for (int i = 0; i < old.length(); i++) {
+                    JSONObject item = old.optJSONObject(i);
+                    if (item == null) continue;
+                    if (commandId.equals(item.optString("command_id", ""))) {
+                        if (!replaced) {
+                            String oldStatus = item.optString("status", "");
+                            boolean oldFinal = "succeeded".equals(oldStatus) || "failed".equals(oldStatus);
+                            boolean oldTerminalDelivery = "accepted".equals(oldStatus) || "uncertain".equals(oldStatus);
+                            boolean newEarly = "received".equals(status) || "executing".equals(status) || "retry_wait".equals(status);
+                            // 迟到的早期状态不得覆盖 accepted/uncertain 或最终 succeeded/failed。
+                            next.put((oldFinal || (oldTerminalDelivery && newEarly)) ? item : entry);
+                            replaced = true;
+                        }
+                    } else next.put(item);
+                }
+                if (!replaced) next.put(entry);
+                JSONArray trimmed = new JSONArray();
+                int start = Math.max(0, next.length() - COMMAND_FEEDBACK_MAX);
+                for (int i = start; i < next.length(); i++) trimmed.put(next.get(i));
+                boolean ok = getSharedPreferences("device_finder_prefs", MODE_PRIVATE).edit()
+                        .putString(PREF_COMMAND_FEEDBACK, trimmed.toString()).commit();
+                if (!ok) FileLogger.log(this, "HTTP_CMD", "⚠️ command_feedback 本地持久化未确认: " + commandId);
+            } catch (Exception e) {
+                FileLogger.log(this, "HTTP_CMD", "❌ 保存 command_feedback 失败: " + e.getMessage());
             }
         }
     }
@@ -3968,6 +4254,7 @@ public class TrackingService extends Service implements LocationListener {
         if (multicastLock != null && multicastLock.isHeld()) multicastLock.release();
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         if (sensorManager != null && motionListener != null) sensorManager.cancelTriggerSensor(motionListener, motionSensor);
+        handler.removeCallbacks(networkRefreshRunnable);
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
             if (cm != null && networkCallback != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) cm.unregisterNetworkCallback(networkCallback);
