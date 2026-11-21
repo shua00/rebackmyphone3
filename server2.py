@@ -46,6 +46,7 @@ import json
 import datetime
 import threading
 import time
+import uuid
 import sqlite3
 import gzip
 import os
@@ -824,7 +825,7 @@ def _build_version_aware_commands(target_devs, action_name, payload):
     if action_name == "custom_msg":
         return [f"FIND_ME_FLOAT:{RESCUE_SECRET}:{payload}"]
     if action_name == "chat_msg":
-        return [f"FIND_ME_CHAT:{RESCUE_SECRET}:Web_Console:{payload}"]
+        return [f"FIND_ME_CHAT:{RESCUE_SECRET}:Web_Console:{uuid.uuid4()}:{payload}"]
     return []
 
 
