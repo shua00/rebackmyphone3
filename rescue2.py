@@ -113,6 +113,7 @@ PACKAGE_NAME = "com.example.devicefinder"
 
 # ===== 配置区 =====
 RESCUE_SECRET = "your_private_secret_key"
+PEER_NODE_ID = f"rescue2-{uuid.uuid4().hex[:12]}"  # 本次进程唯一 LAN 会话 ID
 DEFAULT_SERVER_URL = "http://dingwei.bai001.de5.net/api/report"
 DEFAULT_CONFIG_URL = "https://your-config-url.com/config.txt"
 LOG_PORT = 9090
@@ -451,7 +452,7 @@ def udp_listener():
                 if msg.startswith("FIND_ME_PEER_HELLO:"):
                     parts = msg.split(":", 3)
                     if len(parts) == 4 and parts[1] == RESCUE_SECRET:
-                        response = f"FIND_ME_PEER_ACK:{RESCUE_SECRET}:{parts[3]}:rescue2".encode("utf-8")
+                        response = f"FIND_ME_PEER_ACK:{RESCUE_SECRET}:{parts[3]}:{PEER_NODE_ID}".encode("utf-8")
                         try: sock.sendto(response, addr)
                         except OSError: pass
                 elif msg.startswith("FIND_ME_CHAT:"):
