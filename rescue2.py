@@ -157,7 +157,7 @@ _CHAT_DEDUP_OPS = 0
 print_lock = threading.Lock()  # v2.0.2 补丁：全局打印锁，防多线程输出错乱
 
 def _claim_chat_message(sender, message_id):
-    """跨进程/重启的消息幂等；重复消息仍由 UDP 接收分支先回 ACK。"""
+    """跨进程/重启的消息幂等；仅在持久化成功（新消息或重复消息）后确认。"""
     global _CHAT_DEDUP_OPS
     key = str(message_id or "")
     if not key:
@@ -502,7 +502,12 @@ def udp_listener():
                         sender = parts[2]
                         message_id = parts[3]
                         content = parts[4]
-                        if sender in ("PC_Terminal", "Web_Console", "Guest_"): continue
+                        if sender in ("PC_Terminal", "Web_Console", "Guest_"):
+                            if message_id:
+                                ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:{PEER_NODE_ID}".encode("utf-8")
+                                try: sock.sendto(ack, addr)
+                                except OSError: pass
+                            continue
                         claim_result = _claim_chat_message(sender, message_id or content)
                         if claim_result is None:
                             continue  # 持久化失败：不 ACK，允许发送端重试
