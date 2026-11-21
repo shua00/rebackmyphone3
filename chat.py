@@ -1,11 +1,12 @@
 """
 ============================================================
-chat.py — 局域网对讲机 Web 前端（代理/独立双模）
+chat.py — 局域网对讲机 Web 前端（代理/独立双模，v2-only）
 ------------------------------------------------------------
 构建批次 : 20261111-2000
-协议版本 : v2
-最后修改 : 2026-11-12 22:45（v2.0 通道可视化 + v2.0.1 架构优化 + 修复版本常量）
+协议版本 : v2-only
+最后修改 : 2026-11-22（v2-only 收敛；聊天安全文本渲染）
 ------------------------------------------------------------
+本轮约束 : 不依赖 server2 才能运行独立聊天；与 APK/rescue2 使用 FIND_ME_CHAT v2 前缀。
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
   2026-11-12 22:45  v2.0 通道可视化 + v2.0.1 架构优化 + 修复版本常量
   2026-11-11 19:45  注释规范统一（无逻辑改动）
@@ -89,16 +90,24 @@ async function fetchChatHistory() {
         if (data.length === lastLen) return;
         lastLen = data.length;
 
-        let html = "";
+        // 使用 DOM + textContent，聊天内容按纯文本显示，防止局域网成员注入 HTML/脚本。
+        chatDiv.replaceChildren();
         data.forEach(item => {
-            let senderColor = item.sender.includes("Guest") ? "#8b949e" : "#0969da";
-            html += `<div class="chat-msg">
-                <span class="chat-time">${item.time}</span>
-                <span class="chat-sender" style="color:${senderColor}">[${item.sender}]</span>
-                <div class="chat-content">${item.content}</div>
-            </div>`;
+            const row = document.createElement("div");
+            row.className = "chat-msg";
+            const time = document.createElement("span");
+            time.className = "chat-time";
+            time.textContent = item.time || "";
+            const sender = document.createElement("span");
+            sender.className = "chat-sender";
+            sender.style.color = String(item.sender || "").includes("Guest") ? "#8b949e" : "#0969da";
+            sender.textContent = "[" + (item.sender || "Unknown") + "]";
+            const content = document.createElement("div");
+            content.className = "chat-content";
+            content.textContent = item.content || "";
+            row.append(time, sender, content);
+            chatDiv.appendChild(row);
         });
-        chatDiv.innerHTML = html;
         chatDiv.scrollTop = chatDiv.scrollHeight;
     } catch(e) {}
     setTimeout(fetchChatHistory, 1500);
@@ -169,8 +178,8 @@ def udp_listener():
             # [B2] 1024 → 4096，避免长消息被 UDP 层截断
             data, addr = udp_sock.recvfrom(4096)
             msg = data.decode('utf-8', errors='ignore')
-            if msg.startswith("FIND_ME_MSG:"):
-                # [B2] maxsplit 从 4 改为 3，content 含冒号时不再被丢弃
+            if msg.startswith("FIND_ME_CHAT:"):
+                # v2-only：聊天统一使用 FIND_ME_CHAT，不再接收旧 FIND_ME_MSG
                 parts = msg.split(":", 3)
                 if len(parts) == 4 and parts[1] == RESCUE_SECRET:
                     sender = parts[2]
@@ -263,7 +272,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": content})
                         if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
 
-                    payload = f"FIND_ME_MSG:{RESCUE_SECRET}:{sender}:{content}"
+                    payload = f"FIND_ME_CHAT:{RESCUE_SECRET}:{sender}:{content}"
                     # [F1] 子网 + 全局双发，每目标 3 次
                     broadcast_chat_message(payload)
 
