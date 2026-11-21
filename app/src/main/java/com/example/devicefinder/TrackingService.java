@@ -220,8 +220,16 @@ public class TrackingService extends Service implements LocationListener {
     public static volatile int GLOBAL_BATTERY_LEVEL = -1;
 
     private volatile boolean serviceDestroyed = false;
+    // 每个进程只生成一次；进程被系统杀死后重启会得到新的 Session。
+    private static final String PROCESS_SESSION_ID = java.util.UUID.randomUUID().toString();
+    private static final long PROCESS_START_WALL_TIME_MS = System.currentTimeMillis();
+    // 每次 TrackingService 实例创建时生成，用于区分同一进程内的服务重建。
+    private final String serviceInstanceId = java.util.UUID.randomUUID().toString();
     private volatile DatagramSocket rescueSocketRef = null;
     private final Object rescueLock = new Object();
+    // 多路唤醒若从不同线程同时进入自愈，只允许一个自愈检查在途。
+    private final java.util.concurrent.atomic.AtomicBoolean selfHealInFlight =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     // 看门狗线程
     private Thread watchdogThread;
@@ -258,6 +266,7 @@ public class TrackingService extends Service implements LocationListener {
     private long lastHeartbeatExpectedAt = 0;
     private long serviceCreateTimeMs = 0;
     private int udpBindFailCount = 0;
+
     private long lastLocationLogTime = 0;
     private static long lastOnTaskRemovedTime = 0;
     private static final long ON_TASK_REMOVED_THROTTLE_MS = 10 * 60 * 1000L;
@@ -303,6 +312,17 @@ public class TrackingService extends Service implements LocationListener {
                     new ThreadPoolExecutor.AbortPolicy()
             );
 
+    private void logLifecycle(String event, String detail) {
+        FileLogger.log(this, "LIFECYCLE",
+                "event=" + event
+                        + " pid=" + Process.myPid()
+                        + " processSession=" + PROCESS_SESSION_ID
+                        + " processStartWallMs=" + PROCESS_START_WALL_TIME_MS
+                        + " serviceInstance=" + serviceInstanceId
+                        + " serviceCreateElapsedMs=" + serviceCreateTimeMs
+                        + (detail == null || detail.isEmpty() ? "" : " " + detail));
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -318,6 +338,7 @@ public class TrackingService extends Service implements LocationListener {
         }
 
         serviceCreateTimeMs = SystemClock.elapsedRealtime();
+        logLifecycle("SERVICE_CREATE", "foregroundStarted=" + isForegroundStarted);
         locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
 
         // ★ 强力补丁 1：将所有耗时初始化剥离到主线程 Looper 下一轮执行
@@ -339,9 +360,15 @@ public class TrackingService extends Service implements LocationListener {
                 multicastLock.setReferenceCounted(false);
             }
 
-            // alarmManager 已在 onCreate 顶部赋值；这里幂等重复赋值，兼容老流程
+            // alarmManager 已在 onCreate 顶部赋值；若早期系统服务暂不可用，在此补取。
+            // 已成功建立的启动保活闹钟不在这里重复 cancel/re-arm，避免无意义重置计时。
             if (alarmManager == null) {
                 alarmManager = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+                if (alarmManager != null) {
+                    scheduleKeepAliveJob();
+                    scheduleHeartbeatAlarm();
+                    FileLogger.log(this, "ALARM", "启动阶段补建保活与长心跳闹钟");
+                }
             }
             Intent reportIntent = new Intent(this, TrackingService.class);
             reportIntent.setAction("ACTION_ALARM_TRIGGER");
@@ -364,10 +391,8 @@ public class TrackingService extends Service implements LocationListener {
             requestSingleLocationAndReport();
             registerNetworkCallback();
             startLocationUpdates();
-            // 幂等重复排期：主路径已在 onCreate 顶部跑过一次，这里再兜一次底
-            scheduleHeartbeatAlarm();
+            // 保活与长心跳闹钟已在 onCreate 顶部立即注册；此处不重复重置它们。
             registerBatteryMonitor();
-            scheduleKeepAliveJob();
 
             handler.postDelayed(this::flushPendingReports, 5000);
             KeepAliveJobService.scheduleJob(this);
@@ -406,6 +431,7 @@ public class TrackingService extends Service implements LocationListener {
     private void logStartupSelfCheck() {
     try {
         FileLogger.log(this, "SERVICE", "===== 启动自检 =====");
+        logLifecycle("STARTUP_SELF_CHECK", "build=" + BuildInfo.BUILD_VERSION);
         FileLogger.log(this, "SERVICE", "[TS] 版本: " + BuildInfo.BUILD_VERSION
                 + " (协议 v" + BuildInfo.PROTOCOL_VERSION + ")");
         String rom = Build.DISPLAY != null ? Build.DISPLAY : "unknown";
@@ -559,6 +585,10 @@ public class TrackingService extends Service implements LocationListener {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        // 记录每次 start 请求；同 PID/Session 下 startId 增长代表同一服务实例收到多次启动。
+        String actionForLog = intent != null ? intent.getAction() : "<null>";
+        logLifecycle("SERVICE_START", "startId=" + startId
+                + " flags=" + flags + " action=" + actionForLog);
         // ★ [新增] 2026-11-05 第一时间归类唤醒源，便于排查是谁救了服务
         logWakeSource(intent);
 
@@ -814,44 +844,53 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private void selfHeal() {
+        // 多路唤醒并发到达时合并正在执行的自愈检查；不拦截后续独立唤醒。
+        if (!selfHealInFlight.compareAndSet(false, true)) {
+            FileLogger.log(this, "SERVICE", "⏭ 自愈检查已在执行，合并本次并发请求");
+            return;
+        }
         try {
-            try { startForegroundNotification(); } catch (Exception ignored) {}
-
-            boolean listening;
-            synchronized (rescueLock) {
-                listening = isListeningForRescue;
-            }
-            if (!listening && !serviceDestroyed) {
-                FileLogger.log(this, "SERVICE", "⚠️ 自愈: UDP 监听已死，重新拉起");
-                triggerRescueListener();
-            }
-
             try {
-                List<String> providers = locationManager.getProviders(true);
-                if (providers == null || providers.isEmpty()) {
-                    FileLogger.log(this, "SERVICE", "⚠️ 自愈: 无可用 provider，重新注册定位监听");
-                    startLocationUpdates();
+                try { startForegroundNotification(); } catch (Exception ignored) {}
+
+                boolean listening;
+                synchronized (rescueLock) {
+                    listening = isListeningForRescue;
+                }
+                if (!listening && !serviceDestroyed) {
+                    FileLogger.log(this, "SERVICE", "⚠️ 自愈: UDP 监听已死，重新拉起");
+                    triggerRescueListener();
+                }
+
+                try {
+                    List<String> providers = locationManager.getProviders(true);
+                    if (providers == null || providers.isEmpty()) {
+                        FileLogger.log(this, "SERVICE", "⚠️ 自愈: 无可用 provider，重新注册定位监听");
+                        startLocationUpdates();
+                    }
+                } catch (Exception e) {
+                    FileLogger.log(this, "SERVICE", "⚠️ 自愈: 检查定位失败，尝试重注册: " + e.getMessage());
+                    try { startLocationUpdates(); } catch (Exception ignored) {}
+                }
+
+                if (networkCallback == null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    FileLogger.log(this, "SERVICE", "⚠️ 自愈: networkCallback 为空，重新注册");
+                    registerNetworkCallback();
+                }
+
+                // ★ [核心优化] 2026-11-04 从 SharedPreferences 读取持久化的成功上报时间
+                SharedPreferences sp = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
+                long lastSuccess = sp.getLong(PREF_LAST_SUCCESS_REPORT_TIME, 0);
+                if (lastSuccess > 0 && System.currentTimeMillis() - lastSuccess > 30 * 60 * 1000L) {
+                    long gapMin = (System.currentTimeMillis() - lastSuccess) / 60000;
+                    FileLogger.log(this, "SERVICE", "⚠️ 自愈: 距上次成功上报 " + gapMin + " 分钟，强制触发一次");
+                    sendReport(true, false);
                 }
             } catch (Exception e) {
-                FileLogger.log(this, "SERVICE", "⚠️ 自愈: 检查定位失败，尝试重注册: " + e.getMessage());
-                try { startLocationUpdates(); } catch (Exception ignored) {}
+                FileLogger.log(this, "SERVICE", "❌ 自愈心跳异常: " + e.getMessage());
             }
-
-            if (networkCallback == null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                FileLogger.log(this, "SERVICE", "⚠️ 自愈: networkCallback 为空，重新注册");
-                registerNetworkCallback();
-            }
-
-            // ★ [核心优化] 2026-11-04 从 SharedPreferences 读取持久化的成功上报时间
-            SharedPreferences sp = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
-            long lastSuccess = sp.getLong(PREF_LAST_SUCCESS_REPORT_TIME, 0);
-            if (lastSuccess > 0 && System.currentTimeMillis() - lastSuccess > 30 * 60 * 1000L) {
-                long gapMin = (System.currentTimeMillis() - lastSuccess) / 60000;
-                FileLogger.log(this, "SERVICE", "⚠️ 自愈: 距上次成功上报 " + gapMin + " 分钟，强制触发一次");
-                sendReport(true, false);
-            }
-        } catch (Exception e) {
-            FileLogger.log(this, "SERVICE", "❌ 自愈心跳异常: " + e.getMessage());
+        } finally {
+            selfHealInFlight.set(false);
         }
     }
 
@@ -3893,6 +3932,7 @@ public class TrackingService extends Service implements LocationListener {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        logLifecycle("SERVICE_DESTROY", "isForegroundStarted=" + isForegroundStarted);
         FileLogger.log(this, "SERVICE", "🛑 服务销毁");
         serviceDestroyed = true;
 
@@ -3938,6 +3978,8 @@ public class TrackingService extends Service implements LocationListener {
     @Override
     public void onTaskRemoved(Intent rootIntent) {
         super.onTaskRemoved(rootIntent);
+        logLifecycle("TASK_REMOVED", "rootAction="
+                + (rootIntent != null ? rootIntent.getAction() : "<null>"));
         long now = System.currentTimeMillis();
         if (now - lastOnTaskRemovedTime < ON_TASK_REMOVED_THROTTLE_MS) {
             return; // 10分钟内防抖
