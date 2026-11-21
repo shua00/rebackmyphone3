@@ -24,7 +24,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ================= 配置区 =================
 WEB_PORT = 8082
-UDP_PORT = 8888
+UDP_DEVICE_PORT = 8888
+UDP_PORT = 8890  # 独立监听端口，避免与 server2/rescue2 冲突
 RESCUE_SECRET = "your_private_secret_key"  # ⚠️ 必须与手机端一致
 PEER_NODE_ID = f"chat.py-{uuid.uuid4().hex[:12]}"  # 本次进程的唯一 LAN 会话 ID
 SERVER2_URL = "http://127.0.0.1:8080"      # server2.py 的地址
@@ -159,12 +160,13 @@ def broadcast_chat_message(payload_str):
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     try:
         for t in targets:
-            for _ in range(3):
-                try:
-                    sock.sendto(data, (t, UDP_PORT))
-                    time.sleep(0.05)
-                except Exception:
-                    pass
+            for target_port in (UDP_DEVICE_PORT, 8889, UDP_PORT):
+                for _ in range(3):
+                    try:
+                        sock.sendto(data, (t, target_port))
+                        time.sleep(0.05)
+                    except Exception:
+                        pass
     finally:
         sock.close()
 
@@ -209,7 +211,7 @@ def udp_listener():
                             if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
     except OSError as e:
         if e.errno == 98:
-            print(f"❌ UDP {UDP_PORT} 被占用（可能 server2.py 已在运行）。")
+            print(f"❌ UDP {UDP_PORT} 被占用（可能 rescue2.py 已在运行）。")
             print(f"   本网页仍可打开，但无法接收手机消息。建议直接访问 {SERVER2_URL}/ 使用内置对讲机。")
         else:
             print(f"❌ UDP 端口 {UDP_PORT} 绑定失败: {e}")
@@ -311,7 +313,7 @@ if __name__ == '__main__':
         print("   提示：启动后 server2.py 若重启/掉线，本进程不会自动切换模式，需重启 chat.py")
     else:
         print("🔌 未检测到 server2.py → chat.py 进入【独立模式】")
-        print(f"   自行监听 UDP {UDP_PORT}，子网+全局双发广播")
+        print(f"   自行监听 UDP {UDP_PORT}，向 8888/8889/8890 发送子网+全局广播")
         subnet = get_subnet_broadcast()
         print(f"   当前子网广播地址: {subnet if subnet != '255.255.255.255' else '(未检测到内网 IP，仅全局广播)'}")
         threading.Thread(target=udp_listener, daemon=True).start()
