@@ -1154,7 +1154,7 @@ def udp_listener():
                         message_id = parts[3]
                         content = parts[4]
                         if message_id:
-                            ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:server2".encode("utf-8")
+                            ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:{PEER_NODE_ID}".encode("utf-8")
                             try: udp_sock.sendto(ack, addr)
                             except OSError: pass
                         if sender not in ["Web_Console", "PC_Terminal"]:
