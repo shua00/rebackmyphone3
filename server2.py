@@ -1200,35 +1200,35 @@ def udp_listener():
                                 except OSError: pass
                             continue
                         claim_result = _claim_chat_message(sender, message_id or content)
-                            if claim_result is None:
-                                continue  # 持久化失败：不 ACK，允许发送端重试
-                            if message_id:
-                                ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:{PEER_NODE_ID}".encode("utf-8")
-                                try: udp_sock.sendto(ack, addr)
-                                except OSError: pass
-                            if not claim_result:
-                                continue  # 重复消息仍 ACK，但不重复展示
-                            now_ms = int(datetime.datetime.now().timestamp() * 1000)
-                            ts = datetime.datetime.now().strftime("%H:%M:%S")
-                            # ★ 合并为单个锁块，消除一切嵌套疑虑
-                            with state_lock:
-                                if sender not in ALL_DEVICES_STATUS:
-                                    ALL_DEVICES_STATUS[sender] = {
-                                        "device_id": sender, "received_at": now_ms,
-                                        "network": {}, "battery": {"level": "?"}
-                                    }
-                                info = ALL_DEVICES_STATUS[sender]
-                                if not info.get('network'): info['network'] = {}
-                                info['udp_source_ip'] = source_ip
-                                info["received_at"] = now_ms
-                                info.pop("offline_alerted", None)
-                                info["last_chat"] = now_ms
-                                
-                                CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": content})
-                                if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
-                                
-                            with print_lock:
-                                print(f"\n🗣️ [对讲机] {sender} (来自IP: {source_ip}) 说: {content}")
+                        if claim_result is None:
+                            continue  # 持久化失败：不 ACK，允许发送端重试
+                        if message_id:
+                            ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:{PEER_NODE_ID}".encode("utf-8")
+                            try: udp_sock.sendto(ack, addr)
+                            except OSError: pass
+                        if not claim_result:
+                            continue  # 重复消息仍 ACK，但不重复展示
+                        now_ms = int(datetime.datetime.now().timestamp() * 1000)
+                        ts = datetime.datetime.now().strftime("%H:%M:%S")
+                        # ★ 合并为单个锁块，消除一切嵌套疑虑
+                        with state_lock:
+                            if sender not in ALL_DEVICES_STATUS:
+                                ALL_DEVICES_STATUS[sender] = {
+                                    "device_id": sender, "received_at": now_ms,
+                                    "network": {}, "battery": {"level": "?"}
+                                }
+                            info = ALL_DEVICES_STATUS[sender]
+                            if not info.get('network'): info['network'] = {}
+                            info['udp_source_ip'] = source_ip
+                            info["received_at"] = now_ms
+                            info.pop("offline_alerted", None)
+                            info["last_chat"] = now_ms
+                            
+                            CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": content})
+                            if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
+                            
+                        with print_lock:
+                            print(f"\n🗣️ [对讲机] {sender} (来自IP: {source_ip}) 说: {content}")
         except OSError as e:
             if e.errno in (98, 10048) or "Address already in use" in str(e):
                 print(f"❌ udp 8888 bind 失败: {e}，10s 后重试")
