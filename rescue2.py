@@ -462,7 +462,7 @@ def udp_listener():
                         message_id = parts[3]
                         content = parts[4]
                         if message_id:
-                            ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:rescue2".encode("utf-8")
+                            ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:{PEER_NODE_ID}".encode("utf-8")
                             try: sock.sendto(ack, addr)
                             except OSError: pass
                         if sender in ("PC_Terminal", "Web_Console", "Guest_"): continue
