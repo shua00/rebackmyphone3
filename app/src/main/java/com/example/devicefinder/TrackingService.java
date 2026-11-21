@@ -3,7 +3,7 @@
  *  TrackingService.java — 设备同步与可靠通信服务
  * ------------------------------------------------------------
  *  构建批次 : 20261122-P2P-r12
- *  源码版本 : v2.5.14-r14（协议 v2-only / cached-peer fast path）
+ *  源码版本 : v2.5.15-r15（协议 v2-only / background persist + latency trace）
  *  最后修改 : 2026-11-22
  *  体积目标 : 以现有约 140 KB APK 为基线；本轮不新增第三方库/运行时依赖
  *  性能原则 : 复用系统 API、既有回调/线程/上报链；无新增高频轮询、扫描或常驻线程
@@ -16,9 +16,9 @@
  *    - 当前验证仅适用于同一可互通 LAN；跨 NAT ICE、TURN/Relay 仍为未来扩展。
  *  本轮约束 : 移除 FIND_ME_MSG v1 双发/接收；保留现有 UDP 8888 监听、广播发送与所有非聊天业务。
  *  P2P 状态 : 按需 PEER_HELLO/PEER_ACK 挑战；缓存 120 秒验证过的 8888 endpoint，网络回调变化立即清空，优先逐成员单播；CHAT_ACK 必须匹配已验证 peer 的 ID/IP/端口；待确认消息使用 SharedPreferences 同步落盘、最多 50 条，网络恢复后按原 message_id 每次补发最多 3 条。实机验证仍待完成。
- *  本轮改动 : 增加有效 peer endpoint 缓存快路径，正常连续聊天跳过每条消息前的 500ms 发现等待；首次/缓存过期时仍保留 500ms 多成员收集窗口；ACK 等待由每轮 700ms 调整为 250ms，最多 3 轮；多轮未确认后撤销未确认成员的旧 endpoint，下一条消息重新发现。保留网络变化撤销、逐成员单播、ACK 来源 ID/IP/端口校验、message_id、接收去重、离线持久队列及限量补发。
+ *  本轮改动 : 持久化 commit 从 Service 主线程移至后台线程，仍严格先落盘后发送；增加持久化/UDP发送/ACK/接收耗时诊断日志，定位剩余端到端延迟。延续有效 peer endpoint 缓存快路径、首次发现 500ms 多成员窗口、250ms×最多3轮 ACK、失败后撤销未确认路由；不改聊天 UI。
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
- *    2026-11-22 r14 LAN P2P 快速发送：复用 120 秒已验证 peer endpoint，连续消息跳过重复 500ms 发现窗口；ACK 等待缩短为 250ms/轮，失败后撤销旧路由并在后续消息重新发现。\n *    2026-11-22 r4 轻量网络状态代数：网络快照关键字段变化时递增 network_generation；补齐头部架构/依赖/扩展边界说明，无新增第三方依赖。
+ *    2026-11-22 r15 后台持久化与时延诊断：同步 commit 移出 Service 主线程，增加持久化、UDP发送、ACK、接收时间日志。\n *    2026-11-22 r14 LAN P2P 快速发送：复用 120 秒已验证 peer endpoint，连续消息跳过重复 500ms 发现窗口；ACK 等待缩短为 250ms/轮，失败后撤销旧路由并在后续消息重新发现。\n *    2026-11-22 r4 轻量网络状态代数：网络快照关键字段变化时递增 network_generation；补齐头部架构/依赖/扩展边界说明，无新增第三方依赖。
  *    2026-11-21 09:30  网络与反馈扩展：默认网络快照（类型/IP/CIDR/接口/验证状态）；command_feedback 本地持久化、断网补交与服务端明确确认后回收；保留旧 executed_ids 和原离线补发机制
  *    2026-11-20 21:10  可靠性修复：[B1] 离线补发>FLUSH_BATCH_MAX 条时自我续跑（不再等网络状态变化）；
  *                      [B3] 批量下行响应解析由主线程 handler.post 移回工作线程（消除 ANR 风险）；
@@ -243,6 +243,8 @@ public class TrackingService extends Service implements LocationListener {
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CountDownLatch> pendingChatAcks =
             new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.Set<String>> pendingChatAckPeers =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> pendingChatAckStartedAt =
             new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, Long> receivedChatMessageIds =
             new java.util.concurrent.ConcurrentHashMap<>();
@@ -3290,11 +3292,18 @@ public class TrackingService extends Service implements LocationListener {
     /** 新消息先持久化，再尝试发送；UI 调用入口和行为保持原样。 */
     private void sendLocalUdpMessage(final String message) {
         final String messageId = java.util.UUID.randomUUID().toString();
-        if (!persistPendingLanChat(messageId, message)) {
-            FileLogger.log(this, "CHAT", "⚠️ LAN 消息未能持久化，已阻止发送以免断网丢失");
-            return;
-        }
-        sendLocalUdpMessage(message, messageId);
+        // ACTION_SEND_UDP_CHAT 由 Service 主线程接收；同步 commit 可能阻塞主线程。
+        // 将“先持久化、再发送”整体移至后台线程，顺序和不丢消息语义保持不变。
+        new Thread(() -> {
+            long persistStarted = android.os.SystemClock.elapsedRealtime();
+            if (!persistPendingLanChat(messageId, message)) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN 消息未能持久化，已阻止发送以免断网丢失");
+                return;
+            }
+            FileLogger.log(this, "CHAT", "⏱️ P2P 持久化耗时 "
+                    + (android.os.SystemClock.elapsedRealtime() - persistStarted) + "ms，开始发送 " + messageId);
+            sendLocalUdpMessage(message, messageId);
+        }, "LAN-P2P-ChatPersist").start();
     }
 
     private boolean persistPendingLanChat(String messageId, String content) {
@@ -3440,7 +3449,9 @@ public class TrackingService extends Service implements LocationListener {
         java.util.concurrent.CountDownLatch ack =
                 new java.util.concurrent.CountDownLatch(totalPeerCount == 0 ? 1 : totalPeerCount);
         pendingChatAckPeers.put(messageId, awaitingPeerIds);
+        pendingChatAckStartedAt.put(messageId, android.os.SystemClock.elapsedRealtime());
         pendingChatAcks.put(messageId, ack);
+        FileLogger.log(this, "CHAT", "⏱️ P2P UDP 开始发送，已验证成员 " + totalPeerCount + "，消息 " + messageId);
         try {
             for (int attempt = 1; attempt <= 3 && ack.getCount() > 0; attempt++) {
                 if (socket.isClosed()) break;
@@ -3491,6 +3502,7 @@ public class TrackingService extends Service implements LocationListener {
         } finally {
             pendingChatAcks.remove(messageId);
             pendingChatAckPeers.remove(messageId);
+            pendingChatAckStartedAt.remove(messageId);
         }
     }
 
@@ -3700,6 +3712,12 @@ public class TrackingService extends Service implements LocationListener {
                                     && verified.getPort() == packet.getPort()
                                     && expectedPeers.remove(peerId)) {
                                 verifiedChatPeerSeen.put(peerId, System.currentTimeMillis());
+                                Long startedAt = pendingChatAckStartedAt.get(ackParts[2]);
+                                if (startedAt != null) {
+                                    FileLogger.log(this, "CHAT", "⏱️ P2P 收到成员 ACK，耗时 "
+                                            + (android.os.SystemClock.elapsedRealtime() - startedAt)
+                                            + "ms，消息 " + ackParts[2]);
+                                }
                                 latch.countDown();
                             }
                         }
@@ -3776,6 +3794,7 @@ public class TrackingService extends Service implements LocationListener {
                             String messageId = chatParts[3].trim();
                             String content = chatParts[4].trim();
                             // 仅对有效 v2 消息 ACK；同一 message_id 重发时再次 ACK，但只显示一次。
+                            FileLogger.log(TrackingService.this, "CHAT", "⏱️ P2P 收到手机消息，距发送端计时以发送方 ACK 日志为准，消息 " + messageId);
                             sendChatAck(rescueSocket, packet.getAddress(), packet.getPort(), messageId);
                             long now = System.currentTimeMillis();
                             Long previous = receivedChatMessageIds.putIfAbsent(senderId + ":" + messageId, now);
