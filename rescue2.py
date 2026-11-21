@@ -459,7 +459,7 @@ def udp_listener():
                             try: sock.sendto(ack, addr)
                             except OSError: pass
                         if sender in ("PC_Terminal", "Web_Console", "Guest_"): continue
-                        dedup_key = (sender, content)
+                        dedup_key = (sender, message_id or content)
                         now_ts = time.time()
                         if now_ts - _LAST_UDP_MSG.get(dedup_key, 0) < 5.0: continue
                         _LAST_UDP_MSG[dedup_key] = now_ts
