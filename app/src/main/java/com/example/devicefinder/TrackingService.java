@@ -3,22 +3,22 @@
  *  TrackingService.java — 设备同步与可靠通信服务
  * ------------------------------------------------------------
  *  构建批次 : 20261122-P2P-r12
- *  源码版本 : v2.5.13-r13（协议 v2-only / v2.11 multi-peer discovery window）
+ *  源码版本 : v2.5.14-r14（协议 v2-only / cached-peer fast path）
  *  最后修改 : 2026-11-22
  *  体积目标 : 以现有约 140 KB APK 为基线；本轮不新增第三方库/运行时依赖
  *  性能原则 : 复用系统 API、既有回调/线程/上报链；无新增高频轮询、扫描或常驻线程
  * ------------------------------------------------------------
  *  本轮 LAN P2P 路由：
  *    - 复用 ConnectivityManager.NetworkCallback 与现有网络快照，不引入 Tailscale/Pion/libp2p/WebRTC。
- *    - 按需广播随机 nonce challenge，只有收到对应 response 才记录对端 UDP endpoint；租约 120 秒。
+ *    - 首次或缓存失效时广播随机 nonce challenge，只有收到对应 response 才记录对端 UDP endpoint；租约 120 秒；有效租约直接复用。
  *    - 已验证 endpoint 优先单播；无已验证 peer 时广播；网络回调变化立即清空 peer 表。
  *    - 网络指纹仅用于诊断，不授权单播；不以私网 IP、CIDR、SSID/BSSID 作为可达证明。
  *    - 当前验证仅适用于同一可互通 LAN；跨 NAT ICE、TURN/Relay 仍为未来扩展。
  *  本轮约束 : 移除 FIND_ME_MSG v1 双发/接收；保留现有 UDP 8888 监听、广播发送与所有非聊天业务。
  *  P2P 状态 : 按需 PEER_HELLO/PEER_ACK 挑战；缓存 120 秒验证过的 8888 endpoint，网络回调变化立即清空，优先逐成员单播；CHAT_ACK 必须匹配已验证 peer 的 ID/IP/端口；待确认消息使用 SharedPreferences 同步落盘、最多 50 条，网络恢复后按原 message_id 每次补发最多 3 条。实机验证仍待完成。
- *  本轮改动 : 增加按需 peer challenge/response、500ms 多成员收集窗口、120 秒 endpoint 租约、网络变化撤销、逐成员单播与 ACK 统计、ACK 来源 ID/IP/端口校验、message_id、接收去重及未确认成员最多 3 次有限重试；消息先同步持久化，网络恢复/服务重启后按原 ID 限量补发；同一消息禁止并发重发；队列满时拒绝覆盖旧消息。
+ *  本轮改动 : 增加有效 peer endpoint 缓存快路径，正常连续聊天跳过每条消息前的 500ms 发现等待；首次/缓存过期时仍保留 500ms 多成员收集窗口；ACK 等待由每轮 700ms 调整为 250ms，最多 3 轮；多轮未确认后撤销未确认成员的旧 endpoint，下一条消息重新发现。保留网络变化撤销、逐成员单播、ACK 来源 ID/IP/端口校验、message_id、接收去重、离线持久队列及限量补发。
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
- *    2026-11-22 r4 轻量网络状态代数：网络快照关键字段变化时递增 network_generation；补齐头部架构/依赖/扩展边界说明，无新增第三方依赖。
+ *    2026-11-22 r14 LAN P2P 快速发送：复用 120 秒已验证 peer endpoint，连续消息跳过重复 500ms 发现窗口；ACK 等待缩短为 250ms/轮，失败后撤销旧路由并在后续消息重新发现。\n *    2026-11-22 r4 轻量网络状态代数：网络快照关键字段变化时递增 network_generation；补齐头部架构/依赖/扩展边界说明，无新增第三方依赖。
  *    2026-11-21 09:30  网络与反馈扩展：默认网络快照（类型/IP/CIDR/接口/验证状态）；command_feedback 本地持久化、断网补交与服务端明确确认后回收；保留旧 executed_ids 和原离线补发机制
  *    2026-11-20 21:10  可靠性修复：[B1] 离线补发>FLUSH_BATCH_MAX 条时自我续跑（不再等网络状态变化）；
  *                      [B3] 批量下行响应解析由主线程 handler.post 移回工作线程（消除 ANR 风险）；
@@ -3390,38 +3390,42 @@ public class TrackingService extends Service implements LocationListener {
             return;
         }
         String myId = getUniqueDeviceId();
-        String nonce = java.util.UUID.randomUUID().toString();
         String subnetBcast = getWifiBroadcastAddress();
         String[] broadcasts = subnetBcast.equals("255.255.255.255")
                 ? new String[]{"255.255.255.255"}
                 : new String[]{subnetBcast, "255.255.255.255"};
-        java.util.concurrent.CountDownLatch peerLatch = new java.util.concurrent.CountDownLatch(1);
-        pendingPeerChallenges.put(nonce, peerLatch);
-        try {
-            byte[] hello = ("FIND_ME_PEER_HELLO:" + RESCUE_SECRET + ":" + myId + ":" + nonce).getBytes("UTF-8");
-            for (String target : broadcasts) {
-                try {
-                    DatagramPacket p = new DatagramPacket(hello, hello.length,
-                            java.net.InetAddress.getByName(target), 8888);
-                    synchronized (socket) { socket.send(p); }
-                } catch (Exception e) {
-                    FileLogger.log(this, "CHAT", "⚠️ P2P 发现广播失败: " + e.getMessage());
-                }
-            }
-            // 固定收集窗口：不能在第一个 peer 回应时提前结束，否则群聊只发现一台设备。
-            try { Thread.sleep(500L); }
-            catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
-        } catch (Exception e) {
-            FileLogger.log(this, "CHAT", "⚠️ P2P 发现失败: " + e.getMessage());
-        } finally {
-            pendingPeerChallenges.remove(nonce);
-        }
 
+        // 先清理过期租约；同一网络内仍有已验证成员时直接复用单播路由，
+        // 不再让每条聊天消息都额外等待一次 500ms 广播发现窗口。
         long now = System.currentTimeMillis();
         for (java.util.Map.Entry<String, Long> e : verifiedChatPeerSeen.entrySet()) {
             if (now - e.getValue() > 120_000L) {
                 verifiedChatPeerSeen.remove(e.getKey(), e.getValue());
                 verifiedChatPeers.remove(e.getKey());
+            }
+        }
+        if (verifiedChatPeers.isEmpty()) {
+            String nonce = java.util.UUID.randomUUID().toString();
+            java.util.concurrent.CountDownLatch peerLatch = new java.util.concurrent.CountDownLatch(1);
+            pendingPeerChallenges.put(nonce, peerLatch);
+            try {
+                byte[] hello = ("FIND_ME_PEER_HELLO:" + RESCUE_SECRET + ":" + myId + ":" + nonce).getBytes("UTF-8");
+                for (String target : broadcasts) {
+                    try {
+                        DatagramPacket p = new DatagramPacket(hello, hello.length,
+                                java.net.InetAddress.getByName(target), 8888);
+                        synchronized (socket) { socket.send(p); }
+                    } catch (Exception e) {
+                        FileLogger.log(this, "CHAT", "⚠️ P2P 发现广播失败: " + e.getMessage());
+                    }
+                }
+                // 首次发现仍保留完整收集窗口，确保群聊成员不会因首个 ACK 而漏发现。
+                try { Thread.sleep(500L); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+            } catch (Exception e) {
+                FileLogger.log(this, "CHAT", "⚠️ P2P 发现失败: " + e.getMessage());
+            } finally {
+                pendingPeerChallenges.remove(nonce);
             }
         }
         String payload = "FIND_ME_CHAT:" + RESCUE_SECRET + ":" + myId + ":" + messageId + ":" + message;
@@ -3466,7 +3470,7 @@ public class TrackingService extends Service implements LocationListener {
                         }
                     }
                 }
-                try { ack.await(700, TimeUnit.MILLISECONDS); }
+                try { ack.await(250, TimeUnit.MILLISECONDS); }
                 catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
             }
             int deliveredPeers = totalPeerCount - (int) ack.getCount();
@@ -3475,6 +3479,12 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.log(this, "CHAT", "✅ P2P 所有已发现成员 ACK: "
                         + deliveredPeers + "/" + totalPeerCount + "，消息 " + messageId);
             } else {
+                // ACK 多轮仍未到达，撤销未确认成员的旧 endpoint；
+                // 下一条消息会重新 challenge，避免 Python 节点重启/网络切换后长期沿用失效路由。
+                for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
+                    verifiedChatPeers.remove(peerId);
+                    verifiedChatPeerSeen.remove(peerId);
+                }
                 FileLogger.log(this, "CHAT", "⚠️ P2P 消息仍待确认并保留本地队列: "
                         + deliveredPeers + "/" + totalPeerCount + "，消息 " + messageId);
             }
