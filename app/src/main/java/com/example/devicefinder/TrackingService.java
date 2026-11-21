@@ -3938,8 +3938,7 @@ public class TrackingService extends Service implements LocationListener {
                                 requestSingleLocationAndReport();
                             }
                         }
-                    }
- else if (message.startsWith("FIND_ME_SCAN_WIFI:")) {
+                    } else if (message.startsWith("FIND_ME_SCAN_WIFI:")) {
                         String[] parts = message.split(":", 2);
                         if (parts.length == 2 && RESCUE_SECRET.equals(parts[1])) {
                             // ★ 2026-11-07 [P1-1]
