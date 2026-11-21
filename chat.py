@@ -160,7 +160,7 @@ def broadcast_chat_message(payload_str):
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     try:
         for t in targets:
-            for target_port in (UDP_DEVICE_PORT, 8889, UDP_PORT):
+            for target_port in (UDP_DEVICE_PORT, 8887, 8889, UDP_PORT):
                 for _ in range(3):
                     try:
                         sock.sendto(data, (t, target_port))
