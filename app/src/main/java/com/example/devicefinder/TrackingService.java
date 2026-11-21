@@ -2,8 +2,8 @@
  * ============================================================
  *  TrackingService.java — 设备同步与可靠通信服务
  * ------------------------------------------------------------
- *  构建批次 : 20261122-P2P-r19
- *  源码版本 : v2.5.19-r19（协议 v2-only / inbound LAN chat fast path）
+ *  构建批次 : 20261122-P2P-r20
+ *  源码版本 : v2.5.20-r20（协议 v2-only / LAN send-path latency diagnostics）
  *  最后修改 : 2026-11-22
  *  体积目标 : 以现有约 140 KB APK 为基线；本轮不新增第三方库/运行时依赖
  *  性能原则 : 复用系统 API、既有回调/线程/上报链；无新增高频轮询、扫描或常驻线程
@@ -16,8 +16,9 @@
  *    - 当前验证仅适用于同一可互通 LAN；跨 NAT ICE、TURN/Relay 仍为未来扩展。
  *  本轮约束 : 移除 FIND_ME_MSG v1 双发/接收；保留现有 UDP 8888 监听、广播发送与所有非聊天业务。
  *  P2P 状态 : 按需 PEER_HELLO/PEER_ACK 挑战；缓存 120 秒验证过的 8888 endpoint，仅默认网络身份/IP/前缀/接口/网关等关键路径签名变化时清空；已验证成员逐成员单播；CHAT_ACK 必须匹配已验证 peer 的 ID/IP/端口；无 peer 时子网广播一次并保留待确认队列；消息接收先过滤自身 sender，再 ACK/去重；实机验证仍待完成。
- *  本轮改动 : PEER_HELLO/PEER_ACK/CHAT_ACK/CHAT_MSG 均走 UDP 实时快路径；聊天消息先过滤自身回环并立即 ACK，再去重后排入主线程 FIFO 处理历史/UI；普通 UDP 不逐包 logcat；陪伴和警报命令移出接收循环。
+ *  本轮改动 : 在 r19 实时收包快路径基础上，增加 UDP socket 锁等待、实际 send 耗时、ACK 等待轮数/总耗时的阈值诊断；不改变 ACK 重试次数、等待窗口、peer 验证或消息队列语义。
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
+ *    - 2026-11-22 r20 发送路径诊断：记录异常 socket 锁等待、UDP send 耗时和 ACK 等待轮数/总耗时，不改变发送策略。
  *    - 2026-11-22 r19 聊天收包快路径：CHAT_MSG 提前到实时分发，先 ACK 后去重并异步处理历史/UI。
  *    - 2026-11-22 r18 接收循环减负：去掉普通包逐包 logcat；聊天 ACK 立即回包后再 FIFO 处理历史/UI；陪伴与警报命令转主线程串行执行。
  *    - 2026-11-22 r17 实时 ACK 快路径：握手/聊天 ACK 优先处理；移除完整 UDP 包日志，防止协议认证字段和聊天内容进入日志。
@@ -3446,7 +3447,7 @@ public class TrackingService extends Service implements LocationListener {
                     try {
                         DatagramPacket p = new DatagramPacket(hello, hello.length,
                                 java.net.InetAddress.getByName(target), 8888);
-                        synchronized (socket) { socket.send(p); }
+                        sendLanUdpPacket(socket, p, "PEER_HELLO");
                     } catch (Exception e) {
                         FileLogger.log(this, "CHAT", "⚠️ P2P 发现广播失败: " + e.getMessage());
                     }
@@ -3476,6 +3477,8 @@ public class TrackingService extends Service implements LocationListener {
         pendingChatAckStartedAt.put(messageId, android.os.SystemClock.elapsedRealtime());
         pendingChatAcks.put(messageId, ack);
         FileLogger.log(this, "CHAT", "⏱️ P2P UDP 开始发送，已验证成员 " + totalPeerCount + "，消息 " + messageId);
+        long ackLoopStartedAt = android.os.SystemClock.elapsedRealtime();
+        int ackRounds = 0;
         try {
             if (totalPeerCount == 0 && !socket.isClosed()) {
                 // 首次发现窗口内没有经过 challenge 验证的成员：只广播一次。
@@ -3484,7 +3487,7 @@ public class TrackingService extends Service implements LocationListener {
                     try {
                         DatagramPacket p = new DatagramPacket(data, data.length,
                                 java.net.InetAddress.getByName(target), 8888);
-                        synchronized (socket) { socket.send(p); }
+                        sendLanUdpPacket(socket, p, "CHAT_BROADCAST");
                     } catch (Exception e) {
                         FileLogger.log(this, "CHAT", "⚠️ P2P 广播失败: " + e.getMessage());
                     }
@@ -3492,6 +3495,7 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.log(this, "CHAT", "ℹ️ 暂无已验证成员，已广播一次并保留待确认队列: " + messageId);
             }
             for (int attempt = 1; attempt <= 3 && ack.getCount() > 0; attempt++) {
+                ackRounds = attempt;
                 if (socket.isClosed()) break;
                 if (awaitingPeerIds.isEmpty()) {
                     break;
@@ -3505,7 +3509,7 @@ public class TrackingService extends Service implements LocationListener {
                         try {
                             DatagramPacket p = new DatagramPacket(data, data.length,
                                     peer.getAddress(), peer.getPort());
-                            synchronized (socket) { socket.send(p); }
+                            sendLanUdpPacket(socket, p, "CHAT_UNICAST");
                         } catch (Exception e) {
                             FileLogger.log(this, "CHAT", "⚠️ P2P 单播失败: " + e.getMessage());
                         }
@@ -3513,6 +3517,12 @@ public class TrackingService extends Service implements LocationListener {
                 }
                 try { ack.await(250, TimeUnit.MILLISECONDS); }
                 catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+            }
+            long ackLoopElapsed = android.os.SystemClock.elapsedRealtime() - ackLoopStartedAt;
+            if (ackLoopElapsed >= 400L) {
+                FileLogger.logD("CHAT", "P2P ACK loop elapsedMs=" + ackLoopElapsed
+                        + " rounds=" + ackRounds + " remaining=" + ack.getCount()
+                        + "/" + totalPeerCount + " message=" + messageId);
             }
             int deliveredPeers = totalPeerCount - (int) ack.getCount();
             if (totalPeerCount == 0) {
@@ -3539,6 +3549,28 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     /**
+     * 统一串行化 UDP send，并仅在锁等待或系统 send 明显偏慢时输出诊断。
+     * 不记录数据包内容、认证字段或聊天正文。
+     */
+    private void sendLanUdpPacket(DatagramSocket socket, DatagramPacket packet, String kind)
+            throws java.io.IOException {
+        long lockWaitStarted = android.os.SystemClock.elapsedRealtime();
+        long lockWaitMs;
+        long sendMs;
+        synchronized (socket) {
+            lockWaitMs = android.os.SystemClock.elapsedRealtime() - lockWaitStarted;
+            if (socket.isClosed()) return;
+            long sendStarted = android.os.SystemClock.elapsedRealtime();
+            socket.send(packet);
+            sendMs = android.os.SystemClock.elapsedRealtime() - sendStarted;
+        }
+        if (lockWaitMs >= 50L || sendMs >= 50L) {
+            FileLogger.logD("UDP", "slow send kind=" + kind + " lockWaitMs="
+                    + lockWaitMs + " sendMs=" + sendMs + " bytes=" + packet.getLength());
+        }
+    }
+
+    /**
      * 实时 LAN 控制包快路径：握手和聊天 ACK 在普通控制指令分发之前完成。
      * 返回 true 表示该包已处理；不创建线程、不做磁盘 I/O、不执行 UI/业务命令。
      */
@@ -3554,9 +3586,7 @@ public class TrackingService extends Service implements LocationListener {
                     byte[] bytes = response.getBytes("UTF-8");
                     DatagramPacket reply = new DatagramPacket(bytes, bytes.length,
                             packet.getAddress(), packet.getPort());
-                    synchronized (socket) {
-                        if (!socket.isClosed()) socket.send(reply);
-                    }
+                    sendLanUdpPacket(socket, reply, "PEER_ACK");
                 }
                 return true;
             }
@@ -3644,7 +3674,7 @@ public class TrackingService extends Service implements LocationListener {
             String ack = "FIND_ME_CHAT_ACK:" + RESCUE_SECRET + ":" + messageId + ":" + getUniqueDeviceId();
             byte[] bytes = ack.getBytes("UTF-8");
             DatagramPacket packet = new DatagramPacket(bytes, bytes.length, address, port);
-            synchronized (socket) { if (!socket.isClosed()) socket.send(packet); }
+            sendLanUdpPacket(socket, packet, "CHAT_ACK");
         } catch (Exception e) {
             FileLogger.log(this, "CHAT", "⚠️ P2P ACK 发送失败: " + e.getMessage());
         }
