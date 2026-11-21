@@ -3,7 +3,7 @@
  *  TrackingService.java — 设备同步与可靠通信服务
  * ------------------------------------------------------------
  *  构建批次 : 20261122-0210-r4
- *  源码版本 : v2.5.13-r5（协议 v2-only / v2.3 LAN P2P 基础收敛）
+ *  源码版本 : v2.5.13-r6（协议 v2-only / v2.4 LAN P2P ACK）
  *  最后修改 : 2026-11-22
  *  体积目标 : 以现有约 140 KB APK 为基线；本轮不新增第三方库/运行时依赖
  *  性能原则 : 复用系统 API、既有回调/线程/上报链；无新增高频轮询、扫描或常驻线程
@@ -15,7 +15,8 @@
  *    - UDP Challenge/Response、跨 NAT ICE、TURN/Relay 仅预留扩展约定，本版本不启动探测、不增加流量。
  *    - 路由不可确认时由服务端使用现有 HTTP 持久队列；不影响定位、离线补发、聊天监听及其他业务。
  *  本轮约束 : 移除 FIND_ME_MSG v1 双发/接收；保留现有 UDP 8888 监听、广播发送与所有非聊天业务。
- *  P2P 状态 : 本提交只完成协议收敛；成员发现、消息 ID、ACK/重试和离线队列仍待实现与验证。
+ *  P2P 状态 : 聊天消息携带 UUID message_id；使用监听 socket 的 8888 源端口回 ACK；最多 3 次广播发送并等待 ACK。成员发现、单播可达验证、离线发送队列仍待实现与验证。
+ *  本轮改动 : 增加 message_id、接收去重、ACK 回程与最多 3 次有限重试；发送复用 8888 监听 socket，避免临时源端口导致 ACK 无法返回。
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
  *    2026-11-22 r4 轻量网络状态代数：网络快照关键字段变化时递增 network_generation；补齐头部架构/依赖/扩展边界说明，无新增第三方依赖。
  *    2026-11-21 09:30  网络与反馈扩展：默认网络快照（类型/IP/CIDR/接口/验证状态）；command_feedback 本地持久化、断网补交与服务端明确确认后回收；保留旧 executed_ids 和原离线补发机制
@@ -238,6 +239,11 @@ public class TrackingService extends Service implements LocationListener {
     // 每次 TrackingService 实例创建时生成，用于区分同一进程内的服务重建。
     private final String serviceInstanceId = java.util.UUID.randomUUID().toString();
     private volatile DatagramSocket rescueSocketRef = null;
+    // LAN P2P v2：消息 ACK 等待表。每条消息只保留一个短时 latch，不启动常驻线程。
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CountDownLatch> pendingChatAcks =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> receivedChatMessageIds =
+            new java.util.concurrent.ConcurrentHashMap<>();
     private final Object rescueLock = new Object();
     // 多路唤醒若从不同线程同时进入自愈，只允许一个自愈检查在途。
     private final java.util.concurrent.atomic.AtomicBoolean selfHealInFlight =
@@ -3254,50 +3260,60 @@ public class TrackingService extends Service implements LocationListener {
 
     private void sendLocalUdpMessage(final String message) {
         new Thread(() -> {
-            java.net.DatagramSocket socket = null;
-            try {
-                socket = new java.net.DatagramSocket(null);
-                socket.setReuseAddress(true);
-                socket.setBroadcast(true);
-                socket.bind(new InetSocketAddress(0));    // 先 bind 到随机端口，所有接口
-                bindSocketToWifi(socket);                  // 再尝试限定走 WiFi（失败无妨）
-
-                String myId = getUniqueDeviceId();
-                // v2 新前缀
-                String chatPayload   = FIND_ME_CHAT_MSG + ":" + RESCUE_SECRET + ":" + myId + ":" + message;
-                byte[] chatBuf = chatPayload.getBytes("UTF-8");
-
-                String subnetBcast = getWifiBroadcastAddress();
-                String[] targets = subnetBcast.equals("255.255.255.255")
-                        ? new String[]{"255.255.255.255"}
-                        : new String[]{subnetBcast, "255.255.255.255"};
-
-                for (String target : targets) {
-                    // 先发 v2 新前缀
-                    try {
-                        java.net.DatagramPacket p = new java.net.DatagramPacket(
-                                chatBuf, chatBuf.length, java.net.InetAddress.getByName(target), 8888);
-                        socket.send(p);
-                        FileLogger.log(TrackingService.this, "UDP",
-                                "📡 CHAT 已发至 " + target + " | len=" + chatBuf.length
-                                        + " | ip=" + DeviceInfoUtils.getLocalIpAddress());
-                    } catch (Exception e) {
-                        FileLogger.log(TrackingService.this, "UDP",
-                                "⚠️ CHAT 发往 " + target + " 失败: " + e.getMessage());
-                    }
-                }
-            } catch (Exception e) {
-                Log.e("TrackingService", "UDP 发送失败: " + e.toString());
-                FileLogger.log(TrackingService.this, "UDP", "❌ 发送失败: " + e.getMessage());
-            } finally {
-                if (socket != null && !socket.isClosed()) try { socket.close(); } catch (Exception ignored) {}
+            DatagramSocket socket = rescueSocketRef;
+            if (socket == null || socket.isClosed()) {
+                FileLogger.log(TrackingService.this, "CHAT", "⚠️ P2P UDP 监听尚未就绪，消息未发送");
+                return;
             }
-        }).start();
+            String myId = getUniqueDeviceId();
+            String messageId = java.util.UUID.randomUUID().toString();
+            String payload = "FIND_ME_CHAT:" + RESCUE_SECRET + ":" + myId + ":" + messageId + ":" + message;
+            byte[] data;
+            try { data = payload.getBytes("UTF-8"); }
+            catch (Exception e) { return; }
+            String subnetBcast = getWifiBroadcastAddress();
+            String[] targets = subnetBcast.equals("255.255.255.255")
+                    ? new String[]{"255.255.255.255"}
+                    : new String[]{subnetBcast, "255.255.255.255"};
+            java.util.concurrent.CountDownLatch ack = new java.util.concurrent.CountDownLatch(1);
+            pendingChatAcks.put(messageId, ack);
+            boolean confirmed = false;
+            try {
+                for (int attempt = 1; attempt <= 3 && !confirmed; attempt++) {
+                    if (socket.isClosed()) break;
+                    for (String target : targets) {
+                        try {
+                            DatagramPacket packet = new DatagramPacket(
+                                    data, data.length, java.net.InetAddress.getByName(target), 8888);
+                            synchronized (socket) { socket.send(packet); }
+                        } catch (Exception e) {
+                            FileLogger.log(TrackingService.this, "CHAT", "⚠️ P2P 广播失败: " + e.getMessage());
+                        }
+                    }
+                    try { confirmed = ack.await(700, TimeUnit.MILLISECONDS); }
+                    catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+                }
+                FileLogger.log(TrackingService.this, "CHAT",
+                        confirmed ? "✅ P2P 消息已收到 ACK: " + messageId
+                                  : "⚠️ P2P 消息未获 ACK（已有限重试）: " + messageId);
+            } finally {
+                pendingChatAcks.remove(messageId);
+            }
+        }, "LAN-P2P-ChatSend").start();
     }
 
-    // ==================== P0-1/P0-2 辅助方法 ====================
+    private void sendChatAck(DatagramSocket socket, java.net.InetAddress address, int port,
+                             String messageId) {
+        try {
+            String ack = "FIND_ME_CHAT_ACK:" + RESCUE_SECRET + ":" + messageId + ":" + getUniqueDeviceId();
+            byte[] bytes = ack.getBytes("UTF-8");
+            DatagramPacket packet = new DatagramPacket(bytes, bytes.length, address, port);
+            synchronized (socket) { if (!socket.isClosed()) socket.send(packet); }
+        } catch (Exception e) {
+            FileLogger.log(this, "CHAT", "⚠️ P2P ACK 发送失败: " + e.getMessage());
+        }
+    }
 
-    /** recentExecutions 惰性清理阈值（防止 P0-2 改 Key 后内存无界增长） */
     private static final int RECENT_EXECUTIONS_MAX = 200;
 
     /**
@@ -3455,7 +3471,13 @@ public class TrackingService extends Service implements LocationListener {
                         }
                     }
 
-                    if (message.startsWith("FIND_ME_SERVER:")) {
+                    if (message.startsWith("FIND_ME_CHAT_ACK:")) {
+                        String[] ackParts = message.split(":", 4);
+                        if (ackParts.length == 4 && RESCUE_SECRET.equals(ackParts[1])) {
+                            java.util.concurrent.CountDownLatch latch = pendingChatAcks.get(ackParts[2]);
+                            if (latch != null) latch.countDown();
+                        }
+                    } else if (message.startsWith("FIND_ME_SERVER:")) {
                         String[] parts = message.split(":", 3);
                         if (parts.length == 3 && RESCUE_SECRET.equals(parts[1])) {
                             // ★ 改动2：先判重后执行，防路由器/多网卡抖动导致连环 change_server + break
@@ -3522,14 +3544,22 @@ public class TrackingService extends Service implements LocationListener {
                     }
                     // ===== [P0-1] 聊天：v2 新前缀 =====
                     else if (message.startsWith(FIND_ME_CHAT_MSG + ":")) {
-                        String[] chatParts = message.split(":", 4);
-                        if (chatParts.length == 4 && RESCUE_SECRET.equals(chatParts[1])) {
+                        String[] chatParts = message.split(":", 5);
+                        if (chatParts.length == 5 && RESCUE_SECRET.equals(chatParts[1])) {
                             String senderId = chatParts[2].trim();
-                            String content = chatParts[3].trim();
-                            String dk = buildDedupKey("chat_msg", content, null);
-                            if (!isRecentlyExecuted(dk)) {
-                                handleIncomingChat(senderId, content);
-                                // ★ 改动1：删除冗余 recentExecutions.put
+                            String messageId = chatParts[3].trim();
+                            String content = chatParts[4].trim();
+                            // 仅对有效 v2 消息 ACK；同一 message_id 重发时再次 ACK，但只显示一次。
+                            sendChatAck(rescueSocket, packet.getAddress(), packet.getPort(), messageId);
+                            long now = System.currentTimeMillis();
+                            Long previous = receivedChatMessageIds.putIfAbsent(messageId, now);
+                            if (previous == null) {
+                                if (receivedChatMessageIds.size() > 500) {
+                                    long cutoff = now - 10 * 60 * 1000L;
+                                    receivedChatMessageIds.entrySet().removeIf(e -> e.getValue() < cutoff);
+                                }
+                                String dk = buildDedupKey("chat_msg", senderId + ":" + messageId, null);
+                                if (!isRecentlyExecuted(dk)) handleIncomingChat(senderId, content);
                             }
                         }
                     }
