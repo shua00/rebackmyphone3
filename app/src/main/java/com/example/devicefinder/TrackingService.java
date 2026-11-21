@@ -2,8 +2,8 @@
  * ============================================================
  *  TrackingService.java — 设备同步与可靠通信服务
  * ------------------------------------------------------------
- *  构建批次 : 20261122-P2P-r12
- *  源码版本 : v2.5.15-r15（协议 v2-only / background persist + latency trace）
+ *  构建批次 : 20261122-P2P-r16
+ *  源码版本 : v2.5.16-r16（协议 v2-only / LAN route + ACK hardening）
  *  最后修改 : 2026-11-22
  *  体积目标 : 以现有约 140 KB APK 为基线；本轮不新增第三方库/运行时依赖
  *  性能原则 : 复用系统 API、既有回调/线程/上报链；无新增高频轮询、扫描或常驻线程
@@ -11,12 +11,12 @@
  *  本轮 LAN P2P 路由：
  *    - 复用 ConnectivityManager.NetworkCallback 与现有网络快照，不引入 Tailscale/Pion/libp2p/WebRTC。
  *    - 首次或缓存失效时广播随机 nonce challenge，只有收到对应 response 才记录对端 UDP endpoint；租约 120 秒；有效租约直接复用。
- *    - 已验证 endpoint 优先单播；无已验证 peer 时广播；网络回调变化立即清空 peer 表。
+ *    - 已验证 endpoint 优先单播；无已验证 peer 时仅向当前子网广播一次；仅实际默认网络路径签名变化时清空 peer 表。
  *    - 网络指纹仅用于诊断，不授权单播；不以私网 IP、CIDR、SSID/BSSID 作为可达证明。
  *    - 当前验证仅适用于同一可互通 LAN；跨 NAT ICE、TURN/Relay 仍为未来扩展。
  *  本轮约束 : 移除 FIND_ME_MSG v1 双发/接收；保留现有 UDP 8888 监听、广播发送与所有非聊天业务。
- *  P2P 状态 : 按需 PEER_HELLO/PEER_ACK 挑战；缓存 120 秒验证过的 8888 endpoint，网络回调变化立即清空，优先逐成员单播；CHAT_ACK 必须匹配已验证 peer 的 ID/IP/端口；待确认消息使用 SharedPreferences 同步落盘、最多 50 条，网络恢复后按原 message_id 每次补发最多 3 条。实机验证仍待完成。
- *  本轮改动 : 持久化 commit 从 Service 主线程移至后台线程，仍严格先落盘后发送；增加持久化/UDP发送/ACK/接收耗时诊断日志，定位剩余端到端延迟。延续有效 peer endpoint 缓存快路径、首次发现 500ms 多成员窗口、250ms×最多3轮 ACK、失败后撤销未确认路由；不改聊天 UI。
+ *  P2P 状态 : 按需 PEER_HELLO/PEER_ACK 挑战；缓存 120 秒验证过的 8888 endpoint，仅默认网络身份/IP/前缀/接口/网关等关键路径签名变化时清空；已验证成员逐成员单播；CHAT_ACK 必须匹配已验证 peer 的 ID/IP/端口；无 peer 时子网广播一次并保留待确认队列；消息接收先过滤自身 sender，再 ACK/去重；实机验证仍待完成。
+ *  本轮改动 : 修复双目标广播重复包、无 peer 时 ACK latch 负数、接收自身消息仍 ACK、网络回调无条件清 peer；增加 UDP 分支耗时诊断。保留先落盘后发送、120 秒 peer 快路径、首次发现 500ms 多成员窗口、250ms×最多3轮 ACK、失败撤销未确认路由；不改聊天 UI。
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
  *    2026-11-22 r15 后台持久化与时延诊断：同步 commit 移出 Service 主线程，增加持久化、UDP发送、ACK、接收时间日志。\n *    2026-11-22 r14 LAN P2P 快速发送：复用 120 秒已验证 peer endpoint，连续消息跳过重复 500ms 发现窗口；ACK 等待缩短为 250ms/轮，失败后撤销旧路由并在后续消息重新发现。\n *    2026-11-22 r4 轻量网络状态代数：网络快照关键字段变化时递增 network_generation；补齐头部架构/依赖/扩展边界说明，无新增第三方依赖。
  *    2026-11-21 09:30  网络与反馈扩展：默认网络快照（类型/IP/CIDR/接口/验证状态）；command_feedback 本地持久化、断网补交与服务端明确确认后回收；保留旧 executed_ids 和原离线补发机制
@@ -263,6 +263,24 @@ public class TrackingService extends Service implements LocationListener {
             new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CountDownLatch> pendingPeerChallenges =
             new java.util.concurrent.ConcurrentHashMap<>();
+    // 与 buildNetworkSnapshot 的关键路径代数对齐；普通 capabilities/link 回调不应清空有效 peer。
+    private volatile long lastPeerRouteGeneration = -1L;
+
+    private void refreshPeerRoutesForNetworkChange(String reason) {
+        try {
+            JSONObject snapshot = buildNetworkSnapshot();
+            long generation = snapshot.optLong("network_generation", -1L);
+            long previous = lastPeerRouteGeneration;
+            lastPeerRouteGeneration = generation;
+            if (previous >= 0L && generation >= 0L && generation != previous) {
+                invalidateVerifiedChatPeers(reason + " (network generation " + previous + " -> " + generation + ")");
+            } else {
+                FileLogger.logD("CHAT", "LAN P2P 保留已验证 peer：网络路径未变化，generation=" + generation + "，回调=" + reason);
+            }
+        } catch (Exception e) {
+            FileLogger.log(this, "CHAT", "⚠️ 网络回调快照检查失败，暂不清除 peer：" + reason + " / " + e.getMessage());
+        }
+    }
 
     /** 网络路径变化立即撤销旧 LAN endpoint，避免跨子网沿用旧 IP。 */
     private void invalidateVerifiedChatPeers(String reason) {
@@ -1791,12 +1809,13 @@ public class TrackingService extends Service implements LocationListener {
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
             if (cm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                lastPeerRouteGeneration = buildNetworkSnapshot().optLong("network_generation", -1L);
                 networkCallback = new ConnectivityManager.NetworkCallback() {
                     @Override
                     public void onAvailable(Network network) {
                         super.onAvailable(network);
                         // onAvailable 可能先于 LinkProperties/默认网络切换稳定；稍作合并后再上报。
-                        invalidateVerifiedChatPeers("network available/switch");
+                        refreshPeerRoutesForNetworkChange("network available/switch");
                         FileLogger.log(TrackingService.this, "NETWORK", "✅ 网络可用/发生切换，刷新默认网络信息");
                         handler.removeCallbacks(networkRefreshRunnable);
                         handler.postDelayed(networkRefreshRunnable, 1200L);
@@ -1806,7 +1825,7 @@ public class TrackingService extends Service implements LocationListener {
                     public void onLost(Network network) {
                         super.onLost(network);
                         // onLost 可能只是链路变化，不直接认定设备断网；延迟读取当前默认网络再判断。
-                        invalidateVerifiedChatPeers("network lost");
+                        refreshPeerRoutesForNetworkChange("network lost");
                         FileLogger.log(TrackingService.this, "NETWORK", "ℹ️ 网络链路变化，重新检查当前默认网络");
                         handler.removeCallbacks(networkRefreshRunnable);
                         handler.postDelayed(networkRefreshRunnable, 1500L);
@@ -1814,14 +1833,14 @@ public class TrackingService extends Service implements LocationListener {
                     @Override
                     public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
                         super.onCapabilitiesChanged(network, capabilities);
-                        invalidateVerifiedChatPeers("network capabilities changed");
+                        refreshPeerRoutesForNetworkChange("network capabilities changed");
                         handler.removeCallbacks(networkRefreshRunnable);
                         handler.postDelayed(networkRefreshRunnable, 800L);
                     }
                     @Override
                     public void onLinkPropertiesChanged(Network network, LinkProperties linkProperties) {
                         super.onLinkPropertiesChanged(network, linkProperties);
-                        invalidateVerifiedChatPeers("link properties changed");
+                        refreshPeerRoutesForNetworkChange("link properties changed");
                         handler.removeCallbacks(networkRefreshRunnable);
                         handler.postDelayed(networkRefreshRunnable, 800L);
                     }
@@ -1935,7 +1954,8 @@ public class TrackingService extends Service implements LocationListener {
             out.put("has_internet", hasInternet ? 1 : 0);
             out.put("validated", validated ? 1 : 0);
             out.put("network_subtype", "MOBILE".equals(transport) ? "cellular" : transport.toLowerCase(java.util.Locale.US));
-            String signature = transport + "|" + localIp + "|" + subnetPrefix + "|" + interfaceName
+            String networkIdentity = active != null ? active.toString() : "";
+            String signature = networkIdentity + "|" + transport + "|" + localIp + "|" + subnetPrefix + "|" + interfaceName
                     + "|" + gatewayIp + "|" + hasInternet + "|" + validated;
             synchronized (NETWORK_STATE_LOCK) {
                 if (!signature.equals(lastNetworkSignature)) {
@@ -3400,9 +3420,8 @@ public class TrackingService extends Service implements LocationListener {
         }
         String myId = getUniqueDeviceId();
         String subnetBcast = getWifiBroadcastAddress();
-        String[] broadcasts = subnetBcast.equals("255.255.255.255")
-                ? new String[]{"255.255.255.255"}
-                : new String[]{subnetBcast, "255.255.255.255"};
+        // 当前子网广播足以覆盖同一 LAN；同时发 255.255.255.255 会让同一包重复到达。
+        String[] broadcasts = new String[]{subnetBcast};
 
         // 先清理过期租约；同一网络内仍有已验证成员时直接复用单播路由，
         // 不再让每条聊天消息都额外等待一次 500ms 广播发现窗口。
@@ -3446,25 +3465,32 @@ public class TrackingService extends Service implements LocationListener {
             awaitingPeerIds.add(entry.getKey());
         }
         final int totalPeerCount = awaitingPeerIds.size();
+        // 无已验证成员时没有可合法计数的 ACK；避免人为塞入 1 导致 deliveredPeers 为 -1。
         java.util.concurrent.CountDownLatch ack =
-                new java.util.concurrent.CountDownLatch(totalPeerCount == 0 ? 1 : totalPeerCount);
+                new java.util.concurrent.CountDownLatch(totalPeerCount);
         pendingChatAckPeers.put(messageId, awaitingPeerIds);
         pendingChatAckStartedAt.put(messageId, android.os.SystemClock.elapsedRealtime());
         pendingChatAcks.put(messageId, ack);
         FileLogger.log(this, "CHAT", "⏱️ P2P UDP 开始发送，已验证成员 " + totalPeerCount + "，消息 " + messageId);
         try {
+            if (totalPeerCount == 0 && !socket.isClosed()) {
+                // 首次发现窗口内没有经过 challenge 验证的成员：只广播一次。
+                // 未验证来源的 ACK 不计为送达，消息继续保留在本地队列等待后续补发。
+                for (String target : broadcasts) {
+                    try {
+                        DatagramPacket p = new DatagramPacket(data, data.length,
+                                java.net.InetAddress.getByName(target), 8888);
+                        synchronized (socket) { socket.send(p); }
+                    } catch (Exception e) {
+                        FileLogger.log(this, "CHAT", "⚠️ P2P 广播失败: " + e.getMessage());
+                    }
+                }
+                FileLogger.log(this, "CHAT", "ℹ️ 暂无已验证成员，已广播一次并保留待确认队列: " + messageId);
+            }
             for (int attempt = 1; attempt <= 3 && ack.getCount() > 0; attempt++) {
                 if (socket.isClosed()) break;
                 if (awaitingPeerIds.isEmpty()) {
-                    for (String target : broadcasts) {
-                        try {
-                            DatagramPacket p = new DatagramPacket(data, data.length,
-                                    java.net.InetAddress.getByName(target), 8888);
-                            synchronized (socket) { socket.send(p); }
-                        } catch (Exception e) {
-                            FileLogger.log(this, "CHAT", "⚠️ P2P 广播失败: " + e.getMessage());
-                        }
-                    }
+                    break;
                 } else {
                     for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
                         java.net.InetSocketAddress peer = verifiedChatPeers.get(peerId);
@@ -3485,7 +3511,9 @@ public class TrackingService extends Service implements LocationListener {
                 catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
             }
             int deliveredPeers = totalPeerCount - (int) ack.getCount();
-            if (totalPeerCount > 0 && deliveredPeers == totalPeerCount) {
+            if (totalPeerCount == 0) {
+                // 广播模式没有经过验证的 ACK 目标；不报告虚假的送达数，也不清除持久化队列。
+            } else if (deliveredPeers == totalPeerCount) {
                 removePendingLanChat(messageId);
                 FileLogger.log(this, "CHAT", "✅ P2P 所有已发现成员 ACK: "
                         + deliveredPeers + "/" + totalPeerCount + "，消息 " + messageId);
@@ -3655,6 +3683,7 @@ public class TrackingService extends Service implements LocationListener {
                     } catch (java.net.SocketTimeoutException te) {
                         continue;
                     }
+                    long udpReceiveElapsedMs = android.os.SystemClock.elapsedRealtime();
                     String message = new String(packet.getData(), 0, packet.getLength());
                     // 【诊断】任何 UDP 包到达都打日志，证明 socket 收到了
                     FileLogger.log(this, "UDP", "📥 收到 UDP 包: " + message + " (来自 " + packet.getAddress() + ")");
@@ -3793,8 +3822,13 @@ public class TrackingService extends Service implements LocationListener {
                             String senderId = chatParts[2].trim();
                             String messageId = chatParts[3].trim();
                             String content = chatParts[4].trim();
+                            // 广播回环可能把本机发出的包送回本机；必须在 ACK/去重/入库之前过滤。
+                            if (senderId.isEmpty() || senderId.equals(getUniqueDeviceId())) {
+                                FileLogger.logD("CHAT", "忽略本机/空 sender 的 LAN 回环消息: " + messageId);
+                                continue;
+                            }
                             // 仅对有效 v2 消息 ACK；同一 message_id 重发时再次 ACK，但只显示一次。
-                            FileLogger.log(TrackingService.this, "CHAT", "⏱️ P2P 收到手机消息，距发送端计时以发送方 ACK 日志为准，消息 " + messageId);
+                            FileLogger.log(this, "CHAT", "⏱️ P2P 收到手机消息，message_id=" + messageId);
                             sendChatAck(rescueSocket, packet.getAddress(), packet.getPort(), messageId);
                             long now = System.currentTimeMillis();
                             Long previous = receivedChatMessageIds.putIfAbsent(senderId + ":" + messageId, now);
@@ -3904,6 +3938,11 @@ public class TrackingService extends Service implements LocationListener {
                                 requestSingleLocationAndReport();
                             }
                         }
+                    }
+                    long udpDispatchCostMs = android.os.SystemClock.elapsedRealtime() - udpReceiveElapsedMs;
+                    if (udpDispatchCostMs >= 200L) {
+                        FileLogger.log(this, "UDP", "⚠️ UDP 接收分支处理偏慢: " + udpDispatchCostMs
+                                + "ms, prefix=" + (message.length() > 48 ? message.substring(0, 48) : message));
                     } else if (message.startsWith("FIND_ME_SCAN_WIFI:")) {
                         String[] parts = message.split(":", 2);
                         if (parts.length == 2 && RESCUE_SECRET.equals(parts[1])) {
