@@ -3,9 +3,10 @@
 server2.py — 全功能同步服务（v2 协议稳定版）
 ------------------------------------------------------------
 构建批次 : 20261121-0930
-协议版本 : v2 / v2.1 网络与指令反馈扩展（向后兼容）
+协议版本 : v2-only / v2.2 网络与指令反馈扩展
 最后修改 : 2026-11-21（v2.5.13-r1 网络状态采集与指令反馈闭环（按 v2.5.12 服务端基线重建））
 ------------------------------------------------------------
+本轮改动 : v2-only；custom_msg 仅发 FIND_ME_FLOAT，chat_msg 仅发 FIND_ME_CHAT；UDP 接收不再接受 FIND_ME_MSG。
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
   2026-11-21 09:30  v2.5.13-r1 重建：服务端严格以 v2.5.12 为基线，增加网络前缀/接口/传输状态落库、command_feedback 持久化与幂等处理；修正 Cloudflare HTTP source_ip 不得作为设备 UDP 目标；兼容旧 executed_ids。
   2026-11-21 09:15  v2.5.12 设备管理整合：统一离线阈值并支持持久化自定义；设备列表增加在线/离线/异常筛选；在线/离线设备均可删除；待执行指令数直接跳转到该设备队列；删除前阻止遗留待确认指令；时间格式人类可读；保留最后有效 IP 与定位采集时间；增加删除审计。
@@ -811,7 +812,7 @@ def resolve_target_devices(target_ip):
 
 # ★ 2026-11-07 [P4.1]: 版本感知前缀生成
 def get_target_protocol(dev_id):
-    """查设备协议版本，旧设备默认 v1"""
+    """v2-only：协议版本仅用于诊断，不再选择旧版信令。"""
     with state_lock:
         info = ALL_DEVICES_STATUS.get(dev_id, {})
         v = info.get("protocol_version")
@@ -819,39 +820,11 @@ def get_target_protocol(dev_id):
 
 
 def _build_version_aware_commands(target_devs, action_name, payload):
-    """
-    版本感知前缀（2026-11-07 [P4.1]）:
-    - custom_msg: 全 v2→FLOAT; 全 v1→MSG(不含冒号); 混合/广播→FLOAT(含冒号只FLOAT)
-    - chat_msg:   CHAT + MSG 双发
-    """
+    """v2-only 信令生成：不再依据设备版本双发旧协议。"""
     if action_name == "custom_msg":
-        versions = set(get_target_protocol(d) for d in target_devs) if target_devs else set()
-        has_colon = ":" in payload
-        # ★ FIX-C 2026-11-19：versions 为空 == "版本未知"，不是"混合"。
-        #   触发场景（高频）：target_ip 指定了某台设备，但它尚未上报 / 重连换了 IP，
-        #   resolve_target_devices 以 IP 为设备主键匹配不到 -> target_devs=[] ->
-        #   versions=set() 落到下面的兜底分支，对一台纯 v2 的手机同时下发
-        #   FIND_ME_FLOAT 与 FIND_ME_MSG，屏幕上多弹一个对话框。
-        #   版本未知时只发 v2 悬浮（v2 是能力超集，且不会重复弹窗）；真混合 {1,2} 仍双发。
-        if not versions:
-            return [f"FIND_ME_FLOAT:{RESCUE_SECRET}:{payload}"]
-        if versions == {2}:
-            return [f"FIND_ME_FLOAT:{RESCUE_SECRET}:{payload}"]
-        if versions == {1}:
-            # ★ FIX-3 2026-11-18：旧版此处 return []，使 /api/control 回 status=error；
-            #   但第 1377~1380 行早已把这条 custom_msg 入队 —— 前端提示"失败"，
-            #   设备下次上报却照样收到并弹屏，返回码与实际行为相反。
-            #   改为把半角冒号降级成全角冒号：v1 用首个冒号切字段，全角冒号不会被截断，
-            #   消息不丢、返回码也恢复真实。
-            safe_payload = payload.replace(":", "：") if has_colon else payload
-            return [f"FIND_ME_MSG:{RESCUE_SECRET}:{safe_payload}"]
-        cmds = [f"FIND_ME_FLOAT:{RESCUE_SECRET}:{payload}"]
-        if not has_colon:
-            cmds.append(f"FIND_ME_MSG:{RESCUE_SECRET}:{payload}")
-        return cmds
+        return [f"FIND_ME_FLOAT:{RESCUE_SECRET}:{payload}"]
     if action_name == "chat_msg":
-        return [f"FIND_ME_CHAT:{RESCUE_SECRET}:Web_Console:{payload}",
-                f"FIND_ME_MSG:{RESCUE_SECRET}:Web_Console:{payload}"]
+        return [f"FIND_ME_CHAT:{RESCUE_SECRET}:Web_Console:{payload}"]
     return []
 
 
@@ -1166,8 +1139,8 @@ def udp_listener():
                     continue
                 msg = data.decode('utf-8', errors='ignore')
                 source_ip = addr[0]
-                # ★ 2026-11-07 [P4.6 修正]: v2 CHAT + legacy MSG
-                if msg.startswith("FIND_ME_CHAT:") or msg.startswith("FIND_ME_MSG:"):
+                # v2-only：只接收 FIND_ME_CHAT
+                if msg.startswith("FIND_ME_CHAT:"):
                     parts = msg.split(":", 3)
                     if len(parts) == 4 and parts[1] == RESCUE_SECRET:
                         sender = parts[2]
@@ -2364,7 +2337,7 @@ def handle_client(client_conn, client_addr):
                         success = False
                         extra_msg = "未能构造下行信令，指令已写入队列，等手机下次上报时下发"
                 elif action == "chat_msg":
-                    # ★ 2026-11-07 [P4.5]: CHAT + MSG 双发
+                    # v2-only：单一 CHAT 信令
                     success = False
                     for cmd_prefix in _build_version_aware_commands(target_devs, "chat_msg", payload):
                         if smart_send(cmd_prefix):
