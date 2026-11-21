@@ -59,6 +59,7 @@ from urllib.parse import urlparse, parse_qs
 # ★ 新增ThreadPoolExecutor 补丁： 2026-11-05 13:50
 from concurrent.futures import ThreadPoolExecutor
 
+UDP_LISTEN_PORT = 8887  # server2 独立监听端口；发往 Android 的指令仍使用 8888
 PEER_NODE_ID = f"server2-{uuid.uuid4().hex[:12]}"  # 本次进程唯一 LAN 会话 ID
 
 """
@@ -1170,9 +1171,9 @@ def udp_listener():
         udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            udp_sock.bind(('0.0.0.0', 8888))
+            udp_sock.bind(('0.0.0.0', UDP_LISTEN_PORT))
             UDP_LISTENING = True
-            print("🎧 UDP 监听已启动，等待局域网对讲机消息...")
+            print(f"🎧 UDP 监听已启动 port={UDP_LISTEN_PORT}，等待局域网对讲机消息...")
             while True:
                 try:
                     data, addr = udp_sock.recvfrom(4096)
