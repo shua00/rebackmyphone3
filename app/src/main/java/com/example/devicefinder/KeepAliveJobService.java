@@ -4,7 +4,7 @@
  * ------------------------------------------------------------
  *  构建批次 : 20261111-2000
  *  协议版本 : v2
- *  最后修改 : 2026-11-12 22:45（v2.0 通道可视化 + v2.0.1 架构优化 + 修复版本常量）
+ *  最后修改 : 2026-11-21 10:45（优化范围：同步完成语义、离线可调度、Job 唤醒日志，保留 JOB_ID、15 分钟周期、持久化设置和原有拉起行为）
  * ============================================================
  */
 
@@ -22,13 +22,12 @@ import android.os.Build;
 public class KeepAliveJobService extends JobService {
 
     private static final int JOB_ID = 10086;
+    private static final long JOB_INTERVAL_MS = 15 * 60 * 1000L;
 
     @Override
     public boolean onStartJob(JobParameters params) {
-        // ★③-1 新增：存活日志。下次出问题，有这条就能判断 JobService 到底活没活。
-        //        （如果日志里有这条而 TrackingService 没起，说明 startForegroundService 抛异常；
-        //          如果连这条都没有，说明 App 被 force-stop，只能靠用户手动操作）
-        FileLogger.log(this, "JOB", "⏰ JobService 收到唤醒（独立进程存活证明）");
+        FileLogger.log(this, "JOB",
+                "⏰ JobService 收到系统调度，jobId=" + params.getJobId());
 
         Intent intent = new Intent(this, TrackingService.class);
         intent.setAction("ACTION_JOB_WAKE_UP");
@@ -39,52 +38,68 @@ public class KeepAliveJobService extends JobService {
             } else {
                 startService(intent);
             }
-            FileLogger.log(this, "JOB", "✅ 已请求拉起 TrackingService");
+            FileLogger.log(this, "JOB",
+                    "✅ 已提交 TrackingService 启动请求，jobId=" + params.getJobId());
         } catch (Exception e) {
-            FileLogger.log(this, "JOB", "❌ 拉起服务失败: " + e.getMessage());
+            FileLogger.log(this, "JOB",
+                    "❌ 拉起 TrackingService 失败，jobId=" + params.getJobId()
+                            + " error=" + e.getClass().getSimpleName()
+                            + ": " + e.getMessage());
         }
 
-        // ★③-2 新增：显式告知系统本任务已同步完成（needReschedule=false）。
-        //        规范做法，避免系统 hold wake lock 过久。
-        jobFinished(params, false);
-
-        // 同步完成，返回 false 让系统释放 wake lock
+        // 本任务只同步提交一次服务启动请求，没有异步 Job 工作。
+        // 返回 false 即表示本次 Job 已完成，不需要再调用 jobFinished()。
         return false;
     }
 
     @Override
     public boolean onStopJob(JobParameters params) {
-        // ★③-3 修改：原返回 true = 系统中断时立即重试（会加剧重入压力）；
-        //        本任务无状态（拉起服务后就不管了），被中断不需要重试 → false。
-        FileLogger.log(this, "JOB", "⏹ JobService 被系统中断，不重试");
+        FileLogger.log(this, "JOB",
+                "⏹ Job 被系统停止，不请求重试，jobId=" + params.getJobId());
         return false;
     }
 
     public static void scheduleJob(Context context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return;
 
-        JobScheduler jobScheduler = (JobScheduler) context.getSystemService(Context.JOB_SCHEDULER_SERVICE);
-        if (jobScheduler == null) return;
+        Context appContext = context.getApplicationContext();
+        JobScheduler scheduler = (JobScheduler) appContext.getSystemService(
+                Context.JOB_SCHEDULER_SERVICE);
+        if (scheduler == null) {
+            FileLogger.log(appContext, "JOB", "❌ JobScheduler 不可用");
+            return;
+        }
 
-        // 防重复注册（你现有逻辑，保留）
-        for (JobInfo job : jobScheduler.getAllPendingJobs()) {
+        // 同一 JOB_ID 已存在时不重新 schedule，避免无意义地重置周期。
+        for (JobInfo job : scheduler.getAllPendingJobs()) {
             if (job.getId() == JOB_ID) {
-                FileLogger.log(context, "JOB", "ℹ️ JobScheduler 已存在，跳过重复注册");
+                FileLogger.log(appContext, "JOB",
+                        "ℹ️ 周期任务已存在，跳过重复注册，jobId=" + JOB_ID);
                 return;
             }
         }
 
-        JobInfo.Builder builder = new JobInfo.Builder(JOB_ID,
-                new ComponentName(context, KeepAliveJobService.class));
-        builder.setPeriodic(15 * 60 * 1000);
-        builder.setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY);
+        JobInfo.Builder builder = new JobInfo.Builder(
+                JOB_ID,
+                new ComponentName(appContext, KeepAliveJobService.class));
+        builder.setPeriodic(JOB_INTERVAL_MS);
         builder.setPersisted(true);
 
-        int result = jobScheduler.schedule(builder.build());
-        if (result == JobScheduler.RESULT_SUCCESS) {
-            FileLogger.log(context, "JOB", "✅ JobScheduler 注册成功 (15分钟周期)");
-        } else {
-            FileLogger.log(context, "JOB", "❌ JobScheduler 注册失败");
+        // 不设置网络约束：保活唤醒不依赖网络，离线时也允许系统调度。
+        try {
+            int result = scheduler.schedule(builder.build());
+            if (result == JobScheduler.RESULT_SUCCESS) {
+                FileLogger.log(appContext, "JOB",
+                        "✅ 周期任务注册成功，间隔15分钟，jobId=" + JOB_ID);
+            } else {
+                FileLogger.log(appContext, "JOB",
+                        "❌ 周期任务注册失败，result=" + result + " jobId=" + JOB_ID);
+            }
+        } catch (Exception e) {
+            FileLogger.log(appContext, "JOB",
+                    "❌ 周期任务注册异常: " + e.getClass().getSimpleName()
+                            + ": " + e.getMessage());
         }
     }
 }
+
