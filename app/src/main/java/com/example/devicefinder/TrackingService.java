@@ -3330,8 +3330,9 @@ public class TrackingService extends Service implements LocationListener {
             for (java.util.Map.Entry<String, java.net.InetSocketAddress> entry : verifiedChatPeers.entrySet()) {
                 awaitingPeerIds.add(entry.getKey());
             }
+            final int totalPeerCount = awaitingPeerIds.size();
             java.util.concurrent.CountDownLatch ack =
-                    new java.util.concurrent.CountDownLatch(awaitingPeerIds.isEmpty() ? 1 : awaitingPeerIds.size());
+                    new java.util.concurrent.CountDownLatch(totalPeerCount == 0 ? 1 : totalPeerCount);
             pendingChatAckPeers.put(messageId, awaitingPeerIds);
             pendingChatAcks.put(messageId, ack);
             try {
@@ -3352,8 +3353,8 @@ public class TrackingService extends Service implements LocationListener {
                         for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
                             java.net.InetSocketAddress peer = verifiedChatPeers.get(peerId);
                             if (peer == null) {
-                                awaitingPeerIds.remove(peerId);
-                                ack.countDown();
+                                FileLogger.log(TrackingService.this, "CHAT",
+                                        "⚠️ P2P peer 路由已失效，未计为送达: " + peerId);
                                 continue;
                             }
                             try {
@@ -3368,8 +3369,7 @@ public class TrackingService extends Service implements LocationListener {
                     try { ack.await(700, TimeUnit.MILLISECONDS); }
                     catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
                 }
-                int totalPeers = awaitingPeerIds.size();
-                int deliveredPeers = totalPeers - (int) ack.getCount();
+                int deliveredPeers = totalPeerCount - (int) ack.getCount();
                 FileLogger.log(TrackingService.this, "CHAT",
                         deliveredPeers > 0
                                 ? "✅ P2P 成员 ACK: " + deliveredPeers + "/" + totalPeers + "，消息 " + messageId
@@ -3582,10 +3582,10 @@ public class TrackingService extends Service implements LocationListener {
                             String peerId = ackParts[3].trim();
                             java.net.InetSocketAddress verified = verifiedChatPeers.get(peerId);
                             java.util.Set<String> expectedPeers = pendingChatAckPeers.get(ackParts[2]);
-                            if (latch != null && expectedPeers != null && expectedPeers.remove(peerId)
-                                    && verified != null
+                            if (latch != null && expectedPeers != null && verified != null
                                     && verified.getAddress().equals(packet.getAddress())
-                                    && verified.getPort() == packet.getPort()) {
+                                    && verified.getPort() == packet.getPort()
+                                    && expectedPeers.remove(peerId)) {
                                 verifiedChatPeerSeen.put(peerId, System.currentTimeMillis());
                                 latch.countDown();
                             }
