@@ -15,7 +15,7 @@
  *    - UDP Challenge/Response、跨 NAT ICE、TURN/Relay 仅预留扩展约定，本版本不启动探测、不增加流量。
  *    - 路由不可确认时由服务端使用现有 HTTP 持久队列；不影响定位、离线补发、聊天监听及其他业务。
  *  本轮约束 : 移除 FIND_ME_MSG v1 双发/接收；保留现有 UDP 8888 监听、广播发送与所有非聊天业务。
- *  P2P 状态 : 聊天消息携带 UUID message_id；使用监听 socket 的 8888 源端口回 ACK；最多 3 次广播发送并等待 ACK。成员发现、单播可达验证、离线发送队列仍待实现与验证。
+ *  P2P 状态 : 聊天消息携带 UUID message_id；接收端去重并使用监听 socket 的 8888 源端口回 ACK；最多 3 次广播发送并等待至少一个 ACK。尚未实现成员发现、逐成员送达统计、离线待发队列及实机验证。
  *  本轮改动 : 增加 message_id、接收去重、ACK 回程与最多 3 次有限重试；发送复用 8888 监听 socket，避免临时源端口导致 ACK 无法返回。
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
  *    2026-11-22 r4 轻量网络状态代数：网络快照关键字段变化时递增 network_generation；补齐头部架构/依赖/扩展边界说明，无新增第三方依赖。
@@ -214,7 +214,7 @@ public class TrackingService extends Service implements LocationListener {
     // ===== 协议前缀（P0-1 拆分）=====
     /** v2 悬浮文字：FIND_ME_FLOAT:secret:content（content 可含冒号） */
     private static final String FIND_ME_FLOAT_MSG = "FIND_ME_FLOAT";
-    /** v2 聊天：FIND_ME_CHAT:secret:sender:content */
+    /** v2 聊天：FIND_ME_CHAT:secret:sender:message_id:content */
     private static final String FIND_ME_CHAT_MSG  = "FIND_ME_CHAT";
 
     private static long lastConfigFetchTime = 0;
