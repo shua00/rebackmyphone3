@@ -2,11 +2,13 @@
 ============================================================
 server2.py — 全功能同步服务（v2 协议稳定版）
 ------------------------------------------------------------
-构建批次 : 20261121-0045
-协议版本 : v2
-最后修改 : 2026-11-21 00:45（v2.5.11 管理台导航、页面内列表与地图定位细节优化）
+构建批次 : 20261121-0930
+协议版本 : v2 / v2.1 网络与指令反馈扩展（向后兼容）
+最后修改 : 2026-11-21（v2.5.13-r1 网络状态采集与指令反馈闭环（按 v2.5.12 服务端基线重建））
 ------------------------------------------------------------
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
+  2026-11-21 09:30  v2.5.13-r1 重建：服务端严格以 v2.5.12 为基线，增加网络前缀/接口/传输状态落库、command_feedback 持久化与幂等处理；修正 Cloudflare HTTP source_ip 不得作为设备 UDP 目标；兼容旧 executed_ids。
+  2026-11-21 09:15  v2.5.12 设备管理整合：统一离线阈值并支持持久化自定义；设备列表增加在线/离线/异常筛选；在线/离线设备均可删除；待执行指令数直接跳转到该设备队列；删除前阻止遗留待确认指令；时间格式人类可读；保留最后有效 IP 与定位采集时间；增加删除审计。
   2026-11-21 00:45  v2.5.11 管理台细节优化：①设备维护卡片自动收起无操作项的空卡片，按钮统一网格对齐；②二级导航去除左侧竖线并提高导航字号；③云端留言与指令队列改为页面内展示，不再弹出通用模态框；④地图保留原始默认中心与缩放，进入地图不自动跳转设备位置，悬浮定位按钮仅在用户点击时定位到最近上报设备，手机端同步显示；⑤不修改 API、数据库及 Android 协议
   2026-11-21 02:30  v2.5.10 地图与页面视觉整理：①实时地图增加设备最新上报位置圆点标记与悬浮定位按钮，定位到最近上报设备；②地图显示全部有有效坐标设备并支持点击查看设备/定位时间；③陪护、对讲、地图、定位、留言和队列页面统一中性卡片样式，弱化彩色描边与高饱和按钮；④移除页面内装饰性 emoji 图标，保留导航与必要状态信息；⑤不使用管理端浏览器 GPS，不改变设备定位授权、API、数据库及 Android 协议
   2026-11-21 01:00  v2.5.9 手机端导航重构：①手机端顶部精简栏+侧滑抽屉，取消常驻整块导航；②增加底部常用入口；③抽屉遮罩、ESC/菜单点击关闭与页面切换自动关闭；④桌面端维持左侧导航；⑤保留原页面、业务函数、API、数据库与 Android 协议
@@ -50,6 +52,7 @@ import re
 import html as html_lib  # ★ 2026-11-07 [P4.7 XSS]
 import faulthandler
 import signal
+import ipaddress
 from urllib.parse import urlparse, parse_qs
 # ★ 新增ThreadPoolExecutor 补丁： 2026-11-05 13:50
 from concurrent.futures import ThreadPoolExecutor
@@ -66,7 +69,7 @@ DeviceFinder server2.py — 全功能同步服务（终极稳健版）
 - reports 表完整持久化（含扩展字段 ext_json、SIM 状态等）
 - HTTP 下行队列（pending_commands 双通道下发）
 - UDP 监听 + 聊天室去重
-- 离线设备管理（单设备删除、批量清理 >2h 设备）
+- 设备管理（统一在线/离线/异常视图、可配置离线阈值、单台/批量删除与审计）
 - 地图三图层（天地图无偏移 + 高德自动坐标转换 + 谷歌国际版备用）
 - 地图容器延迟初始化（解决手机端白屏）
 - 全前端 JS 已 ES5 化，完美兼容所有浏览器 / 微信 / WebView
@@ -158,7 +161,7 @@ REPORTS_EXT_MAX_BYTES = 4096      # ext_json 单条最大字节
 
 # ===== 清理策略 =====
 CLEAN_OFFLINE_THRESHOLD_MS = 2 * 3600 * 1000    # "清理全部离线设备"阈值：2 小时
-MANAGE_OFFLINE_THRESHOLD_S = 30 * 60            # "管理离线设备"弹窗展示阈值：30 分钟
+MANAGE_OFFLINE_THRESHOLD_S = CLEAN_OFFLINE_THRESHOLD_MS // 1000  # 设备管理统一离线阈值：2 小时
 
 PORT = 8080
 # ★ 2026-11-20 [P0] HTTP 请求边界：请求头与请求体分别限额，避免慢速/超大请求长期占用 worker。
@@ -194,7 +197,7 @@ USING_DEFAULT_CREDENTIALS = (CONTROL_TOKEN == DEFAULT_DEVICE_TOKEN)
 DEVICE_TOKEN_IS_DEFAULT = (AUTH_TOKEN == DEFAULT_DEVICE_TOKEN and RESCUE_SECRET == DEFAULT_DEVICE_TOKEN)
 
 # ===== 版本 =====
-BUILD_VERSION = "20261121-0045"
+BUILD_VERSION = "20261121-0930"
 PROTOCOL_VERSION = 2
 
 GLOBAL_DEFAULT_CONFIG = {
@@ -289,6 +292,11 @@ REPORTS_COLUMNS = [
     ("source_ip",              "TEXT"),
     ("network_type",           "TEXT"),
     ("network_subtype",        "TEXT"),
+    ("network_subnet_prefix",  "TEXT"),
+    ("network_interface",      "TEXT"),
+    ("network_transport",      "TEXT"),
+    ("network_validated",      "INTEGER"),
+    ("network_changed_at",     "INTEGER"),
     ("has_internet",           "INTEGER"),
     ("sim_state",              "TEXT"),
     ("sim_operator",           "TEXT"),
@@ -362,6 +370,11 @@ def init_db():
                  (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, action TEXT NOT NULL,
                   payload TEXT, created_at REAL NOT NULL)''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_pending_commands_device ON pending_commands (device_id, created_at)")
+    # ★ v2.5.13：设备执行反馈独立持久化；command_id + device_id 联合幂等，兼容旧版 executed_ids。
+    c.execute('''CREATE TABLE IF NOT EXISTS command_feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, command_id TEXT NOT NULL, device_id TEXT NOT NULL, action TEXT, status TEXT NOT NULL, detail TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL, UNIQUE(command_id, device_id))''')
+    c.execute("CREATE INDEX IF NOT EXISTS idx_command_feedback_device_time ON command_feedback (device_id, updated_at DESC)")
+    c.execute('''CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS device_delete_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, action TEXT NOT NULL, scope TEXT NOT NULL, actor_ip TEXT, created_at INTEGER NOT NULL, result TEXT NOT NULL)''')
     col_defs = ", ".join(f"{name} {typ}" for name, typ in REPORTS_COLUMNS)
     c.execute(f"CREATE TABLE IF NOT EXISTS reports ({col_defs})")
     try:
@@ -404,6 +417,59 @@ def init_db():
 if hasattr(signal, 'SIGUSR1') and hasattr(faulthandler, 'register'):
     faulthandler.register(signal.SIGUSR1, all_threads=True)
 init_db()
+
+
+def _load_offline_threshold():
+    global CLEAN_OFFLINE_THRESHOLD_MS, MANAGE_OFFLINE_THRESHOLD_S
+    try:
+        conn = sqlite3.connect('track_history.db', timeout=10)
+        row = conn.execute("SELECT value FROM app_settings WHERE key='offline_threshold_s'").fetchone()
+        conn.close()
+        if row:
+            seconds = int(row[0])
+            if 300 <= seconds <= 604800:
+                MANAGE_OFFLINE_THRESHOLD_S = seconds
+                CLEAN_OFFLINE_THRESHOLD_MS = seconds * 1000
+    except Exception as e:
+        print(f"⚠️ [配置] 读取离线阈值失败，继续使用默认值: {e}")
+
+
+def _set_offline_threshold(seconds):
+    global CLEAN_OFFLINE_THRESHOLD_MS, MANAGE_OFFLINE_THRESHOLD_S
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        return False
+    if seconds < 300 or seconds > 604800:
+        return False
+    with db_write_lock:
+        conn = sqlite3.connect('track_history.db', timeout=10)
+        try:
+            conn.execute("INSERT INTO app_settings(key,value) VALUES('offline_threshold_s',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(seconds),))
+            conn.commit()
+        finally:
+            conn.close()
+    MANAGE_OFFLINE_THRESHOLD_S = seconds
+    CLEAN_OFFLINE_THRESHOLD_MS = seconds * 1000
+    return True
+
+
+def _record_device_delete_audit(dev_id, action, actor_ip, result):
+    try:
+        with db_write_lock:
+            conn = sqlite3.connect('track_history.db', timeout=10)
+            try:
+                conn.execute("INSERT INTO device_delete_audit(device_id,action,scope,actor_ip,created_at,result) VALUES(?,?,?,?,?,?)",
+                             (str(dev_id), str(action), "device_list_only", str(actor_ip or ""), int(time.time() * 1000), str(result)))
+                conn.commit()
+            finally:
+                conn.close()
+    except Exception as e:
+        with print_lock:
+            print(f"⚠️ [设备删除审计] 写入失败 {dev_id}: {e}")
+
+
+_load_offline_threshold()
 
 
 # ==================== save_report ====================
@@ -451,9 +517,33 @@ def save_report(dev_id, data, source_ip):
             try: wifi_rssi = int(wifi_rssi)
             except (TypeError, ValueError): wifi_rssi = None
         net_subtype = network.get("network_subtype") or None
+        network_subnet_prefix = network.get("subnet_prefix") or network.get("network_subnet_prefix") or None
+        network_interface = network.get("interface_name") or network.get("network_interface") or None
+        network_transport = network.get("transport") or network.get("network_transport") or None
+        network_validated = _parse_bool_val(network.get("validated"))
+        network_changed_at = network.get("changed_at")
+        if isinstance(network_changed_at, bool) or not isinstance(network_changed_at, int) or network_changed_at <= 0:
+            network_changed_at = None
         has_internet = _parse_bool_val(network.get("has_internet"))
+        # 只接受格式正确的 IPv4 CIDR；不将未经验证的字符串用于路由计算。
+        try:
+            if network_subnet_prefix:
+                network_subnet_prefix = str(ipaddress.ip_network(str(network_subnet_prefix), strict=False))
+                if ipaddress.ip_network(network_subnet_prefix).version != 4:
+                    network_subnet_prefix = None
+        except Exception:
+            network_subnet_prefix = None
+        if not isinstance(network_interface, str): network_interface = None
+        else: network_interface = network_interface[:64]
+        if not isinstance(network_transport, str): network_transport = None
+        else: network_transport = network_transport[:32]
+        if isinstance(net_subtype, str): net_subtype = net_subtype[:64]
+        else: net_subtype = None
 
-        if wifi_ssid and wifi_ssid not in ("UNKNOWN", "OFF", "<unknown ssid>"):
+        reported_net_type = network.get("network_type") or network.get("transport")
+        if isinstance(reported_net_type, str) and reported_net_type.upper() in ("WIFI", "MOBILE", "ETHERNET", "OTHER", "OFFLINE"):
+            net_type = reported_net_type.upper()
+        elif wifi_ssid and wifi_ssid not in ("UNKNOWN", "OFF", "<unknown ssid>"):
             net_type = "WiFi"
         elif local_ip and not local_ip.startswith("127.") and local_ip != "0.0.0.0":
             net_type = "MOBILE"
@@ -577,7 +667,8 @@ def save_report(dev_id, data, source_ip):
                     (device_id, timestamp, received_at, day_str, hour, weekday,
                      battery_level, is_charging, battery_temp_c, battery_voltage_mv,
                      wifi_ssid, wifi_bssid, wifi_rssi, local_ip, source_ip,
-                     network_type, network_subtype, has_internet,
+                     network_type, network_subtype, network_subnet_prefix, network_interface,
+                     network_transport, network_validated, network_changed_at, has_internet,
                      sim_state, sim_operator,
                      is_screen_on, is_screen_locked, airplane_mode,
                      ringer_mode, volume_alarm, unlock_count_since_boot,
@@ -588,11 +679,12 @@ def save_report(dev_id, data, source_ip):
                      build_version, protocol_version,
                      companion_enabled, push_photo_url, push_video_url, push_audio_url, push_web_url,
                      queue_id)
-                    VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?, ?,?,?, ?,?, ?,?,?, ?,?,?, ?,?,?,?, ?,?,?,?,?,?, ?, ?,?,?,?, ?,?, ?,?,?,?, ?, ?)""", (
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
                     dev_id, ts, received_at, dt.strftime("%Y-%m-%d"), dt.hour, dt.weekday(),
                     batt_level, is_charging, batt_temp, batt_volt,
                     wifi_ssid or None, wifi_bssid, wifi_rssi, local_ip, source_ip,
-                    net_type, net_subtype, has_internet,
+                    net_type, net_subtype, network_subnet_prefix, network_interface,
+                    network_transport, network_validated, network_changed_at, has_internet,
                     sim_state, sim_operator,
                     1 if data.get("is_screen_on") else 0, is_screen_locked, airplane_mode,
                     ringer_mode, volume_alarm, unlock_cnt,
@@ -815,12 +907,17 @@ def _load_pending_commands():
             print(f"♻️ [HTTP队列] 已从数据库恢复 {total} 条待执行指令")
 
 
-def enqueue_command(dev_id, action, payload):
+def enqueue_command(dev_id, action, payload, require_device=False):
     global CMD_SEQ
     if not dev_id: return
     now = time.time()
     payload_str = payload if payload is not None else ""
     with _cmd_lock:
+        if require_device:
+            # 与设备删除路径采用相同锁顺序（cmd -> state），避免删除后再产生兜底指令。
+            with state_lock:
+                if dev_id not in ALL_DEVICES_STATUS:
+                    return False
         queue = PENDING_COMMANDS.setdefault(dev_id, [])
         for i, c in enumerate(queue):
             if c["type"] == action and c["payload"] == payload_str:
@@ -828,7 +925,7 @@ def enqueue_command(dev_id, action, payload):
                 _persist_command_queue_locked(dev_id)
                 with print_lock:
                     print(f"📋 [HTTP队列] {dev_id} ~{action}({c['id']}) 去重（延后过期）")
-                return
+                return True
         CMD_SEQ += 1
         cmd_id = f"c_{int(now)}_{CMD_SEQ}"
         dropped = 0
@@ -841,6 +938,7 @@ def enqueue_command(dev_id, action, payload):
             print(f"📋 [HTTP队列] {dev_id} +{action}({cmd_id}) 队列满丢弃 {dropped} 条旧指令")
         else:
             print(f"📋 [HTTP队列] {dev_id} +{action}({cmd_id})")
+    return True
 
 
 def process_executed_commands(dev_id, executed_ids):
@@ -861,6 +959,91 @@ def process_executed_commands(dev_id, executed_ids):
             print(f"✅ [HTTP队列] {dev_id} 已确认执行 {removed} 条")
 
 
+def process_command_feedback(dev_id, feedback_items):
+    """保存设备执行反馈；accepted/uncertain/最终结果状态可结束重复下发，写入反馈表后从待执行队列移除。
+
+    accepted 表示设备端处理入口已接受，不等同于异步媒体/定位任务已最终完成；
+    后续可由更细粒度的 completed 反馈扩展。旧版客户端仍走 executed_ids。
+    """
+    if not isinstance(feedback_items, list) or not feedback_items:
+        return 0
+    accepted_statuses = {"received", "executing", "retry_wait", "accepted", "uncertain", "succeeded", "failed"}
+    # accepted/uncertain 可结束重复下发，但后续异步回调仍可把状态细化为 succeeded/failed。
+    # succeeded/failed 才是最终结果，终态之间不允许被迟到的旧反馈互相覆盖。
+    terminal_statuses = {"accepted", "uncertain", "succeeded", "failed"}
+    valid = []
+    now = time.time()
+    for item in feedback_items[:100]:
+        if not isinstance(item, dict):
+            continue
+        command_id = item.get("command_id") or item.get("id")
+        status = item.get("status")
+        if not isinstance(command_id, str) or not command_id or len(command_id) > 128:
+            continue
+        if status not in accepted_statuses:
+            continue
+        action = item.get("action") if isinstance(item.get("action"), str) else None
+        detail = item.get("detail") if isinstance(item.get("detail"), str) else ""
+        valid.append((command_id, dev_id, action, status, detail[:500], now, now))
+    if not valid:
+        return 0
+    # 先持久化反馈，再清理队列；任何 DB 失败都保留原队列等待下次上报。
+    with db_write_lock:
+        conn = sqlite3.connect('track_history.db', timeout=10)
+        try:
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.executemany("""INSERT INTO command_feedback
+                (command_id, device_id, action, status, detail, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?)
+                ON CONFLICT(command_id, device_id) DO UPDATE SET
+                  action=COALESCE(excluded.action, command_feedback.action),
+                  status=CASE
+                    WHEN command_feedback.status IN ('succeeded','failed') THEN command_feedback.status
+                    WHEN command_feedback.status IN ('accepted','uncertain') AND excluded.status IN ('received','executing','retry_wait','accepted','uncertain')
+                      THEN command_feedback.status
+                    ELSE excluded.status END,
+                  detail=CASE
+                    WHEN command_feedback.status IN ('succeeded','failed') THEN command_feedback.detail
+                    WHEN command_feedback.status IN ('accepted','uncertain') AND excluded.status IN ('received','executing','retry_wait','accepted','uncertain')
+                      THEN command_feedback.detail
+                    ELSE excluded.detail END,
+                  updated_at=CASE
+                    WHEN command_feedback.status IN ('succeeded','failed') THEN command_feedback.updated_at
+                    WHEN command_feedback.status IN ('accepted','uncertain') AND excluded.status IN ('received','executing','retry_wait','accepted','uncertain')
+                      THEN command_feedback.updated_at
+                    ELSE excluded.updated_at END""", valid)
+            conn.commit()
+        finally:
+            conn.close()
+    terminal_ids = {row[0] for row in valid if row[3] in terminal_statuses}
+    if terminal_ids:
+        with _cmd_lock:
+            queue = PENDING_COMMANDS.get(dev_id, [])
+            new_queue = [c for c in queue if c.get("id") not in terminal_ids]
+            if len(new_queue) != len(queue):
+                if new_queue: PENDING_COMMANDS[dev_id] = new_queue
+                else: PENDING_COMMANDS.pop(dev_id, None)
+                _persist_command_queue_locked(dev_id)
+    return len(valid)
+
+
+def get_recent_command_feedback(dev_id, limit=20):
+    try:
+        with db_write_lock:
+            conn = sqlite3.connect('track_history.db', timeout=5)
+            try:
+                rows = conn.execute("""SELECT command_id, action, status, detail, updated_at
+                    FROM command_feedback WHERE device_id=? ORDER BY updated_at DESC LIMIT ?""",
+                    (dev_id, max(1, min(int(limit), 50)))).fetchall()
+            finally:
+                conn.close()
+        return [{"id": r[0], "type": r[1] or "", "status": r[2], "detail": r[3] or "",
+                 "updated_at": r[4]} for r in rows]
+    except Exception as e:
+        with print_lock: print(f"⚠️ [指令反馈] 查询失败 {dev_id}: {e}")
+        return []
+
+
 def get_pending_commands(dev_id):
     now = time.time()
     with _cmd_lock:
@@ -872,6 +1055,24 @@ def get_pending_commands(dev_id):
             else: PENDING_COMMANDS.pop(dev_id, None)
             _persist_command_queue_locked(dev_id)
         return [dict(c) for c in valid]
+
+
+def _delete_device_if_queue_empty(dev_id):
+    """在队列锁内检查并删除设备列表记录，避免检查队列后又并发入队。"""
+    now = time.time()
+    with _cmd_lock:
+        queue = PENDING_COMMANDS.get(dev_id, [])
+        valid = [c for c in queue if now - c["ts"] < cmd_ttl_for(c.get("type", ""))]
+        if len(valid) != len(queue):
+            if valid: PENDING_COMMANDS[dev_id] = valid
+            else: PENDING_COMMANDS.pop(dev_id, None)
+            _persist_command_queue_locked(dev_id)
+        if valid:
+            return False, len(valid)
+        with state_lock:
+            existed = dev_id in ALL_DEVICES_STATUS
+            ALL_DEVICES_STATUS.pop(dev_id, None)
+        return existed, 0
 
 
 def cleanup_expired_commands():
@@ -1025,7 +1226,7 @@ def udp_listener():
 
 def offline_detector():
     """
-    失联检测：每 5 分钟扫描一次，>2h 未上报告警并排队兜底指令。
+    失联检测：每 5 分钟扫描一次，超过统一可配置阈值未上报告警并排队兜底指令。
 
     ★ 2026-11-07 修复：
       1) 死锁：原代码在持有 print_lock 时调用 enqueue_command，后者内部再拿 print_lock，
@@ -1045,19 +1246,25 @@ def offline_detector():
                 gap_min = (now - last_seen) // 60000
                 already_alerted = info.get('offline_alerted', False)
 
-                if gap_min > 120 and not already_alerted:
+                if gap_min * 60 > MANAGE_OFFLINE_THRESHOLD_S and not already_alerted:
+                    should_alert = False
                     with state_lock:
-                        if dev_id in ALL_DEVICES_STATUS:
-                            ALL_DEVICES_STATUS[dev_id]['offline_alerted'] = True
+                        current = ALL_DEVICES_STATUS.get(dev_id)
+                        if current and current.get('received_at', 0) == last_seen and not current.get('offline_alerted', False):
+                            current['offline_alerted'] = True
+                            should_alert = True
+                    if not should_alert:
+                        continue
                     with print_lock:
                         print(f"\n🚨 【失联告警】{dev_id} 已 {gap_min // 60} 小时 {gap_min % 60} 分钟未上报！")
-                    # 给失联设备排队兜底指令：只要它有一次 HTTP 上报，就能拿到并重启 UDP
-                    enqueue_command(dev_id, "force_report", "")
-                    enqueue_command(dev_id, "restart_udp", "")
-                    with print_lock:
-                        print(f"📋 [兜底] 已为 {dev_id} 排队 force_report 和 restart_udp 指令")
+                    # 删除与兜底入队串行化：设备已从列表删除时，不再新建残留指令。
+                    queued_a = enqueue_command(dev_id, "force_report", "", require_device=True)
+                    queued_b = enqueue_command(dev_id, "restart_udp", "", require_device=True)
+                    if queued_a or queued_b:
+                        with print_lock:
+                            print(f"📋 [兜底] 已为 {dev_id} 排队 force_report 和 restart_udp 指令")
 
-                elif gap_min <= 120 and already_alerted:
+                elif gap_min * 60 <= MANAGE_OFFLINE_THRESHOLD_S and already_alerted:
                     with state_lock:
                         if dev_id in ALL_DEVICES_STATUS:
                             ALL_DEVICES_STATUS[dev_id]['offline_alerted'] = False
@@ -1202,6 +1409,22 @@ def _detect_local_ip():
     # 🌟 第四级纵深：在三大平台完全不连任何网络、不插网线、不开热点状态下的终极自愈纯字符串兜底
     return "127.0.0.1"
 
+def resolve_device_udp_route(info, server_ip):
+    """返回 (LAN目标, UDP实测目标)。CIDR 仅用于诊断；握手验证完成前不据此启用 LAN 单播。"""
+    info = info if isinstance(info, dict) else {}
+    # 只有 UDP listener 实际观察到的来源地址才可作为单播候选；绝不使用 HTTP source_ip，
+    # 因为 Cloudflare Tunnel/反向代理地址并不是设备可回连地址。CIDR 仅在管理台展示。
+    udp_ip = info.get("udp_source_ip")
+    try:
+        udp_obj = ipaddress.ip_address(str(udp_ip))
+        if udp_obj.version == 4 and not (udp_obj.is_loopback or udp_obj.is_link_local
+                                         or udp_obj.is_multicast or udp_obj.is_unspecified):
+            return None, str(udp_obj)
+    except Exception:
+        pass
+    return None, None
+
+
 def get_local_ip(force_refresh=False):
     """带 TTL 缓存的本机出口 IP。force_refresh=True 强制重探（切网/网卡热插拔时用）。"""
     now = time.time()
@@ -1324,8 +1547,8 @@ def _channel_badge_html(ch, gap_min):
     v2.0 补丁：生成通道健康度徽章 HTML。
     返回空字符串表示不显示（旧版 APK 未上报 channel）。
     """
-    if gap_min is not None and gap_min > 120:
-        return "<span title='失联超过 2 小时' style='color:#cf222e;font-size:13px;'>🔴 </span>"
+    if gap_min is not None and gap_min > (MANAGE_OFFLINE_THRESHOLD_S // 60):
+        return f"<span title='失联超过 {MANAGE_OFFLINE_THRESHOLD_S // 3600} 小时' style='color:#cf222e;font-size:13px;'>🔴 </span>"
     if not ch:
         return ""
     health = ch.get("health", "")
@@ -1466,6 +1689,7 @@ def handle_client(client_conn, client_addr):
                     return
                 batch_dev_id = batch_dev_id.strip()
                 accepted = 0
+                feedback_accepted_total = 0
                 all_executed_ids = []
 
                 # ★ 2026-11-20 20:32 严格按客户端发送顺序前缀入库：遇到首条无效记录立即 break，
@@ -1489,6 +1713,9 @@ def handle_client(client_conn, client_addr):
                     executed_ids = item.pop("last_executed_cmd_ids", [])
                     if not isinstance(executed_ids, list):
                         executed_ids = []
+                    command_feedback = item.pop("command_feedback", [])
+                    if not isinstance(command_feedback, list):
+                        command_feedback = []
 
                     item["received_at"] = now_ms
 
@@ -1523,6 +1750,13 @@ def handle_client(client_conn, client_addr):
                             item["cloud_logs_time"] = prev_info.get("cloud_logs_time", 0)
                         item["source_ip"] = client_addr[0]
                         item["local_ip"] = (item.get("network") or {}).get("local_ip", "")
+                        # HTTP client_addr 可能是 Cloudflare Tunnel/反向代理地址，不作为设备 last_valid_ip。
+                        # 设备地址优先采用客户端明确上报的 local_ip；其次保留 UDP listener 实测来源地址。
+                        incoming_ips = [item.get("local_ip"), prev_udp_ip, prev_info.get("last_valid_ip")]
+                        valid_ip = next((x for x in incoming_ips if isinstance(x, str) and x
+                                         and not x.startswith(("127.", "169.254.")) and x != "0.0.0.0"), None)
+                        if valid_ip:
+                            item["last_valid_ip"] = valid_ip
                         # ★ 2026-11-07 [P4.4]
                         item["build_version"] = item.get("build_version") or "旧版"
                         item["protocol_version"] = item.get("protocol_version") or 1
@@ -1532,6 +1766,8 @@ def handle_client(client_conn, client_addr):
                             item["last_chat"] = prev_info["last_chat"]
                         ALL_DEVICES_STATUS[dev_id] = item
                     all_executed_ids.extend(executed_ids)
+                    if command_feedback:
+                        feedback_accepted_total += process_command_feedback(batch_dev_id, command_feedback)
                     accepted += 1
 
                 if all_executed_ids:
@@ -1543,6 +1779,7 @@ def handle_client(client_conn, client_addr):
                     "status": "success",
                     "accepted": accepted,
                     "accepted_is_prefix": True,
+                    "feedback_accepted": feedback_accepted_total,
                     "config": GLOBAL_DEFAULT_CONFIG,
                     "pending_commands": pending,
                     "next_poll_seconds": next_poll
@@ -1582,6 +1819,9 @@ def handle_client(client_conn, client_addr):
                 executed_ids = data.pop("last_executed_cmd_ids", [])
                 if not isinstance(executed_ids, list):
                     executed_ids = []
+                command_feedback = data.pop("command_feedback", [])
+                if not isinstance(command_feedback, list):
+                    command_feedback = []
                 data["received_at"] = int(datetime.datetime.now().timestamp() * 1000)
 
                 # v2.0 补丁：通道健康度判定（服务端算，客户端不填）
@@ -1611,6 +1851,7 @@ def handle_client(client_conn, client_addr):
                     return
                 if executed_ids:
                     process_executed_commands(dev_id, executed_ids)
+                feedback_accepted = process_command_feedback(dev_id, command_feedback) if command_feedback else 0
 
                 with state_lock:
                     if dev_id not in ALL_DEVICES_STATUS:
@@ -1625,6 +1866,12 @@ def handle_client(client_conn, client_addr):
                         data["cloud_logs_time"] = prev_info.get("cloud_logs_time", 0)
                     data["source_ip"] = client_addr[0]
                     data["local_ip"] = (data.get("network") or {}).get("local_ip", "")
+                    # HTTP client_addr 可能是 Cloudflare Tunnel/反向代理地址，不作为设备 last_valid_ip。
+                    incoming_ips = [data.get("local_ip"), prev_udp_ip, prev_info.get("last_valid_ip")]
+                    valid_ip = next((x for x in incoming_ips if isinstance(x, str) and x
+                                     and not x.startswith(("127.", "169.254.")) and x != "0.0.0.0"), None)
+                    if valid_ip:
+                        data["last_valid_ip"] = valid_ip
                     # ★ 2026-11-07 [P4.4]
                     data["build_version"] = data.get("build_version") or "旧版"
                     data["protocol_version"] = data.get("protocol_version") or 1
@@ -1638,6 +1885,7 @@ def handle_client(client_conn, client_addr):
                 next_poll = 30 if pending else 0
                 response_body = json.dumps({
                     "status": "success",
+                    "feedback_accepted": feedback_accepted,
                     "config": GLOBAL_DEFAULT_CONFIG,
                     "pending_commands": pending,
                     "next_poll_seconds": next_poll
@@ -1885,17 +2133,19 @@ def handle_client(client_conn, client_addr):
                 for dev_id, info in devices_snapshot.items():
                     queue = get_pending_commands(dev_id)
                     last_seen = info.get("received_at", 0) / 1000.0
-                    ip = (info.get("source_ip") or info.get("udp_source_ip") or (info.get("network") or {}).get("local_ip", ""))
+                    ip_candidates = [info.get("last_valid_ip"), info.get("local_ip"), (info.get("network") or {}).get("local_ip"), info.get("source_ip"), info.get("udp_source_ip")]
+                    ip = next((x for x in ip_candidates if isinstance(x, str) and x and not x.startswith(("127.", "169.254.")) and x != "0.0.0.0"), "")
                     battery = info.get("battery") or {}
                     batt_level = battery.get("level")
                     if batt_level == "?" or batt_level is None: batt_level = None
                     loc = info.get("location") or {}
                     loc_lat = loc.get("latitude")
                     loc_lng = loc.get("longitude")
-                    loc_age = loc.get("age_s")
+                    loc_time = loc.get("time")
+                    loc_age = max(0, int(now - (loc_time / 1000.0))) if isinstance(loc_time, (int, float)) and loc_time > 0 else (loc.get("age_s") if isinstance(loc.get("age_s"), int) else None)
                     loc_obj = None
                     if loc_lat is not None and loc_lng is not None:
-                        loc_obj = {"lat": loc_lat, "lng": loc_lng, "accuracy": loc.get("accuracy"), "age_s": loc_age if isinstance(loc_age, int) else None}
+                        loc_obj = {"lat": loc_lat, "lng": loc_lng, "accuracy": loc.get("accuracy"), "age_s": loc_age, "time": loc_time if isinstance(loc_time, (int, float)) else None}
                     
                     net = info.get("network") or {}
                     wifi_ssid = net.get("wifi_ssid") or ""
@@ -1912,9 +2162,14 @@ def handle_client(client_conn, client_addr):
                         "battery": batt_level,
                         "is_charging": bool(battery.get("is_charging")),
                         "wifi_ssid": wifi_ssid,
-                        "network_type": net_type,
+                        "network_type": net.get("network_type") or net.get("transport") or net_type,
+                        "network_subnet_prefix": net.get("subnet_prefix") or net.get("network_subnet_prefix") or "",
+                        "network_interface": net.get("interface_name") or "",
+                        "network_validated": net.get("validated"),
+                        "network_changed_at": net.get("changed_at"),
                         "location": loc_obj,
                         "commands": [{"id": c["id"], "type": c["type"], "payload": str(c.get("payload", ""))[:60], "age_s": max(0, int(now - c["ts"]))} for c in queue[:10]],
+                        "recent_feedback": get_recent_command_feedback(dev_id, 10),
                         # ★ 2026-11-07 [P4.8]
                         "build_version": info.get("build_version", "旧版"),
                         "protocol_version": info.get("protocol_version", 1),
@@ -2045,8 +2300,8 @@ def handle_client(client_conn, client_addr):
                     sent_pkts = 0
                     try:
                         local_ip = get_local_ip()
-                        local_prefix = ".".join(local_ip.split(".")[:3])
-                    except Exception: local_prefix = ""
+                    except Exception:
+                        local_ip = ""
                     if isinstance(target_ip, list):
                         for ip in target_ip:
                             if ip and ip != '0.0.0.0':
@@ -2059,16 +2314,12 @@ def handle_client(client_conn, client_addr):
                         unicast_ips = []
                         remote_ips = []
                         for dev_id, info in devices_snapshot.items():
-                            ip = (info.get("source_ip") or info.get("udp_source_ip") or (info.get("network") or {}).get("local_ip"))
-                            if not ip or ip == '0.0.0.0': continue
-                            if local_prefix and ip.startswith(local_prefix + "."):
-                                if ip not in unicast_ips: unicast_ips.append(ip)
-                            else:
-                                # ★ FIX-8 2026-11-18：旧版在这里把该 IP 直接丢弃，注释写"广播已能覆盖全网段"
-                                #   —— 这是错的：255.255.255.255 不出路由器、不出公网，跨网段/专网路由可达的
-                                #   设备因此彻底收不到信令，只能等下一次 HTTP 上报（默认 1800s）。
-                                #   改为单独收集，广播照发的同时在预算内补一次定向单播。
-                                if ip not in remote_ips: remote_ips.append(ip)
+                            lan_target, observed_udp_target = resolve_device_udp_route(info, local_ip)
+                            # 未上报有效 CIDR 或不在服务端子网时，不猜测同网；跨网仅尝试 UDP listener 实测来源。
+                            if lan_target and lan_target not in unicast_ips:
+                                unicast_ips.append(lan_target)
+                            elif observed_udp_target and observed_udp_target not in remote_ips:
+                                remote_ips.append(observed_udp_target)
                         need_broadcast = (not unicast_ips) or (len(unicast_ips) > UDP_TOTAL_PACKET_BUDGET)
                         if need_broadcast:
                             sent_pkts += send_udp_broadcast(cmd_prefix, "255.255.255.255")
@@ -2077,6 +2328,7 @@ def handle_client(client_conn, client_addr):
                                 sent_pkts += send_udp_broadcast(cmd_prefix, ip)
                         if remote_ips and (len(unicast_ips) + len(remote_ips)) <= UDP_TOTAL_PACKET_BUDGET:
                             for ip in remote_ips:
+                                # 仅对 UDP listener 实际观测到的来源地址尝试跨网段单播；HTTP 代理地址不参与。
                                 sent_pkts += send_udp_broadcast(cmd_prefix, ip)
                         if not unicast_ips and not remote_ips:
                             # ★ 2026-11-18 修复（自 server2_2.py 移植）：无在线设备时旧版直接回"指令执行失败"，
@@ -2139,39 +2391,51 @@ def handle_client(client_conn, client_addr):
                 # ★ 2026-11-07 [P2]
                 elif action == "elder_mode": success = smart_send(f"FIND_ME_ELDER_MODE:{RESCUE_SECRET}:{payload}")
 
+                elif action == "set_offline_threshold":
+                    if _set_offline_threshold(payload):
+                        success = True
+                        extra_msg = f"离线判定阈值已更新为 {MANAGE_OFFLINE_THRESHOLD_S // 3600} 小时（服务端配置已保存）" if MANAGE_OFFLINE_THRESHOLD_S % 3600 == 0 else f"离线判定阈值已更新为 {MANAGE_OFFLINE_THRESHOLD_S // 60} 分钟（服务端配置已保存）"
+                    else:
+                        success = False
+                        extra_msg = "阈值无效：允许 5 分钟至 7 天"
+
                 elif action == "clean_device":
                     target_dev_id = payload
                     if not isinstance(target_dev_id, str) or not target_dev_id.strip():
                         success = False; extra_msg = "无效的设备 ID"
                     else:
                         target_dev_id = target_dev_id.strip()
-                        with state_lock:
-                            existed = target_dev_id in ALL_DEVICES_STATUS
-                            ALL_DEVICES_STATUS.pop(target_dev_id, None)
-                        with _cmd_lock:
-                            PENDING_COMMANDS.pop(target_dev_id, None)
-                            _persist_command_queue_locked(target_dev_id)
-                        success = existed
-                        extra_msg = f"已删除 {target_dev_id}" if existed else f"设备 {target_dev_id} 不存在（可能已清理）"
+                        existed, pending_count = _delete_device_if_queue_empty(target_dev_id)
+                        if pending_count:
+                            success = False
+                            extra_msg = f"{target_dev_id} 仍有 {pending_count} 条待确认指令，请先在指令管理中撤回或处理后再删除"
+                        else:
+                            success = existed
+                            if existed:
+                                _record_device_delete_audit(target_dev_id, "clean_device", client_addr[0], "success")
+                            extra_msg = f"已删除 {target_dev_id}；历史数据保留，设备再次上报后可重新出现" if existed else f"设备 {target_dev_id} 不存在（可能已清理）"
 
                 elif action == "clean_offline":
                     try:
                         now_ts = int(datetime.datetime.now().timestamp() * 1000)
-                        to_delete = []
+                        candidates = []
                         with state_lock:
                             for k, v in list(ALL_DEVICES_STATUS.items()):
                                 if now_ts - v.get('received_at', 0) > CLEAN_OFFLINE_THRESHOLD_MS:
-                                    to_delete.append(k)
-                            for k in to_delete:
-                                if k in ALL_DEVICES_STATUS:
-                                    del ALL_DEVICES_STATUS[k]
-                        with _cmd_lock:
-                            for k in to_delete:
-                                PENDING_COMMANDS.pop(k, None)
-                                _persist_command_queue_locked(k)
-                        success = len(to_delete) > 0
+                                    candidates.append(k)
+                        to_delete = []
+                        skipped_pending = 0
+                        for k in candidates:
+                            deleted, pending_count = _delete_device_if_queue_empty(k)
+                            if pending_count:
+                                skipped_pending += 1
+                            elif deleted:
+                                to_delete.append(k)
+                        for k in to_delete:
+                            _record_device_delete_audit(k, "clean_offline", client_addr[0], "success")
+                        success = bool(to_delete or skipped_pending)
                         threshold_h = CLEAN_OFFLINE_THRESHOLD_MS // 3600000
-                        extra_msg = f"清理了 {len(to_delete)} 台设备（>{threshold_h}小时未活动）" if to_delete else f"没有符合条件的设备（>{threshold_h}小时未活动）"
+                        extra_msg = f"清理了 {len(to_delete)} 台设备（>{threshold_h}小时未上报）" + (f"；另有 {skipped_pending} 台因存在待确认指令而跳过" if skipped_pending else "") if to_delete or skipped_pending else f"没有符合条件的设备（>{threshold_h}小时未上报）"
                     except Exception as e:
                         success = False; extra_msg = f"清理失败: {e}"
                 # 2026-11-20 13:38 在 POST /api/control 的 action 分支中补充：
@@ -2669,7 +2933,7 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
             <button onclick="sendAdminCmd('set_cloud_log', '0')">☁️ 关闭云端日志</button>
             <button class="btn-danger" onclick="sendAdminCmd('play_alarm')">🔊 选定设备测试音频</button>
             <button id="toggleMapBtn" onclick="toggleMap()">🗺️ 展开地图</button>
-            <button onclick="showOfflineManager()">🗑️ 管理离线设备</button>
+            <button onclick="showDeviceOfflineView()">🗑️ 查看离线设备</button>
             <button onclick="sendAdminCmd('clear_history')">清空手机历史</button>
             <button class="btn-danger" onclick="sendAdminCmd('clear_chat')">🧹 清空手机聊天</button>
         </div>
@@ -2739,8 +3003,20 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
     </div>
 </div>
 
+<div id="deviceManagementToolbar" class="panel" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
+    <label for="deviceViewFilter">设备视图</label>
+    <select id="deviceViewFilter" onchange="filterDeviceRows()" style="min-width:120px;padding:7px;border:1px solid var(--color-border-default);border-radius:6px;">
+        <option value="all">全部设备</option><option value="online">在线</option><option value="offline">离线</option><option value="abnormal">异常</option>
+    </select>
+    <label for="offlineThresholdSelect">离线阈值</label>
+    <select id="offlineThresholdSelect" style="min-width:120px;padding:7px;border:1px solid var(--color-border-default);border-radius:6px;">
+        <option value="1800">30 分钟</option><option value="3600">1 小时</option><option value="7200">2 小时</option><option value="14400">4 小时</option><option value="21600">6 小时</option><option value="43200">12 小时</option>
+    </select>
+    <input id="offlineThresholdCustom" type="number" min="5" max="10080" step="1" placeholder="自定义分钟" style="width:112px;padding:7px;border:1px solid var(--color-border-default);border-radius:6px;">
+    <button type="button" class="btn-sm" onclick="saveOfflineThreshold()">应用阈值</button>
+</div>
 <div class="table-responsive">
-    <table>
+    <table id="deviceManagementTable">
         <tr>
             <th>设备ID</th>
             <th>系统 / 状态</th>
@@ -2749,8 +3025,9 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
             <th>经纬度</th>
             <th class="hide-mobile">定位时间</th>
             <th>收到时间</th>
+            <th>队列</th>
             <th class="hide-mobile">周围热点</th>
-            <th style="min-width: 180px;">操作</th>
+            <th style="min-width: 210px;">操作</th>
         </tr>
 """
                 with state_lock:
@@ -2769,7 +3046,7 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
 
                         last_seen = info.get('received_at', 0)
                         gap_min = (now_ms - last_seen) // 60000 if last_seen else 99999
-                        if gap_min > 120:
+                        if gap_min > (MANAGE_OFFLINE_THRESHOLD_S // 60):
                             offline_tag = f"<br><span style='color:#cf222e;font-weight:bold;'>🚨 失联 {gap_min // 60}h{gap_min % 60}m</span>"
                         elif gap_min > 30:
                             offline_tag = f"<br><span style='color:#bf8700;'>⏸ {gap_min} 分钟未上报</span>"
@@ -2780,7 +3057,8 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
 
                         lat = location.get('latitude')
                         lng = location.get('longitude')
-                        age_s = location.get('age_s')
+                        loc_time_ms = location.get('time')
+                        age_s = max(0, int((now_ms - loc_time_ms) / 1000)) if isinstance(loc_time_ms, (int, float)) and loc_time_ms > 0 else location.get('age_s')
                         if lat is not None and lng is not None:
                             coord = f"<a href='https://uri.amap.com/marker?position={lng},{lat}' target='_blank'>{lat:.6f}, {lng:.6f}</a>"
                             if age_s is not None and age_s >= 0:
@@ -2794,8 +3072,9 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
                             coord = "<span style='color:var(--color-fg-muted);'>无定位</span>"
 
                         ssid = network.get('wifi_ssid', '?')
-                        local_ip = network.get("local_ip", "0.0.0.0")
-                        source_ip = (info.get("source_ip") or info.get("udp_source_ip") or local_ip)
+                        local_ip_raw = network.get("local_ip", "0.0.0.0")
+                        local_ip = local_ip_raw if local_ip_raw and not local_ip_raw.startswith(("127.", "169.254.")) and local_ip_raw != "0.0.0.0" else (info.get("last_valid_ip") or "未知")
+                        source_ip = (info.get("last_valid_ip") or info.get("source_ip") or info.get("udp_source_ip") or local_ip)
                         
                         # ★ 修复：如果源IP是回环、代理或内网IP，不作为有效展示/控制IP
                         is_proxy_ip = False
@@ -2827,7 +3106,12 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
                         # v2.0 补丁：通道健康度徽章 + dev_id 转义
                         _ch = info.get("channel") or {}
                         _badge = _channel_badge_html(_ch, gap_min)
-                        html += (f"<tr><td><b>{html_lib.escape(dev_id, quote=True)}</b>"
+                        connection_state = "offline" if gap_min > (MANAGE_OFFLINE_THRESHOLD_S // 60) else "online"
+                        health_value = str(_ch.get("health") or "unknown").lower()
+                        location_stale = isinstance(age_s, (int, float)) and age_s >= 1800
+                        abnormal = health_value == "degraded" or location_stale or (isinstance(battery.get("level"), (int, float)) and battery.get("level") <= 15)
+                        health_state = "abnormal" if abnormal else "normal"
+                        html += (f"<tr data-connection-state='{connection_state}' data-health-state='{health_state}'><td><b>{html_lib.escape(dev_id, quote=True)}</b>"
                                  f"<br>{_badge}<span style='font-size:11px;color:#8c959f'>{_bv} · v{_pv}</span></td>")
                         html += f"<td>{sys_status}</td>"
                         html += f"<td>{battery.get('level', '?')}%</td>"
@@ -2835,6 +3119,13 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
                         html += f"<td>{coord}</td>"
                         html += f"<td class='hide-mobile'>{format_loc_time(location.get('time', 0))}</td>"
                         html += f"<td>{format_loc_time(info.get('received_at', 0))}</td>"
+                        pending_count = len(get_pending_commands(dev_id))
+                        dev_id_js = json.dumps(dev_id, ensure_ascii=False)
+                        if pending_count:
+                            queue_cell = f"<button type='button' class='btn-sm' style='color:#9a6700;' onclick='openDeviceQueue({html_lib.escape(dev_id_js, quote=True)})'>📬 {pending_count} 条指令待执行</button>"
+                        else:
+                            queue_cell = "<span style='color:var(--color-fg-muted);'>📭 0 条指令待执行</span>"
+                        html += f"<td>{queue_cell}</td>"
                         html += f"<td class='hide-mobile'>{ap_list_html}</td>"
 
                         html += f"<td>"
@@ -2852,14 +3143,15 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
                         html += f"<button class='btn-sm' onclick=\"showTrack('{dev_id}')\">轨迹</button>"
                         html += f"<button class='btn-sm' onclick=\"showCloudLogs('{dev_id}')\">📄 日志</button>"
                         html += f"<button class='btn-sm' onclick=\"fillCompanionDevId('{html_lib.escape(dev_id, quote=True)}')\">👨‍👩‍👧 陪伴</button>"
+                        html += f"<button class='btn-sm btn-danger' onclick='confirmDeleteDevice({html_lib.escape(dev_id_js, quote=True)}, {pending_count})'>删除</button>"
                         html += f"</td></tr>"
                     except Exception as e:
                         with print_lock:
                             print(f"⚠️ [HTML] 渲染设备 {dev_id} 异常: {e}")
-                        html += f"<tr><td colspan='9' style='color:#cf222e;'>设备 {dev_id} 数据异常，已跳过显示 ({e})</td></tr>"
+                        html += f"<tr><td colspan='10' style='color:#cf222e;'>设备 {dev_id} 数据异常，已跳过显示 ({e})</td></tr>"
 
                 if not ALL_DEVICES_STATUS:
-                    html += "<tr><td colspan='9' align='center' style='padding:40px;color:var(--color-fg-muted);'>暂无设备上报</td></tr>"
+                    html += "<tr><td colspan='10' align='center' style='padding:40px;color:var(--color-fg-muted);'>暂无设备上报</td></tr>"
 
                 html += """</table></div>
 <div id="mapContainer">
@@ -2887,6 +3179,36 @@ var isMapVisible = false;
 var isChatVisible = false;
 var isCompanionVisible = false;  // ★ v2.2 远程陪伴面板展开状态
 var _offlineDevices = [];
+var OFFLINE_THRESHOLD_SECONDS = __OFFLINE_THRESHOLD_SECONDS__;
+
+function showDeviceOfflineView() {
+    showAdminPage('devices');
+    var filter = document.getElementById('deviceViewFilter');
+    if (filter) { filter.value = 'offline'; filterDeviceRows(); }
+}
+
+function filterDeviceRows() {
+    var filter = document.getElementById('deviceViewFilter');
+    var mode = filter ? filter.value : 'all';
+    var rows = document.querySelectorAll('#deviceManagementTable tr[data-connection-state]');
+    rows.forEach(function(row) {
+        var visible = mode === 'all' || row.getAttribute('data-connection-state') === mode || (mode === 'abnormal' && row.getAttribute('data-health-state') === 'abnormal');
+        row.style.display = visible ? '' : 'none';
+    });
+}
+
+function saveOfflineThreshold() {
+    var el = document.getElementById('offlineThresholdSelect');
+    var custom = document.getElementById('offlineThresholdCustom');
+    if (!el) return;
+    var seconds = custom && custom.value ? Math.round(Number(custom.value) * 60) : Number(el.value);
+    if (!Number.isFinite(seconds) || seconds < 300 || seconds > 604800) {
+        showToast('自定义阈值需为 5 至 10080 分钟');
+        return;
+    }
+    sendCmd('set_offline_threshold', String(seconds));
+}
+
 // ★ FIX-1：控制面鉴权令牌，由服务端渲染时替换 __ADMIN_TOKEN__ 注入
 var ADMIN_TOKEN = "__ADMIN_TOKEN__";
 
@@ -3391,14 +3713,14 @@ function showOfflineManager() {
     fetch('/api/cmd_status')
     .then(function(res) { return res.json(); })
     .then(function(data) {
-        var threshold = 30 * 60;
+        var threshold = OFFLINE_THRESHOLD_SECONDS;
         var offline = [];
         for (var devId in data) {
             var d = data[devId];
             var ago = d.last_report_ago_s;
             if (ago === -1 || ago > threshold) { offline.push({ id: devId, info: d }); }
         }
-        if (offline.length === 0) { showToast("当前没有离线设备（>30 分钟未活动）"); return; }
+        if (offline.length === 0) { showToast("当前没有离线设备（超过当前离线阈值未上报）"); return; }
         
         offline.sort(function(a, b) {
             var aa = a.info.last_report_ago_s === -1 ? 999999999 : a.info.last_report_ago_s;
@@ -3409,7 +3731,7 @@ function showOfflineManager() {
 
         var html = '<div style="background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;padding:10px 12px;margin-bottom:16px;font-size:13px;color:#6b5900;">' +
             '⚠️ <b>删除操作只从当前列表移除，不影响历史数据</b>（reports / history / messages 表全部保留）。<br>' +
-            '手机重新上报后会自动回到列表。当前展示标准：<b>' + (threshold/60) + ' 分钟</b>未活动。' +
+            '手机重新上报后会自动回到列表。当前展示标准：<b>' + (threshold/3600) + ' 小时</b>未上报。' +
         '</div>';
 
         for (var i = 0; i < offline.length; i++) {
@@ -3435,7 +3757,7 @@ function showOfflineManager() {
             } else { locStr = "<span style='color:#8c959f;'>无定位</span>"; }
             
             var wifiStr = info.wifi_ssid && info.wifi_ssid !== "UNKNOWN" ? info.wifi_ssid + " (" + (info.network_type || "?") + ")" : "<span style='color:#8c959f;'>无 WiFi</span>";
-            var queueStr = info.pending > 0 ? '<span style="color:#bf8700;">📬 ' + info.pending + ' 条指令待执行</span>' : "";
+            var queueStr = info.pending > 0 ? '<button type="button" class="btn-sm" style="color:#9a6700;" onclick="openDeviceQueue(' + JSON.stringify(dev.id).replace(/</g, '\\u003c') + ')">📬 ' + info.pending + ' 条指令待执行</button>' : "";
 
             html += '<div style="border:1px solid var(--color-border-default);border-radius:6px;padding:12px 16px;margin-bottom:10px;background:#fafbfc;">' +
                 '<div style="font-weight:600;font-size:15px;margin-bottom:6px;word-break:break-all;">' + escapeHtml(dev.id) + '</div>' +
@@ -3454,7 +3776,7 @@ function showOfflineManager() {
         }
 
         html += '<div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--color-border-muted);text-align:right;">' +
-            '<button class="btn-danger" onclick="confirmCleanAllOffline()" style="padding:6px 20px;">🗑️ 清理全部 >2h 离线设备</button>' +
+            '<button class="btn-danger" onclick="confirmCleanAllOffline()" style="padding:6px 20px;">🗑️ 清理全部超阈值离线设备</button>' +
         '</div>';
 
         document.getElementById('modalTitle').innerText = '🗑️ 管理离线设备（' + offline.length + ' 台）';
@@ -3473,16 +3795,19 @@ function cleanSingleDeviceByIndex(idx) {
     if (info.wifi_ssid && info.wifi_ssid !== "UNKNOWN") detailLines.push("WiFi: " + info.wifi_ssid);
     var ago = info.last_report_ago_s;
     if (ago === -1) detailLines.push("最后活动: 从未上报");
-    else if (ago > 3600) detailLines.push("最后活动: " + Math.floor(ago/3600) + " 小时前");
-    else detailLines.push("最后活动: " + Math.floor(ago/60) + " 分钟前");
-    detailLines.push("", "⚠️ 只从列表移除，历史数据完整保留。", "手机重新上报后会自动回到列表。");
-
+    else detailLines.push("最后活动: " + formatAgeText(ago));
+    detailLines.push("", "只从设备管理列表移除，历史定位与上报记录保留。", "设备再次正常上报后会重新出现在列表。");
+    if (info.pending > 0) {
+        detailLines.push("", "待确认指令：" + info.pending + " 条");
+        if (confirm(detailLines.join("\\n") + "\\n\\n现在打开该设备的指令队列？")) openDeviceQueue(dev.id);
+        return;
+    }
     if (!confirm(detailLines.join("\\n"))) return;
     sendCmd('clean_device', dev.id);
 }
 
 function confirmCleanAllOffline() {
-    if (!confirm("确认清理所有【超过 2 小时未活动】的设备？\\n\\n注意：\\n- 只从列表移除，历史数据完整保留\\n- 30 分钟~2 小时之间的离线设备不会被清理\\n- 如需清理较新的离线设备，请用单设备删除")) return;
+    if (!confirm("确认清理所有【超过当前离线阈值未上报】的设备？\\n\\n注意：\\n- 只从设备管理列表移除，历史数据完整保留\\n- 有待确认指令的设备会跳过，不会静默丢弃队列\\n- 设备再次正常上报后会重新出现")) return;
     sendCmd('clean_offline');
 }
 
@@ -3650,7 +3975,33 @@ function uploadCompanionMedia() {
 // ==================== [HTTP 下行指令队列：查看 / 撤回 / 清空] ====================
 // ★ 2026-11-20 新增：拉取 /api/cmd_status 的 commands 明细，支持单条撤回(cancel_cmd)、
 //   按设备清空与清空全部(clear_cmd_queue)，全部经由受 CONTROL_TOKEN 保护的 POST /api/control。
-function showCommandQueue() {
+function openDeviceQueue(devId) {
+    showCommandQueue(devId);
+}
+
+function confirmDeleteDevice(devId, pendingCount) {
+    var msg = '确认从设备管理列表删除设备：' + devId + '？\\n\\n历史定位与上报记录会保留；设备再次正常上报后会重新出现在列表。';
+    if (pendingCount > 0) {
+        msg += '\\n\\n该设备还有 ' + pendingCount + ' 条待确认指令。请先点击队列数量进入指令管理，撤回或处理完毕后再删除。';
+        if (confirm(msg + '\\n\\n现在打开该设备的指令队列？')) openDeviceQueue(devId);
+        return;
+    }
+    if (confirm(msg)) sendCmd('clean_device', devId);
+}
+
+function formatAgeText(seconds) {
+    seconds = Math.max(0, Number(seconds) || 0);
+    if (seconds < 60) return seconds < 5 ? '刚刚' : Math.floor(seconds) + '秒前';
+    if (seconds < 3600) return Math.floor(seconds / 60) + '分钟前';
+    if (seconds < 86400) {
+        var h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60);
+        return h + '小时' + (m ? m + '分钟' : '') + '前';
+    }
+    var d = Math.floor(seconds / 86400), hh = Math.floor((seconds % 86400) / 3600);
+    return d + '天' + (hh ? hh + '小时' : '') + '前';
+}
+
+function showCommandQueue(targetDevId) {
     showAdminPage('queue');
     fetch('/api/cmd_status')
     .then(function(res) { return res.json(); })
@@ -3659,26 +4010,34 @@ function showCommandQueue() {
         var totalPending = 0;
         var bodyHtml = '';
 
+        if (targetDevId) devIds = devIds.filter(function(id) { return id === targetDevId; });
         devIds.forEach(function(devId) {
             var d = data[devId] || {};
             var cmds = d.commands || [];
-            if (!cmds.length && (!d.pending || d.pending <= 0)) return;
+            var feedback = d.recent_feedback || [];
+            if (!cmds.length && !feedback.length && (!d.pending || d.pending <= 0)) return;
             totalPending += (d.pending || cmds.length);
 
             bodyHtml += '<div style="border:1px solid var(--color-border-default);border-radius:6px;padding:12px 14px;margin-bottom:12px;background:#fafbfc;">' +
                 '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;">' +
                     '<b>' + escapeHtml(devId) + ' <span style="color:#57606a;font-weight:400;font-size:12px;">(' + (d.pending || cmds.length) + ' 条待发)</span></b>' +
-                     '<button class="btn-sm btn-danger" data-device-id="' + escapeHtml(devId) + '" onclick="clearDeviceQueue(this.dataset.deviceId)">清空该设备队列</button>' +
+                     (cmds.length ? '<button class="btn-sm btn-danger" data-device-id="' + escapeHtml(devId) + '" onclick="clearDeviceQueue(this.dataset.deviceId)">清空该设备队列</button>' : '') +
+                '</div>' +
+                '<div style="font-size:12px;color:#57606a;margin-bottom:8px;">网络：' + escapeHtml(d.network_type || '未知') +
+                    (d.network_subnet_prefix ? ' · 子网 ' + escapeHtml(d.network_subnet_prefix) : '') +
+                    (d.network_interface ? ' · 接口 ' + escapeHtml(d.network_interface) : '') +
+                    (d.network_validated === true || d.network_validated === 1 ? ' · 已验证联网' : (d.network_validated === false || d.network_validated === 0 ? ' · 未验证联网' : '')) +
+                    (d.network_changed_at ? ' · 状态变更 ' + escapeHtml(new Date(Number(d.network_changed_at)).toLocaleString()) : '') +
                 '</div>';
 
             if (!cmds.length) {
-                bodyHtml += '<div style="color:#57606a;font-size:12px;">暂无明细</div>';
+                bodyHtml += '<div style="color:#57606a;font-size:12px;">暂无待执行指令</div>';
             } else {
                 cmds.forEach(function(c) {
                     var cid = String(c.id || '');
                     var ctype = String(c.type || '');
                     var cpay = String(c.payload || '');
-                    var ageTxt = (c.age_s || 0) + 's 前';
+                    var ageTxt = formatAgeText(c.age_s || 0);
                     bodyHtml += '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-top:1px dashed var(--color-border-muted);font-size:12px;">' +
                         '<div style="overflow:hidden;text-overflow:ellipsis;">' +
                             '<b>' + escapeHtml(ctype) + '</b> ' +
@@ -3688,6 +4047,22 @@ function showCommandQueue() {
                          '<button class="btn-sm" data-device-id="' + escapeHtml(devId) + '" data-command-id="' + escapeHtml(cid) + '" onclick="cancelSingleCmd(this.dataset.deviceId, this.dataset.commandId)">撤回</button>' +
                     '</div>';
                 });
+            }
+            if (feedback.length) {
+                var statusNames = {received:'设备已收到', executing:'设备处理中', retry_wait:'等待重试', accepted:'设备处理入口已接受', uncertain:'执行结果待核实（未自动重放）', succeeded:'执行成功', failed:'执行失败'};
+                bodyHtml += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--color-border-muted);font-size:12px;">' +
+                    '<b style="color:#57606a;">最近设备反馈</b>';
+                feedback.slice(0, 8).forEach(function(f) {
+                    var status = String(f.status || 'unknown');
+                    var when = f.updated_at ? new Date(Number(f.updated_at) * 1000).toLocaleString() : '';
+                    bodyHtml += '<div style="padding:5px 0;border-top:1px dashed var(--color-border-muted);">' +
+                        '<b>' + escapeHtml(f.type || '指令') + '</b> · ' + escapeHtml(statusNames[status] || status) +
+                        (f.id ? ' <span style="color:#8c959f;">[' + escapeHtml(f.id) + ']</span>' : '') +
+                        (when ? '<span style="color:#8c959f;float:right;">' + escapeHtml(when) + '</span>' : '') +
+                        (f.detail ? '<div style="color:#57606a;word-break:break-word;">' + escapeHtml(f.detail) + '</div>' : '') +
+                    '</div>';
+                });
+                bodyHtml += '</div>';
             }
             bodyHtml += '</div>';
         });
@@ -3929,6 +4304,7 @@ function initAdminLayout() {
     var chat = document.getElementById('chatBox');
     var companion = document.getElementById('companionBox');
     var table = document.querySelector('body > .table-responsive');
+    var deviceToolbar = document.getElementById('deviceManagementToolbar');
     var mapContainer = document.getElementById('mapContainer');
     var modal = document.getElementById('msgModal');
     var toast = document.getElementById('toast');
@@ -4071,6 +4447,7 @@ function initAdminLayout() {
         var summary = details.querySelector('summary');
         if (summary) summary.textContent = '设备维护工具';
     }
+    if (deviceToolbar) pages.devices.appendChild(deviceToolbar);
     pages.devices.appendChild(table);
     var talkIntro = document.createElement('div'); talkIntro.className = 'panel admin-subpage-intro';
     talkIntro.innerHTML = '<b>局域网对讲机</b><div class="admin-page-desc">本页面只显示对讲机，不与远程陪护面板同时展开。设备选择独立保存。</div>';
@@ -4115,12 +4492,23 @@ function initAdminLayout() {
 
 // ★ v2.5.5：先完成页面分区，再加载设备选择器。
 initAdminLayout();
+(function(){
+    var thresholdSelect = document.getElementById('offlineThresholdSelect');
+    var thresholdCustom = document.getElementById('offlineThresholdCustom');
+    if (thresholdSelect) {
+        var currentThreshold = String(OFFLINE_THRESHOLD_SECONDS);
+        var known = Array.prototype.some.call(thresholdSelect.options, function(o){ return o.value === currentThreshold; });
+        if (known) thresholdSelect.value = currentThreshold;
+        else if (thresholdCustom) thresholdCustom.value = String(Math.round(OFFLINE_THRESHOLD_SECONDS / 60));
+    }
+})();
 // ★ v2.5.3：首屏即加载三套独立设备选择器，避免必须先展开陪伴/对讲机才能选择高级设置目标。
 fetchDeviceTargets();
 </script>
 </body></html>"""
                 # ★ FIX-1：把服务端令牌注入前端（用 replace 而非 f-string，避免 HTML 里大量 {} 冲突）
                 html = html.replace("__ADMIN_TOKEN__", html_lib.escape(CONTROL_TOKEN, quote=True))  # FIX-1B: 注入控制面孔令
+                html = html.replace("__OFFLINE_THRESHOLD_SECONDS__", str(MANAGE_OFFLINE_THRESHOLD_S))
                 # ★ v2.5.10：将设备最新上报坐标作为地图标记数据注入页面，避免额外轮询或改变 API。
                 map_devices = []
                 for _dev_id, _info in devices_snapshot_html:
@@ -4227,7 +4615,7 @@ def start_server():
         print(f"🚀 设备同步服务已启动: http://{get_local_ip()}:{PORT}")
         print(f"📁 日志上传目录: {os.path.abspath(UPLOAD_LOG_DIR)}")
         print(f"📁 媒体上传目录: {os.path.abspath(UPLOAD_MEDIA_DIR)}")
-        print(f"🚨 失联检测: 每 5 分钟扫描一次，>2 小时未上报告警")
+        print(f"🚨 失联检测: 每 5 分钟扫描一次，>{MANAGE_OFFLINE_THRESHOLD_S // 60} 分钟未上报告警")
         print(f"📋 HTTP 下行队列: TTL={CMD_TTL_SECONDS}s, 上限={CMD_MAX_PER_DEVICE}/设备")
         if USING_DEFAULT_CREDENTIALS:
             print("🚨 [安全] 控制面仍在用出厂默认口令。请设 DF_CONTROL_TOKEN=<强口令> 后重启"
