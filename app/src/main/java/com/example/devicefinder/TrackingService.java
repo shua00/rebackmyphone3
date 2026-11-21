@@ -3,7 +3,7 @@
  *  TrackingService.java — 设备同步与可靠通信服务
  * ------------------------------------------------------------
  *  构建批次 : 20261122-0210-r4
- *  源码版本 : v2.5.13-r6（协议 v2-only / v2.4 LAN P2P ACK）
+ *  源码版本 : v2.5.13-r7（协议 v2-only / v2.5 LAN P2P peer verification）
  *  最后修改 : 2026-11-22
  *  体积目标 : 以现有约 140 KB APK 为基线；本轮不新增第三方库/运行时依赖
  *  性能原则 : 复用系统 API、既有回调/线程/上报链；无新增高频轮询、扫描或常驻线程
@@ -15,8 +15,8 @@
  *    - UDP Challenge/Response、跨 NAT ICE、TURN/Relay 仅预留扩展约定，本版本不启动探测、不增加流量。
  *    - 路由不可确认时由服务端使用现有 HTTP 持久队列；不影响定位、离线补发、聊天监听及其他业务。
  *  本轮约束 : 移除 FIND_ME_MSG v1 双发/接收；保留现有 UDP 8888 监听、广播发送与所有非聊天业务。
- *  P2P 状态 : 聊天消息携带 UUID message_id；接收端去重并使用监听 socket 的 8888 源端口回 ACK；最多 3 次广播发送并等待至少一个 ACK。尚未实现成员发现、逐成员送达统计、离线待发队列及实机验证。
- *  本轮改动 : 增加 message_id、接收去重、ACK 回程与最多 3 次有限重试；发送复用 8888 监听 socket，避免临时源端口导致 ACK 无法返回。
+ *  P2P 状态 : 增加按需 PEER_HELLO/PEER_ACK 双向挑战；缓存 120 秒内验证过的 8888 endpoint，优先单播；无验证 peer 时退回广播。聊天含 UUID message_id、接收去重、ACK 与最多 3 次重试。逐成员送达统计、离线待发队列和实机验证仍待完成。
+ *  本轮改动 : 增加按需 peer challenge/response、120 秒 endpoint 租约、验证 peer 单播、message_id、接收去重、ACK 回程与最多 3 次有限重试；发送复用 8888 监听 socket。
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
  *    2026-11-22 r4 轻量网络状态代数：网络快照关键字段变化时递增 network_generation；补齐头部架构/依赖/扩展边界说明，无新增第三方依赖。
  *    2026-11-21 09:30  网络与反馈扩展：默认网络快照（类型/IP/CIDR/接口/验证状态）；command_feedback 本地持久化、断网补交与服务端明确确认后回收；保留旧 executed_ids 和原离线补发机制
@@ -243,6 +243,13 @@ public class TrackingService extends Service implements LocationListener {
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CountDownLatch> pendingChatAcks =
             new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, Long> receivedChatMessageIds =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    // 仅缓存经本机 challenge/response 验证的 LAN peer；网络变化时必须清空。
+    private final java.util.concurrent.ConcurrentHashMap<String, java.net.InetSocketAddress> verifiedChatPeers =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> verifiedChatPeerSeen =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CountDownLatch> pendingPeerChallenges =
             new java.util.concurrent.ConcurrentHashMap<>();
     private final Object rescueLock = new Object();
     // 多路唤醒若从不同线程同时进入自愈，只允许一个自愈检查在途。
@@ -3267,34 +3274,78 @@ public class TrackingService extends Service implements LocationListener {
             }
             String myId = getUniqueDeviceId();
             String messageId = java.util.UUID.randomUUID().toString();
+            String nonce = java.util.UUID.randomUUID().toString();
+            String subnetBcast = getWifiBroadcastAddress();
+            String[] broadcasts = subnetBcast.equals("255.255.255.255")
+                    ? new String[]{"255.255.255.255"}
+                    : new String[]{subnetBcast, "255.255.255.255"};
+            java.util.concurrent.CountDownLatch peerLatch = new java.util.concurrent.CountDownLatch(1);
+            pendingPeerChallenges.put(nonce, peerLatch);
+            try {
+                byte[] hello = ("FIND_ME_PEER_HELLO:" + RESCUE_SECRET + ":" + myId + ":" + nonce).getBytes("UTF-8");
+                for (String target : broadcasts) {
+                    try {
+                        DatagramPacket p = new DatagramPacket(hello, hello.length,
+                                java.net.InetAddress.getByName(target), 8888);
+                        synchronized (socket) { socket.send(p); }
+                    } catch (Exception e) {
+                        FileLogger.log(TrackingService.this, "CHAT", "⚠️ P2P 发现广播失败: " + e.getMessage());
+                    }
+                }
+                try { peerLatch.await(350, TimeUnit.MILLISECONDS); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+            } catch (Exception e) {
+                FileLogger.log(TrackingService.this, "CHAT", "⚠️ P2P 发现失败: " + e.getMessage());
+            } finally {
+                pendingPeerChallenges.remove(nonce);
+            }
+
+            // 过期 endpoint 不得继续使用；每次发送前清理 120 秒未验证的 peer。
+            long now = System.currentTimeMillis();
+            for (java.util.Map.Entry<String, Long> e : verifiedChatPeerSeen.entrySet()) {
+                if (now - e.getValue() > 120_000L) {
+                    verifiedChatPeerSeen.remove(e.getKey(), e.getValue());
+                    verifiedChatPeers.remove(e.getKey());
+                }
+            }
             String payload = "FIND_ME_CHAT:" + RESCUE_SECRET + ":" + myId + ":" + messageId + ":" + message;
             byte[] data;
             try { data = payload.getBytes("UTF-8"); }
             catch (Exception e) { return; }
-            String subnetBcast = getWifiBroadcastAddress();
-            String[] targets = subnetBcast.equals("255.255.255.255")
-                    ? new String[]{"255.255.255.255"}
-                    : new String[]{subnetBcast, "255.255.255.255"};
             java.util.concurrent.CountDownLatch ack = new java.util.concurrent.CountDownLatch(1);
             pendingChatAcks.put(messageId, ack);
             boolean confirmed = false;
             try {
+                java.util.List<java.net.InetSocketAddress> peers =
+                        new java.util.ArrayList<>(verifiedChatPeers.values());
                 for (int attempt = 1; attempt <= 3 && !confirmed; attempt++) {
                     if (socket.isClosed()) break;
-                    for (String target : targets) {
-                        try {
-                            DatagramPacket packet = new DatagramPacket(
-                                    data, data.length, java.net.InetAddress.getByName(target), 8888);
-                            synchronized (socket) { socket.send(packet); }
-                        } catch (Exception e) {
-                            FileLogger.log(TrackingService.this, "CHAT", "⚠️ P2P 广播失败: " + e.getMessage());
+                    if (peers.isEmpty()) {
+                        for (String target : broadcasts) {
+                            try {
+                                DatagramPacket p = new DatagramPacket(data, data.length,
+                                        java.net.InetAddress.getByName(target), 8888);
+                                synchronized (socket) { socket.send(p); }
+                            } catch (Exception e) {
+                                FileLogger.log(TrackingService.this, "CHAT", "⚠️ P2P 广播失败: " + e.getMessage());
+                            }
+                        }
+                    } else {
+                        for (java.net.InetSocketAddress peer : peers) {
+                            try {
+                                DatagramPacket p = new DatagramPacket(data, data.length,
+                                        peer.getAddress(), peer.getPort());
+                                synchronized (socket) { socket.send(p); }
+                            } catch (Exception e) {
+                                FileLogger.log(TrackingService.this, "CHAT", "⚠️ P2P 单播失败: " + e.getMessage());
+                            }
                         }
                     }
                     try { confirmed = ack.await(700, TimeUnit.MILLISECONDS); }
                     catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
                 }
                 FileLogger.log(TrackingService.this, "CHAT",
-                        confirmed ? "✅ P2P 消息已收到 ACK: " + messageId
+                        confirmed ? "✅ P2P 消息至少收到一个 ACK: " + messageId
                                   : "⚠️ P2P 消息未获 ACK（已有限重试）: " + messageId);
             } finally {
                 pendingChatAcks.remove(messageId);
@@ -3471,7 +3522,32 @@ public class TrackingService extends Service implements LocationListener {
                         }
                     }
 
-                    if (message.startsWith("FIND_ME_CHAT_ACK:")) {
+                    if (message.startsWith("FIND_ME_PEER_HELLO:")) {
+                        String[] peerParts = message.split(":", 4);
+                        if (peerParts.length == 4 && RESCUE_SECRET.equals(peerParts[1])
+                                && !peerParts[2].equals(getUniqueDeviceId())) {
+                            String response = "FIND_ME_PEER_ACK:" + RESCUE_SECRET + ":"
+                                    + peerParts[3] + ":" + getUniqueDeviceId();
+                            byte[] responseBytes = response.getBytes("UTF-8");
+                            DatagramPacket responsePacket = new DatagramPacket(responseBytes,
+                                    responseBytes.length, packet.getAddress(), packet.getPort());
+                            synchronized (rescueSocket) { rescueSocket.send(responsePacket); }
+                        }
+                    } else if (message.startsWith("FIND_ME_PEER_ACK:")) {
+                        String[] peerParts = message.split(":", 4);
+                        if (peerParts.length == 4 && RESCUE_SECRET.equals(peerParts[1])) {
+                            java.util.concurrent.CountDownLatch latch = pendingPeerChallenges.get(peerParts[2]);
+                            if (latch != null && packet.getPort() == 8888) {
+                                String peerId = peerParts[3].trim();
+                                if (!peerId.isEmpty() && !peerId.equals(getUniqueDeviceId())) {
+                                    verifiedChatPeers.put(peerId,
+                                            new java.net.InetSocketAddress(packet.getAddress(), packet.getPort()));
+                                    verifiedChatPeerSeen.put(peerId, System.currentTimeMillis());
+                                    latch.countDown();
+                                }
+                            }
+                        }
+                    } else if (message.startsWith("FIND_ME_CHAT_ACK:")) {
                         String[] ackParts = message.split(":", 4);
                         if (ackParts.length == 4 && RESCUE_SECRET.equals(ackParts[1])) {
                             java.util.concurrent.CountDownLatch latch = pendingChatAcks.get(ackParts[2]);
