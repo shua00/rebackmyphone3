@@ -3448,7 +3448,7 @@ public class TrackingService extends Service implements LocationListener {
             try {
                 byte[] hello = ("FIND_ME_PEER_HELLO:" + RESCUE_SECRET + ":" + myId + ":" + nonce).getBytes("UTF-8");
                 for (String target : broadcasts) {
-                    // server2/chat.py 使用 8888；rescue2 独立监听 8889。
+                    // server2 使用 8888；rescue2 使用 8889；独立 chat.py 使用 8890。
                     // 分端口发现后，单播路由才能唯一对应到实际接收进程。
                     for (int peerPort : new int[]{8888, 8889, 8890}) {
                         try {
@@ -3617,7 +3617,7 @@ public class TrackingService extends Service implements LocationListener {
             if (message.startsWith("FIND_ME_PEER_ACK:")) {
                 String[] parts = message.split(":", 4);
                 if (parts.length == 4 && RESCUE_SECRET.equals(parts[1])
-                        && (packet.getPort() == 8888 || packet.getPort() == 8889)) {
+                        && (packet.getPort() == 8888 || packet.getPort() == 8889 || packet.getPort() == 8890)) {
                     java.util.concurrent.CountDownLatch latch = pendingPeerChallenges.get(parts[2]);
                     String peerId = parts[3].trim();
                     if (latch != null && !peerId.isEmpty() && !peerId.equals(getUniqueDeviceId())) {
