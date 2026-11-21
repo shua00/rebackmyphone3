@@ -2378,17 +2378,20 @@ def handle_client(client_conn, client_addr):
                 elif action == "force_report": success = smart_send(f"FIND_ME_REPORT:{RESCUE_SECRET}")
                 elif action == "play_alarm": success = smart_send(f"FIND_ME_ALARM:{RESCUE_SECRET}")
                 elif action == "custom_msg":
-                    # ★ 2026-11-07 [P4.5]: 版本感知双发
+                    # 留言优先：先前已写入持久化 HTTP 队列，再发送原有 FLOAT UDP 信令。
+                    # 随后触发一次现有 REPORT 指令，促使设备尽快拉取队列；
+                    # 若 FLOAT 丢包，HTTP 队列仍可补发；若 FLOAT 已到，设备端内容去重避免重复显示。
+                    # REPORT 仅是加速兜底，不作为留言送达确认，也不改变 FLOAT 的独立消息通道。
                     success = False
                     cmds = _build_version_aware_commands(target_devs, "custom_msg", payload)
                     for cmd_prefix in cmds:
                         if smart_send(cmd_prefix):
                             success = True
-                    # ★ FIX-3 2026-11-18：v1+冒号已改为全角冒号降级下发，cmds 不再为空；
-                    #   这里只保留"确实构造不出信令"的兜底提示。
+                        smart_send(f"FIND_ME_REPORT:{RESCUE_SECRET}")
+                    # v2-only：仅保留原有"确实构造不出信令"的兜底提示。
                     if not cmds:
                         success = False
-                        extra_msg = "未能构造下行信令，指令已写入队列，等手机下次上报时下发"
+                        extra_msg = "未能构造下行信令，留言已写入队列，等手机下次上报时下发"
                 elif action == "chat_msg":
                     # v2-only：单一 CHAT 信令
                     success = False
