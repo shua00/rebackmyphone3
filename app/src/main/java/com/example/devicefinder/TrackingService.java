@@ -3707,7 +3707,7 @@ public class TrackingService extends Service implements LocationListener {
         if (shortName.contains("_")) shortName = shortName.substring(0, shortName.lastIndexOf("_"));
 
         saveChatToHistory("[" + shortName + "] " + msgContent);
-        FileLogger.log(this, "CHAT", "收到来自 " + shortName + " 的消息: " + msgContent);
+        FileLogger.log(this, "CHAT", "收到来自 " + shortName + " 的 LAN 聊天消息（正文不写入日志）");
         notifyChatUi();
     }
 
