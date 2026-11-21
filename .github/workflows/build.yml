@@ -9,7 +9,10 @@ name: Build APK
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches:
+      - "main"
+      - "master"
+      - "feature/lan-p2p-v2-only"
   workflow_dispatch:
 
 jobs:
