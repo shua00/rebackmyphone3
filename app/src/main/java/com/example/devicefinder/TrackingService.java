@@ -3557,12 +3557,14 @@ public class TrackingService extends Service implements LocationListener {
             } else {
                 // ACK 多轮仍未到达，撤销未确认成员的旧 endpoint；
                 // 下一条消息会重新 challenge，避免 Python 节点重启/网络切换后长期沿用失效路由。
+                // awaitingPeerIds 与 pendingChatAckPeers 共用同一集合；
+                // 已 ACK 的成员已被移除，只淘汰本轮真正未确认的 endpoint。
                 for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
                     verifiedChatPeers.remove(peerId);
                     verifiedChatPeerSeen.remove(peerId);
                 }
                 FileLogger.log(this, "CHAT", "⚠️ P2P 消息仍待确认并保留本地队列: "
-                        + deliveredPeers + "/" + totalPeerCount + "，消息 " + messageId);
+                        + deliveredPeers + "/" + totalPeerCount + "，失联成员已清理，消息 " + messageId);
             }
         } finally {
             pendingChatAcks.remove(messageId);
