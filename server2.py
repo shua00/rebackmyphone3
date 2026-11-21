@@ -1144,7 +1144,7 @@ def udp_listener():
                 if msg.startswith("FIND_ME_PEER_HELLO:"):
                     parts = msg.split(":", 3)
                     if len(parts) == 4 and parts[1] == RESCUE_SECRET:
-                        response = f"FIND_ME_PEER_ACK:{RESCUE_SECRET}:{parts[3]}:server2".encode("utf-8")
+                        response = f"FIND_ME_PEER_ACK:{RESCUE_SECRET}:{parts[3]}:{PEER_NODE_ID}".encode("utf-8")
                         try: udp_sock.sendto(response, addr)
                         except OSError: pass
                 elif msg.startswith("FIND_ME_CHAT:"):
