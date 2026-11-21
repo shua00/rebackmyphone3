@@ -1149,10 +1149,10 @@ def udp_listener():
                         except OSError: pass
                 elif msg.startswith("FIND_ME_CHAT:"):
                     parts = msg.split(":", 4)
-                    if len(parts) in (4, 5) and parts[1] == RESCUE_SECRET:
+                    if len(parts) == 5 and parts[1] == RESCUE_SECRET:
                         sender = parts[2]
-                        message_id = parts[3] if len(parts) == 5 else ""
-                        content = parts[4] if len(parts) == 5 else parts[3]
+                        message_id = parts[3]
+                        content = parts[4]
                         if message_id:
                             ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:server2".encode("utf-8")
                             try: udp_sock.sendto(ack, addr)
