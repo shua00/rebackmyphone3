@@ -118,7 +118,8 @@ PEER_NODE_ID = f"rescue2-{uuid.uuid4().hex[:12]}"  # 本次进程唯一 LAN 会�
 DEFAULT_SERVER_URL = "http://dingwei.bai001.de5.net/api/report"
 DEFAULT_CONFIG_URL = "https://your-config-url.com/config.txt"
 LOG_PORT = 9090
-UDP_PORT = 8888
+UDP_DEVICE_PORT = 8888
+UDP_PORT = 8889  # 独立监听端口，避免与 server2.py 的 8888 冲突
 LOG_DIR = "received_logs"
 
 # ============================================================
@@ -309,7 +310,7 @@ def send_udp(command_str, target_ip="255.255.255.255", quiet=False, no_retry=Fal
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     try:
         for i in range(send_times):
-            try: sock.sendto(command_str.encode('utf-8'), (target_ip, UDP_PORT))
+            try: sock.sendto(command_str.encode('utf-8'), (target_ip, UDP_DEVICE_PORT))
             except Exception as e:
                 if not quiet: print(f"   [{i+1}/{send_times}] 发送失败: {e}")
                 break
@@ -571,7 +572,7 @@ def _probe_ips(ips, local_ip):
     def probe(ip):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.sendto(cmd.encode(), (ip, UDP_PORT))
+            s.sendto(cmd.encode(), (ip, UDP_DEVICE_PORT))
             s.close()
         except Exception: pass
     with concurrent.futures.ThreadPoolExecutor(max_workers=50) as ex:
