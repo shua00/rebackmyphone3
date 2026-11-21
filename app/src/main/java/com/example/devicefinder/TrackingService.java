@@ -272,6 +272,9 @@ public class TrackingService extends Service implements LocationListener {
             new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CountDownLatch> pendingPeerChallenges =
             new java.util.concurrent.ConcurrentHashMap<>();
+    // 有效 peer 存在时也定期重新发现，纳入后来上线/加入局域网的设备。
+    private volatile long lastPeerDiscoveryAt = 0L;
+    private static final long PEER_DISCOVERY_REFRESH_MS = 30_000L;
     // 与 buildNetworkSnapshot 的关键路径代数对齐；普通 capabilities/link 回调不应清空有效 peer。
     private volatile long lastPeerRouteGeneration = -1L;
 
@@ -3441,15 +3444,18 @@ public class TrackingService extends Service implements LocationListener {
                 verifiedChatPeers.remove(e.getKey());
             }
         }
-        if (verifiedChatPeers.isEmpty()) {
+        boolean shouldDiscoverPeers = verifiedChatPeers.isEmpty()
+                || now - lastPeerDiscoveryAt >= PEER_DISCOVERY_REFRESH_MS;
+        if (shouldDiscoverPeers) {
+            lastPeerDiscoveryAt = now;
             String nonce = java.util.UUID.randomUUID().toString();
             java.util.concurrent.CountDownLatch peerLatch = new java.util.concurrent.CountDownLatch(1);
             pendingPeerChallenges.put(nonce, peerLatch);
             try {
                 byte[] hello = ("FIND_ME_PEER_HELLO:" + RESCUE_SECRET + ":" + myId + ":" + nonce).getBytes("UTF-8");
                 for (String target : broadcasts) {
-                    // server2 使用 8888；rescue2 使用 8889；独立 chat.py 使用 8890。
-                    // 分端口发现后，单播路由才能唯一对应到实际接收进程。
+                    // server2 使用 8887；Android 手机使用 8888；rescue2 使用 8889；
+                    // 独立 chat.py 使用 8890。分端口发现后，单播路由对应唯一接收进程。
                     for (int peerPort : new int[]{8888, 8887, 8889, 8890}) {
                         try {
                             DatagramPacket p = new DatagramPacket(hello, hello.length,
