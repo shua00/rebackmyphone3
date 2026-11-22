@@ -705,6 +705,88 @@ def is_outgoing_discovery_pending(db_path, sender_scope, message_id):
             conn.close()
 
 
+def send_outbox_to_active_peers(sock, db_path, sender_scope, message_id,
+                                   packet_template, peer_ids, secret, send_lock=None,
+                                   attempts=3, retry_delay_seconds=0.25):
+    """Send one durable message to active fixed targets; retry only those still unacked."""
+    if sock is None or not db_path or not sender_scope or not message_id:
+        return 0
+    max_attempts = max(1, min(3, int(attempts)))
+    delay = max(0.0, min(1.0, float(retry_delay_seconds)))
+    targets = sorted(set(str(peer_id) for peer_id in (peer_ids or []) if peer_id))
+    sent_total = 0
+    for attempt in range(max_attempts):
+        sent_this_round = 0
+        for peer_id in targets:
+            pending = load_pending_outgoing_for_peer(
+                db_path, sender_scope, peer_id, limit=50)
+            message = next((item for item in pending
+                            if item.get("message_id") == message_id), None)
+            if message is None:
+                continue
+            packet = dict(packet_template or {})
+            packet["target_peer_id"] = peer_id
+            try:
+                raw = encode_packet(packet, secret)
+                destination = (message["endpoint_ip"], int(message["endpoint_port"]))
+                if send_lock is None:
+                    sock.sendto(raw, destination)
+                else:
+                    with send_lock:
+                        sock.sendto(raw, destination)
+                mark_outgoing_attempt(db_path, message_id, peer_id,
+                                      destination[0], destination[1])
+                sent_total += 1
+                sent_this_round += 1
+            except Exception:
+                continue
+        if attempt + 1 >= max_attempts or delay <= 0:
+            continue
+        still_pending = False
+        for peer_id in targets:
+            pending = load_pending_outgoing_for_peer(
+                db_path, sender_scope, peer_id, limit=50)
+            if any(item.get("message_id") == message_id for item in pending):
+                still_pending = True
+                break
+        if still_pending and (sent_this_round or attempt + 1 < max_attempts):
+            time.sleep(delay)
+    return sent_total
+
+
+def send_broadcast_packet_with_retries(sock, packet_bytes, destinations,
+                                       send_lock=None, attempts=3,
+                                       retry_delay_seconds=0.25):
+    """Bounded first-discovery broadcast; repeated packets keep the same message ID."""
+    if sock is None or not packet_bytes:
+        return 0
+    max_attempts = max(1, min(3, int(attempts)))
+    delay = max(0.0, min(1.0, float(retry_delay_seconds)))
+    targets = []
+    for destination in (destinations or []):
+        if not isinstance(destination, (tuple, list)) or len(destination) != 2:
+            continue
+        ip, port = str(destination[0]), int(destination[1])
+        if ip and 1 <= port <= 65535:
+            targets.append((ip, port))
+    targets = list(dict.fromkeys(targets))
+    sent_total = 0
+    for attempt in range(max_attempts):
+        for destination in targets:
+            try:
+                if send_lock is None:
+                    sock.sendto(packet_bytes, destination)
+                else:
+                    with send_lock:
+                        sock.sendto(packet_bytes, destination)
+                sent_total += 1
+            except OSError:
+                continue
+        if attempt + 1 < max_attempts and delay > 0:
+            time.sleep(delay)
+    return sent_total
+
+
 def peer_endpoint_matches(db_path, receiver_scope, peer_id, endpoint_ip, endpoint_port):
     """Return true only when an ACK comes from the currently recorded route for its target peer."""
     if not receiver_scope or not peer_id or not endpoint_ip or not endpoint_port:
