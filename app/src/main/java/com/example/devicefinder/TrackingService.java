@@ -4173,47 +4173,56 @@ public class TrackingService extends Service implements LocationListener {
      * Complete the short ACK observation window away from the FIFO sender.
      * UDP dispatch remains ordered, while ACK persistence continues on LanChat-IO.
      */
+    /**
+     * Complete the short ACK observation window away from the FIFO sender.
+     * UDP dispatch remains ordered, while ACK persistence continues on LanChat-IO.
+     */
     private void completeLanChatAckWindow(String messageId,
             java.util.Set<String> awaitingPeerIds,
             java.util.concurrent.CountDownLatch ack,
             int totalPeerCount, int reachablePeerCount,
             LanChatStore store, long ackStartedAt) {
-        long elapsed = android.os.SystemClock.elapsedRealtime() - ackStartedAt;
-        int deliveredPeers = totalPeerCount == 0
-                ? (ack.getCount() == 0 ? 1 : 0)
-                : reachablePeerCount - (int) ack.getCount();
-        if (totalPeerCount == 0) {
-            if (ack.getCount() == 0) {
-                lastPeerDiscoveryAt = 0L;
-                FileLogger.log(this, "CHAT", "ℹ️ P2P 广播至少一个接收端已确认，但成员名单未建立；"
-                        + "保留消息并等待逐设备目标建立: " + messageId);
+        try {
+            long elapsed = android.os.SystemClock.elapsedRealtime() - ackStartedAt;
+            int deliveredPeers = totalPeerCount == 0
+                    ? (ack.getCount() == 0 ? 1 : 0)
+                    : reachablePeerCount - (int) ack.getCount();
+            if (totalPeerCount == 0) {
+                if (ack.getCount() == 0) {
+                    lastPeerDiscoveryAt = 0L;
+                    FileLogger.log(this, "CHAT", "ℹ️ P2P 广播至少一个接收端已确认，但成员名单未建立；"
+                            + "保留消息并等待逐设备目标建立: " + messageId);
+                } else {
+                    FileLogger.log(this, "CHAT", "⚠️ P2P 广播暂未收到 ACK，消息保留待确认队列: " + messageId);
+                }
+            } else if (store != null && store.allTargetsAcked(messageId)) {
+                removePendingLanChat(messageId);
+                FileLogger.log(this, "CHAT", "✅ P2P 固定目标全部持久化 ACK: "
+                        + deliveredPeers + "/" + totalPeerCount + "，消息 " + messageId);
             } else {
-                FileLogger.log(this, "CHAT", "⚠️ P2P 广播暂未收到 ACK，消息保留待确认队列: " + messageId);
+                lastPeerDiscoveryAt = 0L;
+                for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
+                    verifiedChatPeers.remove(peerId);
+                    verifiedChatPeerSeen.remove(peerId);
+                }
+                FileLogger.log(this, "CHAT", "⚠️ P2P 消息仍待确认并保留本地队列: "
+                        + deliveredPeers + "/" + totalPeerCount + "，失联成员已清理，消息 " + messageId);
             }
-        } else if (store != null && store.allTargetsAcked(messageId)) {
-            removePendingLanChat(messageId);
-            FileLogger.log(this, "CHAT", "✅ P2P 固定目标全部持久化 ACK: "
-                    + deliveredPeers + "/" + totalPeerCount + "，消息 " + messageId);
-        } else {
-            // ACK may arrive after this grace window; its durable endpoint remains authoritative.
-            lastPeerDiscoveryAt = 0L;
-            for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
-                verifiedChatPeers.remove(peerId);
-                verifiedChatPeerSeen.remove(peerId);
+            if (elapsed >= 400L) {
+                FileLogger.logD("CHAT", "P2P ACK grace elapsedMs=" + elapsed
+                        + " remaining=" + ack.getCount() + "/" + totalPeerCount
+                        + " message=" + messageId);
             }
-            FileLogger.log(this, "CHAT", "⚠️ P2P 消息仍待确认并保留本地队列: "
-                    + deliveredPeers + "/" + totalPeerCount + "，失联成员已清理，消息 " + messageId);
+        } catch (Exception e) {
+            FileLogger.log(this, "CHAT", "⚠️ LAN ACK 观察窗口收尾失败 message="
+                    + messageId + " error=" + e.getClass().getSimpleName());
+        } finally {
+            pendingChatAcks.remove(messageId);
+            pendingChatAckPeers.remove(messageId);
+            pendingChatAckStartedAt.remove(messageId);
+            lanChatAckGraceInFlight.remove(messageId);
+            activeLanChatTransmissions.remove(messageId);
         }
-        if (elapsed >= 400L) {
-            FileLogger.logD("CHAT", "P2P ACK grace elapsedMs=" + elapsed
-                    + " remaining=" + ack.getCount() + "/" + totalPeerCount
-                    + " message=" + messageId);
-        }
-        pendingChatAcks.remove(messageId);
-        pendingChatAckPeers.remove(messageId);
-        pendingChatAckStartedAt.remove(messageId);
-        lanChatAckGraceInFlight.remove(messageId);
-        activeLanChatTransmissions.remove(messageId);
     }
 
 private void sendLanUdpPacket(DatagramSocket socket, DatagramPacket packet, String kind)
