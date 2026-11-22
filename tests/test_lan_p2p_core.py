@@ -846,6 +846,21 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn('"SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id=?"', acknowledge)
         self.assertNotIn('next.put("state", total > 0 && total == acked ? "delivered"', acknowledge[:terminal_guard])
 
+    def test_android_all_targets_acked_never_resurrects_expired_outbox(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        start = source.index("public boolean allTargetsAcked(")
+        end = source.index("public List<Target> loadKnownPeers(", start)
+        method = source[start:end]
+        expired_guard = method.index('if ("expired".equals(state)) return false;')
+        delivered_mutation = method.index('next.put("state", "delivered")')
+        self.assertLess(expired_guard, delivered_mutation)
+        self.assertIn('state = c.getString(0);', method)
+        self.assertIn('if (discoveryOpen || total == 0) return false;', method)
+
+
     def test_record_peer_fails_closed_when_database_cannot_be_opened(self):
         from lan_p2p_core import record_peer
         directory_path = os.path.join(self.temp_dir.name, "not-a-database-file")

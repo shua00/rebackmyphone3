@@ -327,6 +327,8 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     new String[]{messageId});
             if (!c.moveToFirst()) return false;
             String state = c.getString(0);
+            // Expired is terminal: reconciliation must never resurrect it as delivered.
+            if ("expired".equals(state)) return false;
             long deadline = c.getLong(1);
             int total = c.getInt(2);
             int acked = c.isNull(3) ? 0 : c.getInt(3);
