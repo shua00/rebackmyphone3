@@ -59,7 +59,7 @@ from urllib.parse import urlparse, parse_qs
 # ★ 新增ThreadPoolExecutor 补丁： 2026-11-05 13:50
 from concurrent.futures import ThreadPoolExecutor
 
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message
 UDP_LISTEN_PORT = 8887  # server2 独立监听端口；发往 Android 的指令仍使用 8888
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "server2")
 
@@ -278,6 +278,8 @@ LAST_MSG_INFO_TTL = 10.0
 CHAT_DEDUP_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3")
 CHAT_DEDUP_LOCK = threading.Lock()
 CHAT_DEDUP_OPS = 0
+UDP_LISTENER_SOCKET = None
+UDP_CHAT_SEND_LOCK = threading.Lock()
 CHAT_MESSAGES.extend(_restore_chat_history())
 
 UPLOAD_LOG_DIR = "uploads/logs"
@@ -883,10 +885,17 @@ def _build_version_aware_commands(target_devs, action_name, payload):
     if action_name == "custom_msg":
         return [f"FIND_ME_FLOAT:{RESCUE_SECRET}:{payload}"]
     if action_name == "chat_msg":
+        message_id = uuid.uuid4().hex
+        created_at_ms = int(time.time() * 1000)
+        if not persist_outgoing_message(CHAT_DEDUP_DB, "server2", PEER_NODE_ID,
+                                        message_id, str(payload), target_devs, created_at_ms):
+            with print_lock:
+                print("⚠️ Web chat outbox persistence failed; refusing untracked UDP send")
+            return []
         packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
                   "sender_peer_type": "server2", "service_id": PEER_NODE_ID,
-                  "target_peer_id": "*", "message_id": uuid.uuid4().hex,
-                  "created_at_ms": int(time.time() * 1000),
+                  "target_peer_id": "*", "message_id": message_id,
+                  "created_at_ms": created_at_ms,
                   "display_name": "Web_Console", "body": str(payload)}
         return [encode_packet(packet, RESCUE_SECRET).decode("utf-8")]
     return []
@@ -1201,7 +1210,12 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
         except OSError: pass
         return
     if packet_type == "chat.ack":
-        # The durable sender-side ACK ledger is added in the server outbox phase.
+        message_id = str(envelope.get("message_id") or "")
+        target = str(envelope.get("target_peer_id") or "")
+        if target == PEER_NODE_ID and envelope.get("status") == "stored" and sender:
+            if acknowledge_outgoing_message(CHAT_DEDUP_DB, "server2", message_id, sender):
+                record_peer(CHAT_DEDUP_DB, "server2", sender, "android", "android-main",
+                            addr[0], 8888, "active")
         return
     if packet_type != "chat.message":
         return
@@ -1245,13 +1259,30 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
         print(f"\\n🗣️ [对讲机] {display_sender} (来自IP: {addr[0]}) 说: {body}")
 
 
+def send_udp_chat_from_listener(command_str, target_ip):
+    """Send chat from the bound 8887 socket so recipient ACKs return to udp_listener."""
+    sock = UDP_LISTENER_SOCKET
+    if sock is None or sock.fileno() < 0:
+        return 0
+    try:
+        data = command_str.encode("utf-8")
+        with UDP_CHAT_SEND_LOCK:
+            sock.sendto(data, (target_ip, 8888))
+        return 1
+    except OSError as e:
+        with print_lock:
+            print(f"⚠️ server2 chat UDP send failed to {target_ip}: {type(e).__name__}")
+        return 0
+
+
 def udp_listener():
-    global UDP_LISTENING
+    global UDP_LISTENING, UDP_LISTENER_SOCKET
     while True:
         udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             udp_sock.bind(('0.0.0.0', UDP_LISTEN_PORT))
+            UDP_LISTENER_SOCKET = udp_sock
             UDP_LISTENING = True
             print(f"🎧 UDP 监听已启动 port={UDP_LISTEN_PORT}，等待局域网对讲机消息...")
             while True:
@@ -1338,6 +1369,8 @@ def udp_listener():
             continue
         finally:
             UDP_LISTENING = False
+            if UDP_LISTENER_SOCKET is udp_sock:
+                UDP_LISTENER_SOCKET = None
             try: udp_sock.close()
             except Exception: pass
 
@@ -2416,6 +2449,7 @@ def handle_client(client_conn, client_addr):
                 def smart_send(cmd_prefix):
                     nonlocal extra_msg          # ★ 2026-11-18：必须声明，否则下面赋值只改到局部变量
                     sent_pkts = 0
+                    send_func = send_udp_chat_from_listener if action == "chat_msg" else send_udp_broadcast
                     try:
                         local_ip = get_local_ip()
                     except Exception:
@@ -2423,7 +2457,7 @@ def handle_client(client_conn, client_addr):
                     if isinstance(target_ip, list):
                         for ip in target_ip:
                             if ip and ip != '0.0.0.0':
-                                sent_pkts += send_udp_broadcast(cmd_prefix, ip)
+                                sent_pkts += send_func(cmd_prefix, ip)
                     elif target_ip == "all" or target_ip == "255.255.255.255":
                         # ★ 2026-11-07 修复：改用 state_lock，与 /api/report、clean_device 等写方互斥
                         # ★ 2026-11-18 补丁B：先聚合去重、再一次性发送，总包数受 UDP_TOTAL_PACKET_BUDGET 约束
@@ -2440,20 +2474,20 @@ def handle_client(client_conn, client_addr):
                                 remote_ips.append(observed_udp_target)
                         need_broadcast = (not unicast_ips) or (len(unicast_ips) > UDP_TOTAL_PACKET_BUDGET)
                         if need_broadcast:
-                            sent_pkts += send_udp_broadcast(cmd_prefix, "255.255.255.255")
+                            sent_pkts += send_func(cmd_prefix, "255.255.255.255")
                         else:
                             for ip in unicast_ips:
-                                sent_pkts += send_udp_broadcast(cmd_prefix, ip)
+                                sent_pkts += send_func(cmd_prefix, ip)
                         if remote_ips and (len(unicast_ips) + len(remote_ips)) <= UDP_TOTAL_PACKET_BUDGET:
                             for ip in remote_ips:
                                 # 仅对 UDP listener 实际观测到的来源地址尝试跨网段单播；HTTP 代理地址不参与。
-                                sent_pkts += send_udp_broadcast(cmd_prefix, ip)
+                                sent_pkts += send_func(cmd_prefix, ip)
                         if not unicast_ips and not remote_ips:
                             # ★ 2026-11-18 修复（自 server2_2.py 移植）：无在线设备时旧版直接回"指令执行失败"，
                             #   家属以为是推送逻辑坏了；实际包已广播，只是设备不在列表/不在同网段。
                             extra_msg = "已向子网广播，但当前设备列表为空：请确认手机已在同一 WiFi 下且已成功上报（走流量时 UDP 不可达）"
                     else:
-                        sent_pkts += send_udp_broadcast(cmd_prefix, target_ip)
+                        sent_pkts += send_func(cmd_prefix, target_ip)
                     return sent_pkts > 0
 
                 # ★ 插件挂载：远程陪伴控制
