@@ -832,5 +832,32 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("handler.postDelayed", tracking)
         self.assertIn("lanChatRetryInFlight.set(false);", recovery)
 
+
+    def test_android_peer_and_target_reads_do_not_collapse_database_errors_to_empty(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        tracking = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+
+        for method_name, next_method in (
+            ("public List<Target> loadKnownPeers()", "public List<PendingMessage> loadPending"),
+            ("public List<Target> loadTargets(String messageId)", None),
+        ):
+            start = store.index(method_name)
+            end = store.index("\n    /**", start + len(method_name)) if next_method is None else store.index(next_method, start)
+            method = store[start:end]
+            self.assertNotIn("catch (Exception ignored)", method)
+            self.assertIn("finally", method)
+
+        tx_start = tracking.index("final List<LanChatStore.Target> savedTargets")
+        tx_end = tracking.index("java.util.Set<String> pendingTargetIds", tx_start)
+        tx = tracking[tx_start:tx_end]
+        self.assertIn("store.loadTargets(messageId)", tx)
+        self.assertIn("拒绝发送以免误投", tx)
+        self.assertIn("return;", tx)
+
 if __name__ == "__main__":
     unittest.main()
