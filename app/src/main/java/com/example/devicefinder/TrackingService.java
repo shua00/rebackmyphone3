@@ -3576,7 +3576,7 @@ public class TrackingService extends Service implements LocationListener {
      * 沿用原 message_id，接收端会 ACK 但不会重复显示。
      */
     private void retryPendingLanChatMessages() {
-        if (!lanChatRetryInFlight.compareAndSet(false, true)) return;
+        if (serviceDestroyed || !lanChatRetryInFlight.compareAndSet(false, true)) return;
         try {
             lanChatSendExecutor.execute(() -> {
                 try {
