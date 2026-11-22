@@ -3662,15 +3662,30 @@ public class TrackingService extends Service implements LocationListener {
             FileLogger.log(this, "CHAT", "ℹ️ 同一 message_id 已在发送/补发，跳过并发副本: " + messageId);
             return;
         }
+        boolean attemptRecorded = false;
         try {
+            if (serviceDestroyed) return;
+            DatagramSocket socket = rescueSocketRef;
+            LanChatStore store = lanChatStore;
+            if (socket == null || socket.isClosed() || store == null) {
+                FileLogger.log(this, "CHAT", "ℹ️ LAN 监听或账本尚未就绪，消息保留待恢复");
+                return;
+            }
+            if (store.recordOutboxAttempt(messageId) < 0) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN SQLite 发送尝试记账失败，停止本轮发送");
+                return;
+            }
+            attemptRecorded = true;
             // The discovery snapshot and ACK bookkeeping are shared per service; serialize send transactions.
             synchronized (lanChatTransmitLock) {
                 if (!serviceDestroyed) transmitLocalUdpMessageInternal(message, messageId);
             }
+        } catch (Exception e) {
+            FileLogger.log(this, "CHAT", "⚠️ LAN 对讲发送/恢复异常: " + e.getClass().getSimpleName());
         } finally {
             activeLanChatTransmissions.remove(messageId);
         }
-        scheduleLanChatRetryFromOutbox();
+        if (attemptRecorded) scheduleLanChatRetryFromOutbox();
     }
 
     /**
@@ -3705,11 +3720,6 @@ public class TrackingService extends Service implements LocationListener {
         DatagramSocket socket = rescueSocketRef;
         if (socket == null || socket.isClosed()) {
             FileLogger.log(this, "CHAT", "⚠️ P2P UDP 监听尚未就绪，消息保留在本地待确认队列");
-            return;
-        }
-        LanChatStore store = lanChatStore;
-        if (store == null || store.recordOutboxAttempt(messageId) < 0) {
-            FileLogger.log(this, "CHAT", "⚠️ LAN SQLite 发送尝试记账失败，保留消息并停止本轮网络发送");
             return;
         }
         String myId = getUniqueDeviceId();
