@@ -4509,8 +4509,10 @@ public class TrackingService extends Service implements LocationListener {
                         boolean persistedEndpointMatch = store != null
                                 && store.matchesExpectedAckEndpoint(messageId, senderId,
                                         sourceAddress.getHostAddress(), sourcePort);
-                        boolean discoveryAck = store != null && store.isDiscoveryPending(messageId);
-                        if (!routeMatches && !persistedEndpointMatch && !discoveryAck) {
+                        // Discovery is a recipient-collection window, not an identity bypass.
+                        // A newly discovered peer must first complete peer.ack route verification;
+                        // delayed ACKs may alternatively use the exact endpoint persisted for this target.
+                        if (!routeMatches && !persistedEndpointMatch) {
                             FileLogger.log(this, "CHAT", "P2P ACK rejected message=" + messageId
                                     + " peer=" + senderId + " reason=unverified_endpoint");
                             return;
