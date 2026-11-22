@@ -498,6 +498,52 @@ def start_log_receiver():
         server.serve_forever()
     except Exception as e: print(f"{I.warn} 接收端启动失败: {e}")
 
+def _handle_authenticated_v2_packet(envelope, sock, addr):
+    packet_type = envelope.get("type")
+    sender = str(envelope.get("sender_peer_id") or "")
+    if packet_type == "peer.hello":
+        record_peer(_CHAT_DEDUP_DB, "rescue2", sender, envelope.get("sender_peer_type", "unknown"),
+                    envelope.get("service_id", ""), addr[0], 8888, "suspect")
+        reply = {"type": "peer.ack", "sender_peer_id": PEER_NODE_ID,
+                 "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
+                 "reply_nonce": envelope.get("nonce", ""), "listen_port": UDP_PORT}
+        try: sock.sendto(encode_packet(reply, RESCUE_SECRET), addr)
+        except OSError: pass
+        return
+    if packet_type == "chat.ack":
+        # The durable sender-side ACK ledger is added in the server outbox phase.
+        return
+    if packet_type != "chat.message":
+        return
+    target = envelope.get("target_peer_id", "*")
+    if target not in ("*", PEER_NODE_ID):
+        return
+    message_id = str(envelope.get("message_id") or "")
+    body = str(envelope.get("body") or "")
+    if not sender or not message_id:
+        return
+    if sender in ("Web_Console", "PC_Terminal", "Guest_"):
+        claim_result = True
+    else:
+        claim_result = _claim_chat_message(sender, message_id, body)
+    if claim_result is None:
+        return
+    record_peer(_CHAT_DEDUP_DB, "rescue2", sender, envelope.get("sender_peer_type", "unknown"),
+                envelope.get("service_id", ""), addr[0], 8888, "active")
+    ack_packet = {"type": "chat.ack", "sender_peer_id": PEER_NODE_ID,
+                  "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
+                  "target_peer_id": sender, "message_id": message_id, "status": "stored"}
+    try: sock.sendto(encode_packet(ack_packet, RESCUE_SECRET), addr)
+    except OSError: pass
+    if not claim_result:
+        return
+    print(f"\\n{I.chat} [{sender}] {body}  (来自 {addr[0]})")
+    with _state_lock:
+        info = DISCOVERED_DEVICES.setdefault(sender, {})
+        info["source_ip"] = addr[0]
+        info["last_chat"] = time.time()
+
+
 def udp_listener():
     global UDP_OK
     while True:
@@ -511,47 +557,10 @@ def udp_listener():
                 data, addr = sock.recvfrom(4096)
                 msg = data.decode('utf-8', errors='ignore')
                 if msg.startswith("{"):
-                    try:
-                        envelope = decode_packet(data, RESCUE_SECRET)
-                    except ValueError:
-                        envelope = None
+                    try: envelope = decode_packet(data, RESCUE_SECRET)
+                    except ValueError: envelope = None
                     if envelope is not None:
-                        packet_type = envelope.get("type")
-                        sender = str(envelope.get("sender_peer_id") or "")
-                        if packet_type == "peer.hello":
-                            record_peer(_CHAT_DEDUP_DB, "rescue2", sender, envelope.get("sender_peer_type", "unknown"),
-                                        envelope.get("service_id", ""), addr[0], 8888, "suspect")
-                            reply = {"type": "peer.ack", "sender_peer_id": PEER_NODE_ID,
-                                     "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
-                                     "reply_nonce": envelope.get("nonce", ""), "listen_port": UDP_PORT}
-                            try: sock.sendto(encode_packet(reply, RESCUE_SECRET), addr)
-                            except OSError: pass
-                        elif packet_type == "chat.message":
-                            target = envelope.get("target_peer_id", "*")
-                            if target in ("*", PEER_NODE_ID):
-                                message_id = str(envelope.get("message_id") or "")
-                                body = str(envelope.get("body") or "")
-                                if sender and message_id:
-                                    if sender in ("Web_Console", "PC_Terminal", "Guest_"):
-                                        claim_result = True
-                                    else:
-                                        claim_result = _claim_chat_message(sender, message_id, body)
-                                    if claim_result is not None:
-                                        record_peer(_CHAT_DEDUP_DB, "rescue2", sender, "android", "android-main",
-                                                    addr[0], 8888, "active")
-                                        ack_packet = {"type": "chat.ack", "sender_peer_id": PEER_NODE_ID,
-                                                      "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
-                                                      "target_peer_id": sender, "message_id": message_id,
-                                                      "status": "stored"}
-                                        try: sock.sendto(encode_packet(ack_packet, RESCUE_SECRET), addr)
-                                        except OSError: pass
-                                    if claim_result:
-                            print(f"\\n{I.chat} [{sender}] {body}  (来自 {addr[0]})")
-                            with _state_lock:
-                                info = DISCOVERED_DEVICES.setdefault(sender, {})
-                                info["source_ip"] = addr[0]
-                                info["last_chat"] = time.time()
-        # Authenticated JSON v2 packet handled; never fall through to the legacy parser.
+                        _handle_authenticated_v2_packet(envelope, sock, addr)
                         continue
                 if msg.startswith("FIND_ME_PEER_HELLO:"):
                     parts = msg.split(":", 3)
