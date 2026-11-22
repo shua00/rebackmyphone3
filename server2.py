@@ -59,7 +59,7 @@ from urllib.parse import urlparse, parse_qs
 # ★ 新增ThreadPoolExecutor 补丁： 2026-11-05 13:50
 from concurrent.futures import ThreadPoolExecutor
 
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, peer_endpoint_matches
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, peer_endpoint_matches, list_known_peer_snapshot
 UDP_LISTEN_PORT = 8887  # server2 独立监听端口；发往 Android 的指令仍使用 8888
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "server2")
 
@@ -2422,6 +2422,17 @@ def handle_client(client_conn, client_addr):
                 target_devs = []
                 if action in HTTP_SUPPORTED_ACTIONS:
                     target_devs = resolve_target_devices(target_ip)
+                    if action == "chat_msg":
+                        # The web chat's fixed target snapshot includes known offline members.
+                        # Use historical IDs for recipients, but keep UDP routing to current IPs only.
+                        historical = list_known_peer_snapshot(CHAT_DEDUP_DB, "server2")
+                        if target_ip in ("all", "255.255.255.255") or not target_ip:
+                            historical_ids = [peer["peer_id"] for peer in historical]
+                        else:
+                            selected_ips = set(target_ip if isinstance(target_ip, list) else [target_ip])
+                            historical_ids = [peer["peer_id"] for peer in historical
+                                              if peer["endpoint_ip"] in selected_ips]
+                        target_devs = sorted(set(target_devs) | set(historical_ids))
                     for dev_id in target_devs:
                         enqueue_command(dev_id, action, payload)
 
