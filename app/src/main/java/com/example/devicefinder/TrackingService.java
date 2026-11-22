@@ -2120,7 +2120,7 @@ public class TrackingService extends Service implements LocationListener {
                 flushPendingReports();
                 if (changed) triggerRescueListener();
                 // 首次启动、网络回调重建或服务重启也要恢复待确认消息，不只依赖指纹变化。
-                retryPendingLanChatMessages();
+                retryPendingLanChatMessages(true);
             }
         } catch (Exception e) {
             FileLogger.log(TrackingService.this, "NETWORK", "⚠️ 刷新网络状态失败: " + e.getMessage());
@@ -3715,12 +3715,26 @@ public class TrackingService extends Service implements LocationListener {
      * 沿用原 message_id，接收端会 ACK 但不会重复显示。
      */
     private void retryPendingLanChatMessages() {
+        retryPendingLanChatMessages(false);
+    }
+
+    /**
+     * Timer wakeups consume the current finite retry budget. Only a concrete recovery event
+     * (network restored, listener rebound, or peer route verified) may reopen an exhausted epoch.
+     */
+    private void retryPendingLanChatMessages(boolean recoveryEvent) {
         if (serviceDestroyed || !lanChatRetryInFlight.compareAndSet(false, true)) return;
         try {
             lanChatSendExecutor.execute(() -> {
                 try {
                     LanChatStore store = lanChatStore;
                     if (store == null) return;
+                    if (recoveryEvent) {
+                        int resumed = store.resumeExhaustedRetriesForRecoveryEvent(System.currentTimeMillis());
+                        if (resumed > 0) {
+                            FileLogger.log(this, "CHAT", "LAN 恢复事件重新开启有限补发预算 messages=" + resumed);
+                        }
+                    }
                     synchronized (lanChatQueueLock) {
                         JSONArray legacy = new JSONArray(getSharedPreferences("device_finder_prefs", MODE_PRIVATE)
                                 .getString(PREF_LAN_CHAT_QUEUE, "[]"));
@@ -3802,6 +3816,7 @@ public class TrackingService extends Service implements LocationListener {
             return;
         }
         boolean attemptRecorded = false;
+        int attemptNumber = -1;
         try {
             if (serviceDestroyed) return;
             DatagramSocket socket = rescueSocketRef;
@@ -3810,8 +3825,9 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.log(this, "CHAT", "ℹ️ LAN 监听或账本尚未就绪，消息保留待恢复");
                 return;
             }
-            if (store.recordOutboxAttempt(messageId) < 0) {
-                FileLogger.log(this, "CHAT", "⚠️ LAN SQLite 发送尝试记账失败，停止本轮发送");
+            attemptNumber = store.recordOutboxAttempt(messageId);
+            if (attemptNumber < 0) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN SQLite 发送尝试记账失败或本轮预算已耗尽，停止发送");
                 return;
             }
             attemptRecorded = true;
@@ -3830,13 +3846,20 @@ public class TrackingService extends Service implements LocationListener {
         } finally {
             activeLanChatTransmissions.remove(messageId);
         }
-        if (attemptRecorded) scheduleLanChatRetryFromOutbox();
+        if (attemptRecorded) {
+            if (attemptNumber >= LanChatStore.MAX_AUTOMATIC_RETRY_ATTEMPTS
+                    && !store.allTargetsAcked(messageId)) {
+                FileLogger.log(this, "CHAT", "LAN 自动补发预算已耗尽，SQLite 消息及未 ACK 目标继续保留，等待网络/peer 恢复事件: "
+                        + messageId + " attempts=" + attemptNumber);
+            }
+            scheduleLanChatRetryFromOutbox();
+        }
     }
 
     /**
-     * Persisted retry wakeups use exponential backoff with a capped interval.
-     * Known recipients remain retryable until durable per-peer ACK; waiting_peers rows
-     * are excluded so late devices never receive an old broadcast message.
+     * Persisted retry wakeups use exponential backoff and a finite per-epoch attempt budget.
+     * Exhausted rows remain durable in SQLite but are not timer-polled; a real recovery event
+     * may reopen one bounded epoch after the persisted cooldown. waiting_peers stays frozen.
      */
     private void scheduleLanChatRetryFromOutbox() {
         if (serviceDestroyed || lanChatRetryWakeScheduled.get()) return;
@@ -3852,10 +3875,9 @@ public class TrackingService extends Service implements LocationListener {
                 }
             }
             if (minimumAttempts == Integer.MAX_VALUE) return;
-            // Retry known, still-pending recipients until ACK; cap the interval, not the
-            // number of attempts. This preserves recovery after transient packet loss while
-            // keeping background traffic bounded. Empty discovery snapshots are finalized
-            // separately as waiting_peers and are not included in loadPending().
+            // loadPending() excludes messages that exhausted this epoch's finite budget.
+            // Their SQLite rows and unacked target records remain intact for recovery events.
+            // Empty discovery snapshots are finalized separately as waiting_peers.
             final long delayMs = minimumAttempts <= 1 ? 1_500L
                     : (minimumAttempts == 2 ? 4_000L
                     : Math.min(60_000L, 10_000L << Math.min(3, minimumAttempts - 3)));
@@ -4006,13 +4028,12 @@ public class TrackingService extends Service implements LocationListener {
                         }
                     }
                 }
-                // 首次发现仍保留完整收集窗口，确保群聊成员不会因首个 ACK 而漏发现。
-                long discoveryStartedAt = android.os.SystemClock.elapsedRealtime();
-                try { Thread.sleep(500L); }
-                catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
-                FileLogger.logD("CHAT", "P2P discovery finished peers=" + verifiedChatPeers.size()
-                        + " elapsedMs="
-                        + (android.os.SystemClock.elapsedRealtime() - discoveryStartedAt));
+                // Discovery is deliberately non-blocking: the message send path must not
+                // hold the FIFO transmit lock while waiting for a peer list. During the
+                // bounded first-discovery window, authenticated peer/chat ACKs add recipients
+                // durably and trigger a targeted retry; later devices cannot join that snapshot.
+                FileLogger.logD("CHAT", "P2P discovery broadcast dispatched cachedPeers="
+                        + verifiedChatPeers.size());
             } catch (Exception e) {
                 FileLogger.log(this, "CHAT", "⚠️ P2P 发现失败: " + e.getMessage());
             } finally {
@@ -4351,7 +4372,7 @@ public class TrackingService extends Service implements LocationListener {
                                     new java.net.InetSocketAddress(peerAddress, port));
                             verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
                             latch.countDown();
-                            scheduleLanChatTask("peer-verified-retry", this::retryPendingLanChatMessages, 150L);
+                            scheduleLanChatTask("peer-verified-retry", () -> retryPendingLanChatMessages(true), 150L);
                         });
                     } catch (java.util.concurrent.RejectedExecutionException rejected) {
                         FileLogger.log(this, "CHAT", "⚠️ peer.ack 持久化队列已满，暂不启用单播");
@@ -4747,7 +4768,7 @@ public class TrackingService extends Service implements LocationListener {
                 // 启动/重绑定后主动通告一次本机 LAN peer，唤醒其他节点的离线消息补发。
                 scheduleLanChatTask("listener-peer-beacon", this::broadcastLanPeerHello, 300L);
                 // 初次启动及网络切换重绑定后统一恢复待确认队列；此时 socket 已可用。
-                scheduleLanChatTask("listener-outbox-recovery", this::retryPendingLanChatMessages, 1200L);
+                scheduleLanChatTask("listener-outbox-recovery", () -> retryPendingLanChatMessages(true), 1200L);
 
                 byte[] buffer = new byte[4096];
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
