@@ -242,3 +242,45 @@ def acknowledge_outgoing_message(db_path, sender_scope, message_id, peer_id):
         return False
     finally:
         conn.close()
+
+
+def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10):
+    """Load only unacked messages addressed to a peer whose current LAN lease is valid."""
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        conn.execute("PRAGMA busy_timeout=10000")
+        now = time.time()
+        rows = conn.execute("""SELECT o.message_id,o.sender_peer_id,o.body,o.created_at_ms,
+                    p.endpoint_ip,p.endpoint_port
+            FROM lan_outbox o
+            JOIN lan_outbox_targets t ON t.message_id=o.message_id
+            JOIN lan_peers p ON p.receiver_scope=? AND p.peer_id=t.peer_id
+            WHERE o.sender_scope=? AND t.peer_id=? AND t.status!='acked'
+              AND o.state NOT IN ('delivered','expired') AND p.lease_expires_at>?
+            ORDER BY o.created_at_ms LIMIT ?""",
+            (sender_scope, sender_scope, peer_id, now, max(1, min(50, int(limit))))).fetchall()
+        return [{"message_id": r[0], "sender_peer_id": r[1], "body": r[2],
+                 "created_at_ms": r[3], "endpoint_ip": r[4], "endpoint_port": r[5]}
+                for r in rows]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_port):
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        conn.execute("PRAGMA busy_timeout=10000")
+        cur = conn.execute("""UPDATE lan_outbox_targets SET status='sent',
+            attempt_count=attempt_count+1,last_attempt_at=?,last_endpoint=?,last_error=''
+            WHERE message_id=? AND peer_id=? AND status!='acked'""",
+            (int(time.time() * 1000), str(endpoint_ip) + ":" + str(endpoint_port),
+             message_id, peer_id))
+        conn.commit()
+        return cur.rowcount > 0
+    except Exception:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
