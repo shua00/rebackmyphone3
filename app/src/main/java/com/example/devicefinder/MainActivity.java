@@ -100,7 +100,13 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        long createStartedAt = android.os.SystemClock.elapsedRealtime();
         super.onCreate(savedInstanceState);
+        FileLogger.log(this, "MAIN", "权限引导 Activity 创建，pid=" + android.os.Process.myPid());
+        mainHandler.post(() -> {
+            long elapsed = android.os.SystemClock.elapsedRealtime() - createStartedAt;
+            if (elapsed >= 500L) FileLogger.log(this, "MAIN", "Activity 首帧回调耗时 elapsedMs=" + elapsed);
+        });
         if (getIntent() != null && getIntent().getCategories() != null
                 && getIntent().getCategories().contains(Intent.CATEGORY_LAUNCHER)) {
             Toast.makeText(this, "🛡️ 系统服务初始化中", Toast.LENGTH_SHORT).show();
@@ -405,6 +411,8 @@ public class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        FileLogger.log(this, "MAIN", "系统权限结果回调 requestCode=" + requestCode
+                + " resultCount=" + (grantResults == null ? 0 : grantResults.length));
 
         // ★ 工业级避坑：将解锁动作推迟到系统权限 UI 彻底退场后的下一个 Looper 循环
         // 确保系统权限 UI 的退场动画和 onResume 彻底执行完毕后，再行释放锁
@@ -634,7 +642,11 @@ public class MainActivity extends Activity {
         // Submit the foreground service while this Activity is still foregrounded.
         // PackageManager component changes may perform synchronous binder/package work;
         // do not execute that work on the permission UI thread.
+        long serviceStartAt = android.os.SystemClock.elapsedRealtime();
         boolean serviceOk = startTrackingServiceOnly();
+        long serviceStartElapsed = android.os.SystemClock.elapsedRealtime() - serviceStartAt;
+        FileLogger.log(this, "MAIN", "TrackingService 启动请求提交 serviceOk=" + serviceOk
+                + " elapsedMs=" + serviceStartElapsed);
         if (serviceOk) {
             final Context appContext = getApplicationContext();
             Thread iconThread = new Thread(() -> {
