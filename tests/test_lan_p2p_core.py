@@ -962,6 +962,21 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn('"retry_paused".equals(state) ? "retry_paused" : "pending"', ack)
 
 
+    def test_android_failed_send_preserves_last_valid_ack_endpoint(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        start = store.index("public boolean markAttempt(")
+        end = store.index("public boolean matchesExpectedAckEndpoint(", start)
+        method = store[start:end]
+        self.assertIn("last_endpoint=CASE WHEN ?!='' THEN ? ELSE last_endpoint END", method)
+        self.assertIn('endpoint == null ? "" : endpoint', method)
+        self.assertIn("last_error=?", method)
+        self.assertIn("status!='acked'", method)
+        self.assertNotIn("last_endpoint=?", method)
+
+
     def test_android_peer_and_target_reads_do_not_collapse_database_errors_to_empty(self):
         repo_root = Path(__file__).resolve().parents[1]
         store = (
