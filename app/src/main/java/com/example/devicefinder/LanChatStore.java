@@ -578,7 +578,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     deadline = outbox.getLong(1);
                 }
             } finally { outbox.close(); }
-            if (state.isEmpty()) return false;
+            if (state.isEmpty() || "expired".equals(state)) return false;
 
             ContentValues ackValues = new ContentValues();
             ackValues.put("status", "acked");
