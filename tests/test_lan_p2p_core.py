@@ -1137,7 +1137,7 @@ class LanP2PCoreTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         enqueue_start = store.index("public boolean enqueue(")
-        enqueue_end = store.index("\\n    public ", enqueue_start + 12)
+        enqueue_end = store.index("\n    public ", enqueue_start + 12)
         enqueue = store[enqueue_start:enqueue_end]
         self.assertIn('v.put("delivery_deadline_ms", 0L)', enqueue)
         self.assertNotIn("+ FIRST_DISCOVERY_WINDOW_MS", enqueue)
