@@ -116,6 +116,25 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertEqual(changed_route[1], 0)
         self.assertEqual(changed_route[2], "suspect")
 
+
+
+    def test_unverified_same_endpoint_hello_cannot_extend_verified_peer_lease(self):
+        with patch("lan_p2p_core.time.time", return_value=1000.0):
+            self.assertTrue(record_peer(self.db_path, "server2", "android-a",
+                                        "android", "android-main", "192.168.1.10", 8888, "active"))
+        with patch("lan_p2p_core.time.time", return_value=1110.0):
+            self.assertTrue(record_peer(self.db_path, "server2", "android-a",
+                                        "android", "android-main", "192.168.1.10", 8888, "suspect"))
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT last_seen_at,last_verified_at,lease_expires_at,status FROM lan_peers "
+                "WHERE receiver_scope='server2' AND peer_id='android-a'"
+            ).fetchone()
+        self.assertEqual(row[0], 1110.0)
+        self.assertEqual(row[1], 1000.0)
+        self.assertEqual(row[2], 1120.0)
+        self.assertEqual(row[3], "active")
+
     def test_same_peer_has_independent_service_scopes(self):
         self.assertTrue(record_peer(self.db_path, "server2", "android-a",
                                     "android", "android-main", "192.168.1.10", 8888, "suspect"))

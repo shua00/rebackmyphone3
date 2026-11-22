@@ -45,7 +45,9 @@ def record_peer(db_path, receiver_scope, peer_id, peer_type, service_id,
                              (lan_peers.endpoint_ip!=excluded.endpoint_ip OR
                               lan_peers.endpoint_port!=excluded.endpoint_port) THEN 0
                         ELSE lan_peers.last_verified_at END,
-                    lease_expires_at=excluded.lease_expires_at,
+                    lease_expires_at=CASE
+                        WHEN excluded.status='active' THEN excluded.lease_expires_at
+                        ELSE lan_peers.lease_expires_at END,
                     status=CASE
                         WHEN excluded.status='suspect' AND
                              (lan_peers.endpoint_ip!=excluded.endpoint_ip OR
