@@ -3685,8 +3685,8 @@ public class TrackingService extends Service implements LocationListener {
             for (LanChatStore.PendingMessage item : pending) {
                 if (item.retryAttempts < 3) minimumAttempts = Math.min(minimumAttempts, item.retryAttempts);
             }
-            if (minimumAttempts == Integer.MAX_VALUE || minimumAttempts <= 0) return;
-            final long delayMs = minimumAttempts == 1 ? 1_500L : 4_000L;
+            if (minimumAttempts == Integer.MAX_VALUE) return;
+            final long delayMs = minimumAttempts <= 1 ? 1_500L : 4_000L;
             if (!lanChatRetryWakeScheduled.compareAndSet(false, true)) return;
             boolean posted = handler.postDelayed(() -> {
                 lanChatRetryWakeScheduled.set(false);
