@@ -4080,7 +4080,6 @@ public class TrackingService extends Service implements LocationListener {
         FileLogger.log(this, "CHAT", "⏱️ P2P UDP 开始发送，固定目标 " + totalPeerCount
                 + "，当前可达路由 " + reachablePeerCount + "，消息 " + messageId);
         long ackLoopStartedAt = android.os.SystemClock.elapsedRealtime();
-        int ackRounds = 0;
         boolean ackCleanupDeferred = false;
         try {
             if (totalPeerCount == 0 && !socket.isClosed()) {
@@ -4098,10 +4097,8 @@ public class TrackingService extends Service implements LocationListener {
                         }
                     }
                 }
-                ackRounds = 1;
             } else if (reachablePeerCount > 0) {
                 for (int attempt = 1; attempt <= 1 && ack.getCount() > 0; attempt++) {
-                    ackRounds = attempt;
                     if (socket.isClosed()) break;
                     for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
                         java.net.InetSocketAddress peer = verifiedChatPeers.get(peerId);
@@ -4175,7 +4172,9 @@ public class TrackingService extends Service implements LocationListener {
             int totalPeerCount, int reachablePeerCount,
             LanChatStore store, long ackStartedAt) {
         long elapsed = android.os.SystemClock.elapsedRealtime() - ackStartedAt;
-        int deliveredPeers = reachablePeerCount - (int) ack.getCount();
+        int deliveredPeers = totalPeerCount == 0
+                ? (ack.getCount() == 0 ? 1 : 0)
+                : reachablePeerCount - (int) ack.getCount();
         if (totalPeerCount == 0) {
             if (ack.getCount() == 0) {
                 lastPeerDiscoveryAt = 0L;
@@ -4466,7 +4465,7 @@ private void sendLanUdpPacket(DatagramSocket socket, DatagramPacket packet, Stri
                         boolean persistedAck = store != null && store.acknowledge(messageId, senderId);
                         if (persistedAck) {
                             if (routeMatches) verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
-                            if (latch != null) latch.countDown();
+                            if (latch != null && (wasExpected || discoveryAck)) latch.countDown();
                             if (store.allTargetsAcked(messageId)) {
                                 removePendingLanChat(messageId);
                                 FileLogger.log(this, "CHAT", "P2P 最终 ACK 已落账并回收兼容队列 message="
