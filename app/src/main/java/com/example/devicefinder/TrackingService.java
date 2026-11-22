@@ -4420,6 +4420,14 @@ public class TrackingService extends Service implements LocationListener {
                             if (persistedAck) {
                                 if (routeMatches) verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
                                 if (latch != null) latch.countDown();
+                                // The final ACK can commit after the sender's short latch wait has
+                                // already returned. Reconcile the legacy queue mirror here as well,
+                                // otherwise completed rows can occupy the 50-item compatibility queue.
+                                if (store.allTargetsAcked(messageId)) {
+                                    removePendingLanChat(messageId);
+                                    FileLogger.log(this, "CHAT", "P2P 最终 ACK 已落账并回收兼容队列 message="
+                                            + messageId + " peer=" + senderId);
+                                }
                             } else if (wasExpected && expected != null) {
                                 expected.add(senderId);
                                 FileLogger.log(this, "CHAT", "⚠️ v2 ACK 账本写入失败，等待重试: " + senderId);
