@@ -128,6 +128,9 @@ public class ChatActivity extends Activity {
         String msg = inputMsg.getText().toString().trim();
         if (!msg.isEmpty()) {
             inputMsg.setText("");
+            // The send button may take focus away from the editor. Restore it immediately
+            // so an already-visible IME can accept the next message without another tap.
+            inputMsg.requestFocus();
 
             // 【新增】拦截暗号清空指令
             if ("/clear".equalsIgnoreCase(msg)) {
