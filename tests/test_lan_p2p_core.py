@@ -869,5 +869,28 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("拒绝发送以免误投", tx)
         self.assertIn("return;", tx)
 
+
+    def test_android_expired_empty_discovery_window_never_broadcasts_old_message_to_late_peers(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        tracking = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+
+        start = store.index("public boolean isDiscoveryPending(String messageId)")
+        end = store.index("\n    /** Add a newly discovered peer", start)
+        discovery = store[start:end]
+        self.assertIn("delivery_deadline_ms>=?", discovery)
+        self.assertIn("System.currentTimeMillis()", discovery)
+
+        tx_start = tracking.index("final int totalPeerCount = pendingTargetIds.size()")
+        tx_end = tracking.index("java.util.concurrent.CountDownLatch ack", tx_start)
+        send_guard = tracking[tx_start:tx_end]
+        self.assertIn("firstDiscoveryWindowOpen = store.isDiscoveryPending(messageId)", send_guard)
+        self.assertIn("totalPeerCount == 0 && !firstDiscoveryWindowOpen", send_guard)
+        self.assertIn("禁止向晚加入设备广播旧消息", send_guard)
+
 if __name__ == "__main__":
     unittest.main()
