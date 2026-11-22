@@ -309,7 +309,7 @@ public class TrackingService extends Service implements LocationListener {
             lastPeerRouteGeneration = generation;
             if (previous >= 0L && generation >= 0L && generation != previous) {
                 invalidateVerifiedChatPeers(reason + " (network generation " + previous + " -> " + generation + ")");
-                handler.postDelayed(this::broadcastLanPeerHello, 1200L);
+                scheduleLanChatTask("network-peer-beacon", this::broadcastLanPeerHello, 1200L);
             } else {
                 FileLogger.logD("CHAT", "LAN P2P 保留已验证 peer：网络路径未变化，generation=" + generation + "，回调=" + reason);
             }
@@ -446,6 +446,37 @@ public class TrackingService extends Service implements LocationListener {
                     },
                     new ThreadPoolExecutor.AbortPolicy()
             );
+
+    // P2P retry/deadline timers must not depend on main-Looper responsiveness.
+    private final java.util.concurrent.ScheduledExecutorService lanChatScheduler =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "LanChat-Scheduler");
+                thread.setPriority(Thread.NORM_PRIORITY);
+                return thread;
+            });
+    private final java.util.concurrent.atomic.AtomicBoolean rescueListenerRetryScheduled =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    private boolean scheduleLanChatTask(String taskName, Runnable task, long delayMs) {
+        if (serviceDestroyed || task == null) return false;
+        try {
+            lanChatScheduler.schedule(() -> {
+                if (serviceDestroyed) return;
+                try {
+                    task.run();
+                } catch (Exception e) {
+                    FileLogger.log(this, "CHAT", "LAN 调度任务失败 task=" + taskName
+                            + " error=" + e.getClass().getSimpleName());
+                }
+            }, Math.max(0L, delayMs), TimeUnit.MILLISECONDS);
+            return true;
+        } catch (java.util.concurrent.RejectedExecutionException rejected) {
+            if (!serviceDestroyed) {
+                FileLogger.log(this, "CHAT", "LAN 调度器拒绝任务 task=" + taskName);
+            }
+            return false;
+        }
+    }
 
     // Serialize service maintenance work away from the UI thread. Multiple system
     // wake sources (JobScheduler/accessibility/alarm) are coalesced by selfHealInFlight.
@@ -3539,18 +3570,18 @@ public class TrackingService extends Service implements LocationListener {
         }
 
         if (alreadyListening) {
-            // 进队前强行清空 MessageQueue 中所有积压的同类重试任务
-            handler.removeMessages(MSG_RETRY_RESCUE_LISTENER);
-
-            Message msg = Message.obtain(handler, () -> {
-                boolean still;
-                synchronized (rescueLock) {
-                    still = isListeningForRescue;
-                }
-                if (!still && !serviceDestroyed) startRescueListener();
-            });
-            msg.what = MSG_RETRY_RESCUE_LISTENER;
-            handler.sendMessageDelayed(msg, 8000);
+            // Coalesce listener recovery on the LAN scheduler, not the main Looper.
+            if (rescueListenerRetryScheduled.compareAndSet(false, true)) {
+                boolean scheduled = scheduleLanChatTask("rescue-listener-retry", () -> {
+                    rescueListenerRetryScheduled.set(false);
+                    boolean still;
+                    synchronized (rescueLock) {
+                        still = isListeningForRescue;
+                    }
+                    if (!still && !serviceDestroyed) startRescueListener();
+                }, 8000L);
+                if (!scheduled) rescueListenerRetryScheduled.set(false);
+            }
             return;
         }
         startRescueListener();
@@ -3617,8 +3648,7 @@ public class TrackingService extends Service implements LocationListener {
                 }
                 // Close the first-discovery window after its fixed deadline without forcing
                 // another network send. All ACKed targets are reclaimed; partial targets stay pending.
-                handler.postDelayed(() -> {
-                    if (serviceDestroyed) return;
+                scheduleLanChatTask("discovery-window-close", () -> {
                     try {
                         lanChatSendExecutor.execute(() -> removePendingLanChat(messageId));
                     } catch (java.util.concurrent.RejectedExecutionException ignored) {
@@ -3826,11 +3856,11 @@ public class TrackingService extends Service implements LocationListener {
             if (minimumAttempts == Integer.MAX_VALUE) return;
             final long delayMs = minimumAttempts <= 1 ? 1_500L : 4_000L;
             if (!lanChatRetryWakeScheduled.compareAndSet(false, true)) return;
-            boolean posted = handler.postDelayed(() -> {
+            boolean scheduled = scheduleLanChatTask("outbox-retry", () -> {
                 lanChatRetryWakeScheduled.set(false);
                 retryPendingLanChatMessages();
             }, delayMs);
-            if (!posted) lanChatRetryWakeScheduled.set(false);
+            if (!scheduled) lanChatRetryWakeScheduled.set(false);
         } catch (Exception e) {
             FileLogger.log(this, "CHAT", "⚠️ 无法安排 LAN 持久化补发: " + e.getClass().getSimpleName());
         }
@@ -3917,7 +3947,7 @@ public class TrackingService extends Service implements LocationListener {
             String nonce = java.util.UUID.randomUUID().toString();
             java.util.concurrent.CountDownLatch peerLatch = new java.util.concurrent.CountDownLatch(1);
             pendingPeerChallenges.put(nonce, peerLatch);
-            handler.postDelayed(() -> {
+            scheduleLanChatTask("peer-discovery-timeout", () -> {
                 if (pendingPeerChallenges.get(nonce) == peerLatch) {
                     clearPendingPeerChallenge(nonce);
                 }
@@ -4162,7 +4192,7 @@ public class TrackingService extends Service implements LocationListener {
             FileLogger.log(this, "CHAT", "LAN peer beacon creation failed: " + e.getClass().getSimpleName());
             return;
         }
-        handler.postDelayed(() -> {
+        scheduleLanChatTask("peer-challenge-timeout", () -> {
             if (pendingPeerChallenges.get(nonce) == challengeLatch) {
                 clearPendingPeerChallenge(nonce);
             }
@@ -4287,7 +4317,7 @@ public class TrackingService extends Service implements LocationListener {
                                     new java.net.InetSocketAddress(peerAddress, port));
                             verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
                             latch.countDown();
-                            handler.postDelayed(this::retryPendingLanChatMessages, 150L);
+                            scheduleLanChatTask("peer-verified-retry", this::retryPendingLanChatMessages, 150L);
                         });
                     } catch (java.util.concurrent.RejectedExecutionException rejected) {
                         FileLogger.log(this, "CHAT", "⚠️ peer.ack 持久化队列已满，暂不启用单播");
@@ -4681,9 +4711,9 @@ public class TrackingService extends Service implements LocationListener {
                 udpBindFailCount = 0;
                 FileLogger.log(this, "UDP", "✅ 监听已绑定 8888");
                 // 启动/重绑定后主动通告一次本机 LAN peer，唤醒其他节点的离线消息补发。
-                handler.postDelayed(this::broadcastLanPeerHello, 300L);
+                scheduleLanChatTask("listener-peer-beacon", this::broadcastLanPeerHello, 300L);
                 // 初次启动及网络切换重绑定后统一恢复待确认队列；此时 socket 已可用。
-                handler.postDelayed(this::retryPendingLanChatMessages, 1200L);
+                scheduleLanChatTask("listener-outbox-recovery", this::retryPendingLanChatMessages, 1200L);
 
                 byte[] buffer = new byte[4096];
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
@@ -5534,6 +5564,7 @@ public class TrackingService extends Service implements LocationListener {
         if (reportExecutor != null) reportExecutor.shutdown();
         if (lanChatSendExecutor != null) lanChatSendExecutor.shutdown();
         if (lanChatIoExecutor != null) lanChatIoExecutor.shutdown();
+        if (lanChatScheduler != null) lanChatScheduler.shutdownNow();
         if (maintenanceExecutor != null) maintenanceExecutor.shutdownNow();
         if (lanChatStore != null) { try { lanChatStore.closeStore(); } catch (Exception ignored) {} lanChatStore = null; }
         if (rescueSocketRef != null) {
