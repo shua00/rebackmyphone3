@@ -369,7 +369,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
         try {
             c = getReadableDatabase().rawQuery(
                     "SELECT message_id,sender_peer_id,body,created_at_ms,state,retry_attempt_count FROM lan_outbox " +
-                    "WHERE state NOT IN ('delivered','expired') ORDER BY created_at_ms LIMIT ?",
+                    "WHERE state NOT IN ('delivered','expired') ORDER BY retry_attempt_count,created_at_ms LIMIT ?",
                     new String[]{String.valueOf(Math.max(1, Math.min(50, limit)))});
             while (c.moveToNext()) result.add(new PendingMessage(
                     c.getString(0), c.getString(1), c.getString(2), c.getLong(3),
@@ -388,10 +388,17 @@ public final class LanChatStore extends SQLiteOpenHelper {
         Cursor c = null;
         try {
             long now = System.currentTimeMillis();
-            int changed = db.compileStatement(
+            android.database.sqlite.SQLiteStatement update = db.compileStatement(
                     "UPDATE lan_outbox SET retry_attempt_count=retry_attempt_count+1,last_retry_at_ms=? " +
-                    "WHERE message_id=? AND state NOT IN ('delivered','expired')")
-                    .executeUpdateDelete();
+                    "WHERE message_id=? AND state NOT IN ('delivered','expired')");
+            int changed;
+            try {
+                update.bindLong(1, now);
+                update.bindString(2, messageId);
+                changed = update.executeUpdateDelete();
+            } finally {
+                update.close();
+            }
             if (changed != 1) return -1;
             c = db.rawQuery("SELECT retry_attempt_count FROM lan_outbox WHERE message_id=?",
                     new String[]{messageId});
