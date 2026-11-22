@@ -17,7 +17,7 @@ import java.util.List;
  */
 public final class LanChatStore extends SQLiteOpenHelper {
     private static final String DB_NAME = "lan_p2p_delivery.db";
-    private static final int DB_VERSION = 3;
+    private static final int DB_VERSION = 4;
     public static final int MAX_PENDING_MESSAGES = 50;
 
     public static final class PendingMessage {
@@ -26,13 +26,15 @@ public final class LanChatStore extends SQLiteOpenHelper {
         public final String body;
         public final long createdAtMs;
         public final String state;
+        public final int retryAttempts;
 
-        PendingMessage(String id, String sender, String body, long created, String state) {
+        PendingMessage(String id, String sender, String body, long created, String state, int retryAttempts) {
             this.messageId = id;
             this.senderPeerId = sender;
             this.body = body;
             this.createdAtMs = created;
             this.state = state;
+            this.retryAttempts = retryAttempts;
         }
     }
 
@@ -82,7 +84,9 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 "created_at_ms INTEGER NOT NULL," +
                 "protocol_version INTEGER NOT NULL DEFAULT 2," +
                 "state TEXT NOT NULL DEFAULT 'discovery_pending'," +
-                "delivery_deadline_ms INTEGER NOT NULL DEFAULT 0)");
+                "delivery_deadline_ms INTEGER NOT NULL DEFAULT 0," +
+                "retry_attempt_count INTEGER NOT NULL DEFAULT 0," +
+                "last_retry_at_ms INTEGER NOT NULL DEFAULT 0)");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_lan_outbox_state ON lan_outbox(state, created_at_ms)");
 
         db.execSQL("CREATE TABLE IF NOT EXISTS lan_outbox_targets (" +
@@ -152,6 +156,14 @@ public final class LanChatStore extends SQLiteOpenHelper {
             // Rows that existed before v3 already passed through the old history path.
             // Mark them as displayed so an upgrade never replays historical messages.
             db.execSQL("UPDATE lan_inbox SET displayed=1");
+        }
+        if (oldVersion < 4) {
+            if (!hasColumn(db, "lan_outbox", "retry_attempt_count")) {
+                db.execSQL("ALTER TABLE lan_outbox ADD COLUMN retry_attempt_count INTEGER NOT NULL DEFAULT 0");
+            }
+            if (!hasColumn(db, "lan_outbox", "last_retry_at_ms")) {
+                db.execSQL("ALTER TABLE lan_outbox ADD COLUMN last_retry_at_ms INTEGER NOT NULL DEFAULT 0");
+            }
         }
     }
 
@@ -356,14 +368,42 @@ public final class LanChatStore extends SQLiteOpenHelper {
         Cursor c = null;
         try {
             c = getReadableDatabase().rawQuery(
-                    "SELECT message_id,sender_peer_id,body,created_at_ms,state FROM lan_outbox " +
+                    "SELECT message_id,sender_peer_id,body,created_at_ms,state,retry_attempt_count FROM lan_outbox " +
                     "WHERE state NOT IN ('delivered','expired') ORDER BY created_at_ms LIMIT ?",
                     new String[]{String.valueOf(Math.max(1, Math.min(50, limit)))});
             while (c.moveToNext()) result.add(new PendingMessage(
-                    c.getString(0), c.getString(1), c.getString(2), c.getLong(3), c.getString(4)));
+                    c.getString(0), c.getString(1), c.getString(2), c.getLong(3),
+                    c.getString(4), c.getInt(5)));
             return result;
         } finally {
             if (c != null) c.close();
+        }
+    }
+
+    /** Persist one bounded delivery attempt for this message before network I/O. */
+    public int recordOutboxAttempt(String messageId) {
+        if (messageId == null || messageId.length() == 0) return -1;
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        Cursor c = null;
+        try {
+            long now = System.currentTimeMillis();
+            android.content.ContentValues values = new android.content.ContentValues();
+            values.put("last_retry_at_ms", now);
+            int changed = db.execSQL("UPDATE lan_outbox SET retry_attempt_count=retry_attempt_count+1," +
+                    "last_retry_at_ms=? WHERE message_id=? AND state NOT IN ('delivered','expired')",
+                    new Object[]{now, messageId}) == null ? 1 : 1;
+            c = db.rawQuery("SELECT retry_attempt_count FROM lan_outbox WHERE message_id=?",
+                    new String[]{messageId});
+            if (!c.moveToFirst()) return -1;
+            int attempts = c.getInt(0);
+            db.setTransactionSuccessful();
+            return attempts;
+        } catch (Exception e) {
+            return -1;
+        } finally {
+            if (c != null) c.close();
+            db.endTransaction();
         }
     }
 
