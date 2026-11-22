@@ -928,5 +928,72 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("send_server2_v2_chat_from_outbox(cmd_prefix, target_devs)", web_chat)
         self.assertNotIn("smart_send(cmd_prefix)", web_chat)
 
+
+    def test_android_service_first_startup_work_runs_off_main_looper(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        start = source.index("public void onCreate()")
+        end = source.index("private void startWatchdog()", start)
+        startup = source[start:end]
+
+        # Foreground promotion remains synchronous to satisfy Android's FGS deadline.
+        self.assertIn("startForegroundNotification();", startup)
+        worker_start = startup.index('new Thread(() ->')
+        self.assertGreater(worker_start, startup.index("startForegroundNotification();"))
+        worker = startup[worker_start:]
+        for operation in (
+            "logStartupSelfCheck();",
+            "handleIconVisibility(true);",
+            "triggerRescueListener();",
+            "requestSingleLocationAndReport();",
+            "registerNetworkCallback();",
+            "startLocationUpdates();",
+            "registerBatteryMonitor();",
+            "KeepAliveJobService.scheduleJob(this);",
+        ):
+            self.assertIn(operation, worker)
+        self.assertNotIn("handler.post(() -> {\\n            FileLogger.log(this, \"SERVICE\", \"🚀 追踪服务已启动", startup)
+
+    def test_android_location_callbacks_stay_on_main_looper_after_worker_registration(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        start = source.index("private void startLocationUpdates()")
+        end = source.index("public void onLocationChanged(Location location)", start)
+        method = source[start:end]
+        self.assertIn("LocationManager.GPS_PROVIDER, minTime, 0f, this, Looper.getMainLooper()", method)
+        self.assertIn("LocationManager.FUSED_PROVIDER, minTime, 0f, this, Looper.getMainLooper()", method)
+        self.assertIn("LocationManager.NETWORK_PROVIDER, minTime, 0f, this, Looper.getMainLooper()", method)
+
+    def test_android_permission_finish_does_not_change_launcher_component_on_ui_thread(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/MainActivity.java"
+        ).read_text(encoding="utf-8")
+        start = source.index("private void finishWithToast(String msg, int duration)")
+        end = source.index("\n}", start)
+        finish = source[start:end]
+        self.assertIn("startTrackingServiceOnly();", finish)
+        self.assertIn('new Thread(() -> {', finish)
+        self.assertIn("LauncherIconUtils.setLauncherIconVisible(appContext, false)", finish)
+        self.assertNotIn("hideLauncherIcon();", finish)
+
+    def test_android_system_wake_self_heal_is_dispatched_to_maintenance_executor(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        start = source.index("public int onStartCommand(Intent intent, int flags, int startId)")
+        end = source.index("private void logWakeSource(Intent intent)", start)
+        method = source[start:end]
+        self.assertIn('scheduleSelfHeal("job");', method)
+        self.assertIn('scheduleSelfHeal("accessibility");', method)
+        self.assertIn('scheduleSelfHeal("component");', method)
+        self.assertIn('executeMaintenance("keep-alive"', method)
+        self.assertNotIn('selfHeal();\\n            } else if ("ACTION_JOB_WAKE_UP"', method)
+
 if __name__ == "__main__":
     unittest.main()
