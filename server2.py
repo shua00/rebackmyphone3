@@ -59,7 +59,7 @@ from urllib.parse import urlparse, parse_qs
 # ★ 新增ThreadPoolExecutor 补丁： 2026-11-05 13:50
 from concurrent.futures import ThreadPoolExecutor
 
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, peer_endpoint_matches, list_known_peer_snapshot, encode_chat_http_fallback_payload, decode_chat_http_fallback_payload, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, add_discovery_targets_for_peer, validate_incoming_message_claim, is_outgoing_discovery_pending
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, peer_endpoint_matches, list_known_peer_snapshot, encode_chat_http_fallback_payload, decode_chat_http_fallback_payload, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, add_discovery_targets_for_peer, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries
 UDP_LISTEN_PORT = 8887  # server2 独立监听端口；发往 Android 的指令仍使用 8888
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "server2")
 
@@ -1430,6 +1430,43 @@ def send_udp_chat_from_listener(command_str, target_ip):
         return 0
 
 
+def send_server2_v2_chat_from_outbox(command_str, fixed_target_ids):
+    """Send server2 web chat only to its persisted fixed targets; broadcast only for an empty open discovery set."""
+    sock = UDP_LISTENER_SOCKET
+    if sock is None or sock.fileno() < 0:
+        return 0
+    try:
+        raw = command_str.encode("utf-8")
+        envelope = decode_packet(raw, RESCUE_SECRET)
+        message_id = str(envelope.get("message_id") or "")
+        if not message_id or envelope.get("type") != "chat.message":
+            return 0
+
+        # A non-empty snapshot is immutable: offline members wait for a verified
+        # route to return, and are never replaced by devices joining later.
+        if fixed_target_ids:
+            return send_outbox_to_active_peers(
+                sock, CHAT_DEDUP_DB, "server2", message_id, envelope, RESCUE_SECRET,
+                send_lock=UDP_CHAT_SEND_LOCK, attempts=3, retry_delay_seconds=0.25)
+
+        # No known recipients at message creation: bounded broadcast is permitted
+        # only while the original first-discovery window remains open.
+        if not is_outgoing_discovery_pending(CHAT_DEDUP_DB, "server2", message_id):
+            with print_lock:
+                print(f"ℹ️ server2 chat discovery window closed; suppress late-peer broadcast: {message_id}")
+            return 0
+        subnet = get_subnet_broadcast()
+        destinations = [(ip, UDP_DEVICE_PORT) for ip in dict.fromkeys(
+            [subnet, "255.255.255.255"])]
+        return send_broadcast_packet_with_retries(
+            sock, raw, destinations, send_lock=UDP_CHAT_SEND_LOCK,
+            attempts=3, retry_delay_seconds=0.25)
+    except Exception as e:
+        with print_lock:
+            print(f"⚠️ server2 v2 chat send retained in Outbox: {type(e).__name__}")
+        return 0
+
+
 def udp_listener():
     global UDP_LISTENING, UDP_LISTENER_SOCKET
     while True:
@@ -2661,8 +2698,11 @@ def handle_client(client_conn, client_addr):
                                 print(f"⚠️ Web chat HTTP fallback queue rejected for {dev_id}")
 
                     # Queue fallback before UDP send so a fast stored ACK can cancel that exact row.
+                    # Do not route chat through generic smart_send(): its broadcast fallback
+                    # could expose an old fixed-recipient message to a late-joining device.
                     for cmd_prefix in chat_packets:
-                        if smart_send(cmd_prefix):
+                        sent = send_server2_v2_chat_from_outbox(cmd_prefix, target_devs)
+                        if sent > 0:
                             success = True
                     if fallback_queued:
                         success = True
