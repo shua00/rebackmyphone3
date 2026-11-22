@@ -257,6 +257,9 @@ public class TrackingService extends Service implements LocationListener {
             new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, Long> receivedChatMessageIds =
             new java.util.concurrent.ConcurrentHashMap<>();
+    // LAN 对讲先持久化消息正文与消息 ID，再发 ACK；防止进程在 ACK 后、历史写入前退出。
+    private final Object lanChatReceiveLock = new Object();
+    private static final String PREF_LAN_CHAT_RECEIVED_IDS = "lan_chat_received_message_ids";
     // 本地 LAN 聊天待确认队列：SharedPreferences 同步 commit，最多保留 50 条。
     private static final String PREF_LAN_CHAT_QUEUE = "lan_p2p_pending_messages";
     private static final int LAN_CHAT_QUEUE_MAX = 50;
@@ -3701,27 +3704,18 @@ public class TrackingService extends Service implements LocationListener {
                     String senderId = chatParts[2].trim();
                     String messageId = chatParts[3].trim();
                     String content = chatParts[4].trim();
-                    // 本机广播回环不回 ACK、不入库；有效远端消息先立即 ACK。
+                    // 本机广播回环不回 ACK；先把消息和去重 ID 原子落盘，成功后才确认发送端。
                     if (senderId.isEmpty() || senderId.equals(getUniqueDeviceId())) {
                         FileLogger.logD("CHAT", "忽略本机/空 sender 的 LAN 回环消息: " + messageId);
                         return true;
                     }
-                    sendChatAck(socket, packet.getAddress(), packet.getPort(), messageId);
-                    long now = System.currentTimeMillis();
-                    Long previous = receivedChatMessageIds.putIfAbsent(senderId + ":" + messageId, now);
-                    if (previous == null) {
+                    if (persistIncomingLanChat(senderId, messageId, content)) {
+                        receivedChatMessageIds.put(senderId + ":" + messageId, System.currentTimeMillis());
                         if (receivedChatMessageIds.size() > 500) {
-                            long cutoff = now - 10 * 60 * 1000L;
+                            long cutoff = System.currentTimeMillis() - 10 * 60 * 1000L;
                             receivedChatMessageIds.entrySet().removeIf(e -> e.getValue() < cutoff);
                         }
-                        String dk = buildDedupKey("chat_msg", senderId + ":" + messageId, null);
-                        if (!isRecentlyExecuted(dk)) {
-                            final String incomingSenderId = senderId;
-                            final String incomingContent = content;
-                            handler.post(() -> {
-                                if (!serviceDestroyed) handleIncomingChat(incomingSenderId, incomingContent);
-                            });
-                        }
+                        sendChatAck(socket, packet.getAddress(), packet.getPort(), messageId);
                     }
                 }
                 return true;
@@ -3862,6 +3856,87 @@ public class TrackingService extends Service implements LocationListener {
         saveChatToHistory("[" + shortName + "] " + msgContent);
         FileLogger.log(this, "CHAT", "收到来自 " + shortName + " 的 LAN 聊天消息（正文不写入日志）");
         notifyChatUi();
+    }
+
+    /**
+     * LAN 对讲可靠接收：聊天历史与 messageId 去重记录在同一次 SharedPreferences commit 中落盘。
+     * 返回 true 表示消息已保存或已确认是重复包，可以安全 ACK；落盘失败返回 false，不 ACK 让发送端重试。
+     */
+    private boolean persistIncomingLanChat(String senderId, String messageId, String msgContent) {
+        if (senderId == null || senderId.isEmpty() || messageId == null || messageId.isEmpty()) return false;
+        boolean historyChanged = false;
+        String shortName = senderId;
+        if (shortName.contains("_")) shortName = shortName.substring(0, shortName.lastIndexOf("_"));
+        synchronized (lanChatReceiveLock) {
+            try {
+                SharedPreferences sp = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
+                String stableId = senderId + ":" + messageId;
+                org.json.JSONArray ids = new org.json.JSONArray(
+                        sp.getString(PREF_LAN_CHAT_RECEIVED_IDS, "[]"));
+                for (int i = 0; i < ids.length(); i++) {
+                    if (stableId.equals(ids.optString(i, ""))) return true;
+                }
+
+                long now = System.currentTimeMillis();
+                String dedupKey = senderId + ":" + msgContent;
+                boolean suppressSameContent = dedupKey.equals(lastReceivedMsg)
+                        && now - lastReceivedMsgTime < 3000L;
+                String history = sp.getString("chat_history", "");
+                String updatedHistory = history;
+                if (!suppressSameContent) {
+                    String timeStr = new java.text.SimpleDateFormat(
+                            "HH:mm", java.util.Locale.getDefault()).format(new java.util.Date(now));
+                    String newRecord = timeStr + " | [" + shortName + "] " + msgContent;
+                    updatedHistory = history.isEmpty() ? newRecord : history + "\n" + newRecord;
+                    String[] records = updatedHistory.split("\n");
+                    if (records.length > 100) {
+                        StringBuilder trimmed = new StringBuilder();
+                        for (int i = records.length - 100; i < records.length; i++) {
+                            if (trimmed.length() > 0) trimmed.append("\n");
+                            trimmed.append(records[i]);
+                        }
+                        updatedHistory = trimmed.toString();
+                    }
+                    historyChanged = true;
+                }
+
+                ids.put(stableId);
+                while (ids.length() > 500) {
+                    org.json.JSONArray trimmedIds = new org.json.JSONArray();
+                    for (int i = ids.length() - 500; i < ids.length(); i++) {
+                        trimmedIds.put(ids.optString(i, ""));
+                    }
+                    ids = trimmedIds;
+                }
+                android.content.SharedPreferences.Editor editor = sp.edit()
+                        .putString(PREF_LAN_CHAT_RECEIVED_IDS, ids.toString());
+                if (historyChanged) editor.putString("chat_history", updatedHistory);
+                long persistStarted = android.os.SystemClock.elapsedRealtime();
+                if (!editor.commit()) {
+                    FileLogger.log(this, "CHAT", "⚠️ LAN 对讲落盘失败，不发送 ACK，等待发送端重试");
+                    return false;
+                }
+                if (!suppressSameContent) {
+                    lastReceivedMsg = dedupKey;
+                    lastReceivedMsgTime = now;
+                }
+                long persistMs = android.os.SystemClock.elapsedRealtime() - persistStarted;
+                if (persistMs >= 100L) {
+                    FileLogger.logD("CHAT", "LAN chat durable commit elapsedMs=" + persistMs);
+                }
+            } catch (Exception e) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN 对讲持久化异常，不发送 ACK: "
+                        + e.getClass().getSimpleName());
+                return false;
+            }
+        }
+        if (historyChanged) {
+            FileLogger.log(this, "CHAT", "收到来自 " + shortName + " 的 LAN 聊天消息（正文不写入日志）");
+            handler.post(() -> {
+                if (!serviceDestroyed) notifyChatUi();
+            });
+        }
+        return true;
     }
 
     private void startRescueListener() {
