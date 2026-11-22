@@ -508,7 +508,7 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
     display_sender = str(envelope.get("display_name") or sender)
     if packet_type == "peer.hello":
         record_peer(_CHAT_DEDUP_DB, "rescue2", sender, envelope.get("sender_peer_type", "unknown"),
-                    envelope.get("service_id", ""), addr[0], 8888, "suspect")
+                    envelope.get("service_id", ""), addr[0], addr[1], "suspect")
         reply = {"type": "peer.ack", "sender_peer_id": PEER_NODE_ID,
                  "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
                  "reply_nonce": envelope.get("nonce", ""), "listen_port": UDP_PORT}
@@ -521,8 +521,8 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
                            "created_at_ms": pending["created_at_ms"],
                            "display_name": "PC_Terminal", "body": pending["body"]}
             try:
-                sock.sendto(encode_packet(chat_packet, RESCUE_SECRET), (addr[0], 8888))
-                mark_outgoing_attempt(_CHAT_DEDUP_DB, pending["message_id"], sender, addr[0], 8888)
+                sock.sendto(encode_packet(chat_packet, RESCUE_SECRET), (addr[0], addr[1]))
+                mark_outgoing_attempt(_CHAT_DEDUP_DB, pending["message_id"], sender, addr[0], addr[1])
             except Exception:
                 pass
         return
@@ -548,7 +548,7 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
     if claim_result is None:
         return
     record_peer(_CHAT_DEDUP_DB, "rescue2", sender, envelope.get("sender_peer_type", "unknown"),
-                envelope.get("service_id", ""), addr[0], 8888, "active")
+                envelope.get("service_id", ""), addr[0], addr[1], "active")
     ack_packet = {"type": "chat.ack", "sender_peer_id": PEER_NODE_ID,
                   "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
                   "target_peer_id": sender, "message_id": message_id, "status": "stored"}
@@ -598,9 +598,9 @@ def send_chat_v2(body, target_ips):
                     packet = dict(probe)
                     packet["target_peer_id"] = peer["peer_id"]
                     raw = encode_packet(packet, RESCUE_SECRET)
-                    sock.sendto(raw, (peer["endpoint_ip"], 8888))
+                    sock.sendto(raw, (peer["endpoint_ip"], peer["endpoint_port"]))
                     mark_outgoing_attempt(_CHAT_DEDUP_DB, message_id, peer["peer_id"],
-                                          peer["endpoint_ip"], 8888)
+                                          peer["endpoint_ip"], peer["endpoint_port"])
             else:
                 for ip in selected_ips:
                     sock.sendto(broadcast_bytes, (ip, UDP_DEVICE_PORT))
@@ -634,7 +634,7 @@ def udp_listener():
                 if msg.startswith("FIND_ME_PEER_HELLO:"):
                     parts = msg.split(":", 3)
                     if len(parts) == 4 and parts[1] == RESCUE_SECRET:
-                        record_peer(_CHAT_DEDUP_DB, "rescue2", parts[2], "android", "android-main", addr[0], 8888, "suspect")
+                        record_peer(_CHAT_DEDUP_DB, "rescue2", parts[2], "android", "android-main", addr[0], addr[1], "suspect")
                         response = f"FIND_ME_PEER_ACK:{RESCUE_SECRET}:{parts[3]}:{PEER_NODE_ID}".encode("utf-8")
                         try: sock.sendto(response, addr)
                         except OSError: pass
@@ -652,7 +652,7 @@ def udp_listener():
                             continue
                         claim_result = _claim_chat_message(sender, message_id, content)
                         if claim_result is not None:
-                            record_peer(_CHAT_DEDUP_DB, "rescue2", sender, "android", "android-main", addr[0], 8888, "active")
+                            record_peer(_CHAT_DEDUP_DB, "rescue2", sender, "android", "android-main", addr[0], addr[1], "active")
                         if claim_result is None:
                             continue  # 持久化失败：不 ACK，允许发送端重试
                         if message_id:
