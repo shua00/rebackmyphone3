@@ -1286,6 +1286,20 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("activeLanChatTransmissions.add(messageId)", source)
         self.assertIn("synchronized (lanChatTransmitLock)", source)
 
+    def test_android_ack_grace_cleanup_cannot_remove_a_newly_verified_peer_route(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        send = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
+        cleanup = extract_java_method(source, "private void completeLanChatAckWindow(")
+        self.assertIn("awaitingRouteSnapshot", send)
+        self.assertIn("completionRouteSnapshot", send)
+        self.assertIn("routeSnapshot.get(peerId)", cleanup)
+        self.assertIn("verifiedChatPeers.get(peerId) == sentRoute", cleanup)
+        self.assertIn("verifiedChatPeers.remove(peerId)", cleanup)
+
+
     def test_android_duplicate_ack_cannot_consume_another_peer_wait_slot(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (
