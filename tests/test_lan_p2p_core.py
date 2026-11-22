@@ -982,6 +982,21 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("finally", method)
 
 
+    def test_android_recovery_event_is_latched_across_an_inflight_retry_worker(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        tracking = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        start = tracking.index("private void retryPendingLanChatMessages(boolean recoveryEvent)")
+        end = tracking.index("private void transmitLocalUdpMessage(", start)
+        retry = tracking[start:end]
+        self.assertLess(
+            retry.index("if (recoveryEvent) lanChatRecoveryEventPending.set(true)"),
+            retry.index("lanChatRetryInFlight.compareAndSet(false, true)"),
+        )
+        self.assertIn("lanChatRecoveryEventPending.getAndSet(false)", retry)
+        self.assertIn("resumeExhaustedRetriesForRecoveryEvent(System.currentTimeMillis())", retry)
+
     def test_android_outbox_retry_attempt_ledger_is_persistent_and_migrated(self):
         repo_root = Path(__file__).resolve().parents[1]
         store = (
@@ -1046,6 +1061,11 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("last_event_retry_at_ms<=?", resume)
         self.assertIn("RETRY_RECOVERY_EVENT_COOLDOWN_MS", resume)
         self.assertIn("t.status!='acked'", resume)
+        # Recovery may reopen only unfinished messages with an unacked fixed target.
+        self.assertIn("state NOT IN ('delivered','expired','waiting_peers')", resume)
+        self.assertIn("EXISTS (SELECT 1 FROM lan_outbox_targets t", resume)
+        self.assertIn("t.message_id=lan_outbox.message_id AND t.status!='acked'", resume)
+        self.assertIn("last_event_retry_at_ms<=?", resume)
         self.assertIn("retry_attempt_count=0", resume)
         self.assertIn("state=CASE WHEN state='discovery_pending' THEN 'discovery_pending' ELSE 'pending' END", resume)
         self.assertIn("ELSE 'pending' END", resume)
