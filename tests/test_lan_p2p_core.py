@@ -2155,6 +2155,23 @@ class LanP2PCoreTests(unittest.TestCase):
             self.assertIn("durable ledger read failed", recovery, filename)
             self.assertIn("load_pending_outgoing_for_peer(", recovery, filename)
 
+    def test_all_python_services_stop_peer_replay_on_outbox_storage_write_failure(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        for filename in ("rescue2.py", "chat.py", "server2.py"):
+            source = (repo_root / filename).read_text(encoding="utf-8")
+            self.assertIn("from lan_p2p_core import LanP2PStorageError", source, filename)
+            start = source.index("def _resume_pending_v2_for_peer(")
+            end = source.index("\ndef _handle_authenticated_v2_packet", start)
+            recovery = source[start:end]
+            storage_catch = recovery.index("except LanP2PStorageError as e:")
+            generic_catch = recovery.index("except Exception as e:", storage_catch)
+            self.assertLess(storage_catch, generic_catch, filename)
+            storage_handler = recovery[storage_catch:generic_catch]
+            self.assertIn("durable ledger write failed", storage_handler, filename)
+            self.assertIn("return", storage_handler, filename)
+
+
+
 
 
 if __name__ == "__main__":

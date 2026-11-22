@@ -115,7 +115,7 @@ PACKAGE_NAME = "com.example.devicefinder"
 
 # ===== 配置区 =====
 RESCUE_SECRET = "your_private_secret_key"
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, load_active_pending_targets
+from lan_p2p_core import LanP2PStorageError, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, load_active_pending_targets
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "rescue2")
 DEFAULT_SERVER_URL = "http://dingwei.bai001.de5.net/api/report"
 DEFAULT_CONFIG_URL = "https://your-config-url.com/config.txt"
@@ -531,10 +531,13 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr):
                 continue
             with UDP_CHAT_SEND_LOCK:
                 sock.sendto(raw, (pending["endpoint_ip"], target_port))
+        except LanP2PStorageError as e:
+            with print_lock:
+                print(f"⚠️ rescue2 pending chat retry stopped; durable ledger write failed: {type(e).__name__}")
+            return
         except Exception as e:
             with print_lock:
                 print(f"⚠️ rescue2 pending chat retry failed peer={peer_id}: {type(e).__name__}")
-
 def _handle_authenticated_v2_packet(envelope, sock, addr):
     packet_type = envelope.get("type")
     sender = str(envelope.get("sender_peer_id") or "")
