@@ -1274,6 +1274,10 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("ackCleanupDeferred", send)
         self.assertIn("completeLanChatAckWindow(messageId", source)
         self.assertIn("lanChatAckGraceInFlight.add(messageId)", send)
+        self.assertLess(
+            send.index("lanChatAckGraceInFlight.add(messageId)"),
+            send.index('scheduleLanChatTask("chat-ack-grace-" + messageId'),
+        )
         self.assertIn("lanChatAckGraceInFlight.contains(messageId)", source)
         self.assertIn("lanChatAckGraceInFlight.remove(messageId)", source)
         self.assertIn("activeLanChatTransmissions.remove(messageId)", source)
