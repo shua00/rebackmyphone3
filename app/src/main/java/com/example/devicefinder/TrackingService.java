@@ -3383,25 +3383,50 @@ public class TrackingService extends Service implements LocationListener {
         }
     }
 
-    /** 网络恢复后最多补发 3 条；沿用原 message_id，接收端会再次 ACK 但不会重复显示。 */
+    /**
+     * 网络恢复后按 3 条一批补发；只有队列确实缩短才继续下一批，
+     * 单次最多推进 3 批，避免离线成员导致无限重试/长时间占用线程。
+     * 沿用原 message_id，接收端会 ACK 但不会重复显示。
+     */
     private void retryPendingLanChatMessages() {
         if (!lanChatRetryInFlight.compareAndSet(false, true)) return;
         new Thread(() -> {
             try {
-                List<JSONObject> batch = new ArrayList<>();
-                synchronized (lanChatQueueLock) {
-                    JSONArray queue = new JSONArray(getSharedPreferences("device_finder_prefs", MODE_PRIVATE)
-                            .getString(PREF_LAN_CHAT_QUEUE, "[]"));
-                    int count = Math.min(3, queue.length());
-                    for (int i = 0; i < count; i++) {
-                        JSONObject item = queue.optJSONObject(i);
-                        if (item != null) batch.add(new JSONObject(item.toString()));
+                final int batchSize = 3;
+                final int maxBatchesPerWake = 3;
+                for (int batchNo = 0; batchNo < maxBatchesPerWake; batchNo++) {
+                    List<JSONObject> batch = new ArrayList<>();
+                    int queuedBefore;
+                    synchronized (lanChatQueueLock) {
+                        JSONArray queue = new JSONArray(getSharedPreferences("device_finder_prefs", MODE_PRIVATE)
+                                .getString(PREF_LAN_CHAT_QUEUE, "[]"));
+                        queuedBefore = queue.length();
+                        int count = Math.min(batchSize, queuedBefore);
+                        for (int i = 0; i < count; i++) {
+                            JSONObject item = queue.optJSONObject(i);
+                            if (item != null) batch.add(new JSONObject(item.toString()));
+                        }
                     }
-                }
-                for (JSONObject item : batch) {
-                    String id = item.optString("message_id", "");
-                    String content = item.optString("content", "");
-                    if (!id.isEmpty() && !content.isEmpty()) transmitLocalUdpMessage(content, id);
+                    if (batch.isEmpty()) break;
+
+                    for (JSONObject item : batch) {
+                        String id = item.optString("message_id", "");
+                        String content = item.optString("content", "");
+                        if (!id.isEmpty() && !content.isEmpty()) transmitLocalUdpMessage(content, id);
+                    }
+
+                    int queuedAfter;
+                    synchronized (lanChatQueueLock) {
+                        JSONArray queue = new JSONArray(getSharedPreferences("device_finder_prefs", MODE_PRIVATE)
+                                .getString(PREF_LAN_CHAT_QUEUE, "[]"));
+                        queuedAfter = queue.length();
+                    }
+                    int progressed = queuedBefore - queuedAfter;
+                    FileLogger.log(this, "CHAT", "LAN 队列补发批次 " + (batchNo + 1)
+                            + "，发送 " + batch.size() + " 条，队列变化 "
+                            + queuedBefore + "->" + queuedAfter);
+                    // 没有真实 ACK 回收就停止；留待下一次网络恢复/启动事件再试。
+                    if (progressed <= 0) break;
                 }
             } catch (Exception e) {
                 FileLogger.log(this, "CHAT", "⚠️ LAN 聊天补发失败: " + e.getMessage());
