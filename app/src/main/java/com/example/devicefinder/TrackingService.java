@@ -3985,7 +3985,8 @@ public class TrackingService extends Service implements LocationListener {
         pendingChatAckPeers.put(messageId, awaitingPeerIds);
         pendingChatAckStartedAt.put(messageId, android.os.SystemClock.elapsedRealtime());
         pendingChatAcks.put(messageId, ack);
-        FileLogger.log(this, "CHAT", "⏱️ P2P UDP 开始发送，已验证成员 " + totalPeerCount + "，消息 " + messageId);
+        FileLogger.log(this, "CHAT", "⏱️ P2P UDP 开始发送，固定目标 " + totalPeerCount
+                + "，当前可达路由 " + reachablePeerCount + "，消息 " + messageId);
         long ackLoopStartedAt = android.os.SystemClock.elapsedRealtime();
         int ackRounds = 0;
         try {
