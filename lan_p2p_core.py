@@ -88,3 +88,67 @@ def load_stable_peer_id(db_path, service_name):
         raise
     finally:
         conn.close()
+
+
+def _canonical_envelope_bytes(fields):
+    import json
+    return json.dumps(fields, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False).encode("utf-8")
+
+
+def _envelope_key(secret):
+    import hashlib
+    if not isinstance(secret, str) or not secret:
+        raise ValueError("shared secret is required")
+    return hashlib.sha256(b"lan-p2p-v2\\x00" + secret.encode("utf-8")).digest()
+
+
+def encode_packet(fields, secret, max_bytes=1200):
+    """Encode and authenticate a bounded v2 JSON datagram."""
+    import hashlib
+    import hmac
+    if not isinstance(fields, dict):
+        raise ValueError("packet fields must be a dict")
+    packet = dict(fields)
+    packet.pop("auth", None)
+    packet["v"] = 2
+    packet_type = packet.get("type")
+    if packet_type not in ("peer.hello", "peer.ack", "chat.message", "chat.ack"):
+        raise ValueError("unsupported LAN P2P packet type")
+    unsigned = _canonical_envelope_bytes(packet)
+    packet["auth"] = hmac.new(_envelope_key(secret), unsigned, hashlib.sha256).hexdigest()
+    raw = _canonical_envelope_bytes(packet)
+    if len(raw) > int(max_bytes):
+        raise ValueError("LAN P2P datagram exceeds size limit")
+    return raw
+
+
+def decode_packet(data, secret, max_bytes=1200):
+    """Decode and authenticate a v2 datagram; raises ValueError on any invalid packet."""
+    import hashlib
+    import hmac
+    import json
+    if not isinstance(data, (bytes, bytearray)):
+        raise ValueError("packet must be bytes")
+    if len(data) == 0 or len(data) > int(max_bytes):
+        raise ValueError("invalid LAN P2P datagram size")
+    try:
+        packet = json.loads(bytes(data).decode("utf-8", errors="strict"))
+    except Exception as exc:
+        raise ValueError("invalid LAN P2P JSON") from exc
+    if not isinstance(packet, dict) or packet.get("v") != 2:
+        raise ValueError("unsupported LAN P2P protocol version")
+    if packet.get("type") not in ("peer.hello", "peer.ack", "chat.message", "chat.ack"):
+        raise ValueError("unsupported LAN P2P packet type")
+    if not isinstance(packet.get("sender_peer_id"), str) or not packet["sender_peer_id"]:
+        raise ValueError("missing sender peer identity")
+    supplied = packet.get("auth")
+    if not isinstance(supplied, str):
+        raise ValueError("missing packet authentication")
+    unsigned = dict(packet)
+    unsigned.pop("auth", None)
+    expected = hmac.new(_envelope_key(secret), _canonical_envelope_bytes(unsigned),
+                        hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(supplied, expected):
+        raise ValueError("invalid packet authentication")
+    return packet
