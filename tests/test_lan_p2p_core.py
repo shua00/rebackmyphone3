@@ -827,7 +827,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("int startIndex = batchNo * batchSize", recovery)
         self.assertIn("scheduleLanChatRetryFromOutbox()", recovery)
         self.assertIn("lanChatRetryWakeScheduled", tracking)
-        self.assertIn("minimumAttempts < 3", tracking)
+        self.assertIn("item.retryAttempts < 3", tracking)
         self.assertIn("minimumAttempts <= 1 ? 1_500L : 4_000L", tracking)
         self.assertIn("handler.postDelayed", tracking)
         self.assertIn("lanChatRetryInFlight.set(false);", recovery)
