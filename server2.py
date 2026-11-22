@@ -1456,7 +1456,7 @@ def send_server2_v2_chat_from_outbox(command_str, fixed_target_ids):
                 print(f"ℹ️ server2 chat discovery window closed; suppress late-peer broadcast: {message_id}")
             return 0
         subnet = get_subnet_broadcast()
-        destinations = [(ip, UDP_DEVICE_PORT) for ip in dict.fromkeys(
+        destinations = [(ip, 8888) for ip in dict.fromkeys(
             [subnet, "255.255.255.255"])]
         return send_broadcast_packet_with_retries(
             sock, raw, destinations, send_lock=UDP_CHAT_SEND_LOCK,
