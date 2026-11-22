@@ -267,7 +267,11 @@ def send_chat_v2(body, display_name, message_id):
             send_outbox_to_active_peers(
                 sock, CHAT_DB, "chat.py", message_id, probe, RESCUE_SECRET,
                 send_lock=UDP_CHAT_SEND_LOCK, attempts=3, retry_delay_seconds=0.25)
-        else:
+        elif target_ids:
+            # Known members are fixed recipients even when their current lease is offline.
+            # Wait for their authenticated reappearance; do not expose the old message to late peers.
+            print(f"ℹ️ chat.py fixed recipients have no active route; message remains pending: {message_id}")
+        elif is_outgoing_discovery_pending(CHAT_DB, "chat.py", message_id):
             subnet = get_subnet_broadcast()
             targets = [subnet] if subnet == "255.255.255.255" else [subnet, "255.255.255.255"]
             destinations = [(target_ip, port) for target_ip in targets
