@@ -1997,7 +1997,7 @@ public class TrackingService extends Service implements LocationListener {
                     public void onAvailable(Network network) {
                         super.onAvailable(network);
                         // onAvailable 可能先于 LinkProperties/默认网络切换稳定；稍作合并后再上报。
-                        refreshPeerRoutesForNetworkChange("network available/switch");
+                        executeMaintenance("peer-route-refresh", () -> refreshPeerRoutesForNetworkChange("network available/switch"));
                         FileLogger.log(TrackingService.this, "NETWORK", "✅ 网络可用/发生切换，刷新默认网络信息");
                         handler.removeCallbacks(networkRefreshRunnable);
                         handler.postDelayed(networkRefreshRunnable, 1200L);
@@ -2007,7 +2007,7 @@ public class TrackingService extends Service implements LocationListener {
                     public void onLost(Network network) {
                         super.onLost(network);
                         // onLost 可能只是链路变化，不直接认定设备断网；延迟读取当前默认网络再判断。
-                        refreshPeerRoutesForNetworkChange("network lost");
+                        executeMaintenance("peer-route-refresh", () -> refreshPeerRoutesForNetworkChange("network lost"));
                         FileLogger.log(TrackingService.this, "NETWORK", "ℹ️ 网络链路变化，重新检查当前默认网络");
                         handler.removeCallbacks(networkRefreshRunnable);
                         handler.postDelayed(networkRefreshRunnable, 1500L);
@@ -2015,14 +2015,14 @@ public class TrackingService extends Service implements LocationListener {
                     @Override
                     public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
                         super.onCapabilitiesChanged(network, capabilities);
-                        refreshPeerRoutesForNetworkChange("network capabilities changed");
+                        executeMaintenance("peer-route-refresh", () -> refreshPeerRoutesForNetworkChange("network capabilities changed"));
                         handler.removeCallbacks(networkRefreshRunnable);
                         handler.postDelayed(networkRefreshRunnable, 800L);
                     }
                     @Override
                     public void onLinkPropertiesChanged(Network network, LinkProperties linkProperties) {
                         super.onLinkPropertiesChanged(network, linkProperties);
-                        refreshPeerRoutesForNetworkChange("link properties changed");
+                        executeMaintenance("peer-route-refresh", () -> refreshPeerRoutesForNetworkChange("link properties changed"));
                         handler.removeCallbacks(networkRefreshRunnable);
                         handler.postDelayed(networkRefreshRunnable, 800L);
                     }
@@ -2033,19 +2033,19 @@ public class TrackingService extends Service implements LocationListener {
                 wifiLanNetworkCallback = new ConnectivityManager.NetworkCallback() {
                     @Override public void onAvailable(Network network) {
                         super.onAvailable(network);
-                        refreshWifiLanTransport("Wi-Fi available");
+                        executeMaintenance("wifi-lan-refresh", () -> refreshWifiLanTransport("Wi-Fi available"));
                     }
                     @Override public void onLost(Network network) {
                         super.onLost(network);
-                        refreshWifiLanTransport("Wi-Fi lost");
+                        executeMaintenance("wifi-lan-refresh", () -> refreshWifiLanTransport("Wi-Fi lost"));
                     }
                     @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
                         super.onCapabilitiesChanged(network, capabilities);
-                        refreshWifiLanTransport("Wi-Fi capabilities changed");
+                        executeMaintenance("wifi-lan-refresh", () -> refreshWifiLanTransport("Wi-Fi capabilities changed"));
                     }
                     @Override public void onLinkPropertiesChanged(Network network, LinkProperties linkProperties) {
                         super.onLinkPropertiesChanged(network, linkProperties);
-                        refreshWifiLanTransport("Wi-Fi link properties changed");
+                        executeMaintenance("wifi-lan-refresh", () -> refreshWifiLanTransport("Wi-Fi link properties changed"));
                     }
                 };
                 android.net.NetworkRequest wifiRequest = new android.net.NetworkRequest.Builder()
