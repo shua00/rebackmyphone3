@@ -178,3 +178,20 @@
 
 
 **未完成/未宣称通过**：A01–A10 中要求真实设备的 LAN 双向、多设备、网络切换、三服务全关闭验收；M-A/M-B/M-C 实机运行；F02/F03/F04/F09/F10/F12 完整故障注入；G01–G06 完整回归。Android SQLite 故障注入、Python 三服务真实进程互通、真实 APK 在真实设备上的运行仍缺证据。不得以以上 CI 结果替代这些项目。
+
+
+## 9. 本轮集中推进记录（2026-11-22，commit `5fd24070bdbcf57897de82d5ace185b473014b7c`）
+
+本轮只追加实现和验证记录，不改变 A01–A10、S01–S18、M-A–M-C、F01–F12、G01–G06 的验收门槛。
+
+| 项目 | 本轮结果 | 证据与限制 |
+|---|---|---|
+| Android Outbox 崩溃恢复 | 补发主来源改为 SQLite Outbox；SharedPreferences 仅保留为迁移/兼容镜像，避免镜像丢失导致 SQLite 待发消息被漏掉 | commit `a10177bb68f0214583c3b8e3cbce00b71043c6db` |
+| SQLite 读取失败安全 | pending、已知 peer、固定 target 的 SQL 查询失败不再静默转换为空列表；发送端在无法读取固定收件人集合时拒绝本轮 UDP 发送 | commits `db67f8db738ae06ba6f64038f07eac5cdf52b6fc`、`c783c6507a53de5e87bd8eafdc8f8fc0c8c064a4`、`5cd1f07b920586de0a6f0d5bafe9a6eeb19c69a7` |
+| Android 有界持久化补发 | Outbox 新增发送尝试计数及增量 schema v4 迁移；按 SQLite 快照分批处理，避免首批未 ACK 消息阻塞后续新消息；增加有限延迟唤醒，失败记账时不安排重试唤醒，服务销毁后停止延迟补发 | commits `cc9ea5c060f055d03a5b63a09cb4435675daa8d4`、`1e35a55db8713c7fe61682589054d29cfb16bf80`、`ab219a6304544107ab9bb0e81e7fc808b6e6e7f1`、`2ab1649b0e9a90bf349dfc3b4fd97b4a3ddf115f`、`fb201cada48a3e15a055c5e73f344720eca58af4` |
+| Android 首次发现窗口冻结 | 空目标消息仅在原始发现截止时间内允许发现 ACK/广播；窗口关闭且无固定目标后禁止向晚加入设备广播旧消息 | commits `dbf9c35e53b653719b0c5d8442f4c514657f1adb`、`af8f8a01efe727d509c8c2112e81b513809f4b69` |
+| Python 三服务固定接收人 | rescue2、chat.py、server2 网页对讲均按创建时固定目标集合发送；存在固定目标但当前无 active endpoint 时保留消息等待原 peer 恢复，不退化为全网广播；仅首次无已知目标且发现窗口开放时才允许有界发现广播 | commits `21cc2edb3c220aec811ba385977c6032d06dd384`、`12b051d845e4cf8ab2dc58202eea135385f08c91`、`0e6a4015809ca2064bddab0c361ef24de54863ce`、`7b3ee6e8b707de93cf30087b7a61ff76668622c3` |
+| 本轮新增防回归测试 | 加入 Android Outbox 恢复、SQLite 读失败、有限重试/批次推进、服务销毁保护、发现窗口冻结及三个 Python 发送端固定目标规则的源码防回归测试 | 最新提交共 44 项 Python 单元测试通过 |
+| 最新 CI | Python 服务语法检查、44 项单元测试、Android Java 编译、Debug APK 构建和 artifact 上传全部成功 | [Actions run 44997507429](https://github.com/shua00/rebackmyphone3/actions/runs/44997507429)，commit `5fd24070bdbcf57897de82d5ace185b473014b7c`；APK artifact ID `14744068334`，大小 161937 bytes |
+
+**当前验收结论仍为未完成。** 本轮新增代码和 CI 证据不替代真实设备验收。A01/A04/A05/A07/A08/A09/A10、M-A/M-B/M-C、F02/F03/F04/F09/F10/F12 及 G01–G06 中要求真实设备/服务运行的项目，仍须按本矩阵逐项采集真实日志和操作结果；尤其必须实际验证“三个 Python 服务全部关闭时，两台及以上 APK 仍可双向对讲”。不得把 CI 通过标记为实机通过。
