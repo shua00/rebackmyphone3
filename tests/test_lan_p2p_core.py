@@ -133,5 +133,18 @@ class LanP2PCoreTests(unittest.TestCase):
             conn.close()
         self.assertEqual(state, "delivered")
 
+    def test_ack_endpoint_must_match_recorded_peer_route(self):
+        from lan_p2p_core import peer_endpoint_matches
+        record_peer(self.db_path, "server2", "android-a", "android", "android-main",
+                    "192.168.1.10", 8888, "active")
+        self.assertTrue(peer_endpoint_matches(self.db_path, "server2", "android-a",
+                                              "192.168.1.10", 8888))
+        self.assertFalse(peer_endpoint_matches(self.db_path, "server2", "android-a",
+                                               "192.168.1.11", 8888))
+        self.assertFalse(peer_endpoint_matches(self.db_path, "server2", "android-a",
+                                               "192.168.1.10", 8890))
+        self.assertFalse(peer_endpoint_matches(self.db_path, "rescue2", "android-a",
+                                               "192.168.1.10", 8888))
+
 if __name__ == "__main__":
     unittest.main()
