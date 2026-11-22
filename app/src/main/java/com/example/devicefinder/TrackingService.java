@@ -272,6 +272,9 @@ public class TrackingService extends Service implements LocationListener {
     private volatile LanChatStore lanChatStore;
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRetryInFlight =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+    // Coalesce a recovery event that arrives while a retry batch is already in flight.
+    private final java.util.concurrent.atomic.AtomicBoolean lanChatRecoveryEventPending =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRetryWakeScheduled =
             new java.util.concurrent.atomic.AtomicBoolean(false);
     private final java.util.Set<String> activeLanChatTransmissions =
@@ -3723,13 +3726,14 @@ public class TrackingService extends Service implements LocationListener {
      * (network restored, listener rebound, or peer route verified) may reopen an exhausted epoch.
      */
     private void retryPendingLanChatMessages(boolean recoveryEvent) {
+        if (recoveryEvent) lanChatRecoveryEventPending.set(true);
         if (serviceDestroyed || !lanChatRetryInFlight.compareAndSet(false, true)) return;
         try {
             lanChatSendExecutor.execute(() -> {
                 try {
                     LanChatStore store = lanChatStore;
                     if (store == null) return;
-                    if (recoveryEvent) {
+                    if (lanChatRecoveryEventPending.getAndSet(false)) {
                         int resumed = store.resumeExhaustedRetriesForRecoveryEvent(System.currentTimeMillis());
                         if (resumed > 0) {
                             FileLogger.log(this, "CHAT", "LAN 恢复事件重新开启有限补发预算 messages=" + resumed);
@@ -3794,9 +3798,14 @@ public class TrackingService extends Service implements LocationListener {
                     FileLogger.log(this, "CHAT", "⚠️ LAN 聊天补发失败: " + e.getMessage());
                 } finally {
                     lanChatRetryInFlight.set(false);
-                    // Re-arm after releasing the in-flight guard. A delayed callback may
-                    // have fired while this batch was still running and been coalesced.
-                    scheduleLanChatRetryFromOutbox();
+                    // Do not lose a network/peer recovery event that arrived during this batch.
+                    if (lanChatRecoveryEventPending.get()) {
+                        retryPendingLanChatMessages(true);
+                    } else {
+                        // Re-arm after releasing the in-flight guard. A delayed callback may
+                        // have fired while this batch was still running and been coalesced.
+                        scheduleLanChatRetryFromOutbox();
+                    }
                 }
             });
         } catch (java.util.concurrent.RejectedExecutionException e) {
