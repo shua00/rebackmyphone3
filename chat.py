@@ -30,7 +30,7 @@ UDP_DEVICE_PORT = 8888
 UDP_PORT = 8890  # 独立监听端口，避免与 server2/rescue2 冲突
 RESCUE_SECRET = "your_private_secret_key"  # ⚠️ 必须与手机端一致
 from lan_p2p_core import load_stable_peer_id, record_peer
-PEER_NODE_ID = _load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.sqlite3"), "chat.py")
+PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.sqlite3"), "chat.py")
 SERVER2_URL = "http://127.0.0.1:8080"      # server2.py 的地址
 # ==========================================
 

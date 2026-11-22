@@ -115,7 +115,7 @@ PACKAGE_NAME = "com.example.devicefinder"
 # ===== 配置区 =====
 RESCUE_SECRET = "your_private_secret_key"
 from lan_p2p_core import load_stable_peer_id, record_peer
-PEER_NODE_ID = _load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "rescue2")
+PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "rescue2")
 DEFAULT_SERVER_URL = "http://dingwei.bai001.de5.net/api/report"
 DEFAULT_CONFIG_URL = "https://your-config-url.com/config.txt"
 LOG_PORT = 9090

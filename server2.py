@@ -61,7 +61,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from lan_p2p_core import load_stable_peer_id, record_peer
 UDP_LISTEN_PORT = 8887  # server2 独立监听端口；发往 Android 的指令仍使用 8888
-PEER_NODE_ID = _load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "server2")
+PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "server2")
 
 """
 ============================================================
