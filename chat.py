@@ -278,7 +278,9 @@ def send_chat_v2(body, display_name, message_id):
                             for port in (UDP_DEVICE_PORT, 8887, 8889)]
             send_broadcast_packet_with_retries(
                 sock, broadcast_bytes, destinations, send_lock=UDP_CHAT_SEND_LOCK,
-                attempts=3, retry_delay_seconds=0.25)
+                attempts=3, retry_delay_seconds=0.25,
+                should_continue=lambda: is_outgoing_discovery_pending(
+                    CHAT_DB, "chat.py", message_id))
         return True
     except Exception as e:
         print(f"⚠️ chat.py LAN send failed; message remains pending: {type(e).__name__}")

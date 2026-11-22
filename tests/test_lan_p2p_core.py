@@ -680,6 +680,31 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertEqual(len(socket.sent), 6)
         self.assertTrue(all(packet == payload for packet, _ in socket.sent))
 
+    def test_broadcast_retry_stops_when_discovery_window_closes(self):
+        from lan_p2p_core import send_broadcast_packet_with_retries
+
+        class FakeSocket:
+            def __init__(self):
+                self.sent = []
+            def sendto(self, payload, destination):
+                self.sent.append((payload, destination))
+
+        socket = FakeSocket()
+        allowed = {"open": True}
+        destinations = [("192.168.1.255", 8888), ("255.255.255.255", 8888)]
+        def close_window(_delay):
+            allowed["open"] = False
+
+        with patch("lan_p2p_core.time.sleep", side_effect=close_window):
+            sent = send_broadcast_packet_with_retries(
+                socket, b"same-message-id", destinations, attempts=3,
+                retry_delay_seconds=0.25,
+                should_continue=lambda: allowed["open"])
+
+        self.assertEqual(sent, 2)
+        self.assertEqual(len(socket.sent), 2)
+        self.assertTrue(all(payload == b"same-message-id" for payload, _ in socket.sent))
+
     def test_incoming_message_claim_rejects_same_id_with_different_body(self):
         from lan_p2p_core import validate_incoming_message_claim
         conn = sqlite3.connect(self.db_path)

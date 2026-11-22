@@ -784,8 +784,9 @@ def send_outbox_to_active_peers(sock, db_path, sender_scope, message_id,
 
 def send_broadcast_packet_with_retries(sock, packet_bytes, destinations,
                                        send_lock=None, attempts=3,
-                                       retry_delay_seconds=0.25):
-    """Bounded first-discovery broadcast; repeated packets keep the same message ID."""
+                                       retry_delay_seconds=0.25,
+                                       should_continue=None):
+    """Bounded broadcast; an optional durable gate is rechecked before every send."""
     if sock is None or not packet_bytes:
         return 0
     max_attempts = max(1, min(3, int(attempts)))
@@ -800,7 +801,13 @@ def send_broadcast_packet_with_retries(sock, packet_bytes, destinations,
     targets = list(dict.fromkeys(targets))
     sent_total = 0
     for attempt in range(max_attempts):
+        if should_continue is not None and not should_continue():
+            break
         for destination in targets:
+            # The first-discovery window may expire during a retry round. Recheck
+            # before each destination so no later peer receives an out-of-window replay.
+            if should_continue is not None and not should_continue():
+                break
             try:
                 if send_lock is None:
                     sock.sendto(packet_bytes, destination)
@@ -811,6 +818,8 @@ def send_broadcast_packet_with_retries(sock, packet_bytes, destinations,
             except OSError:
                 continue
         if attempt + 1 < max_attempts and delay > 0:
+            if should_continue is not None and not should_continue():
+                break
             time.sleep(delay)
     return sent_total
 

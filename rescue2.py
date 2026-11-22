@@ -660,7 +660,9 @@ def send_chat_v2(body, target_ips):
                 [subnet, "255.255.255.255"])]
             send_broadcast_packet_with_retries(
                 sock, broadcast_bytes, destinations, send_lock=UDP_CHAT_SEND_LOCK,
-                attempts=3, retry_delay_seconds=0.25)
+                attempts=3, retry_delay_seconds=0.25,
+                should_continue=lambda: is_outgoing_discovery_pending(
+                    _CHAT_DEDUP_DB, "rescue2", message_id))
         elif selected_ips and not broadcast_all:
             # A specifically requested IP with no known peer identity is a directed
             # first-discovery probe, never a subnet-wide fallback.

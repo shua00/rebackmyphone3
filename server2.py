@@ -1462,7 +1462,9 @@ def send_server2_v2_chat_from_outbox(command_str, fixed_target_ids):
             [subnet, "255.255.255.255"])]
         return send_broadcast_packet_with_retries(
             sock, raw, destinations, send_lock=UDP_CHAT_SEND_LOCK,
-            attempts=3, retry_delay_seconds=0.25)
+            attempts=3, retry_delay_seconds=0.25,
+            should_continue=lambda: is_outgoing_discovery_pending(
+                CHAT_DEDUP_DB, "server2", message_id))
     except Exception as e:
         with print_lock:
             print(f"⚠️ server2 v2 chat send retained in Outbox: {type(e).__name__}")
