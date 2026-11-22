@@ -765,5 +765,39 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertTrue(all(packet["listen_port"] == 8887 for packet in decoded))
         self.assertTrue(all(packet["nonce"] == decoded[0]["nonce"] for packet in decoded))
 
+
+    def test_android_retry_recovery_reads_durable_sqlite_outbox(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        tracking = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        start = tracking.index("private void retryPendingLanChatMessages()")
+        end = tracking.index("private void sendLocalUdpMessage", start)
+        recovery = tracking[start:end]
+
+        # SharedPreferences remains a compatibility import only. Retry enumeration
+        # must come from SQLite so a missing/stale mirror cannot strand durable rows.
+        self.assertIn("store.loadPending(50)", recovery)
+        self.assertIn("List<LanChatStore.PendingMessage> pending", recovery)
+        self.assertIn("item.messageId", recovery)
+        self.assertIn("item.body", recovery)
+        self.assertIn("store.allTargetsAcked(id)", recovery)
+        self.assertIn("removePendingLanChat(id)", recovery)
+
+    def test_android_sqlite_pending_read_fails_closed_on_query_error(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        start = store.index("public List<PendingMessage> loadPending(int limit)")
+        end = store.index("\\n    public List<Target> loadTargets", start)
+        method = store[start:end]
+
+        # A database error must escape to retryPendingLanChatMessages' catch/log path.
+        # It must never be converted into an empty queue, which looks like success.
+        self.assertNotIn("catch (Exception ignored)", method)
+        self.assertIn("return result;", method)
+        self.assertIn("finally", method)
+
 if __name__ == "__main__":
     unittest.main()
