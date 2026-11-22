@@ -951,6 +951,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("RETRY_RECOVERY_EVENT_COOLDOWN_MS", resume)
         self.assertIn("t.status!='acked'", resume)
         self.assertIn("retry_attempt_count=0", resume)
+        self.assertIn("state=CASE WHEN state='discovery_pending' THEN 'discovery_pending' ELSE 'pending' END", resume)
         self.assertIn("state='pending'", resume)
         attempt_start = store.index("public int recordOutboxAttempt(String messageId)")
         attempt_end = store.index("public List<Target> loadTargets", attempt_start)
