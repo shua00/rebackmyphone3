@@ -1407,6 +1407,20 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("store.finalizeDiscoveryWindow(messageId)", tracking)
 
 
+    def test_android_discovery_finalization_respects_exhausted_retry_budget(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        start = store.index("private boolean finalizeDiscoveryMessage(")
+        end = store.index("public boolean storeIncoming(", start)
+        finalize = store[start:end]
+        self.assertIn("SELECT retry_attempt_count FROM lan_outbox", finalize)
+        self.assertIn("retryAttempts >= MAX_AUTOMATIC_RETRY_ATTEMPTS ? \"retry_paused\" : \"pending\"", finalize)
+        self.assertIn("total == 0 ? \"waiting_peers\"", finalize)
+        self.assertIn("total == acked ? \"delivered\"", finalize)
+
+
     def test_android_waiting_peers_keeps_sqlite_record_but_releases_legacy_queue_mirror(self):
         repo_root = Path(__file__).resolve().parents[1]
         store = (
