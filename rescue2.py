@@ -648,8 +648,21 @@ def send_chat_v2(body, target_ips):
             send_outbox_to_active_peers(
                 sock, _CHAT_DEDUP_DB, "rescue2", message_id, probe, RESCUE_SECRET,
                 send_lock=UDP_CHAT_SEND_LOCK, attempts=3, retry_delay_seconds=0.25)
-        else:
-            destinations = [(ip, UDP_DEVICE_PORT) for ip in selected_ips]
+        elif target_ids:
+            # The fixed recipient snapshot contains known but currently offline peers.
+            # Never broadcast their old message to devices that join after the snapshot.
+            print(f"ℹ️ 固定对讲目标当前无已验证路由，保留原消息等待 peer 重新上线: {message_id}")
+        elif broadcast_all and is_outgoing_discovery_pending(_CHAT_DEDUP_DB, "rescue2", message_id):
+            subnet = get_subnet_broadcast()
+            destinations = [(ip, UDP_DEVICE_PORT) for ip in dict.fromkeys(
+                [subnet, "255.255.255.255"])]
+            send_broadcast_packet_with_retries(
+                sock, broadcast_bytes, destinations, send_lock=UDP_CHAT_SEND_LOCK,
+                attempts=3, retry_delay_seconds=0.25)
+        elif selected_ips and not broadcast_all:
+            # A specifically requested IP with no known peer identity is a directed
+            # first-discovery probe, never a subnet-wide fallback.
+            destinations = [(ip, UDP_DEVICE_PORT) for ip in selected_ips if ip != "255.255.255.255"]
             send_broadcast_packet_with_retries(
                 sock, broadcast_bytes, destinations, send_lock=UDP_CHAT_SEND_LOCK,
                 attempts=3, retry_delay_seconds=0.25)
