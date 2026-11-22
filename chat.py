@@ -352,11 +352,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                     ts = datetime.datetime.now().strftime("%H:%M:%S")
                     message_id = str(uuid.uuid4())
                     local_saved = _claim_chat_message(sender, message_id, content)
-                    if local_saved:
-                        with print_lock:
-                            print(f"\n💻 [网页] {sender} 说: {content}")
-                            CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": content})
-                            if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
+                    if local_saved is None:
+                        print("⚠️ 本机网页消息历史持久化失败，仍按原有方式发送")
+                    # 保留原来的网页即时显示行为；持久化失败不改变发送与本地显示。
+                    with print_lock:
+                        print(f"\n💻 [网页] {sender} 说: {content}")
+                        CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": content})
+                        if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
 
                     payload = f"FIND_ME_CHAT:{RESCUE_SECRET}:{sender}:{message_id}:{content}"
                     # [F1] 子网 + 全局双发，每目标 3 次
