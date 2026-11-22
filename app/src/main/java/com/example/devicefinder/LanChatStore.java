@@ -438,7 +438,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
             long now = System.currentTimeMillis();
             android.database.sqlite.SQLiteStatement update = db.compileStatement(
                     "UPDATE lan_outbox SET retry_attempt_count=retry_attempt_count+1,last_retry_at_ms=?," +
-                    "state=CASE WHEN retry_attempt_count+1>=? THEN 'retry_paused' ELSE state END " +
+                    "state=CASE WHEN retry_attempt_count+1>=? AND state!='discovery_pending' THEN 'retry_paused' ELSE state END " +
                     "WHERE message_id=? AND state NOT IN ('delivered','expired','waiting_peers','retry_paused') " +
                     "AND retry_attempt_count<?");
             int changed;
