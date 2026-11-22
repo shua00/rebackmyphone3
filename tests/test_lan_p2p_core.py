@@ -467,7 +467,8 @@ class LanP2PCoreTests(unittest.TestCase):
         packet = {
             "type": "chat.message", "sender_peer_id": "rescue2-id",
             "sender_peer_type": "rescue2", "service_id": "rescue2-id",
-            "target_peer_id": "*", "created_at_ms": 123, "body": "hello",
+            "target_peer_id": "*", "message_id": "retry-m1",
+            "created_at_ms": 123, "body": "hello",
         }
         self.assertTrue(persist_outgoing_message(
             self.db_path, "rescue2", "rescue2-id", "retry-m1", "hello", ["android-a"]))
