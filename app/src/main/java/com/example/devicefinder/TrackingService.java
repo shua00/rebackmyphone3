@@ -432,6 +432,20 @@ public class TrackingService extends Service implements LocationListener {
                     new ThreadPoolExecutor.AbortPolicy()
             );
 
+    // Serialize service maintenance work away from the UI thread. Multiple system
+    // wake sources (JobScheduler/accessibility/alarm) are coalesced by selfHealInFlight.
+    private final java.util.concurrent.ExecutorService maintenanceExecutor =
+            new ThreadPoolExecutor(
+                    1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(8),
+                    runnable -> {
+                        Thread thread = new Thread(runnable, "TrackingService-Maintenance");
+                        thread.setPriority(Thread.NORM_PRIORITY - 1);
+                        return thread;
+                    },
+                    new ThreadPoolExecutor.AbortPolicy()
+            );
+
     private void logLifecycle(String event, String detail) {
         FileLogger.log(this, "LIFECYCLE",
                 "event=" + event
@@ -760,7 +774,7 @@ public class TrackingService extends Service implements LocationListener {
             FileLogger.log(this, "SERVICE", "🔄 STICKY/无Action重启，触发兜底自愈");
             try { startForegroundNotification(); } catch (Exception ignored) {}
             // ★ 强力补丁 2：异步自愈，绝不阻塞，防止 5 秒秒杀
-            handler.post(() -> {
+            executeMaintenance("sticky-recovery", () -> {
                 if (!serviceDestroyed) {
                     scheduleNextReport();
                     selfHeal();
@@ -789,9 +803,11 @@ public class TrackingService extends Service implements LocationListener {
                 long actual = System.currentTimeMillis();
                 long drift = lastHeartbeatExpectedAt > 0 ? actual - lastHeartbeatExpectedAt : -1;
                 FileLogger.log(this, "ALARM", "💓 6小时心跳被唤醒" + (drift >= 0 ? " (偏差 " + drift + "ms)" : ""));
-                triggerRescueListener();
-                fetchRemoteConfig();
-                scheduleHeartbeatAlarm();
+                executeMaintenance("long-heartbeat", () -> {
+                    triggerRescueListener();
+                    fetchRemoteConfig();
+                    scheduleHeartbeatAlarm();
+                });
             } else if ("ACTION_PLAY_ALARM".equals(action)) {
                 playAlarm();
             } else if ("ACTION_SHOW_MSG".equals(action)) {
@@ -870,26 +886,28 @@ public class TrackingService extends Service implements LocationListener {
                     }
                 } catch (Exception ignored) {}
 
-                selfHeal();
-                scheduleKeepAliveJob();
+                executeMaintenance("keep-alive", () -> {
+                    selfHeal();
+                    scheduleKeepAliveJob();
+                });
 
             // ★ [核心优化] 2026-11-04 新增独立分支处理 JobScheduler 唤醒，避免和 Alarm 冲突
             } else if ("ACTION_JOB_WAKE_UP".equals(action)) {
                 long uptimeMin = (SystemClock.elapsedRealtime() - serviceCreateTimeMs) / 60000;
                 FileLogger.log(this, "JOB", "💓 JobScheduler 保底唤醒 (已运行 " + uptimeMin + " 分钟)");
-                // 仅触发自愈检查，绝不重新 schedule 闹钟
-                selfHeal();
+                // 仅触发后台自愈检查，绝不重新 schedule 闹钟
+                scheduleSelfHeal("job");
 
             // ★ [新增] 2026-11-05 无障碍服务唤醒入口
             } else if ("ACTION_WAKE_BY_ACCESSIBILITY".equals(action)) {
                 long uptimeMin = (SystemClock.elapsedRealtime() - serviceCreateTimeMs) / 60000;
                 FileLogger.log(this, "ACCESSIBILITY", "♿ 无障碍唤醒，执行自愈 (已运行 " + uptimeMin + " 分钟)");
-                selfHeal();
+                scheduleSelfHeal("accessibility");
 
             // ★ [新增] 2026-11-05 组件自救唤醒入口（预留，配套 AlarmManager 兜底使用）
             } else if ("ACTION_WAKE_BY_COMPONENT_SELF_HEAL".equals(action)) {
-                FileLogger.log(this, "SERVICE", "🔄 组件自救唤醒，执行自愈");
-                selfHeal();
+                FileLogger.log(this, "SERVICE", "🔄 组件自救唤醒，执行后台自愈");
+                scheduleSelfHeal("component");
 
             } else if ("ACTION_LOCK_CHAT".equals(action)) {
                 setChatLocked(true);
@@ -1005,6 +1023,34 @@ public class TrackingService extends Service implements LocationListener {
             }
         }
         FileLogger.log(this, "WAKE_SOURCE", "🚩 当前服务启动源: " + source);
+    }
+
+    private void executeMaintenance(String taskName, Runnable task) {
+        if (serviceDestroyed || task == null) return;
+        try {
+            maintenanceExecutor.execute(() -> {
+                if (serviceDestroyed) return;
+                long startedAt = SystemClock.elapsedRealtime();
+                try {
+                    task.run();
+                } catch (Exception e) {
+                    FileLogger.log(this, "SERVICE", "⚠️ 后台维护任务失败 task=" + taskName
+                            + " error=" + e.getClass().getSimpleName());
+                } finally {
+                    long elapsed = SystemClock.elapsedRealtime() - startedAt;
+                    if (elapsed >= 1000L) {
+                        FileLogger.logD("SERVICE", "maintenance task=" + taskName
+                                + " elapsedMs=" + elapsed);
+                    }
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException rejected) {
+            FileLogger.log(this, "SERVICE", "⚠️ 后台维护队列繁忙，合并本次任务: " + taskName);
+        }
+    }
+
+    private void scheduleSelfHeal(String source) {
+        executeMaintenance("self-heal:" + source, this::selfHeal);
     }
 
     private void selfHeal() {
@@ -5397,6 +5443,7 @@ public class TrackingService extends Service implements LocationListener {
 
         if (reportExecutor != null) reportExecutor.shutdown();
         if (lanChatSendExecutor != null) lanChatSendExecutor.shutdown();
+        if (maintenanceExecutor != null) maintenanceExecutor.shutdownNow();
         if (lanChatStore != null) { try { lanChatStore.closeStore(); } catch (Exception ignored) {} lanChatStore = null; }
         if (rescueSocketRef != null) {
             try { rescueSocketRef.close(); } catch (Exception e) { FileLogger.log(this, "SERVICE", "⚠️ close rescueSocket 失败: " + e.getMessage()); }
