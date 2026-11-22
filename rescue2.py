@@ -1545,7 +1545,10 @@ def main():
                           "target_peer_id": "*", "message_id": uuid.uuid4().hex,
                           "created_at_ms": int(time.time() * 1000),
                           "display_name": "PC_Terminal", "body": chat}
-                send_udp(encode_packet(packet, RESCUE_SECRET).decode("utf-8"), choose_targets_multi())
+                try:
+                    send_udp(encode_packet(packet, RESCUE_SECRET).decode("utf-8"), choose_targets_multi())
+                except ValueError:
+                    print("⚠️ 对讲消息过长，超过局域网 UDP 单包限制，未发送。")
         # 2026-11-20 ：1:45 精准插入以下独立特权流处理分支：
         elif choice == 'P':
             input_val = input("\n请输入远程陪伴媒体 URL / 直播源 / H5 网页地址: ").strip()

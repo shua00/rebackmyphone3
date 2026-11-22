@@ -407,25 +407,31 @@ class RequestHandler(BaseHTTPRequestHandler):
                     except Exception as e:
                         print(f"❌ 代理发送失败: {e}")
                 else:
-                    # 独立模式：本地记录 + 子网/全局双发广播
+                    # 独立模式：先验证单个 UDP 数据包可编码，再写本地历史并发送。
                     ts = datetime.datetime.now().strftime("%H:%M:%S")
                     message_id = str(uuid.uuid4())
-                    local_saved = _claim_chat_message(sender, message_id, content)
-                    if local_saved is None:
-                        print("⚠️ 本机网页消息历史持久化失败，仍按原有方式发送")
-                    # 保留原来的网页即时显示行为；持久化失败不改变发送与本地显示。
-                    with print_lock:
-                        print(f"\n💻 [网页] {sender} 说: {content}")
-                        CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": content})
-                        if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
-
                     packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
                               "sender_peer_type": "chat.py", "service_id": PEER_NODE_ID,
                               "target_peer_id": "*", "message_id": message_id,
                               "created_at_ms": int(time.time() * 1000),
                               "display_name": sender, "body": content}
+                    try:
+                        encoded_packet = encode_packet(packet, RESCUE_SECRET)
+                    except ValueError:
+                        self.send_response(413)
+                        self.send_header('Content-Type', 'application/json')
+                        self.end_headers()
+                        self.wfile.write(b'{"status":"message_too_large"}')
+                        return
+                    local_saved = _claim_chat_message(sender, message_id, content)
+                    if local_saved is None:
+                        print("⚠️ 本机网页消息历史持久化失败，仍按原有方式发送")
+                    with print_lock:
+                        print(f"\n💻 [网页] {sender} 说: {content}")
+                        CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": content})
+                        if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
                     # [F1] 子网广播到现有服务端口；接收端按稳定 peer ID 去重。
-                    broadcast_chat_message(encode_packet(packet, RESCUE_SECRET).decode("utf-8"))
+                    broadcast_chat_message(encoded_packet.decode("utf-8"))
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
