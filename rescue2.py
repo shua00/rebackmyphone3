@@ -114,13 +114,15 @@ PACKAGE_NAME = "com.example.devicefinder"
 
 # ===== 配置区 =====
 RESCUE_SECRET = "your_private_secret_key"
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "rescue2")
 DEFAULT_SERVER_URL = "http://dingwei.bai001.de5.net/api/report"
 DEFAULT_CONFIG_URL = "https://your-config-url.com/config.txt"
 LOG_PORT = 9090
 UDP_DEVICE_PORT = 8888
 UDP_PORT = 8889  # 独立监听端口，避免与 server2.py 的 8888 冲突
+UDP_LISTENER_SOCKET = None
+UDP_CHAT_SEND_LOCK = threading.Lock()
 LOG_DIR = "received_logs"
 
 # ============================================================
@@ -512,9 +514,23 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
                  "reply_nonce": envelope.get("nonce", ""), "listen_port": UDP_PORT}
         try: sock.sendto(encode_packet(reply, RESCUE_SECRET), addr)
         except OSError: pass
+        for pending in load_pending_outgoing_for_peer(_CHAT_DEDUP_DB, "rescue2", sender, limit=10):
+            chat_packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
+                           "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
+                           "target_peer_id": sender, "message_id": pending["message_id"],
+                           "created_at_ms": pending["created_at_ms"],
+                           "display_name": "PC_Terminal", "body": pending["body"]}
+            try:
+                sock.sendto(encode_packet(chat_packet, RESCUE_SECRET), (addr[0], 8888))
+                mark_outgoing_attempt(_CHAT_DEDUP_DB, pending["message_id"], sender, addr[0], 8888)
+            except Exception:
+                pass
         return
     if packet_type == "chat.ack":
-        # The durable sender-side ACK ledger is added in the server outbox phase.
+        message_id = str(envelope.get("message_id") or "")
+        target = str(envelope.get("target_peer_id") or "")
+        if target == PEER_NODE_ID and envelope.get("status") == "stored":
+            acknowledge_outgoing_message(_CHAT_DEDUP_DB, "rescue2", message_id, sender)
         return
     if packet_type != "chat.message":
         return
@@ -547,13 +563,63 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
         info["last_chat"] = time.time()
 
 
+def send_chat_v2(body, target_ips):
+    """Persist PC-originated chat and send from bound UDP 8889 so ACKs return here."""
+    message_id = uuid.uuid4().hex
+    peers = list_known_peers(_CHAT_DEDUP_DB, "rescue2")
+    selected_ips = set(target_ips or [])
+    if not selected_ips:
+        selected_ips = {"255.255.255.255"}
+    selected_peers = [p for p in peers if p["endpoint_ip"] in selected_ips
+                      or "255.255.255.255" in selected_ips]
+    target_ids = [p["peer_id"] for p in selected_peers]
+    created = int(time.time() * 1000)
+    probe = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
+             "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
+             "target_peer_id": "*", "message_id": message_id,
+             "created_at_ms": created, "display_name": "PC_Terminal", "body": body}
+    try:
+        broadcast_bytes = encode_packet(probe, RESCUE_SECRET)
+    except ValueError:
+        print("⚠️ 对讲消息过长，超过局域网 UDP 单包限制，未发送。")
+        return False
+    if not persist_outgoing_message(_CHAT_DEDUP_DB, "rescue2", PEER_NODE_ID,
+                                    message_id, body, target_ids, created):
+        print("⚠️ 对讲消息无法写入持久化队列，已阻止发送。")
+        return False
+    sock = UDP_LISTENER_SOCKET
+    if sock is None or sock.fileno() < 0:
+        print("⚠️ rescue2 UDP 监听尚未就绪，消息已保存，等待设备重新发现后补发。")
+        return False
+    try:
+        with UDP_CHAT_SEND_LOCK:
+            if selected_peers:
+                for peer in selected_peers:
+                    packet = dict(probe)
+                    packet["target_peer_id"] = peer["peer_id"]
+                    raw = encode_packet(packet, RESCUE_SECRET)
+                    sock.sendto(raw, (peer["endpoint_ip"], 8888))
+                    mark_outgoing_attempt(_CHAT_DEDUP_DB, message_id, peer["peer_id"],
+                                          peer["endpoint_ip"], 8888)
+            else:
+                for ip in selected_ips:
+                    sock.sendto(broadcast_bytes, (ip, UDP_DEVICE_PORT))
+        print(f"{I.ok} 对讲消息已提交发送队列: {message_id}")
+        return True
+    except Exception as e:
+        print(f"{I.warn} 对讲发送失败，消息保留待补发: {type(e).__name__}")
+        return False
+
+
 def udp_listener():
-    global UDP_OK
+    global UDP_OK, UDP_LISTENER_SOCKET
     while True:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         try:
             sock.bind(('0.0.0.0', UDP_PORT))
+            UDP_LISTENER_SOCKET = sock
             UDP_OK = True
             print(f"{I.ok} UDP 监听已启动...")
             while True:
@@ -603,6 +669,11 @@ def udp_listener():
         except Exception:
             UDP_OK = False
             time.sleep(10)
+        finally:
+            if UDP_LISTENER_SOCKET is sock:
+                UDP_LISTENER_SOCKET = None
+            try: sock.close()
+            except Exception: pass
 
 # ===== ARP 查询 / 局域网扫描 =====
 def _try_ip_neigh(prefix):
@@ -1540,15 +1611,7 @@ def main():
         elif choice == '6':
             chat = input("对讲消息内容: ").strip()
             if chat:
-                packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
-                          "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
-                          "target_peer_id": "*", "message_id": uuid.uuid4().hex,
-                          "created_at_ms": int(time.time() * 1000),
-                          "display_name": "PC_Terminal", "body": chat}
-                try:
-                    send_udp(encode_packet(packet, RESCUE_SECRET).decode("utf-8"), choose_targets_multi())
-                except ValueError:
-                    print("⚠️ 对讲消息过长，超过局域网 UDP 单包限制，未发送。")
+                send_chat_v2(chat, choose_targets_multi())
         # 2026-11-20 ：1:45 精准插入以下独立特权流处理分支：
         elif choice == 'P':
             input_val = input("\n请输入远程陪伴媒体 URL / 直播源 / H5 网页地址: ").strip()
