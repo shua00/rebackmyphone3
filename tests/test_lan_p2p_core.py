@@ -1153,5 +1153,24 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("首次发现窗口开始", service)
 
 
+
+    def test_android_expired_empty_discovery_becomes_waiting_peers_and_stops_retrying(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        pending_start = store.index("public List<PendingMessage> loadPending(")
+        pending_end = store.index("public int recordOutboxAttempt(", pending_start)
+        self.assertIn("state NOT IN ('delivered','expired','waiting_peers')",
+                      store[pending_start:pending_end])
+        finalize_start = store.index("private boolean finalizeDiscoveryMessage(")
+        finalize_end = store.index("public boolean storeIncoming(", finalize_start)
+        self.assertIn('"waiting_peers"', store[finalize_start:finalize_end])
+        self.assertIn("public boolean finalizeDiscoveryWindow(", store)
+        tracking = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn("store.finalizeDiscoveryWindow(messageId)", tracking)
+
 if __name__ == "__main__":
     unittest.main()
