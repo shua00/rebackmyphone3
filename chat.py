@@ -29,7 +29,7 @@ WEB_PORT = 8082
 UDP_DEVICE_PORT = 8888
 UDP_PORT = 8890  # 独立监听端口，避免与 server2/rescue2 冲突
 RESCUE_SECRET = "your_private_secret_key"  # ⚠️ 必须与手机端一致
-from lan_p2p_core import load_stable_peer_id, record_peer
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.sqlite3"), "chat.py")
 SERVER2_URL = "http://127.0.0.1:8080"      # server2.py 的地址
 # ==========================================
@@ -244,6 +244,49 @@ def udp_listener():
             # [B2] 1024 → 4096，避免长消息被 UDP 层截断
             data, addr = udp_sock.recvfrom(4096)
             msg = data.decode('utf-8', errors='ignore')
+            if msg.startswith("{"):
+                try:
+                    envelope = decode_packet(data, RESCUE_SECRET)
+                except ValueError:
+                    envelope = None
+                if envelope is not None:
+                    packet_type = envelope.get("type")
+                    sender = str(envelope.get("sender_peer_id") or "")
+                    if packet_type == "peer.hello":
+                        record_peer(CHAT_DB, "chat.py", sender, envelope.get("sender_peer_type", "unknown"),
+                                    envelope.get("service_id", ""), addr[0], 8888, "suspect")
+                        reply = {"type": "peer.ack", "sender_peer_id": PEER_NODE_ID,
+                                 "sender_peer_type": "chat.py", "service_id": PEER_NODE_ID,
+                                 "reply_nonce": envelope.get("nonce", ""), "listen_port": UDP_PORT}
+                        try: udp_sock.sendto(encode_packet(reply, RESCUE_SECRET), addr)
+                        except OSError: pass
+                    elif packet_type == "chat.message":
+                        target = envelope.get("target_peer_id", "*")
+                        if target in ("*", PEER_NODE_ID):
+                            message_id = str(envelope.get("message_id") or "")
+                            body = str(envelope.get("body") or "")
+                            if sender and message_id:
+                                if sender in ("Web_Console", "PC_Terminal", "Guest_"):
+                                    claim_result = True
+                                else:
+                                    claim_result = _claim_chat_message(sender, message_id, body)
+                                if claim_result is not None:
+                                    record_peer(CHAT_DB, "chat.py", sender, "android", "android-main",
+                                                addr[0], 8888, "active")
+                                    ack_packet = {"type": "chat.ack", "sender_peer_id": PEER_NODE_ID,
+                                                  "sender_peer_type": "chat.py", "service_id": PEER_NODE_ID,
+                                                  "target_peer_id": sender, "message_id": message_id,
+                                                  "status": "stored"}
+                                    try: udp_sock.sendto(encode_packet(ack_packet, RESCUE_SECRET), addr)
+                                    except OSError: pass
+                                if claim_result:
+                            ts = datetime.datetime.now().strftime("%H:%M:%S")
+                            with print_lock:
+                                print(f"\\n🗣️ [对讲机] {sender} 说: {body}")
+                                CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": body})
+                                if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
+        # Authenticated JSON v2 packet handled; never fall through to the legacy parser.
+                    continue
             if msg.startswith("FIND_ME_PEER_HELLO:"):
                 parts = msg.split(":", 3)
                 if len(parts) == 4 and parts[1] == RESCUE_SECRET:
