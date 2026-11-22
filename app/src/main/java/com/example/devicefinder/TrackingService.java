@@ -172,6 +172,9 @@ public class TrackingService extends Service implements LocationListener {
     private LocationManager locationManager;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private ConnectivityManager.NetworkCallback networkCallback;
+    // Observe Wi-Fi LAN separately: the default route may remain on cellular.
+    private ConnectivityManager.NetworkCallback wifiLanNetworkCallback;
+    private volatile String wifiLanFingerprint;
     private AlarmManager alarmManager;
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
@@ -1826,11 +1829,58 @@ public class TrackingService extends Service implements LocationListener {
         else FileLogger.log(this, "SERVICE", "⚠️ 修改图标状态失败 (hideIcon=" + hideIcon + ")");
     }
 
+    private String buildWifiLanFingerprint(ConnectivityManager cm) {
+        if (cm == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return "UNAVAILABLE";
+        StringBuilder signature = new StringBuilder();
+        try {
+            for (Network network : cm.getAllNetworks()) {
+                NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+                if (caps == null || !caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue;
+                LinkProperties links = cm.getLinkProperties(network);
+                signature.append(network).append('|');
+                if (links != null) {
+                    signature.append(links.getInterfaceName()).append('|')
+                            .append(links.getLinkAddresses()).append('|')
+                            .append(links.getRoutes());
+                }
+                signature.append(';');
+            }
+        } catch (Exception e) {
+            return "ERROR";
+        }
+        return signature.length() == 0 ? "NO_WIFI" : signature.toString();
+    }
+
+    /**
+     * Wi-Fi can carry local P2P even when cellular remains the default route.
+     * Rebind the UDP listener whenever the actual Wi-Fi LAN path changes.
+     */
+    private void refreshWifiLanTransport(String reason) {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            String current = buildWifiLanFingerprint(cm);
+            String previous = wifiLanFingerprint;
+            wifiLanFingerprint = current;
+            if (previous == null || previous.equals(current)) return;
+            invalidateVerifiedChatPeers("Wi-Fi LAN path changed: " + reason);
+            lastPeerDiscoveryAt = 0L;
+            DatagramSocket oldSocket = rescueSocketRef;
+            if (oldSocket != null && !oldSocket.isClosed()) {
+                FileLogger.log(this, "NETWORK", "Wi-Fi LAN changed; closing old UDP socket for rebind");
+                oldSocket.close();
+            }
+            handler.postDelayed(this::retryPendingLanChatMessages, 1200L);
+        } catch (Exception e) {
+            FileLogger.log(this, "NETWORK", "Wi-Fi LAN refresh failed: " + e.getClass().getSimpleName());
+        }
+    }
+
     private void registerNetworkCallback() {
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
             if (cm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 lastPeerRouteGeneration = buildNetworkSnapshot().optLong("network_generation", -1L);
+                wifiLanFingerprint = buildWifiLanFingerprint(cm);
                 networkCallback = new ConnectivityManager.NetworkCallback() {
                     @Override
                     public void onAvailable(Network network) {
@@ -1868,6 +1918,29 @@ public class TrackingService extends Service implements LocationListener {
                 };
                 // Android 7.0+ 使用默认网络回调，避免把同时存在的非默认网络误判为当前出口。
                 cm.registerDefaultNetworkCallback(networkCallback);
+                // Observe all Wi-Fi networks even when the active default network is cellular.
+                wifiLanNetworkCallback = new ConnectivityManager.NetworkCallback() {
+                    @Override public void onAvailable(Network network) {
+                        super.onAvailable(network);
+                        refreshWifiLanTransport("Wi-Fi available");
+                    }
+                    @Override public void onLost(Network network) {
+                        super.onLost(network);
+                        refreshWifiLanTransport("Wi-Fi lost");
+                    }
+                    @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
+                        super.onCapabilitiesChanged(network, capabilities);
+                        refreshWifiLanTransport("Wi-Fi capabilities changed");
+                    }
+                    @Override public void onLinkPropertiesChanged(Network network, LinkProperties linkProperties) {
+                        super.onLinkPropertiesChanged(network, linkProperties);
+                        refreshWifiLanTransport("Wi-Fi link properties changed");
+                    }
+                };
+                android.net.NetworkRequest wifiRequest = new android.net.NetworkRequest.Builder()
+                        .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                        .build();
+                cm.registerNetworkCallback(wifiRequest, wifiLanNetworkCallback);
             }
         } catch (Exception e) {
             FileLogger.log(this, "NETWORK", "❌ 注册网络回调失败: " + e.getMessage());
@@ -4903,6 +4976,9 @@ public class TrackingService extends Service implements LocationListener {
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
             if (cm != null && networkCallback != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) cm.unregisterNetworkCallback(networkCallback);
+            if (cm != null && wifiLanNetworkCallback != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                cm.unregisterNetworkCallback(wifiLanNetworkCallback);
+            }
         } catch (Exception ignored) {}
     }
 
