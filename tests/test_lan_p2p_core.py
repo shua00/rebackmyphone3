@@ -1283,7 +1283,7 @@ class LanP2PCoreTests(unittest.TestCase):
             repo_root / "app/src/main/java/com/example/devicefinder/ChatActivity.java"
         ).read_text(encoding="utf-8")
         start = source.index("private void sendMessage()")
-        end = source.index("\\n    private void refreshHistory(", start)
+        end = source.index("\n    private void refreshHistory(", start)
         send = source[start:end]
         self.assertIn('inputMsg.setText("");', send)
         self.assertIn("inputMsg.requestFocus();", send)
