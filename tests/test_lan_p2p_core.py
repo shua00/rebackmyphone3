@@ -1017,5 +1017,25 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn('executeMaintenance("network-available-flush"', callback)
         self.assertNotIn("flushPendingReports();", callback)
 
+
+    def test_android_network_callbacks_only_enqueue_network_refresh_work(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+
+        default_start = source.index("networkCallback = new ConnectivityManager.NetworkCallback()")
+        default_end = source.index("cm.registerDefaultNetworkCallback(networkCallback)", default_start)
+        default_callback = source[default_start:default_end]
+        self.assertEqual(default_callback.count('executeMaintenance("peer-route-refresh"'), 4)
+        self.assertNotIn("refreshPeerRoutesForNetworkChange(", default_callback)
+
+        wifi_start = source.index("wifiLanNetworkCallback = new ConnectivityManager.NetworkCallback()")
+        wifi_end = source.index("cm.registerNetworkCallback(wifiRequest, wifiLanNetworkCallback)", wifi_start)
+        wifi_callback = source[wifi_start:wifi_end]
+        self.assertEqual(wifi_callback.count('executeMaintenance("wifi-lan-refresh"'), 4)
+        self.assertNotIn("refreshWifiLanTransport(", wifi_callback)
+
+
 if __name__ == "__main__":
     unittest.main()
