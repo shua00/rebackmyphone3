@@ -301,6 +301,7 @@ public class TrackingService extends Service implements LocationListener {
             lastPeerRouteGeneration = generation;
             if (previous >= 0L && generation >= 0L && generation != previous) {
                 invalidateVerifiedChatPeers(reason + " (network generation " + previous + " -> " + generation + ")");
+                handler.postDelayed(this::broadcastLanPeerHello, 1200L);
             } else {
                 FileLogger.logD("CHAT", "LAN P2P 保留已验证 peer：网络路径未变化，generation=" + generation + "，回调=" + reason);
             }
@@ -3843,6 +3844,51 @@ public class TrackingService extends Service implements LocationListener {
         }
     }
 
+    /** Broadcast one authenticated peer beacon when the listener starts or the LAN route changes. */
+    private void broadcastLanPeerHello() {
+        DatagramSocket socket = rescueSocketRef;
+        if (serviceDestroyed || socket == null || socket.isClosed()) return;
+        String broadcast = getWifiBroadcastAddress();
+        if (broadcast == null || broadcast.isEmpty()) broadcast = "255.255.255.255";
+        sendPeerHello(socket, broadcast, new int[]{8888, 8887, 8889, 8890}, false);
+    }
+
+    /** Send a one-way challenge to a peer that announced itself; it cannot trigger a challenge loop. */
+    private void sendDirectedPeerChallenge(DatagramSocket socket, java.net.InetAddress address, int port) {
+        if (serviceDestroyed || socket == null || socket.isClosed() || address == null
+                || !(port == 8888 || port == 8887 || port == 8889 || port == 8890)) return;
+        sendPeerHello(socket, address.getHostAddress(), new int[]{port}, true);
+    }
+
+    private void sendPeerHello(DatagramSocket socket, String address, int[] ports, boolean challengeOnly) {
+        String nonce = java.util.UUID.randomUUID().toString();
+        pendingPeerChallenges.put(nonce, new java.util.concurrent.CountDownLatch(1));
+        try {
+            JSONObject hello = LanP2pProtocol.create("peer.hello", getUniqueDeviceId(), "android", "android-main");
+            hello.put("nonce", nonce);
+            hello.put("listen_port", 8888);
+            hello.put("challenge_only", challengeOnly);
+            hello.put("network_scope", wifiLanFingerprint == null ? "" : wifiLanFingerprint);
+            hello.put("capabilities", new JSONArray().put("chat.text").put("chat.ack"));
+            byte[] bytes = LanP2pProtocol.encode(hello, RESCUE_SECRET);
+            for (int port : ports) {
+                try {
+                    DatagramPacket packet = new DatagramPacket(bytes, bytes.length,
+                            java.net.InetAddress.getByName(address), port);
+                    sendLanUdpPacket(socket, packet, "PEER_BEACON_" + port);
+                } catch (Exception e) {
+                    FileLogger.logD("CHAT", "LAN peer beacon send failed port=" + port
+                            + " error=" + e.getClass().getSimpleName());
+                }
+            }
+        } catch (Exception e) {
+            pendingPeerChallenges.remove(nonce);
+            FileLogger.log(this, "CHAT", "LAN peer beacon creation failed: " + e.getClass().getSimpleName());
+            return;
+        }
+        handler.postDelayed(() -> pendingPeerChallenges.remove(nonce), 2500L);
+    }
+
     /**
      * 实时 LAN 控制包快路径：握手和聊天 ACK 在普通控制指令分发之前完成。
      * 返回 true 表示该包已处理；不创建线程、不做磁盘 I/O、不执行 UI/业务命令。
@@ -3865,24 +3911,42 @@ public class TrackingService extends Service implements LocationListener {
             String serviceId = envelope.optString("service_id", "");
             long now = System.currentTimeMillis();
             if ("peer.hello".equals(type)) {
-                if (senderId.isEmpty() || senderId.equals(getUniqueDeviceId())) return true;
+                int sourcePort = packet.getPort();
+                if (senderId.isEmpty() || senderId.equals(getUniqueDeviceId())
+                        || envelope.optString("nonce", "").isEmpty()
+                        || !(sourcePort == 8888 || sourcePort == 8887
+                             || sourcePort == 8889 || sourcePort == 8890)) return true;
                 JSONObject reply = LanP2pProtocol.create("peer.ack", getUniqueDeviceId(),
                         "android", "android-main");
                 reply.put("reply_nonce", envelope.optString("nonce", ""));
                 reply.put("listen_port", 8888);
                 byte[] bytes = LanP2pProtocol.encode(reply, RESCUE_SECRET);
                 DatagramPacket response = new DatagramPacket(bytes, bytes.length,
-                        packet.getAddress(), packet.getPort());
+                        packet.getAddress(), sourcePort);
                 sendLanUdpPacket(socket, response, "PEER_ACK_V2");
+
+                // A HELLO is authenticated presence, not yet a verified return route.
+                // Persist it as suspect; a matching challenge response promotes it to active.
                 LanChatStore store = lanChatStore;
                 if (store != null) {
+                    final String peerType = envelope.optString("sender_peer_type", "unknown");
+                    final String peerNetwork = envelope.optString("network_scope", "");
+                    final String peerIp = packet.getAddress().getHostAddress();
                     try {
-                        reportExecutor.execute(() -> store.upsertPeer(senderId,
-                                envelope.optString("sender_peer_type", "unknown"), serviceId,
-                                envelope.optString("network_scope", ""),
-                                packet.getAddress().getHostAddress(), packet.getPort(),
-                                now, now + 120_000L));
+                        reportExecutor.execute(() -> store.observePeer(senderId, peerType, serviceId,
+                                peerNetwork, peerIp, sourcePort, now, now + 120_000L));
                     } catch (java.util.concurrent.RejectedExecutionException ignored) {}
+                }
+
+                // A normal beacon also challenges its sender once, allowing an existing sender
+                // to rediscover this device and resume its own pending outbox. challenge_only
+                // prevents challenge ping-pong between two devices.
+                if (!envelope.optBoolean("challenge_only", false)) {
+                    java.net.InetSocketAddress verified = verifiedChatPeers.get(senderId);
+                    boolean sameRoute = verified != null
+                            && verified.getAddress().equals(packet.getAddress())
+                            && verified.getPort() == sourcePort;
+                    if (!sameRoute) sendDirectedPeerChallenge(socket, packet.getAddress(), sourcePort);
                 }
                 return true;
             }
@@ -3907,13 +3971,20 @@ public class TrackingService extends Service implements LocationListener {
                         } catch (java.util.concurrent.RejectedExecutionException ignored) {}
                     }
                     latch.countDown();
+                    // A newly verified peer may have come back online; resume this device's
+                    // durable outbox immediately instead of waiting for another user message.
+                    handler.postDelayed(this::retryPendingLanChatMessages, 150L);
                 }
                 return true;
             }
             if ("chat.ack".equals(type)) {
                 String messageId = envelope.optString("message_id", "");
                 String targetId = envelope.optString("target_peer_id", "");
-                if (!getUniqueDeviceId().equals(targetId) || !"stored".equals(envelope.optString("status", ""))) {
+                int sourcePort = packet.getPort();
+                if (messageId.isEmpty() || !getUniqueDeviceId().equals(targetId)
+                        || !"stored".equals(envelope.optString("status", ""))
+                        || !(sourcePort == 8888 || sourcePort == 8887
+                             || sourcePort == 8889 || sourcePort == 8890)) {
                     return true;
                 }
                 java.util.concurrent.CountDownLatch latch = pendingChatAcks.get(messageId);
@@ -3922,19 +3993,16 @@ public class TrackingService extends Service implements LocationListener {
                 LanChatStore store = lanChatStore;
                 boolean routeMatches = verified != null
                         && verified.getAddress().equals(packet.getAddress())
-                        && verified.getPort() == packet.getPort();
+                        && verified.getPort() == sourcePort;
+                // Unknown peers may ACK only while this message's bounded first-discovery
+                // snapshot is open. Such an ACK adds a target but never grants route trust.
                 boolean discoveryAck = store != null && store.isDiscoveryPending(messageId);
                 if (routeMatches || discoveryAck) {
-                    if (!routeMatches && discoveryAck) {
-                        verifiedChatPeers.put(senderId,
-                                new java.net.InetSocketAddress(packet.getAddress(), packet.getPort()));
-                        verifiedChatPeerSeen.put(senderId, now);
-                    }
                     boolean wasExpected = expected != null && expected.remove(senderId);
                     try {
                         reportExecutor.execute(() -> {
                             if (store != null && store.acknowledge(messageId, senderId)) {
-                                verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
+                                if (routeMatches) verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
                                 if (latch != null) latch.countDown();
                             } else if (wasExpected && expected != null) {
                                 expected.add(senderId);
@@ -4385,6 +4453,8 @@ public class TrackingService extends Service implements LocationListener {
                 rescueSocketRef = rescueSocket;
                 udpBindFailCount = 0;
                 FileLogger.log(this, "UDP", "✅ 监听已绑定 8888");
+                // 启动/重绑定后主动通告一次本机 LAN peer，唤醒其他节点的离线消息补发。
+                handler.postDelayed(this::broadcastLanPeerHello, 300L);
                 // 初次启动及网络切换重绑定后统一恢复待确认队列；此时 socket 已可用。
                 handler.postDelayed(this::retryPendingLanChatMessages, 1200L);
 

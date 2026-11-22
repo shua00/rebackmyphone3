@@ -462,6 +462,56 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
+    /**
+     * Record an authenticated HELLO without treating it as a verified return route.
+     * A changed IP/port clears the old verification; a same-route HELLO preserves it.
+     */
+    public void observePeer(String peerId, String peerType, String serviceId, String networkScope,
+                            String ip, int port, long now, long leaseExpiresAt) {
+        if (peerId == null || peerId.length() == 0 || ip == null || ip.length() == 0
+                || port <= 0 || port > 65535) return;
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            String oldIp = null;
+            int oldPort = -1;
+            long oldVerifiedAt = 0L;
+            String oldStatus = "suspect";
+            Cursor c = db.rawQuery("SELECT endpoint_ip,endpoint_port,last_verified_at,status "
+                    + "FROM lan_peers WHERE peer_id=?", new String[]{peerId});
+            try {
+                if (c.moveToFirst()) {
+                    oldIp = c.getString(0);
+                    oldPort = c.getInt(1);
+                    oldVerifiedAt = c.getLong(2);
+                    oldStatus = c.getString(3);
+                }
+            } finally { c.close(); }
+
+            boolean sameRoute = ip.equals(oldIp) && port == oldPort;
+            ContentValues v = new ContentValues();
+            v.put("peer_type", peerType == null ? "unknown" : peerType);
+            v.put("service_id", serviceId == null ? "" : serviceId);
+            v.put("protocol_version", 2);
+            v.put("network_scope", networkScope == null ? "" : networkScope);
+            v.put("endpoint_ip", ip);
+            v.put("endpoint_port", port);
+            v.put("last_seen_at", now);
+            v.put("last_verified_at", sameRoute ? oldVerifiedAt : 0L);
+            v.put("lease_expires_at", leaseExpiresAt);
+            v.put("status", sameRoute && "active".equals(oldStatus) ? "active" : "suspect");
+            if (oldIp == null) {
+                v.put("peer_id", peerId);
+                db.insertWithOnConflict("lan_peers", null, v, SQLiteDatabase.CONFLICT_IGNORE);
+            } else {
+                db.update("lan_peers", v, "peer_id=?", new String[]{peerId});
+            }
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+    }
+
     public void upsertPeer(String peerId, String peerType, String serviceId, String networkScope,
                            String ip, int port, long now, long leaseExpiresAt) {
         if (peerId == null || peerId.length() == 0) return;
