@@ -2034,6 +2034,13 @@ public class TrackingService extends Service implements LocationListener {
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
             String current = buildWifiLanFingerprint(cm);
+            // A transient ConnectivityManager/API failure is not evidence that the LAN
+            // changed. Preserve the last known-good fingerprint and verified routes;
+            // a later callback will retry the comparison with a real snapshot.
+            if ("ERROR".equals(current) || "UNAVAILABLE".equals(current)) {
+                FileLogger.logD("CHAT", "Wi-Fi LAN fingerprint unavailable; retaining verified peer routes");
+                return;
+            }
             String previous = wifiLanFingerprint;
             wifiLanFingerprint = current;
             if (previous == null || previous.equals(current)) return;

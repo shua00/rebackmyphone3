@@ -2059,6 +2059,12 @@ class LanP2PCoreTests(unittest.TestCase):
         wifi_refresh = source[wifi_start:wifi_end]
         self.assertIn("invalidateVerifiedChatPeers(\"Wi-Fi LAN path changed", wifi_refresh)
         self.assertIn("oldSocket.close()", wifi_refresh)
+        # Transient platform inspection failures must not be mistaken for a real
+        # Wi-Fi LAN topology change, otherwise valid peer routes are needlessly revoked.
+        guard = wifi_refresh.index('if ("ERROR".equals(current) || "UNAVAILABLE".equals(current))')
+        invalidate = wifi_refresh.index('invalidateVerifiedChatPeers("Wi-Fi LAN path changed')
+        self.assertLess(guard, invalidate)
+        self.assertIn("retaining verified peer routes", wifi_refresh)
 
 
 if __name__ == "__main__":
