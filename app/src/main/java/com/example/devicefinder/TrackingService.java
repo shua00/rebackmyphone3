@@ -4131,7 +4131,12 @@ public class TrackingService extends Service implements LocationListener {
                         java.net.InetSocketAddress peer = verifiedChatPeers.get(peerId);
                         if (peer == null) continue;
                         try {
-                            if (store != null) store.markAttempt(messageId, peerId, "");
+                            // Recheck the durable target immediately before UDP dispatch.
+                            // ACK may have arrived after the recipient snapshot was loaded;
+                            // a failed ledger check must fail closed rather than resend to an ACKed peer.
+                            if (store == null || !store.markAttempt(messageId, peerId, "")) {
+                                continue;
+                            }
                             byte[] peerData = buildAuthenticatedLanChatPacket(myId, peerId, messageId, message);
                             DatagramPacket p = new DatagramPacket(peerData, peerData.length,
                                     peer.getAddress(), peer.getPort());
