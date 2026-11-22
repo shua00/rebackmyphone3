@@ -279,6 +279,12 @@ public class TrackingService extends Service implements LocationListener {
             new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CountDownLatch> pendingPeerChallenges =
             new java.util.concurrent.ConcurrentHashMap<>();
+    // Directed challenges are bound to the peer identity and exact source endpoint.
+    // Broadcast discovery challenges intentionally leave both expectations unset.
+    private final java.util.concurrent.ConcurrentHashMap<String, String> pendingPeerChallengeExpectedIds =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, java.net.InetSocketAddress> pendingPeerChallengeExpectedEndpoints =
+            new java.util.concurrent.ConcurrentHashMap<>();
     // 有效 peer 存在时也定期重新发现，纳入后来上线/加入局域网的设备。
     private volatile long lastPeerDiscoveryAt = 0L;
     private static final long PEER_DISCOVERY_REFRESH_MS = 30_000L;
@@ -310,6 +316,8 @@ public class TrackingService extends Service implements LocationListener {
         verifiedChatPeers.clear();
         verifiedChatPeerSeen.clear();
         pendingPeerChallenges.clear();
+        pendingPeerChallengeExpectedIds.clear();
+        pendingPeerChallengeExpectedEndpoints.clear();
         FileLogger.log(this, "CHAT", "LAN P2P peer 路由已失效，等待重新发现: " + reason);
     }
     private final Object rescueLock = new Object();
@@ -3679,7 +3687,7 @@ public class TrackingService extends Service implements LocationListener {
             } catch (Exception e) {
                 FileLogger.log(this, "CHAT", "⚠️ P2P 发现失败: " + e.getMessage());
             } finally {
-                pendingPeerChallenges.remove(nonce);
+                clearPendingPeerChallenge(nonce);
                 peerDiscoveryInFlight.set(false);
             }
         }
@@ -3846,19 +3854,42 @@ public class TrackingService extends Service implements LocationListener {
         if (serviceDestroyed || socket == null || socket.isClosed()) return;
         String broadcast = getWifiBroadcastAddress();
         if (broadcast == null || broadcast.isEmpty()) broadcast = "255.255.255.255";
-        sendPeerHello(socket, broadcast, new int[]{8888, 8887, 8889, 8890}, false);
+        sendPeerHello(socket, broadcast, new int[]{8888, 8887, 8889, 8890},
+                false, null, null);
     }
 
     /** Send a one-way challenge to a peer that announced itself; it cannot trigger a challenge loop. */
-    private void sendDirectedPeerChallenge(DatagramSocket socket, java.net.InetAddress address, int port) {
+    private void sendDirectedPeerChallenge(DatagramSocket socket, String expectedPeerId,
+                                            java.net.InetAddress address, int port) {
         if (serviceDestroyed || socket == null || socket.isClosed() || address == null
+                || expectedPeerId == null || expectedPeerId.isEmpty()
                 || !(port == 8888 || port == 8887 || port == 8889 || port == 8890)) return;
-        sendPeerHello(socket, address.getHostAddress(), new int[]{port}, true);
+        sendPeerHello(socket, address.getHostAddress(), new int[]{port}, true,
+                expectedPeerId, new java.net.InetSocketAddress(address, port));
+    }
+
+    private void clearPendingPeerChallenge(String nonce) {
+        if (nonce == null || nonce.isEmpty()) return;
+        pendingPeerChallenges.remove(nonce);
+        pendingPeerChallengeExpectedIds.remove(nonce);
+        pendingPeerChallengeExpectedEndpoints.remove(nonce);
     }
 
     private void sendPeerHello(DatagramSocket socket, String address, int[] ports, boolean challengeOnly) {
+        sendPeerHello(socket, address, ports, challengeOnly, null, null);
+    }
+
+    private void sendPeerHello(DatagramSocket socket, String address, int[] ports, boolean challengeOnly,
+                               String expectedPeerId,
+                               java.net.InetSocketAddress expectedEndpoint) {
         String nonce = java.util.UUID.randomUUID().toString();
-        pendingPeerChallenges.put(nonce, new java.util.concurrent.CountDownLatch(1));
+        java.util.concurrent.CountDownLatch challengeLatch =
+                new java.util.concurrent.CountDownLatch(1);
+        pendingPeerChallenges.put(nonce, challengeLatch);
+        if (expectedPeerId != null && expectedEndpoint != null) {
+            pendingPeerChallengeExpectedIds.put(nonce, expectedPeerId);
+            pendingPeerChallengeExpectedEndpoints.put(nonce, expectedEndpoint);
+        }
         try {
             JSONObject hello = LanP2pProtocol.create("peer.hello", getUniqueDeviceId(), "android", "android-main");
             hello.put("nonce", nonce);
@@ -3878,11 +3909,15 @@ public class TrackingService extends Service implements LocationListener {
                 }
             }
         } catch (Exception e) {
-            pendingPeerChallenges.remove(nonce);
+            clearPendingPeerChallenge(nonce);
             FileLogger.log(this, "CHAT", "LAN peer beacon creation failed: " + e.getClass().getSimpleName());
             return;
         }
-        handler.postDelayed(() -> pendingPeerChallenges.remove(nonce), 2500L);
+        handler.postDelayed(() -> {
+            if (pendingPeerChallenges.get(nonce) == challengeLatch) {
+                clearPendingPeerChallenge(nonce);
+            }
+        }, 2500L);
     }
 
     /**
@@ -3947,7 +3982,7 @@ public class TrackingService extends Service implements LocationListener {
                                 boolean sameRoute = verified != null
                                         && verified.getAddress().equals(peerAddress)
                                         && verified.getPort() == sourcePort;
-                                if (!sameRoute) sendDirectedPeerChallenge(socket, peerAddress, sourcePort);
+                                if (!sameRoute) sendDirectedPeerChallenge(socket, senderId, peerAddress, sourcePort);
                             }
                         } catch (Exception persistOrSendError) {
                             FileLogger.log(this, "CHAT", "⚠️ peer HELLO 未能持久化/应答: "
@@ -3964,8 +3999,25 @@ public class TrackingService extends Service implements LocationListener {
                 java.util.concurrent.CountDownLatch latch = pendingPeerChallenges.get(nonce);
                 int port = packet.getPort();
                 final java.net.InetAddress peerAddress = packet.getAddress();
+                String expectedPeerId = pendingPeerChallengeExpectedIds.get(nonce);
+                java.net.InetSocketAddress expectedEndpoint =
+                        pendingPeerChallengeExpectedEndpoints.get(nonce);
+                boolean validStandardPort = port == 8888 || port == 8887
+                        || port == 8889 || port == 8890;
+                boolean directedChallengeMatches = expectedPeerId == null
+                        ? expectedEndpoint == null
+                        : expectedPeerId.equals(senderId) && expectedEndpoint != null
+                        && expectedEndpoint.getAddress().equals(peerAddress)
+                        && expectedEndpoint.getPort() == port;
                 if (latch != null && !senderId.isEmpty() && !senderId.equals(getUniqueDeviceId())
-                        && (port == 8888 || port == 8887 || port == 8889 || port == 8890)) {
+                        && validStandardPort && directedChallengeMatches) {
+                    // Directed challenges are single-use; broadcast nonces remain open briefly
+                    // so every peer in the bounded discovery window can be collected.
+                    if (expectedPeerId != null) {
+                        if (!pendingPeerChallenges.remove(nonce, latch)) return true;
+                        pendingPeerChallengeExpectedIds.remove(nonce);
+                        pendingPeerChallengeExpectedEndpoints.remove(nonce);
+                    }
                     LanChatStore store = lanChatStore;
                     if (store == null) return true;
                     final String peerType = envelope.optString("sender_peer_type", "unknown");
