@@ -634,6 +634,38 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertEqual(load_pending_outgoing_for_peer(
             self.db_path, "server2", "android-a"), [])
 
+    def test_android_inbox_conflicting_payload_is_rejected_and_duplicate_refreshes_ui(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store_source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        tracking_source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+
+        enqueue_start = store_source.index("public boolean enqueue(")
+        enqueue_end = store_source.index("\n    public ", enqueue_start + 12)
+        enqueue_method = store_source[enqueue_start:enqueue_end]
+        self.assertIn("SELECT sender_peer_id,body FROM lan_outbox WHERE message_id=?", enqueue_method)
+        self.assertIn("senderPeerId.equals(exists.getString(0))", enqueue_method)
+        self.assertIn("body.equals(exists.getString(1))", enqueue_method)
+
+        inbox_start = store_source.index("public boolean storeIncoming(")
+        inbox_end = store_source.index("\n    public ", inbox_start + 12)
+        inbox_method = store_source[inbox_start:inbox_end]
+        self.assertIn("SELECT body FROM lan_inbox", inbox_method)
+        self.assertIn("body.equals(existing.getString(0))", inbox_method)
+        self.assertIn("if (!identical) return false", inbox_method)
+
+        receive_start = tracking_source.index(
+            "private boolean persistIncomingLanChat(String senderId, String messageId, String msgContent,"
+        )
+        receive_end = tracking_source.index("\n    private void startRescueListener", receive_start)
+        receive_method = tracking_source[receive_start:receive_end]
+        self.assertIn("if (alreadyInLegacyIds)", receive_method)
+        self.assertIn("if (store.isIncomingDisplayed(receiverScope, senderId, messageId))", receive_method)
+        self.assertGreaterEqual(receive_method.count("scheduleLanChatUiRefresh();"), 3)
+
     def test_record_peer_fails_closed_when_database_cannot_be_opened(self):
         from lan_p2p_core import record_peer
         directory_path = os.path.join(self.temp_dir.name, "not-a-database-file")

@@ -148,6 +148,7 @@
 | 稳定 peer 路由 | 已修复端点变化继承旧验证的问题；新端点须重新完成挑战验证 | commit `0f3bd13f6b31b09ae440fd7db9a58335c389fb19` |
 | 网络恢复发现 | Android 监听启动/网络路径变化主动发送一次 HELLO；收到有效挑战响应后触发持久化 Outbox 补发；挑战专用包阻断 ping-pong | commits `1a4799063f2f7cd883f1f816e77457d1e029c80a`、`c66379a466da1d220d199068978ec90ed64d4c3c` |
 | 收件箱去重恢复 | SQLite Inbox 增加持久化 presentation marker；历史提交与 marker 之间崩溃时可重试补齐；旧 500 条 ID 列表只作迁移/恢复辅助 | commit `362bfd3efa315ce59b1c25a2ef815f5e81168efd` |
+| Android 同 ID 正文冲突与 UI 恢复 | Outbox/Inbox 对相同 message_id 的重复包核对发送者和正文，冲突拒绝；当历史与 marker 已落盘但前次 UI refresh 因崩溃未发出时，重试重复包仅刷新窗口，不重复追加历史 | commit `a257dd8ecd19aed47dda903669a486096c0f742d`；新增 Java 源码回归守卫，待 CI |
 | UDP 来源端点 | 异步处理前复制来源 IP/端口，避免接收循环复用 DatagramPacket 导致端点串包 | commit `0a2f045740a1d3620fc5d6b5f3d70f5c48203b25` |
 | v2-only 接收面 | Android、server2、rescue2、chat.py 已移除旧字符串式对讲/发现/ACK 入口；保留普通救援指令和独立悬浮留言路径 | commit `efdd4789e16fa70c76df5b9556a8c7bc3349e13f` |
 | 目标快照与重试测试 | 新增固定目标、部分 ACK 后只重试未确认目标、发现窗口冻结、空目标不误报送达、错误密钥拒绝等自动化用例 | commit `4b4cc9229481d4f5da21a9d302463ba389d8681d`；该提交 CI 中 12 项 Python 单测通过 |
