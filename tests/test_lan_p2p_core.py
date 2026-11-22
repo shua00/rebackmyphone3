@@ -1192,5 +1192,22 @@ class LanP2PCoreTests(unittest.TestCase):
             service.index("private void sendLanUdpPacket(", service.index('scheduleLanChatTask("discovery-window-close"'))
         ])
 
+
+    def test_android_expired_empty_discovery_rows_are_finalized_even_after_pending_window_closes(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        service = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        start = service.index("private void transmitLocalUdpMessageInternal(")
+        end = service.index("private void sendLanUdpPacket(", start)
+        send = service[start:end]
+        self.assertIn("if (pendingTargetIds.isEmpty()) {", send)
+        self.assertIn("boolean firstDispatch = store.beginDiscoveryWindow(messageId)", send)
+        self.assertNotIn(
+            "pendingTargetIds.isEmpty() && store.isDiscoveryPending(messageId)", send
+        )
+        self.assertIn("store.isWaitingForPeers(messageId)", send)
+
+
 if __name__ == "__main__":
     unittest.main()
