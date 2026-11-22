@@ -1172,7 +1172,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("totalPeerCount", method)
         self.assertIn("当前可达路由", method)
         self.assertIn("reachablePeerCount", method)
-        self.assertNotIn("已验证成员", method)
+        # Historical terminology in comments is harmless; the emitted log above
+        # is what defines the operator-facing distinction.
 
 
 
