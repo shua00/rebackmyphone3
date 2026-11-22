@@ -202,16 +202,27 @@ public final class LanChatStore extends SQLiteOpenHelper {
     }
 
     public boolean allTargetsAcked(String messageId) {
+        SQLiteDatabase db = getWritableDatabase();
         Cursor c = null;
         try {
-            c = getReadableDatabase().rawQuery(
-                    "SELECT COUNT(*), SUM(CASE WHEN status='acked' THEN 1 ELSE 0 END) " +
-                    "FROM lan_outbox_targets WHERE message_id=?",
+            c = db.rawQuery(
+                    "SELECT o.state,o.delivery_deadline_ms,COUNT(t.peer_id), " +
+                    "SUM(CASE WHEN t.status='acked' THEN 1 ELSE 0 END) " +
+                    "FROM lan_outbox o LEFT JOIN lan_outbox_targets t ON t.message_id=o.message_id " +
+                    "WHERE o.message_id=? GROUP BY o.message_id",
                     new String[]{messageId});
             if (!c.moveToFirst()) return false;
-            int total = c.getInt(0);
-            int acked = c.isNull(1) ? 0 : c.getInt(1);
-            return total > 0 && total == acked;
+            String state = c.getString(0);
+            long deadline = c.getLong(1);
+            int total = c.getInt(2);
+            int acked = c.isNull(3) ? 0 : c.getInt(3);
+            if ("discovery_pending".equals(state) && deadline > System.currentTimeMillis()) return false;
+            if ("discovery_pending".equals(state) && deadline > 0) {
+                ContentValues next = new ContentValues();
+                next.put("state", total > 0 && total == acked ? "delivered" : (total > 0 ? "pending" : "discovery_pending"));
+                db.update("lan_outbox", next, "message_id=?", new String[]{messageId});
+            }
+            return total > 0 && total == acked && deadline <= System.currentTimeMillis();
         } catch (Exception e) {
             return false;
         } finally {
@@ -303,14 +314,38 @@ public final class LanChatStore extends SQLiteOpenHelper {
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
+            long now = System.currentTimeMillis();
+            Cursor outbox = db.rawQuery("SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id=?",
+                    new String[]{messageId});
+            String state = "";
+            long deadline = 0L;
+            try {
+                if (outbox.moveToFirst()) {
+                    state = outbox.getString(0);
+                    deadline = outbox.getLong(1);
+                }
+            } finally { outbox.close(); }
+            if (state.isEmpty()) return false;
+
             ContentValues v = new ContentValues();
             v.put("status", "acked");
-            v.put("last_ack_at", System.currentTimeMillis());
+            v.put("last_ack_at", now);
             int changed = db.update("lan_outbox_targets", v, "message_id=? AND peer_id=?",
                     new String[]{messageId, peerId});
             if (changed == 0) {
-                db.setTransactionSuccessful();
-                return false;
+                if (!"discovery_pending".equals(state) || (deadline > 0 && now > deadline)) return false;
+                if (deadline == 0L) {
+                    deadline = now + 5_000L;
+                    ContentValues window = new ContentValues();
+                    window.put("delivery_deadline_ms", deadline);
+                    db.update("lan_outbox", window, "message_id=?", new String[]{messageId});
+                }
+                ContentValues target = new ContentValues();
+                target.put("message_id", messageId);
+                target.put("peer_id", peerId);
+                target.put("status", "acked");
+                target.put("last_ack_at", now);
+                db.insertWithOnConflict("lan_outbox_targets", null, target, SQLiteDatabase.CONFLICT_IGNORE);
             }
             Cursor c = db.rawQuery("SELECT COUNT(*), SUM(CASE WHEN status='acked' THEN 1 ELSE 0 END) " +
                     "FROM lan_outbox_targets WHERE message_id=?", new String[]{messageId});
@@ -321,10 +356,11 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     acked = c.isNull(1) ? 0 : c.getInt(1);
                 }
             } finally { c.close(); }
-            if (total > 0 && total == acked) {
-                ContentValues state = new ContentValues();
-                state.put("state", "delivered");
-                db.update("lan_outbox", state, "message_id=?", new String[]{messageId});
+            boolean discoveryOpen = "discovery_pending".equals(state) && deadline > 0 && now <= deadline;
+            if (!discoveryOpen) {
+                ContentValues next = new ContentValues();
+                next.put("state", total > 0 && total == acked ? "delivered" : "pending");
+                db.update("lan_outbox", next, "message_id=?", new String[]{messageId});
             }
             db.setTransactionSuccessful();
             return true;
@@ -333,6 +369,71 @@ public final class LanChatStore extends SQLiteOpenHelper {
         } finally {
             db.endTransaction();
         }
+    }
+
+    public boolean isDiscoveryPending(String messageId) {
+        Cursor c = null;
+        try {
+            c = getReadableDatabase().rawQuery(
+                    "SELECT 1 FROM lan_outbox WHERE message_id=? AND state='discovery_pending'",
+                    new String[]{messageId});
+            return c.moveToFirst();
+        } catch (Exception e) {
+            return false;
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
+    /** Add a newly discovered peer to all open first-discovery snapshots. */
+    public void addDiscoveryPeerToOpenMessages(String peerId) {
+        if (peerId == null || peerId.length() == 0) return;
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            long now = System.currentTimeMillis();
+            Cursor c = db.rawQuery("SELECT message_id,delivery_deadline_ms FROM lan_outbox " +
+                    "WHERE state='discovery_pending'", null);
+            try {
+                while (c.moveToNext()) {
+                    String messageId = c.getString(0);
+                    long deadline = c.getLong(1);
+                    if (deadline > 0 && now > deadline) {
+                        finalizeDiscoveryMessage(db, messageId);
+                        continue;
+                    }
+                    if (deadline == 0L) {
+                        ContentValues window = new ContentValues();
+                        window.put("delivery_deadline_ms", now + 5_000L);
+                        db.update("lan_outbox", window, "message_id=?", new String[]{messageId});
+                    }
+                    ContentValues target = new ContentValues();
+                    target.put("message_id", messageId);
+                    target.put("peer_id", peerId);
+                    target.put("status", "pending");
+                    db.insertWithOnConflict("lan_outbox_targets", null, target, SQLiteDatabase.CONFLICT_IGNORE);
+                }
+            } finally { c.close(); }
+            db.setTransactionSuccessful();
+        } catch (Exception ignored) {
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    private void finalizeDiscoveryMessage(SQLiteDatabase db, String messageId) {
+        Cursor c = db.rawQuery("SELECT COUNT(*), SUM(CASE WHEN status='acked' THEN 1 ELSE 0 END) " +
+                "FROM lan_outbox_targets WHERE message_id=?", new String[]{messageId});
+        int total = 0, acked = 0;
+        try {
+            if (c.moveToFirst()) {
+                total = c.getInt(0);
+                acked = c.isNull(1) ? 0 : c.getInt(1);
+            }
+        } finally { c.close(); }
+        ContentValues next = new ContentValues();
+        next.put("state", total > 0 && total == acked ? "delivered" : (total > 0 ? "pending" : "discovery_pending"));
+        db.update("lan_outbox", next, "message_id=?", new String[]{messageId});
     }
 
     /** Returns true for both first storage and a durable duplicate; false means storage failed. */

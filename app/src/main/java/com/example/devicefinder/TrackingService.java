@@ -3898,10 +3898,12 @@ public class TrackingService extends Service implements LocationListener {
                     LanChatStore store = lanChatStore;
                     if (store != null) {
                         try {
-                            reportExecutor.execute(() -> store.upsertPeer(senderId,
-                                    envelope.optString("sender_peer_type", "unknown"), serviceId,
-                                    envelope.optString("network_scope", ""),
-                                    packet.getAddress().getHostAddress(), port, now, now + 120_000L));
+                            reportExecutor.execute(() -> {
+                                store.upsertPeer(senderId, envelope.optString("sender_peer_type", "unknown"),
+                                        serviceId, envelope.optString("network_scope", ""),
+                                        packet.getAddress().getHostAddress(), port, now, now + 120_000L);
+                                store.addDiscoveryPeerToOpenMessages(senderId);
+                            });
                         } catch (java.util.concurrent.RejectedExecutionException ignored) {}
                     }
                     latch.countDown();
@@ -3917,22 +3919,30 @@ public class TrackingService extends Service implements LocationListener {
                 java.util.concurrent.CountDownLatch latch = pendingChatAcks.get(messageId);
                 java.net.InetSocketAddress verified = verifiedChatPeers.get(senderId);
                 java.util.Set<String> expected = pendingChatAckPeers.get(messageId);
-                if (latch != null && expected != null && verified != null
+                LanChatStore store = lanChatStore;
+                boolean routeMatches = verified != null
                         && verified.getAddress().equals(packet.getAddress())
-                        && verified.getPort() == packet.getPort() && expected.remove(senderId)) {
-                    LanChatStore store = lanChatStore;
+                        && verified.getPort() == packet.getPort();
+                boolean discoveryAck = store != null && store.isDiscoveryPending(messageId);
+                if (routeMatches || discoveryAck) {
+                    if (!routeMatches && discoveryAck) {
+                        verifiedChatPeers.put(senderId,
+                                new java.net.InetSocketAddress(packet.getAddress(), packet.getPort()));
+                        verifiedChatPeerSeen.put(senderId, now);
+                    }
+                    boolean wasExpected = expected != null && expected.remove(senderId);
                     try {
                         reportExecutor.execute(() -> {
-                            if (store == null || store.acknowledge(messageId, senderId)) {
+                            if (store != null && store.acknowledge(messageId, senderId)) {
                                 verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
-                                latch.countDown();
-                            } else {
+                                if (latch != null) latch.countDown();
+                            } else if (wasExpected && expected != null) {
                                 expected.add(senderId);
                                 FileLogger.log(this, "CHAT", "⚠️ v2 ACK 账本写入失败，等待重试: " + senderId);
                             }
                         });
                     } catch (java.util.concurrent.RejectedExecutionException rejected) {
-                        expected.add(senderId);
+                        if (wasExpected && expected != null) expected.add(senderId);
                     }
                 }
                 return true;
