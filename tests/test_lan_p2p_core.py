@@ -775,7 +775,7 @@ class LanP2PCoreTests(unittest.TestCase):
         receive = extract_java_method(source, "private boolean persistIncomingLanChat(String senderId, String messageId, String msgContent,")
         sqlite_commit = receive.index("store.storeIncoming(")
         history_commit = receive.index("editor.commit()")
-        presentation_commit = receive.index("store.markIncomingDisplayed(")
+        presentation_commit = receive.rindex("store.markIncomingDisplayed(")
         self.assertLess(sqlite_commit, history_commit)
         self.assertLess(history_commit, presentation_commit)
         self.assertIn("if (!editor.commit())", receive)
