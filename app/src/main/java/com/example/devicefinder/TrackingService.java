@@ -4137,6 +4137,10 @@ public class TrackingService extends Service implements LocationListener {
             final int completionReachablePeerCount = reachablePeerCount;
             final LanChatStore completionStore = store;
             final long completionStartedAt = ackLoopStartedAt;
+            // Publish the grace state before scheduling: a fast scheduler must never
+            // observe the task before the retry gate knows this message is still active.
+            lanChatAckGraceInFlight.add(messageId);
+            ackCleanupDeferred = true;
             boolean completionScheduled = scheduleLanChatTask("chat-ack-grace-" + messageId, () -> {
                 Runnable completion = () -> completeLanChatAckWindow(messageId,
                         completionAwaitingPeerIds, completionAck,
@@ -4149,12 +4153,11 @@ public class TrackingService extends Service implements LocationListener {
                 }
             }, 250L);
             if (!completionScheduled) {
+                lanChatAckGraceInFlight.remove(messageId);
+                ackCleanupDeferred = false;
                 completeLanChatAckWindow(messageId, completionAwaitingPeerIds, completionAck,
                         completionTotalPeerCount, completionReachablePeerCount,
                         completionStore, completionStartedAt);
-            } else {
-                lanChatAckGraceInFlight.add(messageId);
-                ackCleanupDeferred = true;
             }
         } finally {
             if (!ackCleanupDeferred) {
