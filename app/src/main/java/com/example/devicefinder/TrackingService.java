@@ -4563,7 +4563,11 @@ public class TrackingService extends Service implements LocationListener {
                         || messageId.isEmpty()
                         || !(targetId.equals("*") || targetId.equals(getUniqueDeviceId()))) return true;
                 String receiveKey = senderId + ":" + messageId;
-                if (!pendingLanChatReceives.add(receiveKey)) return true;
+                if (!pendingLanChatReceives.add(receiveKey)) {
+                    // A copy of this message is already being durably committed. Do not
+                    // enqueue duplicate work; the in-flight copy will ACK after persistence.
+                    return true;
+                }
                 final java.net.InetAddress ackAddress = packet.getAddress();
                 final int ackPort = packet.getPort();
                 try {
