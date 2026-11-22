@@ -892,5 +892,41 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("totalPeerCount == 0 && !firstDiscoveryWindowOpen", send_guard)
         self.assertIn("禁止向晚加入设备广播旧消息", send_guard)
 
+
+    def test_python_chat_senders_respect_fixed_recipient_snapshots(self):
+        repo_root = Path(__file__).resolve().parents[1]
+
+        rescue = (repo_root / "rescue2.py").read_text(encoding="utf-8")
+        rescue_start = rescue.index("def send_chat_v2(")
+        rescue_end = rescue.index("\ndef udp_listener", rescue_start)
+        rescue_sender = rescue[rescue_start:rescue_end]
+        self.assertIn("elif target_ids:", rescue_sender)
+        self.assertIn("保留原消息等待 peer 重新上线", rescue_sender)
+        self.assertIn("broadcast_all and is_outgoing_discovery_pending", rescue_sender)
+
+        chat = (repo_root / "chat.py").read_text(encoding="utf-8")
+        chat_start = chat.index("def send_chat_v2(")
+        chat_end = chat.index("\n\n# UDP 监听线程", chat_start)
+        chat_sender = chat[chat_start:chat_end]
+        self.assertIn("elif target_ids:", chat_sender)
+        self.assertIn("message remains pending", chat_sender)
+        self.assertIn("elif is_outgoing_discovery_pending", chat_sender)
+
+        server = (repo_root / "server2.py").read_text(encoding="utf-8")
+        server_start = server.index("def send_server2_v2_chat_from_outbox(")
+        server_end = server.index("\ndef udp_listener", server_start)
+        server_sender = server[server_start:server_end]
+        self.assertIn("if fixed_target_ids:", server_sender)
+        self.assertIn("send_outbox_to_active_peers(", server_sender)
+        self.assertIn("if not is_outgoing_discovery_pending(", server_sender)
+        self.assertIn("send_broadcast_packet_with_retries(", server_sender)
+        self.assertIn("[(ip, 8888)", server_sender)
+
+        action_start = server.index('elif action == "chat_msg":')
+        action_end = server.index('elif action == "change_server":', action_start)
+        web_chat = server[action_start:action_end]
+        self.assertIn("send_server2_v2_chat_from_outbox(cmd_prefix, target_devs)", web_chat)
+        self.assertNotIn("smart_send(cmd_prefix)", web_chat)
+
 if __name__ == "__main__":
     unittest.main()
