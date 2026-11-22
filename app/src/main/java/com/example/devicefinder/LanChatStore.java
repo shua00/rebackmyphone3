@@ -492,21 +492,36 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
-    public boolean markAttempt(String messageId, String peerId, String endpoint, String error) {
+    /** Record an attempt without changing the last endpoint known to have accepted a UDP send. */
+    public boolean markAttempt(String messageId, String peerId, String error) {
         if (messageId == null || peerId == null) return false;
         try {
             SQLiteDatabase db = getWritableDatabase();
             db.execSQL("UPDATE lan_outbox_targets SET status='sent',attempt_count=attempt_count+1," +
-                    "last_attempt_at=?,last_endpoint=CASE WHEN ?!='' THEN ? ELSE last_endpoint END," +
-                    "last_error=? WHERE message_id=? AND peer_id=? AND status!='acked'",
-                    new Object[]{System.currentTimeMillis(), endpoint == null ? "" : endpoint,
-                            endpoint == null ? "" : endpoint, error == null ? "" : error, messageId, peerId});
+                    "last_attempt_at=?,last_error=? WHERE message_id=? AND peer_id=? AND status!='acked'",
+                    new Object[]{System.currentTimeMillis(), error == null ? "" : error, messageId, peerId});
             Cursor c = db.rawQuery(
                     "SELECT status FROM lan_outbox_targets WHERE message_id=? AND peer_id=?",
                     new String[]{messageId, peerId});
             try {
                 return c.moveToFirst() && !"acked".equals(c.getString(0));
             } finally { c.close(); }
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Persist the endpoint only after DatagramSocket.send() returned successfully. */
+    public boolean recordSuccessfulSendEndpoint(String messageId, String peerId, String endpoint) {
+        if (messageId == null || peerId == null || endpoint == null || endpoint.length() == 0) return false;
+        try {
+            SQLiteDatabase db = getWritableDatabase();
+            ContentValues values = new ContentValues();
+            values.put("last_endpoint", endpoint);
+            values.put("last_error", "");
+            return db.update("lan_outbox_targets", values,
+                    "message_id=? AND peer_id=? AND status!='acked'",
+                    new String[]{messageId, peerId}) == 1;
         } catch (Exception e) {
             return false;
         }
