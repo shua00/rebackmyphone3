@@ -3916,13 +3916,14 @@ public class TrackingService extends Service implements LocationListener {
                         || envelope.optString("nonce", "").isEmpty()
                         || !(sourcePort == 8888 || sourcePort == 8887
                              || sourcePort == 8889 || sourcePort == 8890)) return true;
+                final java.net.InetAddress peerAddress = packet.getAddress();
                 JSONObject reply = LanP2pProtocol.create("peer.ack", getUniqueDeviceId(),
                         "android", "android-main");
                 reply.put("reply_nonce", envelope.optString("nonce", ""));
                 reply.put("listen_port", 8888);
                 byte[] bytes = LanP2pProtocol.encode(reply, RESCUE_SECRET);
                 DatagramPacket response = new DatagramPacket(bytes, bytes.length,
-                        packet.getAddress(), sourcePort);
+                        peerAddress, sourcePort);
 
                 // A HELLO is authenticated presence, not yet a verified return route.
                 // Commit it as suspect before replying; otherwise the other side could trust
@@ -3931,7 +3932,7 @@ public class TrackingService extends Service implements LocationListener {
                 if (store == null) return true;
                 final String peerType = envelope.optString("sender_peer_type", "unknown");
                 final String peerNetwork = envelope.optString("network_scope", "");
-                final String peerIp = packet.getAddress().getHostAddress();
+                final String peerIp = peerAddress.getHostAddress();
                 final boolean challengeOnly = envelope.optBoolean("challenge_only", false);
                 try {
                     reportExecutor.execute(() -> {
@@ -3945,9 +3946,9 @@ public class TrackingService extends Service implements LocationListener {
                             if (!challengeOnly) {
                                 java.net.InetSocketAddress verified = verifiedChatPeers.get(senderId);
                                 boolean sameRoute = verified != null
-                                        && verified.getAddress().equals(packet.getAddress())
+                                        && verified.getAddress().equals(peerAddress)
                                         && verified.getPort() == sourcePort;
-                                if (!sameRoute) sendDirectedPeerChallenge(socket, packet.getAddress(), sourcePort);
+                                if (!sameRoute) sendDirectedPeerChallenge(socket, peerAddress, sourcePort);
                             }
                         } catch (Exception persistOrSendError) {
                             FileLogger.log(this, "CHAT", "⚠️ peer HELLO 未能持久化/应答: "
@@ -3963,10 +3964,11 @@ public class TrackingService extends Service implements LocationListener {
                 String nonce = envelope.optString("reply_nonce", "");
                 java.util.concurrent.CountDownLatch latch = pendingPeerChallenges.get(nonce);
                 int port = packet.getPort();
+                final java.net.InetAddress peerAddress = packet.getAddress();
                 if (latch != null && !senderId.isEmpty() && !senderId.equals(getUniqueDeviceId())
                         && (port == 8888 || port == 8887 || port == 8889 || port == 8890)) {
                     verifiedChatPeers.put(senderId,
-                            new java.net.InetSocketAddress(packet.getAddress(), port));
+                            new java.net.InetSocketAddress(peerAddress, port));
                     verifiedChatPeerSeen.put(senderId, now);
                     LanChatStore store = lanChatStore;
                     if (store != null) {
@@ -3974,7 +3976,7 @@ public class TrackingService extends Service implements LocationListener {
                             reportExecutor.execute(() -> {
                                 store.upsertPeer(senderId, envelope.optString("sender_peer_type", "unknown"),
                                         serviceId, envelope.optString("network_scope", ""),
-                                        packet.getAddress().getHostAddress(), port, now, now + 120_000L);
+                                        peerAddress.getHostAddress(), port, now, now + 120_000L);
                                 store.addDiscoveryPeerToOpenMessages(senderId);
                             });
                         } catch (java.util.concurrent.RejectedExecutionException ignored) {}
