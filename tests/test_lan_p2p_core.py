@@ -799,5 +799,38 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("return result;", method)
         self.assertIn("finally", method)
 
+
+    def test_android_outbox_retry_attempt_ledger_is_persistent_and_migrated(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn("DB_VERSION = 4", store)
+        self.assertIn("retry_attempt_count INTEGER NOT NULL DEFAULT 0", store)
+        self.assertIn('if (oldVersion < 4)', store)
+        self.assertIn('ALTER TABLE lan_outbox ADD COLUMN retry_attempt_count', store)
+        self.assertIn("public int recordOutboxAttempt(String messageId)", store)
+        self.assertIn("update.bindLong(1, now)", store)
+        self.assertIn("update.bindString(2, messageId)", store)
+        self.assertIn("retry_attempt_count=retry_attempt_count+1", store)
+        self.assertIn("c.getString(4), c.getInt(5)", store)
+
+    def test_android_retry_wakeups_are_bounded_and_cover_later_pending_rows(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        tracking = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        start = tracking.index("private void retryPendingLanChatMessages()")
+        end = tracking.index("private void sendLocalUdpMessage", start)
+        recovery = tracking[start:end]
+        self.assertIn("final int maxBatchesPerWake = 3", recovery)
+        self.assertIn("int startIndex = batchNo * batchSize", recovery)
+        self.assertIn("scheduleLanChatRetryFromOutbox()", recovery)
+        self.assertIn("lanChatRetryWakeScheduled", tracking)
+        self.assertIn("minimumAttempts < 3", tracking)
+        self.assertIn("minimumAttempts <= 1 ? 1_500L : 4_000L", tracking)
+        self.assertIn("handler.postDelayed", tracking)
+        self.assertIn("lanChatRetryInFlight.set(false);", recovery)
+
 if __name__ == "__main__":
     unittest.main()
