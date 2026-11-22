@@ -551,16 +551,18 @@ def complete_peer_challenge(db_path, receiver_scope, nonce, peer_id,
     if (not db_path or not receiver_scope or not nonce or not peer_id
             or not endpoint_ip or int(endpoint_port or 0) not in (8887, 8888, 8889, 8890)):
         return False
-    conn = sqlite3.connect(db_path, timeout=10)
+    conn = None
     try:
+        conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("PRAGMA busy_timeout=10000")
         row = conn.execute("""SELECT expected_peer_id,expected_ip,expected_port,expires_at
             FROM lan_peer_challenges WHERE receiver_scope=? AND nonce=?""",
             (receiver_scope, str(nonce))).fetchone()
     except Exception:
-        conn.close()
         return False
-    conn.close()
+    finally:
+        if conn is not None:
+            conn.close()
     if row is None:
         return False
     expected_peer_id, expected_ip, expected_port, expires_at = row
@@ -578,16 +580,18 @@ def complete_peer_challenge(db_path, receiver_scope, nonce, peer_id,
     # Directed challenges are single-use. A broadcast nonce may authenticate
     # several independent peers during its short discovery lifetime.
     if expected_peer_id:
+        delete_conn = None
         try:
-            conn = sqlite3.connect(db_path, timeout=10)
-            try:
-                conn.execute("DELETE FROM lan_peer_challenges WHERE receiver_scope=? AND nonce=?",
-                             (receiver_scope, str(nonce)))
-                conn.commit()
-            finally:
-                conn.close()
+            delete_conn = sqlite3.connect(db_path, timeout=10)
+            delete_conn.execute("PRAGMA busy_timeout=10000")
+            delete_conn.execute("DELETE FROM lan_peer_challenges WHERE receiver_scope=? AND nonce=?",
+                                (receiver_scope, str(nonce)))
+            delete_conn.commit()
         except Exception:
             return False
+        finally:
+            if delete_conn is not None:
+                delete_conn.close()
     return True
 
 
