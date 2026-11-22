@@ -1125,6 +1125,15 @@ def process_command_feedback(dev_id, feedback_items):
     # accepted/uncertain 可结束重复下发，但后续异步回调仍可把状态细化为 succeeded/failed。
     # succeeded/failed 才是最终结果，终态之间不允许被迟到的旧反馈互相覆盖。
     terminal_statuses = {"accepted", "uncertain", "succeeded", "failed"}
+    # The pending command row is authoritative when older or malformed clients omit
+    # the action field. In particular, never treat a chat_msg fallback as an ordinary
+    # command: it may only be retired after its shared-ID LAN outbox ACK is durable.
+    with _cmd_lock:
+        pending_actions = {
+            command.get("id"): command.get("type")
+            for command in PENDING_COMMANDS.get(dev_id, [])
+            if command.get("id")
+        }
     valid = []
     now = time.time()
     for item in feedback_items[:100]:
@@ -1136,7 +1145,9 @@ def process_command_feedback(dev_id, feedback_items):
             continue
         if status not in accepted_statuses:
             continue
-        action = item.get("action") if isinstance(item.get("action"), str) else None
+        supplied_action = item.get("action") if isinstance(item.get("action"), str) else None
+        pending_action = pending_actions.get(command_id)
+        action = pending_action or supplied_action
         detail = item.get("detail") if isinstance(item.get("detail"), str) else ""
         valid.append((command_id, dev_id, action, status, detail[:500], now, now))
     if not valid:

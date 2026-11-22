@@ -1934,5 +1934,21 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertNotIn('_remove_chat_fallback_for_message(dev_id, envelope["message_id"])', handler)
 
 
+    def test_server2_feedback_recovers_missing_action_from_pending_command_type(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "server2.py").read_text(encoding="utf-8")
+        start = source.index("def process_command_feedback(")
+        end = source.index("def get_recent_command_feedback(", start)
+        handler = source[start:end]
+        lookup = handler.index("pending_actions = {")
+        fallback = handler.index("pending_action = pending_actions.get(command_id)")
+        reconcile = handler.index("chat_fallback_candidates.append((command_id, envelope))")
+        self.assertLess(lookup, fallback)
+        self.assertLess(fallback, reconcile)
+        self.assertIn("action = pending_action or supplied_action", handler)
+        self.assertIn('if action == "chat_msg" and status in ("accepted", "succeeded")', handler)
+        self.assertIn('row[2] == "chat_msg" and row[0] not in reconciled_chat_command_ids', handler)
+
+
 if __name__ == "__main__":
     unittest.main()
