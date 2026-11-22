@@ -274,6 +274,8 @@ public class TrackingService extends Service implements LocationListener {
             new java.util.concurrent.atomic.AtomicBoolean(false);
     private final java.util.Set<String> activeLanChatTransmissions =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
+    // Serialize message sends so concurrent messages cannot race the shared peer-discovery window.
+    private final Object lanChatTransmitLock = new Object();
     // 仅缓存经本机 challenge/response 验证的 LAN peer；网络变化时必须清空。
     private final java.util.concurrent.ConcurrentHashMap<String, java.net.InetSocketAddress> verifiedChatPeers =
             new java.util.concurrent.ConcurrentHashMap<>();
@@ -3547,7 +3549,10 @@ public class TrackingService extends Service implements LocationListener {
             return;
         }
         try {
-            transmitLocalUdpMessageInternal(message, messageId);
+            // The discovery snapshot and ACK bookkeeping are shared per service; serialize send transactions.
+            synchronized (lanChatTransmitLock) {
+                if (!serviceDestroyed) transmitLocalUdpMessageInternal(message, messageId);
+            }
         } finally {
             activeLanChatTransmissions.remove(messageId);
         }
