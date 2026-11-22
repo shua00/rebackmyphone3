@@ -178,7 +178,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
         if (oldVersion < 5) {
             db.execSQL("UPDATE lan_outbox SET state='retry_paused' " +
-                    "WHERE retry_attempt_count>=8 AND state NOT IN ('delivered','expired','waiting_peers')");
+                    "WHERE retry_attempt_count>=8 AND state NOT IN ('delivered','expired','waiting_peers','discovery_pending')");
         }
     }
 
