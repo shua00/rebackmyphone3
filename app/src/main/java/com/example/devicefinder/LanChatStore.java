@@ -17,7 +17,7 @@ import java.util.List;
  */
 public final class LanChatStore extends SQLiteOpenHelper {
     private static final String DB_NAME = "lan_p2p_delivery.db";
-    private static final int DB_VERSION = 2;
+    private static final int DB_VERSION = 3;
     public static final int MAX_PENDING_MESSAGES = 50;
 
     public static final class PendingMessage {
@@ -107,6 +107,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 "received_at_ms INTEGER NOT NULL," +
                 "display_time TEXT NOT NULL DEFAULT ''," +
                 "display_name TEXT NOT NULL DEFAULT ''," +
+                "displayed INTEGER NOT NULL DEFAULT 0," +
                 "PRIMARY KEY(receiver_scope, sender_peer_id, message_id))");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_lan_inbox_received ON lan_inbox(receiver_scope, received_at_ms)");
 
@@ -120,6 +121,16 @@ public final class LanChatStore extends SQLiteOpenHelper {
         if (oldVersion < 2) {
             try { db.execSQL("ALTER TABLE lan_inbox ADD COLUMN display_name TEXT NOT NULL DEFAULT ''"); }
             catch (Exception ignored) { /* Column may already exist after an interrupted additive migration. */ }
+        }
+        if (oldVersion < 3) {
+            try {
+                db.execSQL("ALTER TABLE lan_inbox ADD COLUMN displayed INTEGER NOT NULL DEFAULT 0");
+                // Existing inbox rows predate the presentation marker and have already followed
+                // the previous history path. Preserve them as displayed to avoid replaying old chat.
+                db.execSQL("UPDATE lan_inbox SET displayed=1");
+            } catch (Exception ignored) {
+                // Column may already exist after an interrupted additive migration.
+            }
         }
     }
 
@@ -509,6 +520,35 @@ public final class LanChatStore extends SQLiteOpenHelper {
             db.setTransactionSuccessful();
         } finally {
             db.endTransaction();
+        }
+    }
+
+    /** True once this durable inbox entry has been appended to the legacy chat history. */
+    public boolean isIncomingDisplayed(String receiverScope, String senderPeerId, String messageId) {
+        Cursor c = null;
+        try {
+            c = getReadableDatabase().rawQuery(
+                    "SELECT displayed FROM lan_inbox WHERE receiver_scope=? AND sender_peer_id=? AND message_id=?",
+                    new String[]{receiverScope, senderPeerId, messageId});
+            return c.moveToFirst() && c.getInt(0) != 0;
+        } catch (Exception e) {
+            return false;
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
+    /** Mark presentation only after the history/ID SharedPreferences commit has succeeded. */
+    public boolean markIncomingDisplayed(String receiverScope, String senderPeerId, String messageId) {
+        try {
+            SQLiteDatabase db = getWritableDatabase();
+            ContentValues values = new ContentValues();
+            values.put("displayed", 1);
+            return db.update("lan_inbox", values,
+                    "receiver_scope=? AND sender_peer_id=? AND message_id=?",
+                    new String[]{receiverScope, senderPeerId, messageId}) > 0;
+        } catch (Exception e) {
+            return false;
         }
     }
 

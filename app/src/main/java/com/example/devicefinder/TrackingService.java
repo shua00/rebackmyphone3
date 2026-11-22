@@ -4353,12 +4353,27 @@ public class TrackingService extends Service implements LocationListener {
                     return false;
                 }
                 SharedPreferences sp = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
+                String receiverScope = "android:" + getUniqueDeviceId();
                 String stableId = senderId + ":" + messageId;
                 org.json.JSONArray ids = new org.json.JSONArray(
                         sp.getString(PREF_LAN_CHAT_RECEIVED_IDS, "[]"));
+                boolean alreadyInLegacyIds = false;
                 for (int i = 0; i < ids.length(); i++) {
-                    if (stableId.equals(ids.optString(i, ""))) return true;
+                    if (stableId.equals(ids.optString(i, ""))) {
+                        alreadyInLegacyIds = true;
+                        break;
+                    }
                 }
+                // SQLite is the durable dedup authority; the bounded legacy ID list is only
+                // a migration/recovery aid for the history commit crash window.
+                if (alreadyInLegacyIds) {
+                    if (!store.markIncomingDisplayed(receiverScope, senderId, messageId)) {
+                        FileLogger.log(this, "CHAT", "⚠️ LAN inbox presentation marker failed; withhold ACK");
+                        return false;
+                    }
+                    return true;
+                }
+                if (store.isIncomingDisplayed(receiverScope, senderId, messageId)) return true;
 
                 long now = System.currentTimeMillis();
                 String dedupKey = senderId + ":" + msgContent;
@@ -4397,6 +4412,10 @@ public class TrackingService extends Service implements LocationListener {
                 long persistStarted = android.os.SystemClock.elapsedRealtime();
                 if (!editor.commit()) {
                     FileLogger.log(this, "CHAT", "⚠️ LAN 对讲落盘失败，不发送 ACK，等待发送端重试");
+                    return false;
+                }
+                if (!store.markIncomingDisplayed(receiverScope, senderId, messageId)) {
+                    FileLogger.log(this, "CHAT", "⚠️ LAN inbox presentation marker failed; withhold ACK for retry");
                     return false;
                 }
                 if (!suppressSameContent) {
