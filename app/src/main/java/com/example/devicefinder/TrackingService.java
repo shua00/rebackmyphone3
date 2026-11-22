@@ -3923,30 +3923,39 @@ public class TrackingService extends Service implements LocationListener {
                 byte[] bytes = LanP2pProtocol.encode(reply, RESCUE_SECRET);
                 DatagramPacket response = new DatagramPacket(bytes, bytes.length,
                         packet.getAddress(), sourcePort);
-                sendLanUdpPacket(socket, response, "PEER_ACK_V2");
 
                 // A HELLO is authenticated presence, not yet a verified return route.
-                // Persist it as suspect; a matching challenge response promotes it to active.
+                // Commit it as suspect before replying; otherwise the other side could trust
+                // a peer that failed to retain the route needed for its own retry path.
                 LanChatStore store = lanChatStore;
-                if (store != null) {
-                    final String peerType = envelope.optString("sender_peer_type", "unknown");
-                    final String peerNetwork = envelope.optString("network_scope", "");
-                    final String peerIp = packet.getAddress().getHostAddress();
-                    try {
-                        reportExecutor.execute(() -> store.observePeer(senderId, peerType, serviceId,
-                                peerNetwork, peerIp, sourcePort, now, now + 120_000L));
-                    } catch (java.util.concurrent.RejectedExecutionException ignored) {}
-                }
-
-                // A normal beacon also challenges its sender once, allowing an existing sender
-                // to rediscover this device and resume its own pending outbox. challenge_only
-                // prevents challenge ping-pong between two devices.
-                if (!envelope.optBoolean("challenge_only", false)) {
-                    java.net.InetSocketAddress verified = verifiedChatPeers.get(senderId);
-                    boolean sameRoute = verified != null
-                            && verified.getAddress().equals(packet.getAddress())
-                            && verified.getPort() == sourcePort;
-                    if (!sameRoute) sendDirectedPeerChallenge(socket, packet.getAddress(), sourcePort);
+                if (store == null) return true;
+                final String peerType = envelope.optString("sender_peer_type", "unknown");
+                final String peerNetwork = envelope.optString("network_scope", "");
+                final String peerIp = packet.getAddress().getHostAddress();
+                final boolean challengeOnly = envelope.optBoolean("challenge_only", false);
+                try {
+                    reportExecutor.execute(() -> {
+                        try {
+                            store.observePeer(senderId, peerType, serviceId, peerNetwork,
+                                    peerIp, sourcePort, now, now + 120_000L);
+                            sendLanUdpPacket(socket, response, "PEER_ACK_V2");
+                            // A normal beacon also challenges its sender once, allowing an
+                            // existing sender to rediscover this device and resume its outbox.
+                            // challenge_only prevents challenge ping-pong.
+                            if (!challengeOnly) {
+                                java.net.InetSocketAddress verified = verifiedChatPeers.get(senderId);
+                                boolean sameRoute = verified != null
+                                        && verified.getAddress().equals(packet.getAddress())
+                                        && verified.getPort() == sourcePort;
+                                if (!sameRoute) sendDirectedPeerChallenge(socket, packet.getAddress(), sourcePort);
+                            }
+                        } catch (Exception persistOrSendError) {
+                            FileLogger.log(this, "CHAT", "⚠️ peer HELLO 未能持久化/应答: "
+                                    + persistOrSendError.getClass().getSimpleName());
+                        }
+                    });
+                } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                    FileLogger.log(this, "CHAT", "⚠️ peer HELLO 队列已满，暂不确认，等待对端重发");
                 }
                 return true;
             }

@@ -125,11 +125,15 @@ public final class LanChatStore extends SQLiteOpenHelper {
         if (oldVersion < 3) {
             try {
                 db.execSQL("ALTER TABLE lan_inbox ADD COLUMN displayed INTEGER NOT NULL DEFAULT 0");
+            } catch (Exception ignored) {
+                // Column may already exist after an interrupted additive migration.
+            }
+            try {
                 // Existing inbox rows predate the presentation marker and have already followed
                 // the previous history path. Preserve them as displayed to avoid replaying old chat.
                 db.execSQL("UPDATE lan_inbox SET displayed=1");
             } catch (Exception ignored) {
-                // Column may already exist after an interrupted additive migration.
+                // A partial migration remains non-destructive; later reads still remain deduplicated by message ID.
             }
         }
     }
