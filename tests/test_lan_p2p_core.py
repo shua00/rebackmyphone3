@@ -1476,7 +1476,10 @@ class LanP2PCoreTests(unittest.TestCase):
         start = source.index('if ("chat.ack".equals(type))')
         end = source.index('if ("chat.message".equals(type))', start)
         handler = source[start:end]
-        self.assertIn("expected.remove(senderId)", handler)
+        persist_ack = handler.index("store.acknowledge(messageId, senderId)")
+        remove_waiter = handler.index("expected.remove(senderId)")
+        self.assertLess(persist_ack, remove_waiter)
+        self.assertIn("only release the in-memory", handler)
         self.assertIn("discoveryAck && expected != null", handler)
         self.assertIn("expected.isEmpty() && latch != null && latch.getCount() > 0", handler)
         self.assertIn("wasExpected || discoveryBroadcastAck", handler)

@@ -4525,9 +4525,12 @@ public class TrackingService extends Service implements LocationListener {
                                     + " peer=" + senderId + " reason=unverified_endpoint");
                             return;
                         }
-                        boolean wasExpected = expected != null && expected.remove(senderId);
+                        // Durable ACK state is authoritative: only release the in-memory
+                        // wait slot after SQLite commits, so a failed duplicate ACK cannot
+                        // race with a successful duplicate and strand the latch.
                         boolean persistedAck = store != null && store.acknowledge(messageId, senderId);
                         if (persistedAck) {
+                            boolean wasExpected = expected != null && expected.remove(senderId);
                             if (routeMatches) {
                                 synchronized (verifiedChatPeerRouteVersions) {
                                     if (verifiedChatPeers.get(senderId) == verified) {
@@ -4549,7 +4552,6 @@ public class TrackingService extends Service implements LocationListener {
                                         + messageId + " peer=" + senderId);
                             }
                         } else {
-                            if (wasExpected && expected != null) expected.add(senderId);
                             FileLogger.log(this, "CHAT", "⚠️ v2 ACK 账本写入失败，等待重试: "
                                     + messageId + " peer=" + senderId);
                         }
