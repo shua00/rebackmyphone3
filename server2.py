@@ -1110,16 +1110,22 @@ def process_command_feedback(dev_id, feedback_items):
                 ON CONFLICT(command_id, device_id) DO UPDATE SET
                   action=COALESCE(excluded.action, command_feedback.action),
                   status=CASE
+                    WHEN command_feedback.action='chat_msg' AND command_feedback.status='succeeded' THEN 'succeeded'
+                    WHEN command_feedback.action='chat_msg' AND excluded.status='accepted' THEN 'accepted'
                     WHEN command_feedback.status IN ('succeeded','failed') THEN command_feedback.status
                     WHEN command_feedback.status IN ('accepted','uncertain') AND excluded.status IN ('received','executing','retry_wait','accepted','uncertain')
                       THEN command_feedback.status
                     ELSE excluded.status END,
                   detail=CASE
+                    WHEN command_feedback.action='chat_msg' AND command_feedback.status='succeeded' THEN command_feedback.detail
+                    WHEN command_feedback.action='chat_msg' AND excluded.status='accepted' THEN excluded.detail
                     WHEN command_feedback.status IN ('succeeded','failed') THEN command_feedback.detail
                     WHEN command_feedback.status IN ('accepted','uncertain') AND excluded.status IN ('received','executing','retry_wait','accepted','uncertain')
                       THEN command_feedback.detail
                     ELSE excluded.detail END,
                   updated_at=CASE
+                    WHEN command_feedback.action='chat_msg' AND command_feedback.status='succeeded' THEN command_feedback.updated_at
+                    WHEN command_feedback.action='chat_msg' AND excluded.status='accepted' THEN excluded.updated_at
                     WHEN command_feedback.status IN ('succeeded','failed') THEN command_feedback.updated_at
                     WHEN command_feedback.status IN ('accepted','uncertain') AND excluded.status IN ('received','executing','retry_wait','accepted','uncertain')
                       THEN command_feedback.updated_at

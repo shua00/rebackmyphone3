@@ -4923,7 +4923,7 @@ public class TrackingService extends Service implements LocationListener {
                 case "custom_msg":
                     if (payload != null && !payload.isEmpty()) showFloatingMessage(payload);
                     return true;
-                case "chat_msg":
+                case "chat_msg": {
                     if (payload == null || payload.isEmpty()) return true;
                     String trimmedChatPayload = payload.trim();
                     if (trimmedChatPayload.startsWith("{")) {
@@ -4954,6 +4954,7 @@ public class TrackingService extends Service implements LocationListener {
                     notifyChatUi();
                     FileLogger.log(this, "CHAT", "收到 HTTP 聊天");
                     return true;
+                }
                 case "change_server":
                     if (!isValidUrl(payload)) return false;
                     saveNewServerUrl(payload);
