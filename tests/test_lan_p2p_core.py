@@ -790,7 +790,7 @@ class LanP2PCoreTests(unittest.TestCase):
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         ).read_text(encoding="utf-8")
         start = store.index("public List<PendingMessage> loadPending(int limit)")
-        end = store.index("\\n    public List<Target> loadTargets", start)
+        end = store.index("\n    public List<Target> loadTargets", start)
         method = store[start:end]
 
         # A database error must escape to retryPendingLanChatMessages' catch/log path.
