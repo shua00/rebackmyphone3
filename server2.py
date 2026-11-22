@@ -201,42 +201,55 @@ CONTROL_IP_ALLOWLIST = [x.strip() for x in os.environ.get("DF_CONTROL_ALLOW_IPS"
 USING_DEFAULT_CREDENTIALS = (CONTROL_TOKEN == DEFAULT_DEVICE_TOKEN)
 DEVICE_TOKEN_IS_DEFAULT = (AUTH_TOKEN == DEFAULT_DEVICE_TOKEN and RESCUE_SECRET == DEFAULT_DEVICE_TOKEN)
 
-def _claim_chat_message(sender, message_id):
-    """跨进程/重启的消息幂等；仅在持久化成功（新消息或重复消息）后确认。"""
+def _claim_chat_message(sender, message_id, content):
+    """Persist body and ID atomically in a receiver-specific namespace before ACK."""
     global CHAT_DEDUP_OPS
-    key = str(message_id or "")
-    if not key:
-        return True
+    key = str(message_id or content or "")
+    if not key: return None
     now = time.time()
+    display_time = datetime.datetime.now().strftime("%H:%M:%S")
     try:
         with CHAT_DEDUP_LOCK:
-            conn = sqlite3.connect(CHAT_DEDUP_DB, timeout=3)
+            conn = sqlite3.connect(CHAT_DEDUP_DB, timeout=5)
             try:
-                conn.execute("PRAGMA busy_timeout=3000")
-                conn.execute("""CREATE TABLE IF NOT EXISTS received_chat_ids (
-                    sender TEXT NOT NULL,
-                    message_key TEXT NOT NULL,
-                    received_at REAL NOT NULL,
-                    PRIMARY KEY(sender, message_key)
-                )""")
-                cur = conn.execute(
-                    "INSERT OR IGNORE INTO received_chat_ids(sender,message_key,received_at) VALUES(?,?,?)",
-                    (str(sender), key, now))
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("""CREATE TABLE IF NOT EXISTS received_chat_messages (
+                    receiver_scope TEXT NOT NULL, sender TEXT NOT NULL, message_key TEXT NOT NULL,
+                    content TEXT NOT NULL, received_at REAL NOT NULL, display_time TEXT NOT NULL,
+                    PRIMARY KEY(receiver_scope, sender, message_key))""")
+                conn.execute("BEGIN IMMEDIATE")
+                cur = conn.execute("""INSERT OR IGNORE INTO received_chat_messages
+                    (receiver_scope,sender,message_key,content,received_at,display_time) VALUES(?,?,?,?,?,?)""",
+                    ("server2", str(sender), key, str(content), now, display_time))
                 CHAT_DEDUP_OPS += 1
                 if CHAT_DEDUP_OPS % 128 == 0:
-                    conn.execute("DELETE FROM received_chat_ids WHERE received_at < ?", (now - 7 * 86400,))
-                    conn.execute("""DELETE FROM received_chat_ids
-                        WHERE rowid IN (SELECT rowid FROM received_chat_ids
-                        ORDER BY received_at DESC LIMIT -1 OFFSET 10000)""")
+                    conn.execute("DELETE FROM received_chat_messages WHERE receiver_scope=? AND received_at<?",
+                                 ("server2", now - 7 * 86400))
+                    conn.execute("""DELETE FROM received_chat_messages WHERE receiver_scope=? AND rowid IN (
+                        SELECT rowid FROM received_chat_messages WHERE receiver_scope=?
+                        ORDER BY received_at DESC LIMIT -1 OFFSET 10000)""", ("server2", "server2"))
                 conn.commit()
                 return cur.rowcount == 1
-            finally:
-                conn.close()
+            finally: conn.close()
     except Exception as e:
-        # 持久化失败不能确认新消息已可靠接收；返回 None 让接收端暂不 ACK。
-        with print_lock:
-            print(f"⚠️ 聊天持久化去重失败，本条消息暂不确认: {type(e).__name__}")
+        with print_lock: print(f"⚠️ 聊天消息持久化失败，本条不确认: {type(e).__name__}")
         return None
+def _restore_chat_history():
+    """Restore only this receiver's last 100 persisted chat messages."""
+    try:
+        conn = sqlite3.connect(CHAT_DEDUP_DB, timeout=5)
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("""CREATE TABLE IF NOT EXISTS received_chat_messages (
+                receiver_scope TEXT NOT NULL, sender TEXT NOT NULL, message_key TEXT NOT NULL,
+                content TEXT NOT NULL, received_at REAL NOT NULL, display_time TEXT NOT NULL,
+                PRIMARY KEY(receiver_scope, sender, message_key))""")
+            rows = conn.execute("SELECT display_time,sender,content FROM received_chat_messages WHERE receiver_scope=? ORDER BY received_at DESC LIMIT 100", ("server2",)).fetchall()
+            return [{"time": r[0], "sender": r[1], "content": r[2]} for r in reversed(rows)]
+        finally: conn.close()
+    except Exception as e:
+        with print_lock: print(f"⚠️ 对讲历史恢复失败: {type(e).__name__}")
+        return []
 
 # ===== 版本 =====
 BUILD_VERSION = "20261122-1200-r3"
@@ -264,6 +277,7 @@ LAST_MSG_INFO_TTL = 10.0
 CHAT_DEDUP_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3")
 CHAT_DEDUP_LOCK = threading.Lock()
 CHAT_DEDUP_OPS = 0
+CHAT_MESSAGES.extend(_restore_chat_history())
 
 UPLOAD_LOG_DIR = "uploads/logs"
 os.makedirs(UPLOAD_LOG_DIR, exist_ok=True)
@@ -1202,7 +1216,7 @@ def udp_listener():
                                 try: udp_sock.sendto(ack, addr)
                                 except OSError: pass
                             continue
-                        claim_result = _claim_chat_message(sender, message_id or content)
+                        claim_result = _claim_chat_message(sender, message_id, content)
                         if claim_result is None:
                             continue  # 持久化失败：不 ACK，允许发送端重试
                         if message_id:
