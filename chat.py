@@ -36,9 +36,11 @@ SERVER2_URL = "http://127.0.0.1:8080"      # server2.py 的地址
 PROXY_MODE = False          # 由启动时探测决定
 CHAT_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.sqlite3")
 print_lock = threading.Lock()
+_CHAT_DB_OPS = 0
 
 
 def _claim_chat_message(sender, message_id, content):
+    global _CHAT_DB_OPS
     """Persist independent chat-mode message body and ID before ACK."""
     key = str(message_id or content or "")
     if not key:
@@ -57,6 +59,13 @@ def _claim_chat_message(sender, message_id, content):
             cur = conn.execute("""INSERT OR IGNORE INTO received_chat_messages
                 (receiver_scope,sender,message_key,content,received_at,display_time)
                 VALUES(?,?,?,?,?,?)""", ("chat.py", str(sender), key, str(content), now, display_time))
+            _CHAT_DB_OPS += 1
+            if _CHAT_DB_OPS % 128 == 0:
+                conn.execute("DELETE FROM received_chat_messages WHERE receiver_scope=? AND received_at<?",
+                             ("chat.py", now - 7 * 86400))
+                conn.execute("""DELETE FROM received_chat_messages WHERE receiver_scope=? AND rowid IN (
+                    SELECT rowid FROM received_chat_messages WHERE receiver_scope=?
+                    ORDER BY received_at DESC LIMIT -1 OFFSET 10000)""", ("chat.py", "chat.py"))
             conn.commit()
             return cur.rowcount == 1
         finally:
@@ -265,7 +274,7 @@ def udp_listener():
                         continue  # 重复消息仍ACK，但不重复展示
                     ts = datetime.datetime.now().strftime("%H:%M:%S")
                     with print_lock:
-                        print(f"\\n🗣️ [对讲机] {sender} 说: {content}")
+                        print(f"\n🗣️ [对讲机] {sender} 说: {content}")
                         CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": content})
                         if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
     except OSError as e:
@@ -345,7 +354,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     local_saved = _claim_chat_message(sender, message_id, content)
                     if local_saved:
                         with print_lock:
-                            print(f"\\n💻 [网页] {sender} 说: {content}")
+                            print(f"\n💻 [网页] {sender} 说: {content}")
                             CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": content})
                             if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
 
