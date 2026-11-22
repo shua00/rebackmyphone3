@@ -910,6 +910,41 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertEqual(state, "delivered")
         self.assertEqual(count, 1)
 
+    def test_python_expired_outbox_rejects_late_ack_without_mutating_targets(self):
+        from lan_p2p_core import persist_outgoing_message, acknowledge_outgoing_message
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-expired-late-ack",
+            "hello", ["android-a"]))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "UPDATE lan_outbox SET state='expired' WHERE message_id=?",
+                ("m-expired-late-ack",))
+            conn.execute(
+                "UPDATE lan_outbox_targets SET status='sent',attempt_count=3 "
+                "WHERE message_id=? AND peer_id=?",
+                ("m-expired-late-ack", "android-a"))
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.assertFalse(acknowledge_outgoing_message(
+            self.db_path, "server2", "m-expired-late-ack", "android-a"))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            state = conn.execute(
+                "SELECT state FROM lan_outbox WHERE message_id=?",
+                ("m-expired-late-ack",)).fetchone()[0]
+            target = conn.execute(
+                "SELECT status,attempt_count,last_ack_at FROM lan_outbox_targets "
+                "WHERE message_id=? AND peer_id=?",
+                ("m-expired-late-ack", "android-a")).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(state, "expired")
+        self.assertEqual(target, ("sent", 3, 0))
+
+
     def test_http_fallback_envelope_preserves_v2_message_identity(self):
         from lan_p2p_core import (
             encode_chat_http_fallback_payload, decode_chat_http_fallback_payload,

@@ -299,9 +299,11 @@ def acknowledge_outgoing_message(db_path, sender_scope, message_id, peer_id):
     try:
         conn.execute("PRAGMA busy_timeout=10000")
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT 1 FROM lan_outbox WHERE sender_scope=? AND message_id=?",
+        row = conn.execute("SELECT state FROM lan_outbox WHERE sender_scope=? AND message_id=?",
                            (sender_scope, message_id)).fetchone()
-        if row is None:
+        # Expired is terminal. A delayed ACK must not mutate target rows or
+        # resurrect the aggregate outbox state, matching the Android ledger.
+        if row is None or row[0] == "expired":
             conn.rollback()
             return False
         now_ms = int(time.time() * 1000)
