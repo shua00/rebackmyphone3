@@ -820,9 +820,18 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 acked = c.isNull(1) ? 0 : c.getInt(1);
             }
         } finally { c.close(); }
+        Cursor retry = db.rawQuery(
+                "SELECT retry_attempt_count FROM lan_outbox WHERE message_id=?",
+                new String[]{messageId});
+        int retryAttempts = 0;
+        try {
+            if (retry.moveToFirst()) retryAttempts = retry.getInt(0);
+        } finally { retry.close(); }
         ContentValues next = new ContentValues();
-        next.put("state", total > 0 && total == acked
-                ? "delivered" : (total > 0 ? "pending" : "waiting_peers"));
+        String settledState = total == 0 ? "waiting_peers"
+                : (total == acked ? "delivered"
+                : (retryAttempts >= MAX_AUTOMATIC_RETRY_ATTEMPTS ? "retry_paused" : "pending"));
+        next.put("state", settledState);
         return db.update("lan_outbox", next, "message_id=?", new String[]{messageId}) == 1;
     }
 
