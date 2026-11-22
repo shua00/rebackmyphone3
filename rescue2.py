@@ -8,7 +8,7 @@ rescue2.py — 局域网救援/调试终端（Ultimate v2 协议）
 协议版本 : v2-only
 最后修改 : 2026-11-22（v2-only；peer challenge；消息 ID/ACK）
 ------------------------------------------------------------
-本轮约束 : 保留救援、ADB、日志与陪护能力；聊天使用带 message_id 的 FIND_ME_CHAT v2 帧；响应随机 nonce peer challenge；服务 peer ID 持久化保存，进程重启后保持不变。
+本轮约束 : 保留救援、ADB、日志与陪护能力；LAN 对讲使用 v2 JSON chat.message/chat.ack 和稳定 message_id；响应随机 nonce peer challenge；服务 peer ID 持久化保存。
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
   2026-11-20 1:30  v2.0.2 新增p远程陪伴特权推流
   2026-11-13 00:30  v2.0.2 紧急三连击 + ADB 安装工具箱 + 并发防弹
@@ -29,14 +29,15 @@ DeviceFinder 局域网救援/调试终端 (Ultimate 终极完全体)
 - 局域网扫描：ARP 表优先 + 全网段探测，多网卡场景遍历所有本机网段
 - 多设备定向：单播 / 子网广播 / 全局广播 三档，按 IP 或设备编号选择
 - 拉日志：并发下发 + 统一等待 30s，结果汇总缺失清单
-- 对讲机：FIND_ME_CHAT v2-only，PC 自身消息不记入设备列表
+- 对讲机：LAN 使用 v2 JSON chat.message/chat.ack，逐消息 ID 持久化、逐 peer 确认；PC 自身消息不记入手机设备列表
 - UDP 8888 监听：断线自愈，指数退避重试，避免端口被占用后永久失聪
 
 【二、协议 v2-only】
-- custom_msg：仅发 FIND_ME_FLOAT
-              含冒号时只发 FLOAT，避免 v1 手机的 legacy 4 段被误判为 chat
-- chat_msg  ：仅发 FIND_ME_CHAT
-- 接收侧    ：仅认 FIND_ME_CHAT，按发送者和内容短时去重
+- 悬浮留言 custom_msg：继续使用独立 FIND_ME_FLOAT 通道，不并入对讲 Inbox/历史
+- LAN 对讲 chat_msg：发送 v2 JSON chat.message，携带稳定 message_id；接收后持久化再回 chat.ack
+- 逐设备确认：按 peer_id 记录 ACK，只补发未确认目标；重试沿用原 message_id
+- 发现握手：peer.hello/peer.ack 使用随机 nonce；启动监听后一次性广播，不做周期性高频扫描
+- FIND_ME_CHAT_LOCK/UNLOCK：仅是原有聊天窗口锁定控制命令，不是聊天消息协议，继续保留
 - 版本上报  ：_handle_report 记录 build_version / protocol_version 到 DISCOVERED_DEVICES
 - 设备列表  ：show_devices / 选择目标列表 显示 build_version，便于分辨新旧 APK
 
