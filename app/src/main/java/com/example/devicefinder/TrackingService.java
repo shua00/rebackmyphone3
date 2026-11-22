@@ -3936,7 +3936,8 @@ public class TrackingService extends Service implements LocationListener {
                 try {
                     reportExecutor.execute(() -> {
                         try {
-                            if (persistIncomingLanChat(senderId, messageId, body)) {
+                            if (persistIncomingLanChat(senderId, messageId, body,
+                                    envelope.optString("display_name", senderId))) {
                                 receivedChatMessageIds.put(receiveKey, System.currentTimeMillis());
                                 sendAuthenticatedChatAck(socket, ackAddress, ackPort, senderId, messageId);
                             }
@@ -4236,10 +4237,17 @@ public class TrackingService extends Service implements LocationListener {
      * 返回 true 表示消息已保存或已确认是重复包，可以安全 ACK；落盘失败返回 false，不 ACK 让发送端重试。
      */
     private boolean persistIncomingLanChat(String senderId, String messageId, String msgContent) {
+        return persistIncomingLanChat(senderId, messageId, msgContent, senderId);
+    }
+
+    private boolean persistIncomingLanChat(String senderId, String messageId, String msgContent,
+                                           String displayName) {
         if (senderId == null || senderId.isEmpty() || messageId == null || messageId.isEmpty()) return false;
         boolean historyChanged = false;
-        String shortName = senderId;
-        if (shortName.contains("_")) shortName = shortName.substring(0, shortName.lastIndexOf("_"));
+        String shortName = (displayName == null || displayName.isEmpty()) ? senderId : displayName;
+        if (shortName.contains("_") && (displayName == null || displayName.isEmpty())) {
+            shortName = shortName.substring(0, shortName.lastIndexOf("_"));
+        }
         synchronized (lanChatReceiveLock) {
             try {
                 LanChatStore store = lanChatStore;
@@ -4247,7 +4255,7 @@ public class TrackingService extends Service implements LocationListener {
                 String displayTime = new java.text.SimpleDateFormat(
                         "HH:mm", java.util.Locale.getDefault()).format(new java.util.Date(inboxNow));
                 if (store == null || !store.storeIncoming("android:" + getUniqueDeviceId(),
-                        senderId, messageId, msgContent, inboxNow, displayTime)) {
+                        senderId, messageId, msgContent, displayName, inboxNow, displayTime)) {
                     FileLogger.log(this, "CHAT", "⚠️ LAN SQLite inbox 持久化失败，不发送 ACK");
                     return false;
                 }

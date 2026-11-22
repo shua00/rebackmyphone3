@@ -17,7 +17,7 @@ import java.util.List;
  */
 public final class LanChatStore extends SQLiteOpenHelper {
     private static final String DB_NAME = "lan_p2p_delivery.db";
-    private static final int DB_VERSION = 1;
+    private static final int DB_VERSION = 2;
     public static final int MAX_PENDING_MESSAGES = 50;
 
     public static final class PendingMessage {
@@ -106,6 +106,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 "created_at_ms INTEGER NOT NULL DEFAULT 0," +
                 "received_at_ms INTEGER NOT NULL," +
                 "display_time TEXT NOT NULL DEFAULT ''," +
+                "display_name TEXT NOT NULL DEFAULT ''," +
                 "PRIMARY KEY(receiver_scope, sender_peer_id, message_id))");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_lan_inbox_received ON lan_inbox(receiver_scope, received_at_ms)");
 
@@ -116,6 +117,10 @@ public final class LanChatStore extends SQLiteOpenHelper {
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
         // Schema changes are additive and versioned. Never drop existing chat or floating-message data.
         if (oldVersion < 1) onCreate(db);
+        if (oldVersion < 2) {
+            try { db.execSQL("ALTER TABLE lan_inbox ADD COLUMN display_name TEXT NOT NULL DEFAULT ''"); }
+            catch (Exception ignored) { /* Column may already exist after an interrupted additive migration. */ }
+        }
     }
 
     /** Persist an outgoing message before any network send. */
@@ -315,7 +320,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
 
     /** Returns true for both first storage and a durable duplicate; false means storage failed. */
     public boolean storeIncoming(String receiverScope, String senderPeerId, String messageId,
-                                 String body, long createdAtMs, String displayTime) {
+                                 String body, String displayName, long createdAtMs, String displayTime) {
         if (receiverScope == null || senderPeerId == null || messageId == null || body == null) return false;
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
@@ -328,6 +333,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
             v.put("created_at_ms", createdAtMs);
             v.put("received_at_ms", System.currentTimeMillis());
             v.put("display_time", displayTime == null ? "" : displayTime);
+            v.put("display_name", displayName == null ? "" : displayName);
             db.insertWithOnConflict("lan_inbox", null, v, SQLiteDatabase.CONFLICT_IGNORE);
             db.setTransactionSuccessful();
             return true;
