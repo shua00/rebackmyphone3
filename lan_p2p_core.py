@@ -360,6 +360,24 @@ def acknowledge_outgoing_message(db_path, sender_scope, message_id, peer_id):
         conn.close()
 
 
+def _finalize_expired_discovery_windows(conn, sender_scope, now_ms):
+    """Settle expired discovery snapshots exactly once, including empty snapshots."""
+    conn.execute("""UPDATE lan_outbox SET state=CASE
+            WHEN EXISTS (SELECT 1 FROM lan_outbox_targets t
+                         WHERE t.message_id=lan_outbox.message_id)
+            THEN CASE
+                WHEN NOT EXISTS (SELECT 1 FROM lan_outbox_targets t
+                                WHERE t.message_id=lan_outbox.message_id AND t.status!='acked')
+                THEN 'delivered'
+                ELSE 'pending'
+            END
+            ELSE 'waiting_peers'
+        END
+        WHERE sender_scope=? AND state='discovery_pending'
+          AND delivery_deadline_ms>0 AND delivery_deadline_ms<=?""",
+        (sender_scope, now_ms))
+
+
 def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10):
     """Load only unacked messages addressed to a peer whose current LAN lease is valid."""
     conn = sqlite3.connect(db_path, timeout=10)
@@ -367,21 +385,8 @@ def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10):
         conn.execute("PRAGMA busy_timeout=10000")
         now = time.time()
         now_ms = int(now * 1000)
-        # Close expired discovery snapshots: pending targets remain retryable; fully ACKed sets finish.
-        conn.execute("""UPDATE lan_outbox SET state='delivered'
-            WHERE sender_scope=? AND state='discovery_pending' AND delivery_deadline_ms>0
-              AND delivery_deadline_ms<=?
-              AND EXISTS (SELECT 1 FROM lan_outbox_targets t WHERE t.message_id=lan_outbox.message_id)
-              AND NOT EXISTS (SELECT 1 FROM lan_outbox_targets t
-                              WHERE t.message_id=lan_outbox.message_id AND t.status!='acked')""",
-            (sender_scope, now_ms))
-        conn.execute("""UPDATE lan_outbox SET state='pending'
-            WHERE sender_scope=? AND state='discovery_pending' AND delivery_deadline_ms>0
-              AND delivery_deadline_ms<=?
-              AND EXISTS (SELECT 1 FROM lan_outbox_targets t WHERE t.message_id=lan_outbox.message_id)
-              AND EXISTS (SELECT 1 FROM lan_outbox_targets t
-                          WHERE t.message_id=lan_outbox.message_id AND t.status!='acked')""",
-            (sender_scope, now_ms))
+        # Settle expired snapshots atomically; an empty snapshot becomes terminal waiting_peers.
+        _finalize_expired_discovery_windows(conn, sender_scope, now_ms)
         conn.commit()
         rows = conn.execute("""SELECT o.message_id,o.sender_peer_id,o.body,o.created_at_ms,
                     p.endpoint_ip,p.endpoint_port
@@ -504,6 +509,7 @@ def add_discovery_targets_for_peer(db_path, sender_scope, peer_id):
         conn.execute("PRAGMA busy_timeout=10000")
         conn.execute("BEGIN IMMEDIATE")
         now_ms = int(time.time() * 1000)
+        _finalize_expired_discovery_windows(conn, sender_scope, now_ms)
         rows = conn.execute("""SELECT message_id,delivery_deadline_ms FROM lan_outbox
             WHERE sender_scope=? AND state='discovery_pending'""", (sender_scope,)).fetchall()
         added = 0
@@ -693,6 +699,8 @@ def is_outgoing_discovery_pending(db_path, sender_scope, message_id):
     try:
         conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("PRAGMA busy_timeout=10000")
+        _finalize_expired_discovery_windows(conn, sender_scope, int(time.time() * 1000))
+        conn.commit()
         row = conn.execute("""SELECT state,delivery_deadline_ms FROM lan_outbox
             WHERE sender_scope=? AND message_id=?""",
             (sender_scope, message_id)).fetchone()

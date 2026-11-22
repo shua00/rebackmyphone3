@@ -371,8 +371,31 @@ class LanP2PCoreTests(unittest.TestCase):
             ).fetchone()[0]
         finally:
             conn.close()
-        self.assertEqual(row[0], "discovery_pending")
+        self.assertEqual(row[0], "waiting_peers")
         self.assertEqual(count, 0)
+
+    def test_expired_empty_discovery_is_finalized_by_broadcast_gate_and_rejects_late_peer(self):
+        from lan_p2p_core import (
+            persist_outgoing_message, is_outgoing_discovery_pending,
+            add_discovery_targets_for_peer,
+        )
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-empty-final", "hello", []))
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE lan_outbox SET delivery_deadline_ms=1 WHERE message_id='m-empty-final'")
+        self.assertFalse(is_outgoing_discovery_pending(
+            self.db_path, "server2", "m-empty-final"))
+        self.assertEqual(add_discovery_targets_for_peer(
+            self.db_path, "server2", "late-android"), 0)
+        with sqlite3.connect(self.db_path) as conn:
+            state = conn.execute(
+                "SELECT state FROM lan_outbox WHERE message_id='m-empty-final'").fetchone()[0]
+            targets = conn.execute(
+                "SELECT COUNT(*) FROM lan_outbox_targets WHERE message_id='m-empty-final'").fetchone()[0]
+        self.assertEqual(state, "waiting_peers")
+        self.assertEqual(targets, 0)
+
 
     def test_initial_discovery_deadline_is_anchored_to_outbox_creation(self):
         from lan_p2p_core import persist_outgoing_message
