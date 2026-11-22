@@ -29,7 +29,39 @@ WEB_PORT = 8082
 UDP_DEVICE_PORT = 8888
 UDP_PORT = 8890  # 独立监听端口，避免与 server2/rescue2 冲突
 RESCUE_SECRET = "your_private_secret_key"  # ⚠️ 必须与手机端一致
-PEER_NODE_ID = f"chat.py-{uuid.uuid4().hex[:12]}"  # 本次进程的唯一 LAN 会话 ID
+def _load_stable_peer_id(db_path, service_name):
+    """Return a durable logical service identity; never use a process-session UUID."""
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("""CREATE TABLE IF NOT EXISTS lan_service_identity (
+            service_name TEXT PRIMARY KEY,
+            peer_id TEXT NOT NULL UNIQUE,
+            created_at REAL NOT NULL
+        )""")
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT peer_id FROM lan_service_identity WHERE service_name=?",
+            (service_name,)
+        ).fetchone()
+        if row and row[0]:
+            peer_id = str(row[0])
+        else:
+            peer_id = service_name + "-" + uuid.uuid4().hex
+            conn.execute(
+                "INSERT INTO lan_service_identity(service_name,peer_id,created_at) VALUES(?,?,?)",
+                (service_name, peer_id, time.time())
+            )
+        conn.commit()
+        return peer_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+PEER_NODE_ID = _load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.sqlite3"), "chat.py")
 SERVER2_URL = "http://127.0.0.1:8080"      # server2.py 的地址
 # ==========================================
 

@@ -114,7 +114,39 @@ PACKAGE_NAME = "com.example.devicefinder"
 
 # ===== 配置区 =====
 RESCUE_SECRET = "your_private_secret_key"
-PEER_NODE_ID = f"rescue2-{uuid.uuid4().hex[:12]}"  # 本次进程唯一 LAN 会话 ID
+def _load_stable_peer_id(db_path, service_name):
+    """Return a durable logical service identity; never use a process-session UUID."""
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("""CREATE TABLE IF NOT EXISTS lan_service_identity (
+            service_name TEXT PRIMARY KEY,
+            peer_id TEXT NOT NULL UNIQUE,
+            created_at REAL NOT NULL
+        )""")
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT peer_id FROM lan_service_identity WHERE service_name=?",
+            (service_name,)
+        ).fetchone()
+        if row and row[0]:
+            peer_id = str(row[0])
+        else:
+            peer_id = service_name + "-" + uuid.uuid4().hex
+            conn.execute(
+                "INSERT INTO lan_service_identity(service_name,peer_id,created_at) VALUES(?,?,?)",
+                (service_name, peer_id, time.time())
+            )
+        conn.commit()
+        return peer_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+PEER_NODE_ID = _load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "rescue2")
 DEFAULT_SERVER_URL = "http://dingwei.bai001.de5.net/api/report"
 DEFAULT_CONFIG_URL = "https://your-config-url.com/config.txt"
 LOG_PORT = 9090
