@@ -1172,5 +1172,25 @@ class LanP2PCoreTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("store.finalizeDiscoveryWindow(messageId)", tracking)
 
+
+    def test_android_waiting_peers_keeps_sqlite_record_but_releases_legacy_queue_mirror(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        service = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn("public boolean isWaitingForPeers(", store)
+        remove_start = service.index("private void removePendingLanChat(")
+        remove_end = service.index("private void retryPendingLanChatMessages(", remove_start)
+        remove = service[remove_start:remove_end]
+        self.assertIn("store.isWaitingForPeers(messageId)", remove)
+        self.assertIn("SQLite 记录保留，停止自动重试", remove)
+        self.assertIn("removePendingLanChat(messageId);", service[
+            service.index('scheduleLanChatTask("discovery-window-close"'):
+            service.index("private void sendLanUdpPacket(", service.index('scheduleLanChatTask("discovery-window-close"'))
+        ])
+
 if __name__ == "__main__":
     unittest.main()
