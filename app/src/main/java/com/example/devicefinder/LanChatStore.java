@@ -182,6 +182,38 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
+    public boolean hasTargets(String messageId) {
+        Cursor c = null;
+        try {
+            c = getReadableDatabase().rawQuery(
+                    "SELECT 1 FROM lan_outbox_targets WHERE message_id=? LIMIT 1",
+                    new String[]{messageId});
+            return c.moveToFirst();
+        } catch (Exception e) {
+            return false;
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
+    public boolean allTargetsAcked(String messageId) {
+        Cursor c = null;
+        try {
+            c = getReadableDatabase().rawQuery(
+                    "SELECT COUNT(*), SUM(CASE WHEN status='acked' THEN 1 ELSE 0 END) " +
+                    "FROM lan_outbox_targets WHERE message_id=?",
+                    new String[]{messageId});
+            if (!c.moveToFirst()) return false;
+            int total = c.getInt(0);
+            int acked = c.isNull(1) ? 0 : c.getInt(1);
+            return total > 0 && total == acked;
+        } catch (Exception e) {
+            return false;
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
     public List<PendingMessage> loadPending(int limit) {
         ArrayList<PendingMessage> result = new ArrayList<>();
         Cursor c = null;
@@ -252,13 +284,22 @@ public final class LanChatStore extends SQLiteOpenHelper {
             ContentValues v = new ContentValues();
             v.put("status", "acked");
             v.put("last_ack_at", System.currentTimeMillis());
-            db.update("lan_outbox_targets", v, "message_id=? AND peer_id=?",
+            int changed = db.update("lan_outbox_targets", v, "message_id=? AND peer_id=?",
                     new String[]{messageId, peerId});
-            Cursor c = db.rawQuery("SELECT COUNT(*) FROM lan_outbox_targets WHERE message_id=? AND status!='acked'",
-                    new String[]{messageId});
-            int pending = 0;
-            try { if (c.moveToFirst()) pending = c.getInt(0); } finally { c.close(); }
-            if (pending == 0) {
+            if (changed == 0) {
+                db.setTransactionSuccessful();
+                return false;
+            }
+            Cursor c = db.rawQuery("SELECT COUNT(*), SUM(CASE WHEN status='acked' THEN 1 ELSE 0 END) " +
+                    "FROM lan_outbox_targets WHERE message_id=?", new String[]{messageId});
+            int total = 0, acked = 0;
+            try {
+                if (c.moveToFirst()) {
+                    total = c.getInt(0);
+                    acked = c.isNull(1) ? 0 : c.getInt(1);
+                }
+            } finally { c.close(); }
+            if (total > 0 && total == acked) {
                 ContentValues state = new ContentValues();
                 state.put("state", "delivered");
                 db.update("lan_outbox", state, "message_id=?", new String[]{messageId});
