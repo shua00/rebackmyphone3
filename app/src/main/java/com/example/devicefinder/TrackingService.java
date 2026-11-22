@@ -3646,15 +3646,6 @@ public class TrackingService extends Service implements LocationListener {
                     FileLogger.log(this, "CHAT", "⚠️ LAN 首次收件人快照持久化失败；消息保留本地待确认队列: " + messageId);
                     return false;
                 }
-                // Close the first-discovery window after its fixed deadline without forcing
-                // another network send. All ACKed targets are reclaimed; partial targets stay pending.
-                scheduleLanChatTask("discovery-window-close", () -> {
-                    try {
-                        lanChatSendExecutor.execute(() -> removePendingLanChat(messageId));
-                    } catch (java.util.concurrent.RejectedExecutionException ignored) {
-                        // The durable queue remains intact; the next service/network wake recovers it.
-                    }
-                }, LAN_CHAT_DISCOVERY_WINDOW_MS + 250L);
                 return true;
             } catch (Exception e) {
                 FileLogger.log(this, "CHAT", "⚠️ LAN 聊天队列持久化异常: " + e.getMessage());
@@ -3897,13 +3888,28 @@ public class TrackingService extends Service implements LocationListener {
             if (!"acked".equals(target.status)) pendingTargetIds.add(target.peerId);
         }
         if (pendingTargetIds.isEmpty() && store.isDiscoveryPending(messageId)) {
-            if (!store.beginDiscoveryWindow(messageId)) {
-                FileLogger.log(this, "CHAT", "P2P 首次发现窗口已结束，空目标消息保留，不向晚加入设备广播: "
+            boolean firstDispatch = store.beginDiscoveryWindow(messageId);
+            if (!store.isDiscoveryPending(messageId)) {
+                FileLogger.log(this, "CHAT", "P2P 首次发现窗口已结束，空目标消息转为 waiting_peers，不向晚加入设备广播: "
                         + messageId);
                 return;
             }
-            FileLogger.log(this, "CHAT", "P2P 首次发现窗口开始，限时 "
-                    + LAN_CHAT_DISCOVERY_WINDOW_MS + "ms，消息 " + messageId);
+            if (firstDispatch) {
+                FileLogger.log(this, "CHAT", "P2P 首次发现窗口开始，限时 "
+                        + LAN_CHAT_DISCOVERY_WINDOW_MS + "ms，消息 " + messageId);
+                scheduleLanChatTask("discovery-window-close", () -> {
+                    try {
+                        lanChatSendExecutor.execute(() -> {
+                            if (store.finalizeDiscoveryWindow(messageId)) {
+                                FileLogger.log(this, "CHAT", "P2P 首次发现窗口关闭，消息状态已结算: "
+                                        + messageId);
+                            }
+                        });
+                    } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                        // A later retry or authenticated peer discovery will settle the durable row.
+                    }
+                }, LAN_CHAT_DISCOVERY_WINDOW_MS + 100L);
+            }
         }
 
         // 先清理过期租约；同一网络内仍有已验证成员时直接复用单播路由，
