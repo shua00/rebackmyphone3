@@ -3817,8 +3817,14 @@ public class TrackingService extends Service implements LocationListener {
                 if (verifiedChatPeers.containsKey(peerId)) awaitingPeerIds.add(peerId);
             }
         }
-        final int totalPeerCount = store == null ? awaitingPeerIds.size() : pendingTargetIds.size();
+        final int totalPeerCount = pendingTargetIds.size();
         final int reachablePeerCount = awaitingPeerIds.size();
+        final boolean firstDiscoveryWindowOpen = store.isDiscoveryPending(messageId);
+        if (totalPeerCount == 0 && !firstDiscoveryWindowOpen) {
+            FileLogger.log(this, "CHAT", "ℹ️ 消息首次发现窗口已关闭且没有固定目标；禁止向晚加入设备广播旧消息，保留待诊断状态: "
+                    + messageId);
+            return;
+        }
         java.util.concurrent.CountDownLatch ack = new java.util.concurrent.CountDownLatch(
                 reachablePeerCount > 0 ? reachablePeerCount : (totalPeerCount == 0 ? 1 : 0));
         pendingChatAckPeers.put(messageId, awaitingPeerIds);
