@@ -274,5 +274,13 @@ class LanP2PCoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             decode_packet(packet, "wrong-secret")
 
+
+    def test_record_peer_fails_closed_when_database_cannot_be_opened(self):
+        from lan_p2p_core import record_peer
+        directory_path = os.path.join(self.temp_dir.name, "not-a-database-file")
+        os.mkdir(directory_path)
+        self.assertFalse(record_peer(directory_path, "server2", "android-a",
+                                     "android", "android-main", "192.168.1.10", 8888, "suspect"))
+
 if __name__ == "__main__":
     unittest.main()

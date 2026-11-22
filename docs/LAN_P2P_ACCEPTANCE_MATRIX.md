@@ -51,7 +51,7 @@
 |---|---|---|---|
 | S01 | 原有功能完整保留 | 只增强可靠性，不删除、弱化或擅自改变 rescue2.py、chat.py、server2.py、Android 原有找回/定位/设备管理/网页管理/控制/聊天等功能 | 变更审查+回归 |
 | S02 | 悬浮留言最高优先级 | 原远程留言/关怀提醒的接收、悬浮显示、关闭、已读、历史和服务端队列行为保持原样；不得因对讲改造退化 | 回归+实机 |
-| S03 | 留言与对讲严格隔离 | 留言使用 `FIND_ME_FLOAT_MSG`/`custom_msg` 与 `showFloatingMessage(content)`；对讲使用 `FIND_ME_CHAT`/`chat_msg` 与 `handleIncomingChat()`；消息类型、队列、历史、去重命名空间、清理和 UI 入口不得混用 | 代码+自动化+实机 |
+| S03 | 留言与对讲严格隔离 | 留言使用 `FIND_ME_FLOAT_MSG`/`custom_msg` 与 `showFloatingMessage(content)`；LAN 对讲使用 v2 JSON `chat.message`/`chat.ack`，Android 通过 `persistIncomingLanChat()` 持久化 Inbox/历史后通知对讲 UI；跨网络网页/HTTP 对讲继续使用独立 `chat_msg` 动作。旧字符串式 `FIND_ME_CHAT`/`FIND_ME_CHAT_ACK`/`FIND_ME_PEER_*` 不属于 v2-only 接收协议。两类消息的类型、队列、历史、去重命名空间、清理和 UI 入口不得混用 | 代码+自动化+实机 |
 | S04 | Android 聊天窗口行为不变 | 打开、关闭、返回、隐藏、刷新及历史行为保持既有体验；不得修改 `ChatActivity.java` | diff 审查+回归 |
 | S05 | LAN 直连优先、HTTP 兜底准确 | 同 LAN 只有在握手/端点验证成功后才标记 UDP 可达；不能仅凭私有 IP 或同网段推断。跨 LAN 使用现有 HTTP/云端路径；网络切换时使旧 UDP endpoint 失效 | 代码+互通/实机 |
 | S06 | 稳定身份与动态路由分离 | peer_id/service_id 持久稳定；IP/端口只是临时 endpoint；network_scope 仅作辅助提示，不作身份或认证依据；同主机不同逻辑服务保持不同 peer | 自动化+重启测试 |
@@ -137,3 +137,23 @@
 5. 任何单项失败都不能用其他项目通过抵消。
 6. 未经实机验证的项目必须明确标注“未实机验收”。
 7. 本矩阵适用于本分支后续所有提交、代码审查、自动化测试、CI 和最终发布验收。
+
+
+## 8. 本轮集中反查记录（2026-11-22）
+
+本节只记录已取得证据的代码/自动化/CI 结果，不构成整体验收通过声明。
+
+| 项目 | 结果 | 证据与限制 |
+|---|---|---|
+| 稳定 peer 路由 | 已修复端点变化继承旧验证的问题；新端点须重新完成挑战验证 | commit `0f3bd13f6b31b09ae440fd7db9a58335c389fb19` |
+| 网络恢复发现 | Android 监听启动/网络路径变化主动发送一次 HELLO；收到有效挑战响应后触发持久化 Outbox 补发；挑战专用包阻断 ping-pong | commits `1a4799063f2f7cd883f1f816e77457d1e029c80a`、`c66379a466da1d220d199068978ec90ed64d4c3c` |
+| 收件箱去重恢复 | SQLite Inbox 增加持久化 presentation marker；历史提交与 marker 之间崩溃时可重试补齐；旧 500 条 ID 列表只作迁移/恢复辅助 | commit `362bfd3efa315ce59b1c25a2ef815f5e81168efd` |
+| UDP 来源端点 | 异步处理前复制来源 IP/端口，避免接收循环复用 DatagramPacket 导致端点串包 | commit `0a2f045740a1d3620fc5d6b5f3d70f5c48203b25` |
+| v2-only 接收面 | Android、server2、rescue2、chat.py 已移除旧字符串式对讲/发现/ACK 入口；保留普通救援指令和独立悬浮留言路径 | commit `efdd4789e16fa70c76df5b9556a8c7bc3349e13f` |
+| 目标快照与重试测试 | 新增固定目标、部分 ACK 后只重试未确认目标、发现窗口冻结、空目标不误报送达、错误密钥拒绝等自动化用例 | commit `4b4cc9229481d4f5da21a9d302463ba389d8681d`；该提交 CI 中 12 项 Python 单测通过 |
+| SQLite 写入失败安全 | Android Outbox、Targets、Inbox、Peer 和 ACK 写入现核查 insert/update 结果；peer.hello/peer.ack 只有相关持久化成功后才启用路由或回 ACK | commit `aa85ce537f211020c969c93ec77a0141c644c451` |
+| Python 握手失败安全 | 三个 Python 服务仅在 peer 路由成功落库且 nonce 有效时回应 peer.ack | commit `623cd7bfa67f4933c719a7e7e61ab125c14bfa70` |
+| v2 同文不同消息 | 取消按 3 秒相同正文吞消息；不同 message_id 即使正文相同，也各自写入历史 | 本次更新 commit（见本节文件历史） |
+| 最新 CI | Python 检查、12 项单元测试、Android Java 编译、Debug APK 构建和 artifact 上传均通过 | [Actions run 44983112090](https://github.com/shua00/rebackmyphone3/actions/runs/44983112090)，对应 commit `623cd7bfa67f4933c719a7e7e61ab125c14bfa70` |
+
+**未完成/未宣称通过**：A01–A10 中要求真实设备的 LAN 双向、多设备、网络切换、三服务全关闭验收；M-A/M-B/M-C 实机运行；F02/F03/F04/F09/F10/F12 完整故障注入；G01–G06 完整回归。Android SQLite 故障注入及真实 APK 在真实设备上的运行仍缺证据。不得以以上 CI 结果替代这些项目。

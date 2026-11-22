@@ -4173,8 +4173,9 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     /**
-     * 收聊天的公共逻辑（新 CHAT 前缀 / 旧 MSG-4段 兼容块共用）。
-     * 原 UDP 监听里的聊天处理逻辑抽此方法，避免两处重复。
+     * Retained legacy local chat presentation helper.
+     * The v2 LAN transport uses persistIncomingLanChat() so message_id, Inbox and
+     * history commit are coordinated before the stored ACK is sent.
      */
     private void handleIncomingChat(String senderId, String msgContent) {
         // 自己发的忽略
@@ -4247,27 +4248,22 @@ public class TrackingService extends Service implements LocationListener {
                 if (store.isIncomingDisplayed(receiverScope, senderId, messageId)) return true;
 
                 long now = System.currentTimeMillis();
-                String dedupKey = senderId + ":" + msgContent;
-                boolean suppressSameContent = dedupKey.equals(lastReceivedMsg)
-                        && now - lastReceivedMsgTime < 3000L;
                 String history = sp.getString("chat_history", "");
-                String updatedHistory = history;
-                if (!suppressSameContent) {
-                    String timeStr = new java.text.SimpleDateFormat(
-                            "HH:mm", java.util.Locale.getDefault()).format(new java.util.Date(now));
-                    String newRecord = timeStr + " | [" + shortName + "] " + msgContent;
-                    updatedHistory = history.isEmpty() ? newRecord : history + "\n" + newRecord;
-                    String[] records = updatedHistory.split("\n");
-                    if (records.length > 100) {
-                        StringBuilder trimmed = new StringBuilder();
-                        for (int i = records.length - 100; i < records.length; i++) {
-                            if (trimmed.length() > 0) trimmed.append("\n");
-                            trimmed.append(records[i]);
-                        }
-                        updatedHistory = trimmed.toString();
+                String timeStr = new java.text.SimpleDateFormat(
+                        "HH:mm", java.util.Locale.getDefault()).format(new java.util.Date(now));
+                String newRecord = timeStr + " | [" + shortName + "] " + msgContent;
+                String updatedHistory = history.isEmpty() ? newRecord : history + "\n" + newRecord;
+                String[] records = updatedHistory.split("\n");
+                if (records.length > 100) {
+                    StringBuilder trimmed = new StringBuilder();
+                    for (int i = records.length - 100; i < records.length; i++) {
+                        if (trimmed.length() > 0) trimmed.append("\n");
+                        trimmed.append(records[i]);
                     }
-                    historyChanged = true;
+                    updatedHistory = trimmed.toString();
                 }
+                // Different message IDs are different messages, even if their text is identical.
+                historyChanged = true;
 
                 ids.put(stableId);
                 while (ids.length() > 500) {
@@ -4288,10 +4284,6 @@ public class TrackingService extends Service implements LocationListener {
                 if (!store.markIncomingDisplayed(receiverScope, senderId, messageId)) {
                     FileLogger.log(this, "CHAT", "⚠️ LAN inbox presentation marker failed; withhold ACK for retry");
                     return false;
-                }
-                if (!suppressSameContent) {
-                    lastReceivedMsg = dedupKey;
-                    lastReceivedMsgTime = now;
                 }
                 long persistMs = android.os.SystemClock.elapsedRealtime() - persistStarted;
                 if (persistMs >= 100L) {

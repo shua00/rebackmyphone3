@@ -188,8 +188,9 @@ IP 地址永远不能作为设备身份。网络变化时应使旧端点路由�
 
 本次工作只改造设备间对讲/聊天：
 
-- 设备间对讲：现有 `FIND_ME_CHAT` 语义路径 / 新的 `chat.message` 信封、`chat.ack`、`handleIncomingChat()`、对讲历史和对讲 UI。
-- 远程悬浮留言：`FIND_ME_FLOAT_MSG` / `custom_msg` 和 `showFloatingMessage(content)`。
+- LAN 设备间对讲：只使用 v2 JSON `chat.message` / `chat.ack` 信封；Android 先通过 `persistIncomingLanChat()` 写入 SQLite Inbox 与本地对讲历史，成功后才发送 stored ACK 并通知对讲 UI。旧字符串式 `FIND_ME_CHAT` / `FIND_ME_CHAT_ACK` / `FIND_ME_PEER_*` 不再作为接收协议。
+- 跨网络网页/HTTP 对讲：继续使用服务端现有 `chat_msg` 动作和独立服务端 Outbox，不与 LAN Inbox 或悬浮留言合并。
+- 远程悬浮留言：继续使用 `FIND_ME_FLOAT_MSG` / `custom_msg` 和 `showFloatingMessage(content)`，其接收、显示、关闭、已读/清理和服务端队列保持独立。
 
 悬浮留言的协议、显示、关闭行为、历史、已读/清理行为、服务端队列和路由必须保持不变。对讲和悬浮留言不得共享去重命名空间、收件箱记录、队列清理逻辑或 UI 通知路径。传输层实施期间不得修改 `ChatActivity.java`。
 
