@@ -31,7 +31,7 @@ UDP_PORT = 8890  # 独立监听端口，避免与 server2/rescue2 冲突
 UDP_LISTENER_SOCKET = None
 UDP_CHAT_SEND_LOCK = threading.Lock()
 RESCUE_SECRET = "your_private_secret_key"  # ⚠️ 必须与手机端一致
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, add_discovery_targets_for_peer
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.sqlite3"), "chat.py")
 SERVER2_URL = "http://127.0.0.1:8080"      # server2.py 的地址
 # ==========================================
@@ -238,7 +238,8 @@ def broadcast_chat_message(payload_str):
 def send_chat_v2(body, display_name, message_id):
     """Durable standalone chat sender; ACKs return to the bound 8890 listener."""
     peers = list_known_peers(CHAT_DB, "chat.py")
-    target_ids = [peer["peer_id"] for peer in peers]
+    # Fixed recipient set includes previously known devices even when their lease expired.
+    target_ids = [peer["peer_id"] for peer in list_known_peer_snapshot(CHAT_DB, "chat.py")]
     created = int(time.time() * 1000)
     probe = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
              "sender_peer_type": "chat.py", "service_id": PEER_NODE_ID,

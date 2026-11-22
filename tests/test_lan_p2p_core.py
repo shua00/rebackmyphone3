@@ -282,5 +282,23 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertFalse(record_peer(directory_path, "server2", "android-a",
                                      "android", "android-main", "192.168.1.10", 8888, "suspect"))
 
+
+    def test_historical_peer_snapshot_includes_expired_offline_members(self):
+        from lan_p2p_core import record_peer, list_known_peers, list_known_peer_snapshot
+        self.assertTrue(record_peer(self.db_path, "rescue2", "android-offline",
+                                    "android", "android-main", "192.168.1.20", 8888, "active"))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "UPDATE lan_peers SET lease_expires_at=1,status='suspect' "
+                "WHERE receiver_scope='rescue2' AND peer_id='android-offline'")
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(list_known_peers(self.db_path, "rescue2"), [])
+        snapshot = list_known_peer_snapshot(self.db_path, "rescue2")
+        self.assertEqual([peer["peer_id"] for peer in snapshot], ["android-offline"])
+        self.assertEqual(snapshot[0]["endpoint_ip"], "192.168.1.20")
+
 if __name__ == "__main__":
     unittest.main()

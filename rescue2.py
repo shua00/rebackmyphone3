@@ -114,7 +114,7 @@ PACKAGE_NAME = "com.example.devicefinder"
 
 # ===== 配置区 =====
 RESCUE_SECRET = "your_private_secret_key"
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, add_discovery_targets_for_peer
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "rescue2")
 DEFAULT_SERVER_URL = "http://dingwei.bai001.de5.net/api/report"
 DEFAULT_CONFIG_URL = "https://your-config-url.com/config.txt"
@@ -576,12 +576,17 @@ def send_chat_v2(body, target_ips):
     """Persist PC-originated chat and send from bound UDP 8889 so ACKs return here."""
     message_id = uuid.uuid4().hex
     peers = list_known_peers(_CHAT_DEDUP_DB, "rescue2")
+    peer_snapshot = list_known_peer_snapshot(_CHAT_DEDUP_DB, "rescue2")
     selected_ips = set(target_ips or [])
-    if not selected_ips:
+    broadcast_all = not selected_ips or "255.255.255.255" in selected_ips
+    if broadcast_all:
         selected_ips = {"255.255.255.255"}
-    selected_peers = [p for p in peers if p["endpoint_ip"] in selected_ips
-                      or "255.255.255.255" in selected_ips]
-    target_ids = [p["peer_id"] for p in selected_peers]
+        target_ids = [p["peer_id"] for p in peer_snapshot]
+    else:
+        # Preserve known offline recipients selected by their last recorded address.
+        target_ids = [p["peer_id"] for p in peer_snapshot if p["endpoint_ip"] in selected_ips]
+    selected_id_set = set(target_ids)
+    selected_peers = [p for p in peers if p["peer_id"] in selected_id_set]
     created = int(time.time() * 1000)
     probe = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
              "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,

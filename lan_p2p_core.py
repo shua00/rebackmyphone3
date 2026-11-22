@@ -333,7 +333,7 @@ def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_po
 
 
 def list_known_peers(db_path, receiver_scope, limit=100):
-    """Return currently leased peers for a service scope; endpoint is a temporary route."""
+    """Return currently leased peers; endpoint is a temporary route."""
     conn = sqlite3.connect(db_path, timeout=10)
     try:
         conn.execute("PRAGMA busy_timeout=10000")
@@ -353,6 +353,28 @@ def list_known_peers(db_path, receiver_scope, limit=100):
         conn.close()
 
 
+def list_known_peer_snapshot(db_path, receiver_scope, limit=500):
+    """Return all historically known peer identities, including expired/offline leases.
+
+    This list is for the immutable recipient snapshot only. Call list_known_peers()
+    separately when a currently leased UDP route is needed for an immediate send.
+    """
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        conn.execute("PRAGMA busy_timeout=10000")
+        rows = conn.execute("""SELECT peer_id,peer_type,service_id,endpoint_ip,endpoint_port,
+                    last_seen_at,lease_expires_at,status
+            FROM lan_peers WHERE receiver_scope=?
+            ORDER BY last_seen_at DESC LIMIT ?""",
+            (receiver_scope, max(1, min(1000, int(limit))))).fetchall()
+        return [{"peer_id": r[0], "peer_type": r[1], "service_id": r[2],
+                 "endpoint_ip": r[3], "endpoint_port": r[4],
+                 "last_seen_at": r[5], "lease_expires_at": r[6], "status": r[7]}
+                for r in rows]
+    except Exception:
+        return []
+    finally:
+        conn.close()
 def add_discovery_target(db_path, sender_scope, message_id, peer_id):
     """Add a peer only during the first bounded discovery window of an unknown-recipient message."""
     if not sender_scope or not message_id or not peer_id:
