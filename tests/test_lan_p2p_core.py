@@ -705,6 +705,9 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("boolean routeMatches", ack_handler)
         self.assertIn("boolean discoveryAck", ack_handler)
         self.assertIn("if (routeMatches) verifiedChatPeerSeen.put", ack_handler)
+        self.assertIn("if (store.allTargetsAcked(messageId))", ack_handler)
+        self.assertIn("removePendingLanChat(messageId)", ack_handler)
+        self.assertIn("P2P 最终 ACK 已落账并回收兼容队列", ack_handler)
         self.assertNotIn("verifiedChatPeers.put(", ack_handler)
 
     def test_android_inbox_conflicting_payload_is_rejected_and_duplicate_refreshes_ui(self):
