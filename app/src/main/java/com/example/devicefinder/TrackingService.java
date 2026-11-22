@@ -3704,7 +3704,10 @@ public class TrackingService extends Service implements LocationListener {
                 }
             }
             snapshot.removeIf(target -> getUniqueDeviceId().equals(target.peerId));
-            if (!snapshot.isEmpty()) store.setTargets(messageId, snapshot);
+            if (!snapshot.isEmpty() && !store.setTargets(messageId, snapshot)) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN 固定目标集合持久化失败，本条暂不发送: " + messageId);
+                return;
+            }
         }
         List<LanChatStore.Target> savedTargets = store != null
                 ? store.loadTargets(messageId) : new ArrayList<>();
@@ -3930,8 +3933,11 @@ public class TrackingService extends Service implements LocationListener {
                 try {
                     reportExecutor.execute(() -> {
                         try {
-                            store.observePeer(senderId, peerType, serviceId, peerNetwork,
-                                    peerIp, sourcePort, now, now + 120_000L);
+                            if (!store.observePeer(senderId, peerType, serviceId, peerNetwork,
+                                    peerIp, sourcePort, now, now + 120_000L)) {
+                                FileLogger.log(this, "CHAT", "⚠️ peer HELLO 持久化未确认，不发送 peer.ack");
+                                return;
+                            }
                             sendLanUdpPacket(socket, response, "PEER_ACK_V2");
                             // A normal beacon also challenges its sender once, allowing an
                             // existing sender to rediscover this device and resume its outbox.
@@ -3960,24 +3966,31 @@ public class TrackingService extends Service implements LocationListener {
                 final java.net.InetAddress peerAddress = packet.getAddress();
                 if (latch != null && !senderId.isEmpty() && !senderId.equals(getUniqueDeviceId())
                         && (port == 8888 || port == 8887 || port == 8889 || port == 8890)) {
-                    verifiedChatPeers.put(senderId,
-                            new java.net.InetSocketAddress(peerAddress, port));
-                    verifiedChatPeerSeen.put(senderId, now);
                     LanChatStore store = lanChatStore;
-                    if (store != null) {
-                        try {
-                            reportExecutor.execute(() -> {
-                                store.upsertPeer(senderId, envelope.optString("sender_peer_type", "unknown"),
-                                        serviceId, envelope.optString("network_scope", ""),
-                                        peerAddress.getHostAddress(), port, now, now + 120_000L);
-                                store.addDiscoveryPeerToOpenMessages(senderId);
-                            });
-                        } catch (java.util.concurrent.RejectedExecutionException ignored) {}
+                    if (store == null) return true;
+                    final String peerType = envelope.optString("sender_peer_type", "unknown");
+                    final String peerNetwork = envelope.optString("network_scope", "");
+                    try {
+                        reportExecutor.execute(() -> {
+                            boolean persisted = store.upsertPeer(senderId, peerType, serviceId,
+                                    peerNetwork, peerAddress.getHostAddress(), port, now, now + 120_000L);
+                            if (!persisted) {
+                                FileLogger.log(this, "CHAT", "⚠️ peer.ack 路由持久化失败，暂不启用单播");
+                                return;
+                            }
+                            if (!store.addDiscoveryPeerToOpenMessages(senderId)) {
+                                FileLogger.log(this, "CHAT", "⚠️ 新 peer 加入待发现目标集失败，稍后重新发现");
+                                return;
+                            }
+                            verifiedChatPeers.put(senderId,
+                                    new java.net.InetSocketAddress(peerAddress, port));
+                            verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
+                            latch.countDown();
+                            handler.postDelayed(this::retryPendingLanChatMessages, 150L);
+                        });
+                    } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                        FileLogger.log(this, "CHAT", "⚠️ peer.ack 持久化队列已满，暂不启用单播");
                     }
-                    latch.countDown();
-                    // A newly verified peer may have come back online; resume this device's
-                    // durable outbox immediately instead of waiting for another user message.
-                    handler.postDelayed(this::retryPendingLanChatMessages, 150L);
                 }
                 return true;
             }

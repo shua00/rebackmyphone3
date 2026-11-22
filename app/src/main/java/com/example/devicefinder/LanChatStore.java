@@ -114,45 +114,72 @@ public final class LanChatStore extends SQLiteOpenHelper {
         db.execSQL("CREATE TABLE IF NOT EXISTS lan_meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)");
     }
 
+    private boolean hasColumn(SQLiteDatabase db, String table, String column) {
+        Cursor c = null;
+        try {
+            c = db.rawQuery("PRAGMA table_info(" + table + ")", null);
+            int nameIndex = c.getColumnIndex("name");
+            while (c.moveToNext()) {
+                if (nameIndex >= 0 && column.equalsIgnoreCase(c.getString(nameIndex))) return true;
+            }
+            return false;
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
+    private boolean rowExists(SQLiteDatabase db, String table, String where, String[] args) {
+        Cursor c = null;
+        try {
+            c = db.rawQuery("SELECT 1 FROM " + table + " WHERE " + where + " LIMIT 1", args);
+            return c.moveToFirst();
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
     @Override
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-        // Schema changes are additive and versioned. Never drop existing chat or floating-message data.
-        if (oldVersion < 1) onCreate(db);
-        if (oldVersion < 2) {
-            try { db.execSQL("ALTER TABLE lan_inbox ADD COLUMN display_name TEXT NOT NULL DEFAULT ''"); }
-            catch (Exception ignored) { /* Column may already exist after an interrupted additive migration. */ }
+        // Additive migration only. Any unexpected error must abort the upgrade transaction,
+        // leaving SQLiteOpenHelper at the previous version so migration can safely retry.
+        if (oldVersion < 2 && !hasColumn(db, "lan_inbox", "display_name")) {
+            db.execSQL("ALTER TABLE lan_inbox ADD COLUMN display_name TEXT NOT NULL DEFAULT ''");
         }
         if (oldVersion < 3) {
-            try {
+            if (!hasColumn(db, "lan_inbox", "displayed")) {
                 db.execSQL("ALTER TABLE lan_inbox ADD COLUMN displayed INTEGER NOT NULL DEFAULT 0");
-            } catch (Exception ignored) {
-                // Column may already exist after an interrupted additive migration.
             }
-            try {
-                // Existing inbox rows predate the presentation marker and have already followed
-                // the previous history path. Preserve them as displayed to avoid replaying old chat.
-                db.execSQL("UPDATE lan_inbox SET displayed=1");
-            } catch (Exception ignored) {
-                // A partial migration remains non-destructive; later reads still remain deduplicated by message ID.
-            }
+            // Rows that existed before v3 already passed through the old history path.
+            // Mark them as displayed so an upgrade never replays historical messages.
+            db.execSQL("UPDATE lan_inbox SET displayed=1");
         }
     }
 
     /** Persist an outgoing message before any network send. */
     public boolean enqueue(String messageId, String senderPeerId, String body, long createdAtMs) {
-        if (messageId == null || messageId.length() == 0 ||
-                senderPeerId == null || senderPeerId.length() == 0 || body == null) return false;
+        if (messageId == null || messageId.length() == 0
+                || senderPeerId == null || senderPeerId.length() == 0 || body == null) return false;
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
             Cursor c = db.rawQuery("SELECT COUNT(*) FROM lan_outbox WHERE state NOT IN ('delivered','expired')", null);
             int count = 0;
             try { if (c.moveToFirst()) count = c.getInt(0); } finally { c.close(); }
-            Cursor exists = db.rawQuery("SELECT 1 FROM lan_outbox WHERE message_id=?", new String[]{messageId});
-            boolean alreadyExists;
-            try { alreadyExists = exists.moveToFirst(); } finally { exists.close(); }
-            if (!alreadyExists && count >= MAX_PENDING_MESSAGES) return false;
 
+            Cursor exists = db.rawQuery(
+                    "SELECT sender_peer_id,body FROM lan_outbox WHERE message_id=?",
+                    new String[]{messageId});
+            try {
+                if (exists.moveToFirst()) {
+                    boolean sameMessage = senderPeerId.equals(exists.getString(0))
+                            && body.equals(exists.getString(1));
+                    if (!sameMessage) return false;
+                    db.setTransactionSuccessful();
+                    return true;
+                }
+            } finally { exists.close(); }
+
+            if (count >= MAX_PENDING_MESSAGES) return false;
             ContentValues v = new ContentValues();
             v.put("message_id", messageId);
             v.put("sender_peer_id", senderPeerId);
@@ -162,7 +189,10 @@ public final class LanChatStore extends SQLiteOpenHelper {
             v.put("protocol_version", 2);
             v.put("state", "discovery_pending");
             v.put("delivery_deadline_ms", 0L);
-            db.insertWithOnConflict("lan_outbox", null, v, SQLiteDatabase.CONFLICT_IGNORE);
+            long rowId = db.insertWithOnConflict("lan_outbox", null, v, SQLiteDatabase.CONFLICT_IGNORE);
+            if (rowId < 0 && !rowExists(db, "lan_outbox", "message_id=?", new String[]{messageId})) {
+                return false;
+            }
             db.setTransactionSuccessful();
             return true;
         } catch (Exception e) {
@@ -178,6 +208,8 @@ public final class LanChatStore extends SQLiteOpenHelper {
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
+            if (!rowExists(db, "lan_outbox", "message_id=?", new String[]{messageId})) return false;
+            int insertedOrExisting = 0;
             for (Target target : targets) {
                 if (target == null || target.peerId == null || target.peerId.length() == 0) continue;
                 ContentValues v = new ContentValues();
@@ -185,16 +217,24 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 v.put("peer_id", target.peerId);
                 v.put("status", "pending");
                 v.put("last_endpoint", target.endpointIp == null ? "" : target.endpointIp + ":" + target.endpointPort);
-                db.insertWithOnConflict("lan_outbox_targets", null, v, SQLiteDatabase.CONFLICT_IGNORE);
+                long rowId = db.insertWithOnConflict(
+                        "lan_outbox_targets", null, v, SQLiteDatabase.CONFLICT_IGNORE);
+                boolean exists = rowId >= 0 || rowExists(db, "lan_outbox_targets",
+                        "message_id=? AND peer_id=?", new String[]{messageId, target.peerId});
+                if (!exists) return false;
+                insertedOrExisting++;
             }
-            Cursor c = db.rawQuery("SELECT COUNT(*) FROM lan_outbox_targets WHERE message_id=?", new String[]{messageId});
+            if (insertedOrExisting == 0) return false;
+            Cursor c = db.rawQuery("SELECT COUNT(*) FROM lan_outbox_targets WHERE message_id=?",
+                    new String[]{messageId});
             int count = 0;
             try { if (c.moveToFirst()) count = c.getInt(0); } finally { c.close(); }
+            if (count <= 0) return false;
             ContentValues state = new ContentValues();
-            state.put("state", count > 0 ? "pending" : "discovery_pending");
-            db.update("lan_outbox", state, "message_id=?", new String[]{messageId});
+            state.put("state", "pending");
+            if (db.update("lan_outbox", state, "message_id=?", new String[]{messageId}) != 1) return false;
             db.setTransactionSuccessful();
-            return count > 0;
+            return true;
         } catch (Exception e) {
             return false;
         } finally {
@@ -231,13 +271,15 @@ public final class LanChatStore extends SQLiteOpenHelper {
             long deadline = c.getLong(1);
             int total = c.getInt(2);
             int acked = c.isNull(3) ? 0 : c.getInt(3);
-            if ("discovery_pending".equals(state) && deadline > System.currentTimeMillis()) return false;
-            if ("discovery_pending".equals(state) && deadline > 0) {
+            boolean discoveryOpen = "discovery_pending".equals(state)
+                    && deadline > System.currentTimeMillis();
+            if (discoveryOpen || total == 0 || total != acked) return false;
+            if (!"delivered".equals(state)) {
                 ContentValues next = new ContentValues();
-                next.put("state", total > 0 && total == acked ? "delivered" : (total > 0 ? "pending" : "discovery_pending"));
-                db.update("lan_outbox", next, "message_id=?", new String[]{messageId});
+                next.put("state", "delivered");
+                if (db.update("lan_outbox", next, "message_id=?", new String[]{messageId}) != 1) return false;
             }
-            return total > 0 && total == acked && deadline <= System.currentTimeMillis();
+            return true;
         } catch (Exception e) {
             return false;
         } finally {
@@ -307,30 +349,32 @@ public final class LanChatStore extends SQLiteOpenHelper {
     }
 
     public boolean markAttempt(String messageId, String peerId, String endpoint, String error) {
-        ContentValues v = new ContentValues();
-        v.put("status", "sent");
-        v.put("attempt_count", "attempt_count + 1");
-        v.put("last_attempt_at", System.currentTimeMillis());
-        v.put("last_endpoint", endpoint == null ? "" : endpoint);
-        v.put("last_error", error == null ? "" : error);
+        if (messageId == null || peerId == null) return false;
         try {
             SQLiteDatabase db = getWritableDatabase();
             db.execSQL("UPDATE lan_outbox_targets SET status='sent',attempt_count=attempt_count+1," +
                     "last_attempt_at=?,last_endpoint=?,last_error=? WHERE message_id=? AND peer_id=? AND status!='acked'",
                     new Object[]{System.currentTimeMillis(), endpoint == null ? "" : endpoint,
                             error == null ? "" : error, messageId, peerId});
-            return true;
+            Cursor c = db.rawQuery(
+                    "SELECT status FROM lan_outbox_targets WHERE message_id=? AND peer_id=?",
+                    new String[]{messageId, peerId});
+            try {
+                return c.moveToFirst() && !"acked".equals(c.getString(0));
+            } finally { c.close(); }
         } catch (Exception e) {
             return false;
         }
     }
 
     public boolean acknowledge(String messageId, String peerId) {
+        if (messageId == null || peerId == null) return false;
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
             long now = System.currentTimeMillis();
-            Cursor outbox = db.rawQuery("SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id=?",
+            Cursor outbox = db.rawQuery(
+                    "SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id=?",
                     new String[]{messageId});
             String state = "";
             long deadline = 0L;
@@ -342,40 +386,68 @@ public final class LanChatStore extends SQLiteOpenHelper {
             } finally { outbox.close(); }
             if (state.isEmpty()) return false;
 
-            ContentValues v = new ContentValues();
-            v.put("status", "acked");
-            v.put("last_ack_at", now);
-            int changed = db.update("lan_outbox_targets", v, "message_id=? AND peer_id=?",
-                    new String[]{messageId, peerId});
+            ContentValues ackValues = new ContentValues();
+            ackValues.put("status", "acked");
+            ackValues.put("last_ack_at", now);
+            int changed = db.update("lan_outbox_targets", ackValues,
+                    "message_id=? AND peer_id=?", new String[]{messageId, peerId});
             if (changed == 0) {
-                if (!"discovery_pending".equals(state) || (deadline > 0 && now > deadline)) return false;
-                if (deadline == 0L) {
-                    deadline = now + 5_000L;
-                    ContentValues window = new ContentValues();
-                    window.put("delivery_deadline_ms", deadline);
-                    db.update("lan_outbox", window, "message_id=?", new String[]{messageId});
+                Cursor target = db.rawQuery(
+                        "SELECT status FROM lan_outbox_targets WHERE message_id=? AND peer_id=?",
+                        new String[]{messageId, peerId});
+                String existingStatus = null;
+                try { if (target.moveToFirst()) existingStatus = target.getString(0); }
+                finally { target.close(); }
+
+                if ("acked".equals(existingStatus)) {
+                    // A repeated ACK is idempotent; continue to reconcile the message state.
+                } else {
+                    if (existingStatus != null || !"discovery_pending".equals(state)
+                            || (deadline > 0 && now > deadline)) return false;
+                    if (deadline == 0L) {
+                        deadline = now + 5_000L;
+                        ContentValues window = new ContentValues();
+                        window.put("delivery_deadline_ms", deadline);
+                        if (db.update("lan_outbox", window, "message_id=?",
+                                new String[]{messageId}) != 1) return false;
+                    }
+                    ContentValues targetValues = new ContentValues();
+                    targetValues.put("message_id", messageId);
+                    targetValues.put("peer_id", peerId);
+                    targetValues.put("status", "acked");
+                    targetValues.put("last_ack_at", now);
+                    long targetRow = db.insertWithOnConflict(
+                            "lan_outbox_targets", null, targetValues, SQLiteDatabase.CONFLICT_IGNORE);
+                    if (targetRow < 0) {
+                        Cursor verify = db.rawQuery(
+                                "SELECT status FROM lan_outbox_targets WHERE message_id=? AND peer_id=?",
+                                new String[]{messageId, peerId});
+                        boolean persistedAck;
+                        try { persistedAck = verify.moveToFirst() && "acked".equals(verify.getString(0)); }
+                        finally { verify.close(); }
+                        if (!persistedAck) return false;
+                    }
                 }
-                ContentValues target = new ContentValues();
-                target.put("message_id", messageId);
-                target.put("peer_id", peerId);
-                target.put("status", "acked");
-                target.put("last_ack_at", now);
-                db.insertWithOnConflict("lan_outbox_targets", null, target, SQLiteDatabase.CONFLICT_IGNORE);
             }
-            Cursor c = db.rawQuery("SELECT COUNT(*), SUM(CASE WHEN status='acked' THEN 1 ELSE 0 END) " +
-                    "FROM lan_outbox_targets WHERE message_id=?", new String[]{messageId});
+
+            Cursor totals = db.rawQuery(
+                    "SELECT COUNT(*),SUM(CASE WHEN status='acked' THEN 1 ELSE 0 END) " +
+                    "FROM lan_outbox_targets WHERE message_id=?",
+                    new String[]{messageId});
             int total = 0, acked = 0;
             try {
-                if (c.moveToFirst()) {
-                    total = c.getInt(0);
-                    acked = c.isNull(1) ? 0 : c.getInt(1);
+                if (totals.moveToFirst()) {
+                    total = totals.getInt(0);
+                    acked = totals.isNull(1) ? 0 : totals.getInt(1);
                 }
-            } finally { c.close(); }
-            boolean discoveryOpen = "discovery_pending".equals(state) && deadline > 0 && now <= deadline;
+            } finally { totals.close(); }
+
+            boolean discoveryOpen = "discovery_pending".equals(state)
+                    && deadline > 0 && now <= deadline;
             if (!discoveryOpen) {
                 ContentValues next = new ContentValues();
                 next.put("state", total > 0 && total == acked ? "delivered" : "pending");
-                db.update("lan_outbox", next, "message_id=?", new String[]{messageId});
+                if (db.update("lan_outbox", next, "message_id=?", new String[]{messageId}) != 1) return false;
             }
             db.setTransactionSuccessful();
             return true;
@@ -401,44 +473,53 @@ public final class LanChatStore extends SQLiteOpenHelper {
     }
 
     /** Add a newly discovered peer to all open first-discovery snapshots. */
-    public void addDiscoveryPeerToOpenMessages(String peerId) {
-        if (peerId == null || peerId.length() == 0) return;
+    public boolean addDiscoveryPeerToOpenMessages(String peerId) {
+        if (peerId == null || peerId.length() == 0) return false;
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
             long now = System.currentTimeMillis();
-            Cursor c = db.rawQuery("SELECT message_id,delivery_deadline_ms FROM lan_outbox " +
-                    "WHERE state='discovery_pending'", null);
+            Cursor c = db.rawQuery(
+                    "SELECT message_id,delivery_deadline_ms FROM lan_outbox WHERE state='discovery_pending'",
+                    null);
             try {
                 while (c.moveToNext()) {
                     String messageId = c.getString(0);
                     long deadline = c.getLong(1);
                     if (deadline > 0 && now > deadline) {
-                        finalizeDiscoveryMessage(db, messageId);
+                        if (!finalizeDiscoveryMessage(db, messageId)) return false;
                         continue;
                     }
                     if (deadline == 0L) {
                         ContentValues window = new ContentValues();
                         window.put("delivery_deadline_ms", now + 5_000L);
-                        db.update("lan_outbox", window, "message_id=?", new String[]{messageId});
+                        if (db.update("lan_outbox", window, "message_id=?",
+                                new String[]{messageId}) != 1) return false;
                     }
                     ContentValues target = new ContentValues();
                     target.put("message_id", messageId);
                     target.put("peer_id", peerId);
                     target.put("status", "pending");
-                    db.insertWithOnConflict("lan_outbox_targets", null, target, SQLiteDatabase.CONFLICT_IGNORE);
+                    long rowId = db.insertWithOnConflict(
+                            "lan_outbox_targets", null, target, SQLiteDatabase.CONFLICT_IGNORE);
+                    if (rowId < 0 && !rowExists(db, "lan_outbox_targets",
+                            "message_id=? AND peer_id=?", new String[]{messageId, peerId})) return false;
                 }
             } finally { c.close(); }
             db.setTransactionSuccessful();
-        } catch (Exception ignored) {
+            return true;
+        } catch (Exception e) {
+            return false;
         } finally {
             db.endTransaction();
         }
     }
 
-    private void finalizeDiscoveryMessage(SQLiteDatabase db, String messageId) {
-        Cursor c = db.rawQuery("SELECT COUNT(*), SUM(CASE WHEN status='acked' THEN 1 ELSE 0 END) " +
-                "FROM lan_outbox_targets WHERE message_id=?", new String[]{messageId});
+    private boolean finalizeDiscoveryMessage(SQLiteDatabase db, String messageId) {
+        Cursor c = db.rawQuery(
+                "SELECT COUNT(*),SUM(CASE WHEN status='acked' THEN 1 ELSE 0 END) " +
+                "FROM lan_outbox_targets WHERE message_id=?",
+                new String[]{messageId});
         int total = 0, acked = 0;
         try {
             if (c.moveToFirst()) {
@@ -447,14 +528,17 @@ public final class LanChatStore extends SQLiteOpenHelper {
             }
         } finally { c.close(); }
         ContentValues next = new ContentValues();
-        next.put("state", total > 0 && total == acked ? "delivered" : (total > 0 ? "pending" : "discovery_pending"));
-        db.update("lan_outbox", next, "message_id=?", new String[]{messageId});
+        next.put("state", total > 0 && total == acked
+                ? "delivered" : (total > 0 ? "pending" : "discovery_pending"));
+        return db.update("lan_outbox", next, "message_id=?", new String[]{messageId}) == 1;
     }
 
-    /** Returns true for both first storage and a durable duplicate; false means storage failed. */
+    /** Returns true for both first storage and a durable identical duplicate; false means storage failed. */
     public boolean storeIncoming(String receiverScope, String senderPeerId, String messageId,
                                  String body, String displayName, long createdAtMs, String displayTime) {
-        if (receiverScope == null || senderPeerId == null || messageId == null || body == null) return false;
+        if (receiverScope == null || receiverScope.length() == 0
+                || senderPeerId == null || senderPeerId.length() == 0
+                || messageId == null || messageId.length() == 0 || body == null) return false;
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
@@ -467,7 +551,16 @@ public final class LanChatStore extends SQLiteOpenHelper {
             v.put("received_at_ms", System.currentTimeMillis());
             v.put("display_time", displayTime == null ? "" : displayTime);
             v.put("display_name", displayName == null ? "" : displayName);
-            db.insertWithOnConflict("lan_inbox", null, v, SQLiteDatabase.CONFLICT_IGNORE);
+            long rowId = db.insertWithOnConflict("lan_inbox", null, v, SQLiteDatabase.CONFLICT_IGNORE);
+            if (rowId < 0) {
+                Cursor existing = db.rawQuery(
+                        "SELECT body FROM lan_inbox WHERE receiver_scope=? AND sender_peer_id=? AND message_id=?",
+                        new String[]{receiverScope, senderPeerId, messageId});
+                boolean identical;
+                try { identical = existing.moveToFirst() && body.equals(existing.getString(0)); }
+                finally { existing.close(); }
+                if (!identical) return false;
+            }
             db.setTransactionSuccessful();
             return true;
         } catch (Exception e) {
@@ -481,10 +574,10 @@ public final class LanChatStore extends SQLiteOpenHelper {
      * Record an authenticated HELLO without treating it as a verified return route.
      * A changed IP/port clears the old verification; a same-route HELLO preserves it.
      */
-    public void observePeer(String peerId, String peerType, String serviceId, String networkScope,
-                            String ip, int port, long now, long leaseExpiresAt) {
+    public boolean observePeer(String peerId, String peerType, String serviceId, String networkScope,
+                               String ip, int port, long now, long leaseExpiresAt) {
         if (peerId == null || peerId.length() == 0 || ip == null || ip.length() == 0
-                || port <= 0 || port > 65535) return;
+                || port <= 0 || port > 65535) return false;
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
@@ -492,8 +585,9 @@ public final class LanChatStore extends SQLiteOpenHelper {
             int oldPort = -1;
             long oldVerifiedAt = 0L;
             String oldStatus = "suspect";
-            Cursor c = db.rawQuery("SELECT endpoint_ip,endpoint_port,last_verified_at,status "
-                    + "FROM lan_peers WHERE peer_id=?", new String[]{peerId});
+            Cursor c = db.rawQuery(
+                    "SELECT endpoint_ip,endpoint_port,last_verified_at,status FROM lan_peers WHERE peer_id=?",
+                    new String[]{peerId});
             try {
                 if (c.moveToFirst()) {
                     oldIp = c.getString(0);
@@ -517,11 +611,16 @@ public final class LanChatStore extends SQLiteOpenHelper {
             v.put("status", sameRoute && "active".equals(oldStatus) ? "active" : "suspect");
             if (oldIp == null) {
                 v.put("peer_id", peerId);
-                db.insertWithOnConflict("lan_peers", null, v, SQLiteDatabase.CONFLICT_IGNORE);
+                long rowId = db.insertWithOnConflict("lan_peers", null, v, SQLiteDatabase.CONFLICT_IGNORE);
+                if (rowId < 0 && !rowExists(db, "lan_peers", "peer_id=?", new String[]{peerId})) return false;
             } else {
-                db.update("lan_peers", v, "peer_id=?", new String[]{peerId});
+                int updated = db.update("lan_peers", v, "peer_id=?", new String[]{peerId});
+                if (updated <= 0 && !rowExists(db, "lan_peers", "peer_id=?", new String[]{peerId})) return false;
             }
             db.setTransactionSuccessful();
+            return true;
+        } catch (Exception e) {
+            return false;
         } finally {
             db.endTransaction();
         }
@@ -556,22 +655,34 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
-    public void upsertPeer(String peerId, String peerType, String serviceId, String networkScope,
-                           String ip, int port, long now, long leaseExpiresAt) {
-        if (peerId == null || peerId.length() == 0) return;
+    public boolean upsertPeer(String peerId, String peerType, String serviceId, String networkScope,
+                              String ip, int port, long now, long leaseExpiresAt) {
+        if (peerId == null || peerId.length() == 0 || ip == null || ip.length() == 0
+                || port <= 0 || port > 65535) return false;
         ContentValues v = new ContentValues();
         v.put("peer_id", peerId);
         v.put("peer_type", peerType == null ? "unknown" : peerType);
         v.put("service_id", serviceId == null ? "" : serviceId);
         v.put("protocol_version", 2);
         v.put("network_scope", networkScope == null ? "" : networkScope);
-        v.put("endpoint_ip", ip == null ? "" : ip);
+        v.put("endpoint_ip", ip);
         v.put("endpoint_port", port);
         v.put("last_seen_at", now);
         v.put("last_verified_at", now);
         v.put("lease_expires_at", leaseExpiresAt);
         v.put("status", "active");
-        getWritableDatabase().insertWithOnConflict("lan_peers", null, v, SQLiteDatabase.CONFLICT_REPLACE);
+        try {
+            SQLiteDatabase db = getWritableDatabase();
+            long rowId = db.insertWithOnConflict("lan_peers", null, v, SQLiteDatabase.CONFLICT_REPLACE);
+            if (rowId >= 0) return true;
+            Cursor c = db.rawQuery(
+                    "SELECT 1 FROM lan_peers WHERE peer_id=? AND endpoint_ip=? AND endpoint_port=? " +
+                    "AND status='active' AND last_verified_at=?",
+                    new String[]{peerId, ip, String.valueOf(port), String.valueOf(now)});
+            try { return c.moveToFirst(); } finally { c.close(); }
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     public void closeStore() {
