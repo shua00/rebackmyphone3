@@ -800,6 +800,34 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertLess(success_return, failure_catch)
         self.assertIn("return false", ack[failure_catch:])
 
+
+    def test_android_inflight_duplicate_receive_is_coalesced_and_rejection_is_retryable(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        start = source.index('if ("chat.message".equals(type))')
+        end = source.index("\n        } catch (Exception e)", start)
+        handler = source[start:end]
+
+        claim = handler.index("pendingLanChatReceives.add(receiveKey)")
+        duplicate_guard = handler.index("if (!pendingLanChatReceives.add(receiveKey))", claim)
+        dispatch = handler.index("lanChatIoExecutor.execute", duplicate_guard)
+        persist = handler.index("persistIncomingLanChat(", dispatch)
+        ack = handler.index("sendAuthenticatedChatAck(", persist)
+        cleanup = handler.index("pendingLanChatReceives.remove(receiveKey)", persist)
+        rejected = handler.index("catch (java.util.concurrent.RejectedExecutionException", cleanup)
+        rejected_cleanup = handler.index("pendingLanChatReceives.remove(receiveKey)", rejected)
+
+        self.assertLess(claim, duplicate_guard)
+        self.assertLess(duplicate_guard, dispatch)
+        self.assertLess(dispatch, persist)
+        self.assertLess(persist, ack)
+        self.assertLess(ack, cleanup)
+        self.assertLess(rejected, rejected_cleanup)
+        self.assertIn("return true", handler[duplicate_guard:dispatch])
+        self.assertIn("if (stored)", handler[persist:cleanup])
+
     def test_record_peer_fails_closed_when_database_cannot_be_opened(self):
         from lan_p2p_core import record_peer
         directory_path = os.path.join(self.temp_dir.name, "not-a-database-file")
