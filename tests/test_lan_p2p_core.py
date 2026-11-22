@@ -1313,6 +1313,19 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertNotIn("smart_send(cmd_prefix)", web_chat)
 
 
+    def test_peer_reconnect_replay_records_attempt_before_udp_send(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        for filename in ("rescue2.py", "chat.py", "server2.py"):
+            source = (repo_root / filename).read_text(encoding="utf-8")
+            start = source.index("def _resume_pending_v2_for_peer(")
+            end = source.index("\ndef _handle_authenticated_v2_packet", start)
+            replay = source[start:end]
+            record = replay.index("if not mark_outgoing_attempt(")
+            send = replay.index("sock.sendto(raw, (pending[\"endpoint_ip\"], target_port))")
+            self.assertLess(record, send, filename)
+            self.assertIn("continue", replay[record:send], filename)
+
+
     def test_android_service_first_startup_work_runs_off_main_looper(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (

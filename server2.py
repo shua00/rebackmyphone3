@@ -1307,10 +1307,12 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr):
         try:
             target_port = int(pending.get("endpoint_port") or addr[1])
             raw = encode_packet(chat_packet, RESCUE_SECRET)
+            if not mark_outgoing_attempt(CHAT_DEDUP_DB, pending["message_id"], peer_id,
+                                         pending["endpoint_ip"], target_port):
+                # Do not send a replay unless its durable attempt is recorded.
+                continue
             with UDP_CHAT_SEND_LOCK:
                 sock.sendto(raw, (pending["endpoint_ip"], target_port))
-            mark_outgoing_attempt(CHAT_DEDUP_DB, pending["message_id"], peer_id,
-                                  pending["endpoint_ip"], target_port)
         except Exception as e:
             with print_lock:
                 print(f"⚠️ server2 pending chat retry failed peer={peer_id}: {type(e).__name__}")
