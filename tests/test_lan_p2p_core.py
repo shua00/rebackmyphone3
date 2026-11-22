@@ -106,5 +106,32 @@ class LanP2PCoreTests(unittest.TestCase):
             conn.close()
         self.assertEqual(state, "delivered")
 
+
+    def test_unknown_recipient_ack_window_collects_multiple_peers(self):
+        from lan_p2p_core import persist_outgoing_message, acknowledge_outgoing_message, record_peer, load_pending_outgoing_for_peer
+        self.assertTrue(persist_outgoing_message(self.db_path, "server2", "server2-id",
+                                                 "m-discovery", "hello", []))
+        self.assertTrue(acknowledge_outgoing_message(self.db_path, "server2", "m-discovery", "android-a"))
+        self.assertTrue(acknowledge_outgoing_message(self.db_path, "server2", "m-discovery", "android-b"))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute("SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id='m-discovery'").fetchone()
+            count = conn.execute("SELECT COUNT(*) FROM lan_outbox_targets WHERE message_id='m-discovery'").fetchone()[0]
+            conn.execute("UPDATE lan_outbox SET delivery_deadline_ms=1 WHERE message_id='m-discovery'")
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(row[0], "discovery_pending")
+        self.assertEqual(count, 2)
+        record_peer(self.db_path, "server2", "android-a", "android", "android-main",
+                    "192.168.1.10", 8888, "active")
+        load_pending_outgoing_for_peer(self.db_path, "server2", "android-a")
+        conn = sqlite3.connect(self.db_path)
+        try:
+            state = conn.execute("SELECT state FROM lan_outbox WHERE message_id='m-discovery'").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(state, "delivered")
+
 if __name__ == "__main__":
     unittest.main()

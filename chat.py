@@ -31,7 +31,7 @@ UDP_PORT = 8890  # 独立监听端口，避免与 server2/rescue2 冲突
 UDP_LISTENER_SOCKET = None
 UDP_CHAT_SEND_LOCK = threading.Lock()
 RESCUE_SECRET = "your_private_secret_key"  # ⚠️ 必须与手机端一致
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, add_discovery_targets_for_peer
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.sqlite3"), "chat.py")
 SERVER2_URL = "http://127.0.0.1:8080"      # server2.py 的地址
 # ==========================================
@@ -293,6 +293,7 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
                  "reply_nonce": envelope.get("nonce", ""), "listen_port": UDP_PORT}
         try: sock.sendto(encode_packet(reply, RESCUE_SECRET), addr)
         except OSError: pass
+        add_discovery_targets_for_peer(CHAT_DB, "chat.py", sender)
         for pending in load_pending_outgoing_for_peer(CHAT_DB, "chat.py", sender, limit=10):
             chat_packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
                            "sender_peer_type": "chat.py", "service_id": PEER_NODE_ID,

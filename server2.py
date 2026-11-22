@@ -1215,6 +1215,7 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
         try: sock.sendto(encode_packet(reply, RESCUE_SECRET), addr)
         except OSError: pass
         # Re-discovery is the retry trigger: resend only this peer's still-unacked outbox rows.
+        add_discovery_targets_for_peer(CHAT_DEDUP_DB, "server2", sender)
         for pending in load_pending_outgoing_for_peer(CHAT_DEDUP_DB, "server2", sender, limit=10):
             chat_packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
                            "sender_peer_type": "server2", "service_id": PEER_NODE_ID,

@@ -114,7 +114,7 @@ PACKAGE_NAME = "com.example.devicefinder"
 
 # ===== 配置区 =====
 RESCUE_SECRET = "your_private_secret_key"
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, add_discovery_targets_for_peer
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "rescue2")
 DEFAULT_SERVER_URL = "http://dingwei.bai001.de5.net/api/report"
 DEFAULT_CONFIG_URL = "https://your-config-url.com/config.txt"
@@ -514,6 +514,7 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
                  "reply_nonce": envelope.get("nonce", ""), "listen_port": UDP_PORT}
         try: sock.sendto(encode_packet(reply, RESCUE_SECRET), addr)
         except OSError: pass
+        add_discovery_targets_for_peer(_CHAT_DEDUP_DB, "rescue2", sender)
         for pending in load_pending_outgoing_for_peer(_CHAT_DEDUP_DB, "rescue2", sender, limit=10):
             chat_packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
                            "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
