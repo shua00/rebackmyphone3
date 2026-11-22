@@ -265,7 +265,7 @@ public class TrackingService extends Service implements LocationListener {
     // 本地 LAN 聊天待确认队列：SharedPreferences 同步 commit，最多保留 50 条。
     private static final String PREF_LAN_CHAT_QUEUE = "lan_p2p_pending_messages";
     private static final int LAN_CHAT_QUEUE_MAX = 50;
-    private static final long LAN_CHAT_DISCOVERY_WINDOW_MS = 5_000L;
+    private static final long LAN_CHAT_DISCOVERY_WINDOW_MS = LanChatStore.FIRST_DISCOVERY_WINDOW_MS;
     // Keep discovery nonces valid long enough for bounded persistence/ACK work to finish.
     private static final long LAN_PEER_CHALLENGE_TIMEOUT_MS = 2_500L;
     private final Object lanChatQueueLock = new Object();
@@ -3895,6 +3895,15 @@ public class TrackingService extends Service implements LocationListener {
         java.util.Set<String> pendingTargetIds = new java.util.HashSet<>();
         for (LanChatStore.Target target : savedTargets) {
             if (!"acked".equals(target.status)) pendingTargetIds.add(target.peerId);
+        }
+        if (pendingTargetIds.isEmpty() && store.isDiscoveryPending(messageId)) {
+            if (!store.beginDiscoveryWindow(messageId)) {
+                FileLogger.log(this, "CHAT", "P2P 首次发现窗口已结束，空目标消息保留，不向晚加入设备广播: "
+                        + messageId);
+                return;
+            }
+            FileLogger.log(this, "CHAT", "P2P 首次发现窗口开始，限时 "
+                    + LAN_CHAT_DISCOVERY_WINDOW_MS + "ms，消息 " + messageId);
         }
 
         // 先清理过期租约；同一网络内仍有已验证成员时直接复用单播路由，
