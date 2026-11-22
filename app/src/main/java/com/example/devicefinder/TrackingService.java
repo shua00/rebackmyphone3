@@ -2562,10 +2562,32 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private String getWifiBroadcastAddress() {
-        String ip = DeviceInfoUtils.getLocalIpAddress();
-        if (ip == null || ip.startsWith("0.") || ip.startsWith("127.")) return "255.255.255.255";
-        String[] parts = ip.split("\\.");
-        if (parts.length == 4) return parts[0] + "." + parts[1] + "." + parts[2] + ".255";
+        // 使用 Wi-Fi 接口实际配置的广播地址，不能假定所有家庭/企业网络都是 /24。
+        // 与 bindSocketToWifi 的 wlan/ap 接口选择保持一致，避免把移动数据地址当作 LAN 广播网段。
+        try {
+            java.util.Enumeration<java.net.NetworkInterface> interfaces =
+                    java.net.NetworkInterface.getNetworkInterfaces();
+            while (interfaces != null && interfaces.hasMoreElements()) {
+                java.net.NetworkInterface intf = interfaces.nextElement();
+                String name = intf.getName();
+                if (!intf.isUp() || intf.isLoopback()
+                        || !(name.startsWith("wlan") || name.startsWith("ap"))) {
+                    continue;
+                }
+                for (java.net.InterfaceAddress interfaceAddress : intf.getInterfaceAddresses()) {
+                    java.net.InetAddress local = interfaceAddress.getAddress();
+                    java.net.InetAddress broadcast = interfaceAddress.getBroadcast();
+                    if (local instanceof java.net.Inet4Address
+                            && !local.isLoopbackAddress()
+                            && broadcast instanceof java.net.Inet4Address) {
+                        return broadcast.getHostAddress();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            FileLogger.logD("CHAT", "读取 Wi-Fi 接口广播地址失败: " + e.getClass().getSimpleName());
+        }
+        // 无法取得接口广播地址时保留原有全局广播兜底，不猜测 /24 网段。
         return "255.255.255.255";
     }
 
