@@ -41,11 +41,17 @@ def record_peer(db_path, receiver_scope, peer_id, peer_type, service_id,
                     last_seen_at=excluded.last_seen_at,
                     last_verified_at=CASE
                         WHEN excluded.status='active' THEN excluded.last_verified_at
+                        WHEN excluded.status='suspect' AND
+                             (lan_peers.endpoint_ip!=excluded.endpoint_ip OR
+                              lan_peers.endpoint_port!=excluded.endpoint_port) THEN 0
                         ELSE lan_peers.last_verified_at END,
                     lease_expires_at=excluded.lease_expires_at,
                     status=CASE
+                        WHEN excluded.status='suspect' AND
+                             (lan_peers.endpoint_ip!=excluded.endpoint_ip OR
+                              lan_peers.endpoint_port!=excluded.endpoint_port) THEN 'suspect'
                         WHEN lan_peers.status='active' AND excluded.status='suspect'
-                        THEN lan_peers.status ELSE excluded.status END""",
+                        THEN 'active' ELSE excluded.status END""",
                 (receiver_scope, str(peer_id), peer_type or "unknown", service_id or "",
                  endpoint_ip or "", int(endpoint_port or 0), now,
                  now if status == "active" else 0.0, now + 120.0, status))

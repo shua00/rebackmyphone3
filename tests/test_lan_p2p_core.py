@@ -20,24 +20,39 @@ class LanP2PCoreTests(unittest.TestCase):
         rescue_id = load_stable_peer_id(self.db_path, "rescue2")
         self.assertNotEqual(server_id, rescue_id)
 
-    def test_peer_lease_keeps_verified_status_after_hello_refresh(self):
+    def test_same_endpoint_hello_keeps_verified_status_but_route_change_invalidates_it(self):
         self.assertTrue(record_peer(self.db_path, "server2", "android-a",
                                     "android", "android-main", "192.168.1.10", 8888, "suspect"))
         self.assertTrue(record_peer(self.db_path, "server2", "android-a",
                                     "android", "android-main", "192.168.1.10", 8888, "active"))
+        # A HELLO refresh from the same endpoint does not erase a valid verification.
         self.assertTrue(record_peer(self.db_path, "server2", "android-a",
-                                    "android", "android-main", "192.168.1.11", 8888, "suspect"))
+                                    "android", "android-main", "192.168.1.10", 8888, "suspect"))
         conn = sqlite3.connect(self.db_path)
         try:
-            row = conn.execute(
+            same_route = conn.execute(
                 "SELECT endpoint_ip,last_verified_at,status FROM lan_peers "
                 "WHERE receiver_scope='server2' AND peer_id='android-a'"
             ).fetchone()
         finally:
             conn.close()
-        self.assertEqual(row[0], "192.168.1.11")
-        self.assertGreater(row[1], 0)
-        self.assertEqual(row[2], "active")
+        self.assertGreater(same_route[1], 0)
+        self.assertEqual(same_route[2], "active")
+
+        # A new IP/port is a new route and must not inherit the old route's verified state.
+        self.assertTrue(record_peer(self.db_path, "server2", "android-a",
+                                    "android", "android-main", "192.168.1.11", 8888, "suspect"))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            changed_route = conn.execute(
+                "SELECT endpoint_ip,last_verified_at,status FROM lan_peers "
+                "WHERE receiver_scope='server2' AND peer_id='android-a'"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(changed_route[0], "192.168.1.11")
+        self.assertEqual(changed_route[1], 0)
+        self.assertEqual(changed_route[2], "suspect")
 
     def test_same_peer_has_independent_service_scopes(self):
         self.assertTrue(record_peer(self.db_path, "server2", "android-a",
