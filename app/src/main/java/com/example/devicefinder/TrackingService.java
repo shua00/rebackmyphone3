@@ -3641,6 +3641,9 @@ public class TrackingService extends Service implements LocationListener {
                     FileLogger.log(this, "CHAT", "⚠️ LAN 聊天补发失败: " + e.getMessage());
                 } finally {
                     lanChatRetryInFlight.set(false);
+                    // Re-arm after releasing the in-flight guard. A delayed callback may
+                    // have fired while this batch was still running and been coalesced.
+                    scheduleLanChatRetryFromOutbox();
                 }
             });
         } catch (java.util.concurrent.RejectedExecutionException e) {
