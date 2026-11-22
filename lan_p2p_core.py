@@ -165,7 +165,8 @@ def persist_outgoing_message(db_path, sender_scope, sender_peer_id, message_id,
     """Atomically persist a Python-originated chat message and its fixed recipient snapshot."""
     if not sender_scope or not sender_peer_id or not message_id or body is None:
         return False
-    now_ms = int(created_at_ms if created_at_ms is not None else time.time() * 1000)
+    persisted_at_ms = int(time.time() * 1000)
+    now_ms = int(created_at_ms if created_at_ms is not None else persisted_at_ms)
     targets = sorted(set(str(peer) for peer in (target_peer_ids or []) if peer))
     conn = sqlite3.connect(db_path, timeout=10)
     try:
@@ -193,18 +194,32 @@ def persist_outgoing_message(db_path, sender_scope, sender_peer_id, message_id,
             PRIMARY KEY(message_id, peer_id)
         )""")
         conn.execute("BEGIN IMMEDIATE")
-        conn.execute("""INSERT OR IGNORE INTO lan_outbox
+        existing = conn.execute(
+            "SELECT sender_scope,sender_peer_id,body FROM lan_outbox WHERE message_id=?",
+            (message_id,)
+        ).fetchone()
+        if existing is not None:
+            # A retry may resume the original outbox row, but it must never mutate
+            # the original payload or enlarge the frozen recipient snapshot.
+            same_message = (existing[0] == sender_scope
+                            and existing[1] == sender_peer_id
+                            and existing[2] == str(body))
+            if not same_message:
+                conn.rollback()
+                return False
+            conn.commit()
+            return True
+
+        discovery_deadline_ms = 0 if targets else persisted_at_ms + 5000
+        conn.execute("""INSERT INTO lan_outbox
             (message_id,sender_scope,sender_peer_id,message_type,body,created_at_ms,
              protocol_version,state,delivery_deadline_ms)
-            VALUES(?,?,?,'chat',?,?,2,?,0)""",
+            VALUES(?,?,?,'chat',?,?,2,?,?)""",
             (message_id, sender_scope, sender_peer_id, str(body), now_ms,
-             "pending" if targets else "discovery_pending"))
+             "pending" if targets else "discovery_pending", discovery_deadline_ms))
         for peer_id in targets:
-            conn.execute("""INSERT OR IGNORE INTO lan_outbox_targets
+            conn.execute("""INSERT INTO lan_outbox_targets
                 (message_id,peer_id,status) VALUES(?,?,'pending')""", (message_id, peer_id))
-        if targets:
-            conn.execute("UPDATE lan_outbox SET state='pending' WHERE message_id=? AND state='discovery_pending'",
-                         (message_id,))
         conn.commit()
         return True
     except Exception:

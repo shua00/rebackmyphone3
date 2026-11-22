@@ -188,7 +188,9 @@ public final class LanChatStore extends SQLiteOpenHelper {
             v.put("created_at_ms", createdAtMs);
             v.put("protocol_version", 2);
             v.put("state", "discovery_pending");
-            v.put("delivery_deadline_ms", 0L);
+            // Freeze the first-discovery collection window from message creation,
+            // not from the first peer that happens to respond.
+            v.put("delivery_deadline_ms", System.currentTimeMillis() + 5_000L);
             long rowId = db.insertWithOnConflict("lan_outbox", null, v, SQLiteDatabase.CONFLICT_IGNORE);
             if (rowId < 0 && !rowExists(db, "lan_outbox", "message_id=?", new String[]{messageId})) {
                 return false;
@@ -208,7 +210,29 @@ public final class LanChatStore extends SQLiteOpenHelper {
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
-            if (!rowExists(db, "lan_outbox", "message_id=?", new String[]{messageId})) return false;
+            Cursor message = db.rawQuery(
+                    "SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id=?",
+                    new String[]{messageId});
+            String messageState = "";
+            long discoveryDeadline = 0L;
+            try {
+                if (message.moveToFirst()) {
+                    messageState = message.getString(0);
+                    discoveryDeadline = message.getLong(1);
+                }
+            } finally { message.close(); }
+            long now = System.currentTimeMillis();
+            if (!"discovery_pending".equals(messageState)
+                    || (discoveryDeadline > 0 && now > discoveryDeadline)) return false;
+            if (discoveryDeadline == 0L) {
+                discoveryDeadline = now + 5_000L;
+                ContentValues window = new ContentValues();
+                window.put("delivery_deadline_ms", discoveryDeadline);
+                if (db.update("lan_outbox", window, "message_id=?",
+                        new String[]{messageId}) != 1) return false;
+            }
+            boolean hadTargets = rowExists(db, "lan_outbox_targets", "message_id=?",
+                    new String[]{messageId});
             int insertedOrExisting = 0;
             for (Target target : targets) {
                 if (target == null || target.peerId == null || target.peerId.length() == 0) continue;
@@ -231,7 +255,9 @@ public final class LanChatStore extends SQLiteOpenHelper {
             try { if (c.moveToFirst()) count = c.getInt(0); } finally { c.close(); }
             if (count <= 0) return false;
             ContentValues state = new ContentValues();
-            state.put("state", "pending");
+            // If a peer already entered the open discovery window, keep collecting
+            // until its original deadline. A direct known-member snapshot freezes now.
+            state.put("state", hadTargets ? "discovery_pending" : "pending");
             if (db.update("lan_outbox", state, "message_id=?", new String[]{messageId}) != 1) return false;
             db.setTransactionSuccessful();
             return true;

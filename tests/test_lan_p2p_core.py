@@ -2,6 +2,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from lan_p2p_core import load_stable_peer_id, record_peer
 
@@ -261,6 +262,66 @@ class LanP2PCoreTests(unittest.TestCase):
             conn.close()
         self.assertEqual(row[0], "discovery_pending")
         self.assertEqual(count, 0)
+
+    def test_initial_discovery_deadline_is_anchored_to_outbox_creation(self):
+        from lan_p2p_core import persist_outgoing_message
+        with patch("lan_p2p_core.time.time", return_value=1000.0):
+            self.assertTrue(persist_outgoing_message(
+                self.db_path, "server2", "server2-id", "m-window-start", "hello", []))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            state, deadline = conn.execute(
+                "SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id='m-window-start'"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(state, "discovery_pending")
+        self.assertEqual(deadline, 1005000)
+
+    def test_first_peer_discovered_after_initial_window_is_not_added(self):
+        from lan_p2p_core import persist_outgoing_message, add_discovery_targets_for_peer
+        with patch("lan_p2p_core.time.time", return_value=1000.0):
+            self.assertTrue(persist_outgoing_message(
+                self.db_path, "server2", "server2-id", "m-too-late", "hello", []))
+        with patch("lan_p2p_core.time.time", return_value=1006.0):
+            self.assertEqual(add_discovery_targets_for_peer(
+                self.db_path, "server2", "android-late"), 0)
+            self.assertFalse(acknowledge_outgoing_message(
+                self.db_path, "server2", "m-too-late", "android-late"))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT state FROM lan_outbox WHERE message_id='m-too-late'"
+            ).fetchone()
+            count = conn.execute(
+                "SELECT COUNT(*) FROM lan_outbox_targets WHERE message_id='m-too-late'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(row[0], "discovery_pending")
+        self.assertEqual(count, 0)
+
+    def test_replaying_same_message_id_cannot_expand_targets_or_change_body(self):
+        from lan_p2p_core import persist_outgoing_message
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-immutable", "original", ["android-a"]))
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-immutable", "original",
+            ["android-a", "android-b"]))
+        self.assertFalse(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-immutable", "mutated", ["android-a"]))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            body = conn.execute(
+                "SELECT body FROM lan_outbox WHERE message_id='m-immutable'"
+            ).fetchone()[0]
+            targets = conn.execute(
+                "SELECT peer_id FROM lan_outbox_targets WHERE message_id='m-immutable' ORDER BY peer_id"
+            ).fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(body, "original")
+        self.assertEqual([x[0] for x in targets], ["android-a"])
 
     def test_packet_with_wrong_secret_is_rejected(self):
         from lan_p2p_core import encode_packet, decode_packet
