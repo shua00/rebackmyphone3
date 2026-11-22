@@ -247,7 +247,7 @@ def udp_listener():
             if msg.startswith("FIND_ME_PEER_HELLO:"):
                 parts = msg.split(":", 3)
                 if len(parts) == 4 and parts[1] == RESCUE_SECRET:
-                        record_peer(CHAT_DB, "chat.py", parts[2], "android", "android-main", addr[0], 8888, "suspect")
+                    record_peer(CHAT_DB, "chat.py", parts[2], "android", "android-main", addr[0], 8888, "suspect")
                     response = f"FIND_ME_PEER_ACK:{RESCUE_SECRET}:{parts[3]}:{PEER_NODE_ID}".encode("utf-8")
                     try: udp_sock.sendto(response, addr)
                     except OSError: pass
