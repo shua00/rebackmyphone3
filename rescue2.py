@@ -157,6 +157,27 @@ _CHAT_DEDUP_LOCK = threading.Lock()
 _CHAT_DEDUP_OPS = 0
 print_lock = threading.Lock()  # v2.0.2 补丁：全局打印锁，防多线程输出错乱
 
+def _restore_chat_history():
+    """Return the last 20 messages accepted by rescue2 for terminal recovery."""
+    try:
+        conn = sqlite3.connect(_CHAT_DEDUP_DB, timeout=5)
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("""CREATE TABLE IF NOT EXISTS received_chat_messages (
+                receiver_scope TEXT NOT NULL, sender TEXT NOT NULL, message_key TEXT NOT NULL,
+                content TEXT NOT NULL, received_at REAL NOT NULL, display_time TEXT NOT NULL,
+                PRIMARY KEY(receiver_scope, sender, message_key))""")
+            return conn.execute("""SELECT display_time,sender,content FROM received_chat_messages
+                WHERE receiver_scope=? ORDER BY received_at DESC LIMIT 20""",
+                ("rescue2",)).fetchall()[::-1]
+        finally:
+            conn.close()
+    except Exception as e:
+        with print_lock:
+            print(f"{I.warn} 对讲历史恢复失败: {type(e).__name__}")
+        return []
+
+
 def _claim_chat_message(sender, message_id, content):
     """Persist body and ID atomically in a receiver-specific namespace before ACK."""
     global _CHAT_DEDUP_OPS
@@ -1505,6 +1526,12 @@ if __name__ == "__main__":
     print("\n正在启动内置服务...")
     print(f"   环境: {env_name()}")
     print(f"   本机 IP: {get_local_ip()}")
+    restored_chat = _restore_chat_history()
+    if restored_chat:
+        print(f"\\n{I.chat} 已恢复最近 {len(restored_chat)} 条本机对讲记录：")
+        for msg_time, sender, content in restored_chat:
+            print(f"  [{msg_time}] [{sender}] {content}")
+
 
     if is_termux():
         print("\n" + "!" * 50)
