@@ -40,8 +40,8 @@ _CHAT_DB_OPS = 0
 
 
 def _claim_chat_message(sender, message_id, content):
-    global _CHAT_DB_OPS
     """Persist independent chat-mode message body and ID before ACK."""
+    global _CHAT_DB_OPS
     key = str(message_id or content or "")
     if not key:
         return None
