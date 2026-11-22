@@ -765,6 +765,40 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("return !socket.isClosed()", ack_method)
         self.assertIn("return false", ack_method)
 
+
+    def test_android_receive_ack_requires_sqlite_history_and_presentation_commit(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+
+        receive = extract_java_method(source, "private boolean persistIncomingLanChat(String senderId, String messageId, String msgContent,")
+        sqlite_commit = receive.index("store.storeIncoming(")
+        history_commit = receive.index("editor.commit()")
+        presentation_commit = receive.index("store.markIncomingDisplayed(")
+        self.assertLess(sqlite_commit, history_commit)
+        self.assertLess(history_commit, presentation_commit)
+        self.assertIn("if (!editor.commit())", receive)
+        self.assertIn("if (!store.markIncomingDisplayed", receive)
+        self.assertIn("return false", receive[presentation_commit:])
+
+        packet_start = source.index('if ("chat.message".equals(type))')
+        packet_end = source.index("\n        } catch (Exception e)", packet_start)
+        packet_handler = source[packet_start:packet_end]
+        persist_call = packet_handler.index("persistIncomingLanChat(")
+        ack_call = packet_handler.index("sendAuthenticatedChatAck(")
+        self.assertLess(persist_call, ack_call)
+        self.assertIn("if (stored)", packet_handler)
+        self.assertIn("if (!stored)", packet_handler)
+
+        ack = extract_java_method(source, "private boolean sendAuthenticatedChatAck(")
+        actual_send = ack.index("sendLanUdpPacket(socket, response, \"CHAT_ACK_V2\")")
+        success_return = ack.index("return !socket.isClosed()")
+        failure_catch = ack.index("catch (Exception e)")
+        self.assertLess(actual_send, success_return)
+        self.assertLess(success_return, failure_catch)
+        self.assertIn("return false", ack[failure_catch:])
+
     def test_record_peer_fails_closed_when_database_cannot_be_opened(self):
         from lan_p2p_core import record_peer
         directory_path = os.path.join(self.temp_dir.name, "not-a-database-file")
