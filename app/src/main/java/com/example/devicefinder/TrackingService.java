@@ -2001,7 +2001,7 @@ public class TrackingService extends Service implements LocationListener {
                         FileLogger.log(TrackingService.this, "NETWORK", "✅ 网络可用/发生切换，刷新默认网络信息");
                         handler.removeCallbacks(networkRefreshRunnable);
                         handler.postDelayed(networkRefreshRunnable, 1200L);
-                        flushPendingReports();
+                        executeMaintenance("network-available-flush", TrackingService.this::flushPendingReports);
                     }
                     @Override
                     public void onLost(Network network) {
@@ -2058,7 +2058,9 @@ public class TrackingService extends Service implements LocationListener {
         }
     }
 
-    private final Runnable networkRefreshRunnable = () -> {
+    // The debounce timer runs on the main Handler, but network IPC, offline queue
+    // flush and LAN recovery are maintenance work and must not run on the UI thread.
+    private final Runnable networkRefreshRunnable = () -> executeMaintenance("network-refresh", () -> {
         try {
             long previousChangedAt = lastNetworkChangedAt;
             JSONObject snapshot = buildNetworkSnapshot();
@@ -2077,7 +2079,7 @@ public class TrackingService extends Service implements LocationListener {
         } catch (Exception e) {
             FileLogger.log(TrackingService.this, "NETWORK", "⚠️ 刷新网络状态失败: " + e.getMessage());
         }
-    };
+    });
 
     /**
      * 获取当前默认网络的轻量快照。SSID/BSSID 仅作可选诊断信息，不参与同网授权；
