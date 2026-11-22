@@ -157,41 +157,38 @@ _CHAT_DEDUP_LOCK = threading.Lock()
 _CHAT_DEDUP_OPS = 0
 print_lock = threading.Lock()  # v2.0.2 补丁：全局打印锁，防多线程输出错乱
 
-def _claim_chat_message(sender, message_id):
-    """跨进程/重启的消息幂等；仅在持久化成功（新消息或重复消息）后确认。"""
+def _claim_chat_message(sender, message_id, content):
+    """Persist body and ID atomically in a receiver-specific namespace before ACK."""
     global _CHAT_DEDUP_OPS
-    key = str(message_id or "")
-    if not key:
-        return True
+    key = str(message_id or content or "")
+    if not key: return None
     now = time.time()
+    display_time = datetime.datetime.now().strftime("%H:%M:%S")
     try:
         with _CHAT_DEDUP_LOCK:
-            conn = sqlite3.connect(_CHAT_DEDUP_DB, timeout=3)
+            conn = sqlite3.connect(_CHAT_DEDUP_DB, timeout=5)
             try:
-                conn.execute("PRAGMA busy_timeout=3000")
-                conn.execute("""CREATE TABLE IF NOT EXISTS received_chat_ids (
-                    sender TEXT NOT NULL,
-                    message_key TEXT NOT NULL,
-                    received_at REAL NOT NULL,
-                    PRIMARY KEY(sender, message_key)
-                )""")
-                cur = conn.execute(
-                    "INSERT OR IGNORE INTO received_chat_ids(sender,message_key,received_at) VALUES(?,?,?)",
-                    (str(sender), key, now))
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("""CREATE TABLE IF NOT EXISTS received_chat_messages (
+                    receiver_scope TEXT NOT NULL, sender TEXT NOT NULL, message_key TEXT NOT NULL,
+                    content TEXT NOT NULL, received_at REAL NOT NULL, display_time TEXT NOT NULL,
+                    PRIMARY KEY(receiver_scope, sender, message_key))""")
+                conn.execute("BEGIN IMMEDIATE")
+                cur = conn.execute("""INSERT OR IGNORE INTO received_chat_messages
+                    (receiver_scope,sender,message_key,content,received_at,display_time) VALUES(?,?,?,?,?,?)""",
+                    ("rescue2", str(sender), key, str(content), now, display_time))
                 _CHAT_DEDUP_OPS += 1
                 if _CHAT_DEDUP_OPS % 128 == 0:
-                    conn.execute("DELETE FROM received_chat_ids WHERE received_at < ?", (now - 7 * 86400,))
-                    conn.execute("""DELETE FROM received_chat_ids
-                        WHERE rowid IN (SELECT rowid FROM received_chat_ids
-                        ORDER BY received_at DESC LIMIT -1 OFFSET 10000)""")
+                    conn.execute("DELETE FROM received_chat_messages WHERE receiver_scope=? AND received_at<?",
+                                 ("rescue2", now - 7 * 86400))
+                    conn.execute("""DELETE FROM received_chat_messages WHERE receiver_scope=? AND rowid IN (
+                        SELECT rowid FROM received_chat_messages WHERE receiver_scope=?
+                        ORDER BY received_at DESC LIMIT -1 OFFSET 10000)""", ("rescue2", "rescue2"))
                 conn.commit()
                 return cur.rowcount == 1
-            finally:
-                conn.close()
+            finally: conn.close()
     except Exception as e:
-        # 持久化失败不能确认新消息已可靠接收；返回 None 让接收端暂不 ACK。
-        with print_lock:
-            print(f"{I.warn} 聊天持久化去重失败，本条消息暂不确认: {type(e).__name__}")
+        with print_lock: print(f"⚠️ 聊天消息持久化失败，本条不确认: {type(e).__name__}")
         return None
 
 # ===== 环境检测 =====
@@ -509,7 +506,7 @@ def udp_listener():
                                 try: sock.sendto(ack, addr)
                                 except OSError: pass
                             continue
-                        claim_result = _claim_chat_message(sender, message_id or content)
+                        claim_result = _claim_chat_message(sender, message_id, content)
                         if claim_result is None:
                             continue  # 持久化失败：不 ACK，允许发送端重试
                         if message_id:
