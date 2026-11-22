@@ -1862,5 +1862,36 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("if fallback_queued:", handler)
 
 
+    def test_server2_executed_chat_id_persists_outbox_ack_before_http_queue_removal(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "server2.py").read_text(encoding="utf-8")
+        start = source.index("def process_executed_commands(")
+        end = source.index("def process_command_feedback(", start)
+        handler = source[start:end]
+        ack = handler.index("acknowledge_outgoing_message(")
+        remove = handler.index("PENDING_COMMANDS[dev_id] = new_queue")
+        persist = handler.index("_persist_command_queue_locked(dev_id)")
+        self.assertLess(ack, remove)
+        self.assertLess(remove, persist)
+        self.assertIn("if not removable_ids:", handler)
+        self.assertIn("fallback retained", handler)
+        self.assertIn("PENDING_COMMANDS[dev_id] = old_queue", handler)
+
+
+    def test_server2_accepted_chat_feedback_cannot_retire_fallback_when_outbox_ack_fails(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "server2.py").read_text(encoding="utf-8")
+        start = source.index("def process_command_feedback(")
+        end = source.index("def get_recent_command_feedback(", start)
+        handler = source[start:end]
+        ack = handler.index("acknowledge_outgoing_message(")
+        reconciled = handler.index("reconciled_chat_command_ids.add(command_id)")
+        terminal = handler.index("terminal_ids = {")
+        self.assertLess(ack, reconciled)
+        self.assertLess(reconciled, terminal)
+        self.assertIn("row[0] not in reconciled_chat_command_ids", handler)
+        self.assertIn("fallback retained", handler)
+
+
 if __name__ == "__main__":
     unittest.main()

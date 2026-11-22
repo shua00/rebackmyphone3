@@ -1034,33 +1034,50 @@ def process_executed_commands(dev_id, executed_ids):
     id_set = {x for x in executed_ids if isinstance(x, str) and x}
     if not id_set: return
     removed = 0
-    completed_chat_fallbacks = []
     with _cmd_lock:
         queue = PENDING_COMMANDS.get(dev_id, [])
         if not queue: return
         completed = [c for c in queue if c.get("id") in id_set]
+        # A chat_msg executed ID is not enough by itself to retire the HTTP
+        # fallback: its shared-ID LAN outbox ACK must commit first.
+        removable_ids = set()
         for command in completed:
-            if command.get("type") == "chat_msg":
-                envelope = decode_chat_http_fallback_payload(command.get("payload"))
-                if envelope:
-                    completed_chat_fallbacks.append(envelope)
-        new_queue = [c for c in queue if c["id"] not in id_set]
-        removed = len(queue) - len(new_queue)
-        if new_queue: PENDING_COMMANDS[dev_id] = new_queue
-        else: PENDING_COMMANDS.pop(dev_id, None)
-        _persist_command_queue_locked(dev_id)
+            command_id = command.get("id")
+            if command.get("type") != "chat_msg":
+                removable_ids.add(command_id)
+                continue
+            envelope = decode_chat_http_fallback_payload(command.get("payload"))
+            if not envelope:
+                with print_lock:
+                    print(f"⚠️ executed HTTP chat fallback payload invalid; retain: {dev_id}")
+                continue
+            if acknowledge_outgoing_message(
+                    CHAT_DEDUP_DB, "server2", envelope["message_id"], dev_id):
+                removable_ids.add(command_id)
+            else:
+                with print_lock:
+                    print(f"⚠️ executed HTTP chat ACK reconcile deferred; fallback retained: {dev_id}")
 
-    # This is safe for the v2 fallback: chat_msg executed IDs are emitted only after the
-    # shared-ID Inbox commit, or after a prior accepted result. Duplicate ACK is idempotent.
-    for envelope in completed_chat_fallbacks:
-        if not acknowledge_outgoing_message(
-                CHAT_DEDUP_DB, "server2", envelope["message_id"], dev_id):
+        if not removable_ids:
+            return
+        old_queue = queue
+        new_queue = [c for c in queue if c.get("id") not in removable_ids]
+        removed = len(old_queue) - len(new_queue)
+        try:
+            if new_queue: PENDING_COMMANDS[dev_id] = new_queue
+            else: PENDING_COMMANDS.pop(dev_id, None)
+            _persist_command_queue_locked(dev_id)
+        except Exception as exc:
+            # Keep the in-memory queue consistent with the durable queue on DB failure.
+            PENDING_COMMANDS[dev_id] = old_queue
             with print_lock:
-                print(f"⚠️ executed HTTP chat ACK reconcile deferred: {dev_id}")
+                print(f"⚠️ executed command queue commit failed; restored in-memory rows: {type(exc).__name__}")
+            return
 
     if removed > 0:
         with print_lock:
             print(f"✅ [HTTP队列] {dev_id} 已确认执行 {removed} 条")
+
 
 
 def process_command_feedback(dev_id, feedback_items):
@@ -1149,19 +1166,26 @@ def process_command_feedback(dev_id, feedback_items):
             conn.close()
 
     # Only a persisted accepted status means dispatchHttpCommand committed the Android Inbox.
-    for envelope in persisted_chat_acks:
+    # Retire the HTTP fallback only after the matching shared-ID outbox ACK is durable.
+    reconciled_chat_command_ids = set()
+    for command_id, envelope in [
+            (command_id, envelope)
+            for command_id, envelope in chat_fallback_candidates]:
         if acknowledge_outgoing_message(
                 CHAT_DEDUP_DB, "server2", envelope["message_id"], dev_id):
+            reconciled_chat_command_ids.add(command_id)
             _remove_chat_fallback_for_message(dev_id, envelope["message_id"])
         else:
             with print_lock:
-                print(f"⚠️ HTTP chat accepted but outbox ACK reconcile deferred: {dev_id}")
+                print(f"⚠️ HTTP chat accepted but outbox ACK reconcile deferred; fallback retained: {dev_id}")
 
+    
     # chat_msg is idempotently replayable, so uncertain/failed results must remain queued.
     terminal_ids = {
         row[0] for row in valid
         if row[3] in terminal_statuses
         and not (row[2] == "chat_msg" and row[3] in ("uncertain", "failed"))
+        and not (row[2] == "chat_msg" and row[0] not in reconciled_chat_command_ids)
     }
     if terminal_ids:
         with _cmd_lock:
