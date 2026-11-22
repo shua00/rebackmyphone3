@@ -1298,6 +1298,9 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("routeSnapshot.get(peerId)", cleanup)
         self.assertIn("verifiedChatPeers.get(peerId) == sentRoute", cleanup)
         self.assertIn("verifiedChatPeers.remove(peerId)", cleanup)
+        self.assertIn("synchronized (verifiedChatPeers)", cleanup)
+        self.assertIn("synchronized (verifiedChatPeers)", send)
+        self.assertIn("if (verifiedChatPeers.get(senderId) == verified)", source)
 
 
     def test_android_duplicate_ack_cannot_consume_another_peer_wait_slot(self):
