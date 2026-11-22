@@ -509,7 +509,7 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr):
                        "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
                        "target_peer_id": peer_id, "message_id": pending["message_id"],
                        "created_at_ms": pending["created_at_ms"],
-                       "display_name": "PEER_NODE_ID", "body": pending["body"]}
+                       "display_name": "PC_Terminal", "body": pending["body"]}
         try:
             target_port = int(pending.get("endpoint_port") or addr[1])
             raw = encode_packet(chat_packet, RESCUE_SECRET)
