@@ -2058,6 +2058,10 @@ public class TrackingService extends Service implements LocationListener {
             if (oldSocket != null && !oldSocket.isClosed()) {
                 FileLogger.log(this, "NETWORK", "Wi-Fi LAN changed; closing old UDP socket for rebind");
                 oldSocket.close();
+            } else {
+                // A LAN path can appear/change while the listener is not running yet.
+                // Do not rely solely on the old receive loop's finally block to restart it.
+                triggerRescueListener();
             }
             // 队列补发改由 UDP socket 重新绑定成功后触发，避免对着已关闭/未就绪 socket 空跑。
         } catch (Exception e) {
@@ -2864,9 +2868,14 @@ public class TrackingService extends Service implements LocationListener {
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
             if (cm == null) return;
+            boolean incompleteNetworkSnapshot = false;
             for (Network n : cm.getAllNetworks()) {
                 NetworkCapabilities nc = cm.getNetworkCapabilities(n);
-                if (nc != null && nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                if (nc == null) {
+                    incompleteNetworkSnapshot = true;
+                    continue;
+                }
+                if (nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
                     try {
                         // Once a Wi-Fi LAN is present, never silently leave this socket
                         // on the default (possibly cellular) network if explicit binding fails.
@@ -2877,6 +2886,9 @@ public class TrackingService extends Service implements LocationListener {
                         throw new java.io.IOException("Wi-Fi LAN socket binding failed", bindError);
                     }
                 }
+            }
+            if (incompleteNetworkSnapshot) {
+                throw new java.io.IOException("Network capabilities incomplete; defer UDP socket binding");
             }
             // No Wi-Fi transport is currently visible; retain the platform default route.
         } catch (java.io.IOException e) {

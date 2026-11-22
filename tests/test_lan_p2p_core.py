@@ -1814,6 +1814,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("previous.equals(current)", refresh)
         self.assertIn("invalidateVerifiedChatPeers(", refresh)
         self.assertIn("oldSocket.close()", refresh)
+        self.assertIn("triggerRescueListener();", refresh)
+        self.assertIn("else {", refresh)
 
         listener_start = source.index("private void startRescueListener()")
         listener_end = source.index("private void parseResponse(", listener_start)
@@ -2107,6 +2109,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("throw new java.io.IOException", method)
         self.assertNotIn("将使用系统默认出口", method)
         self.assertIn("n.bindSocket(socket)", method)
+        self.assertIn("incompleteNetworkSnapshot", method)
+        self.assertIn("Network capabilities incomplete; defer UDP socket binding", method)
 
     def test_outbox_queries_still_return_empty_for_a_valid_empty_ledger(self):
         conn = sqlite3.connect(self.db_path)
