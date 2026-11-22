@@ -59,38 +59,7 @@ from urllib.parse import urlparse, parse_qs
 # ★ 新增ThreadPoolExecutor 补丁： 2026-11-05 13:50
 from concurrent.futures import ThreadPoolExecutor
 
-def _load_stable_peer_id(db_path, service_name):
-    """Return a durable logical service identity; never use a process-session UUID."""
-    conn = sqlite3.connect(db_path, timeout=10)
-    try:
-        conn.execute("PRAGMA busy_timeout=10000")
-        conn.execute("""CREATE TABLE IF NOT EXISTS lan_service_identity (
-            service_name TEXT PRIMARY KEY,
-            peer_id TEXT NOT NULL UNIQUE,
-            created_at REAL NOT NULL
-        )""")
-        conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute(
-            "SELECT peer_id FROM lan_service_identity WHERE service_name=?",
-            (service_name,)
-        ).fetchone()
-        if row and row[0]:
-            peer_id = str(row[0])
-        else:
-            peer_id = service_name + "-" + uuid.uuid4().hex
-            conn.execute(
-                "INSERT INTO lan_service_identity(service_name,peer_id,created_at) VALUES(?,?,?)",
-                (service_name, peer_id, time.time())
-            )
-        conn.commit()
-        return peer_id
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
+from lan_p2p_core import load_stable_peer_id, record_peer
 UDP_LISTEN_PORT = 8887  # server2 独立监听端口；发往 Android 的指令仍使用 8888
 PEER_NODE_ID = _load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "server2")
 
@@ -1233,6 +1202,7 @@ def udp_listener():
                 if msg.startswith("FIND_ME_PEER_HELLO:"):
                     parts = msg.split(":", 3)
                     if len(parts) == 4 and parts[1] == RESCUE_SECRET:
+                        record_peer(CHAT_DEDUP_DB, "server2", parts[2], "android", "android-main", addr[0], 8888, "suspect")
                         response = f"FIND_ME_PEER_ACK:{RESCUE_SECRET}:{parts[3]}:{PEER_NODE_ID}".encode("utf-8")
                         try: udp_sock.sendto(response, addr)
                         except OSError: pass
@@ -1249,6 +1219,8 @@ def udp_listener():
                                 except OSError: pass
                             continue
                         claim_result = _claim_chat_message(sender, message_id, content)
+                        if claim_result is not None:
+                            record_peer(CHAT_DEDUP_DB, "server2", sender, "android", "android-main", addr[0], 8888, "active")
                         if claim_result is None:
                             continue  # 持久化失败：不 ACK，允许发送端重试
                         if message_id:
