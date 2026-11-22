@@ -279,7 +279,10 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertEqual(deadline, 1005000)
 
     def test_first_peer_discovered_after_initial_window_is_not_added(self):
-        from lan_p2p_core import persist_outgoing_message, add_discovery_targets_for_peer
+        from lan_p2p_core import (
+            persist_outgoing_message, add_discovery_targets_for_peer,
+            acknowledge_outgoing_message,
+        )
         with patch("lan_p2p_core.time.time", return_value=1000.0):
             self.assertTrue(persist_outgoing_message(
                 self.db_path, "server2", "server2-id", "m-too-late", "hello", []))
