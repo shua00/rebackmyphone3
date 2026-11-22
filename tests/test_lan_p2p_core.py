@@ -709,6 +709,15 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("removePendingLanChat(messageId)", ack_handler)
         self.assertIn("P2P 最终 ACK 已落账并回收兼容队列", ack_handler)
         self.assertNotIn("verifiedChatPeers.put(", ack_handler)
+        self.assertIn("store.matchesExpectedAckEndpoint(messageId, senderId", ack_handler)
+        self.assertIn("persistedEndpointMatch", ack_handler)
+        self.assertIn("lanChatIoExecutor.execute(() -> {", ack_handler)
+        self.assertIn("reason=unverified_endpoint", ack_handler)
+        endpoint_start = store_source.index("public boolean matchesExpectedAckEndpoint(")
+        endpoint_end = store_source.index("\\n    public ", endpoint_start + 12)
+        endpoint_method = store_source[endpoint_start:endpoint_end]
+        self.assertIn("last_endpoint=?", endpoint_method)
+        self.assertIn("endpointIp + \":\" + endpointPort", endpoint_method)
 
     def test_android_inbox_conflicting_payload_is_rejected_and_duplicate_refreshes_ui(self):
         repo_root = Path(__file__).resolve().parents[1]
