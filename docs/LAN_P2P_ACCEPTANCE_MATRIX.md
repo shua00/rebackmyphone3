@@ -161,5 +161,6 @@
 | 当前累计 CI | 最新代码提交执行 17 项 Python 单元测试、Android Java 编译、Debug APK 构建和 artifact 上传，全部成功 | [Actions run 44984288925](https://github.com/shua00/rebackmyphone3/actions/runs/44984288925)，对应 commit `b9af01eb2bf517864aa802eec9515d79beb8f967` |
 | 最新 CI | Python 检查、12 项单元测试、Android Java 编译、Debug APK 构建和 artifact 上传均通过 | [Actions run 44983112090](https://github.com/shua00/rebackmyphone3/actions/runs/44983112090)，对应 commit `623cd7bfa67f4933c719a7e7e61ab125c14bfa70` |
 | 首次发现窗口与目标快照 | 首次发现窗口从发送箱持久化时起算；Python 相同 message_id 重试不可更改正文/发送者/收件人集合；Android 首次目标快照只允许在原发现窗口内建立，已有窗口成员继续在窗口内收集 | commit 待本轮 CI；新增首次发现超时、晚到成员拒绝、message_id 重放不可扩张等测试 |
+| Python 对称 peer challenge | 三个 Python 服务启动广播和定向 HELLO 都使用短时 nonce；只有 peer.ack 的 nonce、peer_id、来源 IP/端口与挑战一致才升级 active；挑战完成后再加入发现目标并补发待发送消息 | 本轮提交新增挑战错配/过期/候选路由限制自动化；需 CI 验证 |
 
 **未完成/未宣称通过**：A01–A10 中要求真实设备的 LAN 双向、多设备、网络切换、三服务全关闭验收；M-A/M-B/M-C 实机运行；F02/F03/F04/F09/F10/F12 完整故障注入；G01–G06 完整回归。Android SQLite 故障注入、Python 三服务真实进程互通、真实 APK 在真实设备上的运行仍缺证据。不得以以上 CI 结果替代这些项目。

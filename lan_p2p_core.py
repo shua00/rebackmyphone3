@@ -372,7 +372,8 @@ def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10):
             JOIN lan_outbox_targets t ON t.message_id=o.message_id
             JOIN lan_peers p ON p.receiver_scope=? AND p.peer_id=t.peer_id
             WHERE o.sender_scope=? AND t.peer_id=? AND t.status!='acked'
-              AND o.state NOT IN ('delivered','expired') AND p.lease_expires_at>?
+              AND o.state NOT IN ('delivered','expired') AND p.status='active'
+              AND p.lease_expires_at>?
             ORDER BY o.created_at_ms LIMIT ?""",
             (sender_scope, sender_scope, peer_id, now, max(1, min(50, int(limit))))).fetchall()
         return [{"message_id": r[0], "sender_peer_id": r[1], "body": r[2],
@@ -410,7 +411,7 @@ def list_known_peers(db_path, receiver_scope, limit=100):
         rows = conn.execute("""SELECT peer_id,peer_type,service_id,endpoint_ip,endpoint_port,
                     last_seen_at,lease_expires_at,status
             FROM lan_peers WHERE receiver_scope=? AND lease_expires_at>?
-              AND status IN ('active','suspect')
+              AND status='active'
             ORDER BY last_seen_at DESC LIMIT ?""",
             (receiver_scope, time.time(), max(1, min(500, int(limit))))).fetchall()
         return [{"peer_id": r[0], "peer_type": r[1], "service_id": r[2],
@@ -509,8 +510,120 @@ def add_discovery_targets_for_peer(db_path, sender_scope, peer_id):
         conn.close()
 
 
+def remember_peer_challenge(db_path, receiver_scope, nonce, expected_peer_id="",
+                            expected_ip="", expected_port=0, ttl_seconds=5):
+    """Persist a short-lived nonce bound to an optional peer identity and UDP endpoint."""
+    if not db_path or not receiver_scope or not nonce:
+        return False
+    try:
+        now = time.time()
+        conn = sqlite3.connect(db_path, timeout=10)
+        try:
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("""CREATE TABLE IF NOT EXISTS lan_peer_challenges (
+                receiver_scope TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                expected_peer_id TEXT NOT NULL DEFAULT '',
+                expected_ip TEXT NOT NULL DEFAULT '',
+                expected_port INTEGER NOT NULL DEFAULT 0,
+                expires_at REAL NOT NULL,
+                PRIMARY KEY(receiver_scope, nonce)
+            )""")
+            conn.execute("DELETE FROM lan_peer_challenges WHERE expires_at<=?", (now,))
+            conn.execute("""INSERT OR REPLACE INTO lan_peer_challenges
+                (receiver_scope,nonce,expected_peer_id,expected_ip,expected_port,expires_at)
+                VALUES(?,?,?,?,?,?)""",
+                (receiver_scope, str(nonce), str(expected_peer_id or ""),
+                 str(expected_ip or ""), int(expected_port or 0),
+                 now + max(1.0, min(30.0, float(ttl_seconds)))))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+def complete_peer_challenge(db_path, receiver_scope, nonce, peer_id,
+                            endpoint_ip, endpoint_port, peer_type="unknown",
+                            service_id=""):
+    """Activate a route only after a live nonce matches the expected peer and source endpoint."""
+    if (not db_path or not receiver_scope or not nonce or not peer_id
+            or not endpoint_ip or not endpoint_port):
+        return False
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        conn.execute("PRAGMA busy_timeout=10000")
+        row = conn.execute("""SELECT expected_peer_id,expected_ip,expected_port,expires_at
+            FROM lan_peer_challenges WHERE receiver_scope=? AND nonce=?""",
+            (receiver_scope, str(nonce))).fetchone()
+    except Exception:
+        conn.close()
+        return False
+    conn.close()
+    if row is None:
+        return False
+    expected_peer_id, expected_ip, expected_port, expires_at = row
+    if float(expires_at) <= time.time():
+        return False
+    if expected_peer_id and str(expected_peer_id) != str(peer_id):
+        return False
+    if expected_ip and str(expected_ip) != str(endpoint_ip):
+        return False
+    if expected_port and int(expected_port) != int(endpoint_port):
+        return False
+    if not record_peer(db_path, receiver_scope, peer_id, peer_type, service_id,
+                       endpoint_ip, endpoint_port, "active"):
+        return False
+    # Directed challenges are single-use. A broadcast nonce may authenticate
+    # several independent peers during its short discovery lifetime.
+    if expected_peer_id:
+        try:
+            conn = sqlite3.connect(db_path, timeout=10)
+            try:
+                conn.execute("DELETE FROM lan_peer_challenges WHERE receiver_scope=? AND nonce=?",
+                             (receiver_scope, str(nonce)))
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            return False
+    return True
+
+
+def send_directed_peer_challenge(sock, db_path, receiver_scope, sender_peer_id,
+                                 sender_peer_type, service_id, secret, listen_port,
+                                 target_peer_id, target_ip, target_port, ttl_seconds=5):
+    """Challenge one observed route; only its matching reply can activate it."""
+    import uuid
+    if (sock is None or not target_peer_id or not target_ip
+            or not (1 <= int(target_port or 0) <= 65535)):
+        return False
+    nonce = uuid.uuid4().hex
+    if not remember_peer_challenge(db_path, receiver_scope, nonce,
+                                   target_peer_id, target_ip, target_port, ttl_seconds):
+        return False
+    packet = {
+        "type": "peer.hello",
+        "sender_peer_id": str(sender_peer_id),
+        "sender_peer_type": str(sender_peer_type or "unknown"),
+        "service_id": str(service_id),
+        "nonce": nonce,
+        "listen_port": int(listen_port),
+        "network_scope": "",
+        "capabilities": ["chat.text", "chat.ack"],
+        "challenge_only": True,
+    }
+    try:
+        sock.sendto(encode_packet(packet, secret), (str(target_ip), int(target_port)))
+        return True
+    except Exception:
+        return False
+
+
 def send_startup_peer_beacon(sock, peer_id, peer_type, service_id, secret,
-                             listen_port, target_ports, broadcast_addresses=None):
+                             listen_port, target_ports, broadcast_addresses=None,
+                             db_path=None, receiver_scope=None):
     """Send one authenticated HELLO burst after a service listener binds; no background scanner."""
     import uuid
     if sock is None or not peer_id or not service_id:
@@ -522,12 +635,15 @@ def send_startup_peer_beacon(sock, peer_id, peer_type, service_id, secret,
     ))
     if not ports or not addresses:
         return 0
+    nonce = uuid.uuid4().hex
+    if db_path and receiver_scope:
+        remember_peer_challenge(db_path, receiver_scope, nonce, ttl_seconds=5)
     packet = {
         "type": "peer.hello",
         "sender_peer_id": str(peer_id),
         "sender_peer_type": str(peer_type or "unknown"),
         "service_id": str(service_id),
-        "nonce": uuid.uuid4().hex,
+        "nonce": nonce,
         "listen_port": int(listen_port),
         "network_scope": "",
         "capabilities": ["chat.text", "chat.ack"],

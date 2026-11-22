@@ -339,6 +339,53 @@ class LanP2PCoreTests(unittest.TestCase):
             decode_packet(packet, "wrong-secret")
 
 
+    def test_directed_peer_challenge_requires_matching_nonce_identity_and_endpoint(self):
+        from lan_p2p_core import remember_peer_challenge, complete_peer_challenge, list_known_peers
+        self.assertTrue(remember_peer_challenge(
+            self.db_path, "server2", "nonce-1", "android-a", "192.168.1.10", 8888))
+        self.assertFalse(complete_peer_challenge(
+            self.db_path, "server2", "wrong-nonce", "android-a",
+            "192.168.1.10", 8888, "android", "android-main"))
+        self.assertFalse(complete_peer_challenge(
+            self.db_path, "server2", "nonce-1", "android-b",
+            "192.168.1.10", 8888, "android", "android-main"))
+        self.assertFalse(complete_peer_challenge(
+            self.db_path, "server2", "nonce-1", "android-a",
+            "192.168.1.11", 8888, "android", "android-main"))
+        self.assertFalse(complete_peer_challenge(
+            self.db_path, "server2", "nonce-1", "android-a",
+            "192.168.1.10", 8890, "android", "android-main"))
+        self.assertTrue(complete_peer_challenge(
+            self.db_path, "server2", "nonce-1", "android-a",
+            "192.168.1.10", 8888, "android", "android-main"))
+        self.assertFalse(complete_peer_challenge(
+            self.db_path, "server2", "nonce-1", "android-a",
+            "192.168.1.10", 8888, "android", "android-main"))
+        peers = list_known_peers(self.db_path, "server2")
+        self.assertEqual([peer["peer_id"] for peer in peers], ["android-a"])
+        self.assertEqual(peers[0]["status"], "active")
+
+    def test_expired_peer_challenge_cannot_activate_route(self):
+        from lan_p2p_core import remember_peer_challenge, complete_peer_challenge
+        with patch("lan_p2p_core.time.time", return_value=1000.0):
+            self.assertTrue(remember_peer_challenge(
+                self.db_path, "server2", "nonce-expired", "android-a",
+                "192.168.1.10", 8888))
+        with patch("lan_p2p_core.time.time", return_value=1006.0):
+            self.assertFalse(complete_peer_challenge(
+                self.db_path, "server2", "nonce-expired", "android-a",
+                "192.168.1.10", 8888, "android", "android-main"))
+
+    def test_suspect_peer_is_not_an_active_unicast_route(self):
+        from lan_p2p_core import record_peer, list_known_peers, persist_outgoing_message, load_pending_outgoing_for_peer
+        self.assertTrue(record_peer(self.db_path, "server2", "android-a",
+                                    "android", "android-main", "192.168.1.10", 8888, "suspect"))
+        self.assertEqual(list_known_peers(self.db_path, "server2"), [])
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-suspect-route", "hello", ["android-a"]))
+        self.assertEqual(load_pending_outgoing_for_peer(
+            self.db_path, "server2", "android-a"), [])
+
     def test_record_peer_fails_closed_when_database_cannot_be_opened(self):
         from lan_p2p_core import record_peer
         directory_path = os.path.join(self.temp_dir.name, "not-a-database-file")
