@@ -289,10 +289,6 @@ public class TrackingService extends Service implements LocationListener {
             new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, Long> verifiedChatPeerSeen =
             new java.util.concurrent.ConcurrentHashMap<>();
-    private final java.util.concurrent.atomic.AtomicLong verifiedChatPeerRouteVersionCounter =
-            new java.util.concurrent.atomic.AtomicLong(0L);
-    private final java.util.concurrent.ConcurrentHashMap<String, Long> verifiedChatPeerRouteVersions =
-            new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CountDownLatch> pendingPeerChallenges =
             new java.util.concurrent.ConcurrentHashMap<>();
     // Directed challenges are bound to the peer identity and exact source endpoint.
@@ -329,10 +325,9 @@ public class TrackingService extends Service implements LocationListener {
 
     /** 网络路径变化立即撤销旧 LAN endpoint，避免跨子网沿用旧 IP。 */
     private void invalidateVerifiedChatPeers(String reason) {
-        synchronized (verifiedChatPeerRouteVersions) {
+        synchronized (verifiedChatPeers) {
             verifiedChatPeers.clear();
             verifiedChatPeerSeen.clear();
-            verifiedChatPeerRouteVersions.clear();
         }
         pendingPeerChallenges.clear();
         pendingPeerChallengeExpectedIds.clear();
@@ -3978,8 +3973,11 @@ public class TrackingService extends Service implements LocationListener {
         long now = System.currentTimeMillis();
         for (java.util.Map.Entry<String, Long> e : verifiedChatPeerSeen.entrySet()) {
             if (now - e.getValue() > 120_000L) {
-                verifiedChatPeerSeen.remove(e.getKey(), e.getValue());
-                verifiedChatPeers.remove(e.getKey());
+                synchronized (verifiedChatPeers) {
+                    if (verifiedChatPeerSeen.remove(e.getKey(), e.getValue())) {
+                        verifiedChatPeers.remove(e.getKey());
+                    }
+                }
             }
         }
 
@@ -4082,9 +4080,11 @@ public class TrackingService extends Service implements LocationListener {
         // that was freshly verified while the grace timer was pending.
         final java.util.Map<String, java.net.InetSocketAddress> awaitingRouteSnapshot =
                 new java.util.HashMap<>();
-        for (String peerId : awaitingPeerIds) {
-            java.net.InetSocketAddress route = verifiedChatPeers.get(peerId);
-            if (route != null) awaitingRouteSnapshot.put(peerId, route);
+        synchronized (verifiedChatPeers) {
+            for (String peerId : awaitingPeerIds) {
+                java.net.InetSocketAddress route = verifiedChatPeers.get(peerId);
+                if (route != null) awaitingRouteSnapshot.put(peerId, route);
+            }
         }
         final int totalPeerCount = pendingTargetIds.size();
         final int reachablePeerCount = awaitingPeerIds.size();
@@ -4217,9 +4217,13 @@ public class TrackingService extends Service implements LocationListener {
                 lastPeerDiscoveryAt = 0L;
                 for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
                     java.net.InetSocketAddress sentRoute = routeSnapshot.get(peerId);
-                    if (sentRoute != null && verifiedChatPeers.get(peerId) == sentRoute) {
-                        verifiedChatPeers.remove(peerId);
-                        verifiedChatPeerSeen.remove(peerId);
+                    if (sentRoute != null) {
+                        synchronized (verifiedChatPeers) {
+                            if (verifiedChatPeers.get(peerId) == sentRoute) {
+                                verifiedChatPeers.remove(peerId);
+                                verifiedChatPeerSeen.remove(peerId);
+                            }
+                        }
                     }
                 }
                 FileLogger.log(this, "CHAT", "⚠️ P2P 消息仍待确认并保留本地队列: "
@@ -4453,9 +4457,7 @@ public class TrackingService extends Service implements LocationListener {
                                 FileLogger.log(this, "CHAT", "⚠️ 新 peer 加入待发现目标集失败，稍后重新发现");
                                 return;
                             }
-                            synchronized (verifiedChatPeerRouteVersions) {
-                                verifiedChatPeerRouteVersions.put(senderId,
-                                        verifiedChatPeerRouteVersionCounter.incrementAndGet());
+                            synchronized (verifiedChatPeers) {
                                 verifiedChatPeers.put(senderId,
                                         new java.net.InetSocketAddress(peerAddress, port));
                                 verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
@@ -4508,10 +4510,10 @@ public class TrackingService extends Service implements LocationListener {
                         boolean persistedAck = store != null && store.acknowledge(messageId, senderId);
                         if (persistedAck) {
                             if (routeMatches) {
-                                synchronized (verifiedChatPeerRouteVersions) {
-                                    verifiedChatPeerRouteVersions.put(senderId,
-                                            verifiedChatPeerRouteVersionCounter.incrementAndGet());
-                                    verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
+                                synchronized (verifiedChatPeers) {
+                                    if (verifiedChatPeers.get(senderId) == verified) {
+                                        verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
+                                    }
                                 }
                             }
                             if (latch != null && (wasExpected || discoveryAck)) latch.countDown();
