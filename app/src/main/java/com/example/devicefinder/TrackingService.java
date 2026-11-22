@@ -3604,43 +3604,37 @@ public class TrackingService extends Service implements LocationListener {
                     final int batchSize = 3;
                     final int maxBatchesPerWake = 3;
                     for (int batchNo = 0; batchNo < maxBatchesPerWake && !serviceDestroyed; batchNo++) {
-                        List<JSONObject> batch = new ArrayList<>();
-                        int queuedBefore;
-                        synchronized (lanChatQueueLock) {
-                            JSONArray queue = new JSONArray(getSharedPreferences("device_finder_prefs", MODE_PRIVATE)
-                                    .getString(PREF_LAN_CHAT_QUEUE, "[]"));
-                            queuedBefore = queue.length();
-                            int count = Math.min(batchSize, queuedBefore);
-                            for (int i = 0; i < count; i++) {
-                                JSONObject item = queue.optJSONObject(i);
-                                if (item != null) batch.add(new JSONObject(item.toString()));
+                        // SQLite outbox is the durable source of truth. The SharedPreferences
+                        // queue is only a migration/compatibility mirror and may be missing after
+                        // a crash or a failed mirror commit; recovery must therefore enumerate
+                        // pending SQLite rows rather than relying on the legacy mirror.
+                        List<LanChatStore.PendingMessage> pending = store.loadPending(50);
+                        int queuedBefore = pending.size();
+                        int count = Math.min(batchSize, queuedBefore);
+                        if (count == 0) break;
+
+                        // 在同一串行执行器中同步等待每条发送/ACK事务完成，再判断 SQLite 账本是否真实收敛。
+                        for (int i = 0; i < count && !serviceDestroyed; i++) {
+                            LanChatStore.PendingMessage item = pending.get(i);
+                            String id = item.messageId;
+                            String content = item.body;
+                            if (id == null || id.isEmpty() || content == null || content.isEmpty()) continue;
+                            if (store.allTargetsAcked(id)) {
+                                // Recover the crash window between SQLite delivery commit and legacy queue cleanup.
+                                removePendingLanChat(id);
+                                continue;
+                            }
+                            transmitLocalUdpMessage(content, id);
+                            if (store.allTargetsAcked(id)) {
+                                // Reclaim the compatibility mirror only after every fixed target is ACKed.
+                                removePendingLanChat(id);
                             }
                         }
-                        if (batch.isEmpty()) break;
 
-                        // 在同一串行执行器中同步等待每条发送/ACK事务完成，再判断队列是否真实缩短。
-                        for (JSONObject item : batch) {
-                            String id = item.optString("message_id", "");
-                            String content = item.optString("content", "");
-                            if (!id.isEmpty() && !content.isEmpty() && !serviceDestroyed) {
-                                if (store.allTargetsAcked(id)) {
-                                    // Recover the crash window between SQLite delivery commit and legacy queue cleanup.
-                                    removePendingLanChat(id);
-                                    continue;
-                                }
-                                transmitLocalUdpMessage(content, id);
-                            }
-                        }
-
-                        int queuedAfter;
-                        synchronized (lanChatQueueLock) {
-                            JSONArray queue = new JSONArray(getSharedPreferences("device_finder_prefs", MODE_PRIVATE)
-                                    .getString(PREF_LAN_CHAT_QUEUE, "[]"));
-                            queuedAfter = queue.length();
-                        }
+                        int queuedAfter = store.loadPending(50).size();
                         int progressed = queuedBefore - queuedAfter;
-                        FileLogger.log(this, "CHAT", "LAN 队列补发批次 " + (batchNo + 1)
-                                + "，发送 " + batch.size() + " 条，队列变化 "
+                        FileLogger.log(this, "CHAT", "LAN SQLite Outbox 补发批次 " + (batchNo + 1)
+                                + "，处理 " + count + " 条，待确认账本变化 "
                                 + queuedBefore + "->" + queuedAfter);
                         if (progressed <= 0) break;
                     }
