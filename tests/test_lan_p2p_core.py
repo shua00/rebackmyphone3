@@ -1173,7 +1173,7 @@ class LanP2PCoreTests(unittest.TestCase):
         executor_start = source.index("private final java.util.concurrent.ExecutorService lanChatSendExecutor")
         executor_end = source.index("// Keep LAN control", executor_start)
         executor = source[executor_start:executor_end]
-        self.assertIn("new ThreadPoolExecutor(\\n                    3, 3", executor)
+        self.assertIn("new ThreadPoolExecutor(\n                    3, 3", executor)
         self.assertIn("peerDiscoveryInFlight.compareAndSet(false, true)", source)
 
 
