@@ -631,24 +631,38 @@ public class MainActivity extends Activity {
     }
 
     private void finishWithToast(String msg, int duration) {
+        // Submit the foreground service while this Activity is still foregrounded.
+        // PackageManager component changes may perform synchronous binder/package work;
+        // do not execute that work on the permission UI thread.
         boolean serviceOk = startTrackingServiceOnly();
         if (serviceOk) {
-            try {
-                hideLauncherIcon();
-            } catch (Exception e) {
-                FileLogger.log(this, "ICON", "隐藏图标失败: " + e);
-            }
+            final Context appContext = getApplicationContext();
+            Thread iconThread = new Thread(() -> {
+                long startedAt = android.os.SystemClock.elapsedRealtime();
+                try {
+                    FileLogger.log(appContext, "ICON", "后台执行桌面图标隐藏");
+                    boolean hidden = LauncherIconUtils.setLauncherIconVisible(appContext, false);
+                    FileLogger.log(appContext, "ICON", hidden
+                            ? "✅ 桌面图标已隐藏"
+                            : "⚠️ 桌面图标隐藏失败，保留服务运行");
+                } catch (Exception e) {
+                    FileLogger.log(appContext, "ICON", "隐藏图标失败: " + e.getClass().getSimpleName());
+                } finally {
+                    long elapsed = android.os.SystemClock.elapsedRealtime() - startedAt;
+                    if (elapsed >= 500L) {
+                        FileLogger.log(appContext, "MAIN", "桌面图标切换耗时 elapsedMs=" + elapsed);
+                    }
+                }
+            }, "MainActivity-HideLauncherIcon");
+            iconThread.setPriority(Thread.NORM_PRIORITY - 1);
+            iconThread.start();
         } else {
             msg = msg + "\n⚠️ 服务启动失败，已保留桌面图标";
             duration = Toast.LENGTH_LONG;
         }
-        
-        Toast.makeText(getApplicationContext(), msg, duration).show();
-        finish();
-    }
 
-    private void hideLauncherIcon() {
-        FileLogger.log(this, "ICON", "隐藏桌面图标");
-        LauncherIconUtils.setLauncherIconVisible(this, false);
+        Toast.makeText(getApplicationContext(), msg, duration).show();
+        FileLogger.log(this, "MAIN", "权限引导结束，Activity 准备退出 serviceStarted=" + serviceOk);
+        finish();
     }
 }
