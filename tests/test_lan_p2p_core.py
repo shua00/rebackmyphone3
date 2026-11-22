@@ -2065,6 +2065,13 @@ class LanP2PCoreTests(unittest.TestCase):
         invalidate = wifi_refresh.index('invalidateVerifiedChatPeers("Wi-Fi LAN path changed')
         self.assertLess(guard, invalidate)
         self.assertIn("retaining verified peer routes", wifi_refresh)
+        fingerprint_start = source.index("private String buildWifiLanFingerprint")
+        fingerprint_end = source.index("private void refreshWifiLanTransport", fingerprint_start)
+        fingerprint = source[fingerprint_start:fingerprint_end]
+        self.assertIn('if (caps == null) return "UNAVAILABLE";', fingerprint)
+        self.assertIn('if (links == null || links.getInterfaceName() == null', fingerprint)
+        self.assertIn('|| links.getLinkAddresses().isEmpty())', fingerprint)
+        self.assertIn('return "UNAVAILABLE";', fingerprint)
 
 
 if __name__ == "__main__":

@@ -2010,15 +2010,23 @@ public class TrackingService extends Service implements LocationListener {
         try {
             for (Network network : cm.getAllNetworks()) {
                 NetworkCapabilities caps = cm.getNetworkCapabilities(network);
-                if (caps == null || !caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue;
+                // A network can be enumerated before its capabilities are published.
+                // Do not turn that transient, incomplete snapshot into NO_WIFI.
+                if (caps == null) return "UNAVAILABLE";
+                if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue;
                 LinkProperties links = cm.getLinkProperties(network);
-                signature.append(network).append('|');
-                if (links != null) {
-                    signature.append(links.getInterfaceName()).append('|')
-                            .append(links.getLinkAddresses()).append('|')
-                            .append(links.getRoutes());
+                // onAvailable may precede LinkProperties; an interface-less Wi-Fi
+                // snapshot is not evidence that the LAN route actually changed.
+                if (links == null || links.getInterfaceName() == null
+                        || links.getInterfaceName().isEmpty()
+                        || links.getLinkAddresses() == null
+                        || links.getLinkAddresses().isEmpty()) {
+                    return "UNAVAILABLE";
                 }
-                signature.append(';');
+                signature.append(network).append('|')
+                        .append(links.getInterfaceName()).append('|')
+                        .append(links.getLinkAddresses()).append('|')
+                        .append(links.getRoutes()).append(';');
             }
         } catch (Exception e) {
             return "ERROR";
