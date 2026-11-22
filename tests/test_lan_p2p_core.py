@@ -161,5 +161,118 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertFalse(peer_endpoint_matches(self.db_path, "rescue2", "android-a",
                                                "192.168.1.10", 8888))
 
+
+    def test_retry_only_returns_unacked_fixed_targets(self):
+        from lan_p2p_core import (
+            persist_outgoing_message, record_peer, load_pending_outgoing_for_peer,
+            acknowledge_outgoing_message, mark_outgoing_attempt,
+        )
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-retry", "hello",
+            ["android-a", "android-b"]))
+        record_peer(self.db_path, "server2", "android-a", "android", "android-main",
+                    "192.168.1.10", 8888, "active")
+        record_peer(self.db_path, "server2", "android-b", "android", "android-main",
+                    "192.168.1.11", 8888, "active")
+
+        first = load_pending_outgoing_for_peer(self.db_path, "server2", "android-a")
+        second = load_pending_outgoing_for_peer(self.db_path, "server2", "android-b")
+        self.assertEqual([x["message_id"] for x in first], ["m-retry"])
+        self.assertEqual([x["message_id"] for x in second], ["m-retry"])
+
+        self.assertTrue(mark_outgoing_attempt(
+            self.db_path, "m-retry", "android-a", "192.168.1.10", 8888))
+        self.assertTrue(acknowledge_outgoing_message(
+            self.db_path, "server2", "m-retry", "android-a"))
+        self.assertEqual(load_pending_outgoing_for_peer(
+            self.db_path, "server2", "android-a"), [])
+        remaining = load_pending_outgoing_for_peer(
+            self.db_path, "server2", "android-b")
+        self.assertEqual([x["message_id"] for x in remaining], ["m-retry"])
+
+        self.assertTrue(acknowledge_outgoing_message(
+            self.db_path, "server2", "m-retry", "android-b"))
+        self.assertEqual(load_pending_outgoing_for_peer(
+            self.db_path, "server2", "android-b"), [])
+        conn = sqlite3.connect(self.db_path)
+        try:
+            state = conn.execute(
+                "SELECT state FROM lan_outbox WHERE message_id='m-retry'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(state, "delivered")
+
+    def test_first_discovery_target_set_freezes_after_deadline(self):
+        from lan_p2p_core import (
+            persist_outgoing_message, record_peer, add_discovery_targets_for_peer,
+            load_pending_outgoing_for_peer,
+        )
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-freeze", "hello", []))
+        self.assertEqual(add_discovery_targets_for_peer(
+            self.db_path, "server2", "android-a"), 1)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "UPDATE lan_outbox SET delivery_deadline_ms=1 WHERE message_id='m-freeze'")
+            conn.commit()
+        finally:
+            conn.close()
+        record_peer(self.db_path, "server2", "android-a", "android", "android-main",
+                    "192.168.1.10", 8888, "active")
+        load_pending_outgoing_for_peer(self.db_path, "server2", "android-a")
+        self.assertEqual(add_discovery_targets_for_peer(
+            self.db_path, "server2", "android-b"), 0)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            targets = conn.execute(
+                "SELECT peer_id FROM lan_outbox_targets WHERE message_id='m-freeze' ORDER BY peer_id"
+            ).fetchall()
+            state = conn.execute(
+                "SELECT state FROM lan_outbox WHERE message_id='m-freeze'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual([x[0] for x in targets], ["android-a"])
+        self.assertEqual(state, "pending")
+
+    def test_empty_discovery_window_never_becomes_delivered(self):
+        from lan_p2p_core import persist_outgoing_message, load_pending_outgoing_for_peer
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-empty", "hello", []))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "UPDATE lan_outbox SET delivery_deadline_ms=1 WHERE message_id='m-empty'")
+            conn.commit()
+        finally:
+            conn.close()
+        load_pending_outgoing_for_peer(self.db_path, "server2", "nonexistent-peer")
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT state FROM lan_outbox WHERE message_id='m-empty'"
+            ).fetchone()
+            count = conn.execute(
+                "SELECT COUNT(*) FROM lan_outbox_targets WHERE message_id='m-empty'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(row[0], "discovery_pending")
+        self.assertEqual(count, 0)
+
+    def test_packet_with_wrong_secret_is_rejected(self):
+        from lan_p2p_core import encode_packet, decode_packet
+        packet = encode_packet({
+            "type": "chat.message",
+            "sender_peer_id": "android-a",
+            "target_peer_id": "android-b",
+            "message_id": "m-secret",
+            "body": "hello",
+        }, "correct-secret")
+        with self.assertRaises(ValueError):
+            decode_packet(packet, "wrong-secret")
+
 if __name__ == "__main__":
     unittest.main()
