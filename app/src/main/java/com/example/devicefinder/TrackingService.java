@@ -3646,7 +3646,11 @@ public class TrackingService extends Service implements LocationListener {
             java.util.concurrent.CountDownLatch peerLatch = new java.util.concurrent.CountDownLatch(1);
             pendingPeerChallenges.put(nonce, peerLatch);
             try {
-                byte[] hello = ("FIND_ME_PEER_HELLO:" + RESCUE_SECRET + ":" + myId + ":" + nonce).getBytes("UTF-8");
+                JSONObject helloPacket = LanP2pProtocol.create("peer.hello", myId, "android", "android-main");
+                helloPacket.put("nonce", nonce);
+                helloPacket.put("network_scope", wifiLanFingerprint == null ? "" : wifiLanFingerprint);
+                helloPacket.put("capabilities", new JSONArray().put("chat.text").put("chat.ack"));
+                byte[] hello = LanP2pProtocol.encode(helloPacket, RESCUE_SECRET);
                 for (String target : broadcasts) {
                     // server2 使用 8887；Android 手机使用 8888；rescue2 使用 8889；
                     // 独立 chat.py 使用 8890。分端口发现后，单播路由对应唯一接收进程。
@@ -3675,10 +3679,12 @@ public class TrackingService extends Service implements LocationListener {
                 peerDiscoveryInFlight.set(false);
             }
         }
-        String payload = "FIND_ME_CHAT:" + RESCUE_SECRET + ":" + myId + ":" + messageId + ":" + message;
-        byte[] data;
-        try { data = payload.getBytes("UTF-8"); }
-        catch (Exception e) { return; }
+        byte[] broadcastData;
+        try { broadcastData = buildAuthenticatedLanChatPacket(myId, "*", messageId, message); }
+        catch (Exception e) {
+            FileLogger.log(this, "CHAT", "⚠️ LAN v2 消息编码失败，消息保留待确认: " + e.getClass().getSimpleName());
+            return;
+        }
         LanChatStore store = lanChatStore;
         if (store != null && !store.hasTargets(messageId) && !verifiedChatPeers.isEmpty()) {
             List<LanChatStore.Target> snapshot = new ArrayList<>();
@@ -3721,7 +3727,7 @@ public class TrackingService extends Service implements LocationListener {
                 for (String target : broadcasts) {
                     for (int peerPort : new int[]{8888, 8887, 8889, 8890}) {
                         try {
-                            DatagramPacket p = new DatagramPacket(data, data.length,
+                            DatagramPacket p = new DatagramPacket(broadcastData, broadcastData.length,
                                     java.net.InetAddress.getByName(target), peerPort);
                             sendLanUdpPacket(socket, p, "CHAT_BROADCAST_" + peerPort);
                         } catch (Exception e) {
@@ -3743,7 +3749,8 @@ public class TrackingService extends Service implements LocationListener {
                         try {
                             if (store != null) store.markAttempt(messageId, peerId,
                                     peer.getAddress().getHostAddress() + ":" + peer.getPort(), "");
-                            DatagramPacket p = new DatagramPacket(data, data.length,
+                            byte[] peerData = buildAuthenticatedLanChatPacket(myId, peerId, messageId, message);
+                            DatagramPacket p = new DatagramPacket(peerData, peerData.length,
                                     peer.getAddress(), peer.getPort());
                             sendLanUdpPacket(socket, p, "CHAT_UNICAST");
                         } catch (Exception e) {
@@ -3825,9 +3832,157 @@ public class TrackingService extends Service implements LocationListener {
      * 实时 LAN 控制包快路径：握手和聊天 ACK 在普通控制指令分发之前完成。
      * 返回 true 表示该包已处理；不创建线程、不做磁盘 I/O、不执行 UI/业务命令。
      */
+    private byte[] buildAuthenticatedLanChatPacket(String senderId, String targetPeerId,
+                                                           String messageId, String body) throws Exception {
+        JSONObject packet = LanP2pProtocol.create("chat.message", senderId, "android", "android-main");
+        packet.put("message_id", messageId);
+        packet.put("target_peer_id", targetPeerId);
+        packet.put("created_at_ms", System.currentTimeMillis());
+        packet.put("body", body);
+        return LanP2pProtocol.encode(packet, RESCUE_SECRET);
+    }
+
+    private boolean handleAuthenticatedLanPacket(DatagramSocket socket, DatagramPacket packet,
+                                                  JSONObject envelope) {
+        try {
+            String type = envelope.optString("type", "");
+            String senderId = envelope.optString("sender_peer_id", "");
+            String serviceId = envelope.optString("service_id", "");
+            long now = System.currentTimeMillis();
+            if ("peer.hello".equals(type)) {
+                if (senderId.isEmpty() || senderId.equals(getUniqueDeviceId())) return true;
+                JSONObject reply = LanP2pProtocol.create("peer.ack", getUniqueDeviceId(),
+                        "android", "android-main");
+                reply.put("reply_nonce", envelope.optString("nonce", ""));
+                reply.put("listen_port", 8888);
+                byte[] bytes = LanP2pProtocol.encode(reply, RESCUE_SECRET);
+                DatagramPacket response = new DatagramPacket(bytes, bytes.length,
+                        packet.getAddress(), packet.getPort());
+                sendLanUdpPacket(socket, response, "PEER_ACK_V2");
+                LanChatStore store = lanChatStore;
+                if (store != null) {
+                    try {
+                        reportExecutor.execute(() -> store.upsertPeer(senderId,
+                                envelope.optString("sender_peer_type", "unknown"), serviceId,
+                                envelope.optString("network_scope", ""),
+                                packet.getAddress().getHostAddress(), packet.getPort(),
+                                now, now + 120_000L));
+                    } catch (java.util.concurrent.RejectedExecutionException ignored) {}
+                }
+                return true;
+            }
+            if ("peer.ack".equals(type)) {
+                String nonce = envelope.optString("reply_nonce", "");
+                java.util.concurrent.CountDownLatch latch = pendingPeerChallenges.get(nonce);
+                int port = packet.getPort();
+                if (latch != null && !senderId.isEmpty() && !senderId.equals(getUniqueDeviceId())
+                        && (port == 8888 || port == 8887 || port == 8889 || port == 8890)) {
+                    verifiedChatPeers.put(senderId,
+                            new java.net.InetSocketAddress(packet.getAddress(), port));
+                    verifiedChatPeerSeen.put(senderId, now);
+                    LanChatStore store = lanChatStore;
+                    if (store != null) {
+                        try {
+                            reportExecutor.execute(() -> store.upsertPeer(senderId,
+                                    envelope.optString("sender_peer_type", "unknown"), serviceId,
+                                    envelope.optString("network_scope", ""),
+                                    packet.getAddress().getHostAddress(), port, now, now + 120_000L));
+                        } catch (java.util.concurrent.RejectedExecutionException ignored) {}
+                    }
+                    latch.countDown();
+                }
+                return true;
+            }
+            if ("chat.ack".equals(type)) {
+                String messageId = envelope.optString("message_id", "");
+                String targetId = envelope.optString("target_peer_id", "");
+                if (!getUniqueDeviceId().equals(targetId) || !"stored".equals(envelope.optString("status", ""))) {
+                    return true;
+                }
+                java.util.concurrent.CountDownLatch latch = pendingChatAcks.get(messageId);
+                java.net.InetSocketAddress verified = verifiedChatPeers.get(senderId);
+                java.util.Set<String> expected = pendingChatAckPeers.get(messageId);
+                if (latch != null && expected != null && verified != null
+                        && verified.getAddress().equals(packet.getAddress())
+                        && verified.getPort() == packet.getPort() && expected.remove(senderId)) {
+                    LanChatStore store = lanChatStore;
+                    try {
+                        reportExecutor.execute(() -> {
+                            if (store == null || store.acknowledge(messageId, senderId)) {
+                                verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
+                                latch.countDown();
+                            } else {
+                                expected.add(senderId);
+                                FileLogger.log(this, "CHAT", "⚠️ v2 ACK 账本写入失败，等待重试: " + senderId);
+                            }
+                        });
+                    } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                        expected.add(senderId);
+                    }
+                }
+                return true;
+            }
+            if ("chat.message".equals(type)) {
+                String messageId = envelope.optString("message_id", "");
+                String targetId = envelope.optString("target_peer_id", "");
+                String body = envelope.optString("body", "");
+                if (senderId.isEmpty() || senderId.equals(getUniqueDeviceId())
+                        || messageId.isEmpty()
+                        || !(targetId.equals("*") || targetId.equals(getUniqueDeviceId()))) return true;
+                String receiveKey = senderId + ":" + messageId;
+                if (!pendingLanChatReceives.add(receiveKey)) return true;
+                final java.net.InetAddress ackAddress = packet.getAddress();
+                final int ackPort = packet.getPort();
+                try {
+                    reportExecutor.execute(() -> {
+                        try {
+                            if (persistIncomingLanChat(senderId, messageId, body)) {
+                                receivedChatMessageIds.put(receiveKey, System.currentTimeMillis());
+                                sendAuthenticatedChatAck(socket, ackAddress, ackPort, senderId, messageId);
+                            }
+                        } finally {
+                            pendingLanChatReceives.remove(receiveKey);
+                        }
+                    });
+                } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                    pendingLanChatReceives.remove(receiveKey);
+                }
+                return true;
+            }
+        } catch (Exception e) {
+            FileLogger.logD("UDP", "authenticated LAN packet rejected: " + e.getClass().getSimpleName());
+        }
+        return true;
+    }
+
+    private void sendAuthenticatedChatAck(DatagramSocket socket, java.net.InetAddress address,
+                                          int port, String targetPeerId, String messageId) {
+        try {
+            JSONObject ack = LanP2pProtocol.create("chat.ack", getUniqueDeviceId(), "android", "android-main");
+            ack.put("target_peer_id", targetPeerId);
+            ack.put("message_id", messageId);
+            ack.put("status", "stored");
+            byte[] bytes = LanP2pProtocol.encode(ack, RESCUE_SECRET);
+            DatagramPacket response = new DatagramPacket(bytes, bytes.length, address, port);
+            sendLanUdpPacket(socket, response, "CHAT_ACK_V2");
+        } catch (Exception e) {
+            FileLogger.log(this, "CHAT", "⚠️ v2 ACK 发送失败: " + e.getClass().getSimpleName());
+        }
+    }
+
     private boolean handleLanRealtimePacket(DatagramSocket socket, DatagramPacket packet,
                                              String message) {
         try {
+            if (message.startsWith("{")) {
+                try {
+                    JSONObject envelope = LanP2pProtocol.decode(message.getBytes("UTF-8"), RESCUE_SECRET);
+                    return handleAuthenticatedLanPacket(socket, packet, envelope);
+                } catch (Exception invalid) {
+                    FileLogger.logD("UDP", "invalid authenticated LAN JSON frame: "
+                            + invalid.getClass().getSimpleName());
+                    return true;
+                }
+            }
             if (message.startsWith("FIND_ME_PEER_HELLO:")) {
                 String[] parts = message.split(":", 4);
                 if (parts.length == 4 && RESCUE_SECRET.equals(parts[1])
