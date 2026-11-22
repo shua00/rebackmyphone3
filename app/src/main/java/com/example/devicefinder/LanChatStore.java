@@ -511,6 +511,19 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
+    /** Record a failed attempt without incrementing the already-recorded attempt counter. */
+    public void recordTargetSendError(String messageId, String peerId, String error) {
+        if (messageId == null || peerId == null) return;
+        try {
+            ContentValues values = new ContentValues();
+            values.put("last_error", error == null ? "" : error);
+            getWritableDatabase().update("lan_outbox_targets", values,
+                    "message_id=? AND peer_id=? AND status!='acked'",
+                    new String[]{messageId, peerId});
+        } catch (Exception ignored) {
+        }
+    }
+
     /** Persist the endpoint only after DatagramSocket.send() returned successfully. */
     public boolean recordSuccessfulSendEndpoint(String messageId, String peerId, String endpoint) {
         if (messageId == null || peerId == null || endpoint == null || endpoint.length() == 0) return false;
