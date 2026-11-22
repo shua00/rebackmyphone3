@@ -374,6 +374,10 @@ class LanP2PCoreTests(unittest.TestCase):
         from lan_p2p_core import persist_outgoing_message, load_pending_outgoing_for_peer
         self.assertTrue(persist_outgoing_message(
             self.db_path, "server2", "server2-id", "m-empty", "hello", []))
+        # A valid ledger includes the peer table even when this target is unknown.
+        self.assertTrue(record_peer(
+            self.db_path, "server2", "known-peer", "android", "android-main",
+            "192.168.1.20", 8888, "active"))
         conn = sqlite3.connect(self.db_path)
         try:
             conn.execute(
