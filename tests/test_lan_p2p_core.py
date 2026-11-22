@@ -634,6 +634,19 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertEqual(load_pending_outgoing_for_peer(
             self.db_path, "server2", "android-a"), [])
 
+    def test_android_discovery_ack_never_grants_future_route_trust(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        start = source.index('if ("chat.ack".equals(type))')
+        end = source.index('if ("chat.message".equals(type))', start)
+        ack_handler = source[start:end]
+        self.assertIn("boolean routeMatches", ack_handler)
+        self.assertIn("boolean discoveryAck", ack_handler)
+        self.assertIn("if (routeMatches) verifiedChatPeerSeen.put", ack_handler)
+        self.assertNotIn("verifiedChatPeers.put(", ack_handler)
+
     def test_android_inbox_conflicting_payload_is_rejected_and_duplicate_refreshes_ui(self):
         repo_root = Path(__file__).resolve().parents[1]
         store_source = (
