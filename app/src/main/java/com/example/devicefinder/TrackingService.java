@@ -3692,11 +3692,17 @@ public class TrackingService extends Service implements LocationListener {
                     if (item != null && !messageId.equals(item.optString("message_id"))) kept.put(item);
                 }
                 LanChatStore store = lanChatStore;
-                if (store == null || !store.allTargetsAcked(messageId)) {
-                    FileLogger.log(this, "CHAT", "⚠️ 未满足逐设备 ACK 条件，不回收 LAN 消息: " + messageId);
+                boolean delivered = store != null && store.allTargetsAcked(messageId);
+                boolean waitingForPeers = store != null && store.isWaitingForPeers(messageId);
+                if (!delivered && !waitingForPeers) {
+                    FileLogger.log(this, "CHAT", "⚠️ 未满足逐设备 ACK 或有界发现结算条件，不回收 LAN 消息: " + messageId);
                     return;
                 }
                 prefs.edit().putString(PREF_LAN_CHAT_QUEUE, kept.toString()).commit();
+                if (waitingForPeers) {
+                    FileLogger.log(this, "CHAT", "ℹ️ 空目标消息已转 waiting_peers；SQLite 记录保留，停止自动重试: "
+                            + messageId);
+                }
             } catch (Exception e) {
                 FileLogger.log(this, "CHAT", "⚠️ LAN 聊天队列回收失败: " + e.getMessage());
             }
@@ -3892,6 +3898,7 @@ public class TrackingService extends Service implements LocationListener {
             if (!store.isDiscoveryPending(messageId)) {
                 FileLogger.log(this, "CHAT", "P2P 首次发现窗口已结束，空目标消息转为 waiting_peers，不向晚加入设备广播: "
                         + messageId);
+                if (store.isWaitingForPeers(messageId)) removePendingLanChat(messageId);
                 return;
             }
             if (firstDispatch) {
@@ -3903,6 +3910,7 @@ public class TrackingService extends Service implements LocationListener {
                             if (store.finalizeDiscoveryWindow(messageId)) {
                                 FileLogger.log(this, "CHAT", "P2P 首次发现窗口关闭，消息状态已结算: "
                                         + messageId);
+                                removePendingLanChat(messageId);
                             }
                         });
                     } catch (java.util.concurrent.RejectedExecutionException ignored) {
