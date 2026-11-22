@@ -1777,5 +1777,90 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertLess(send.index('inputMsg.setText("");'), send.index("inputMsg.requestFocus();"))
 
 
+    def test_android_wifi_lan_change_rebinds_listener_before_outbox_recovery(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+
+        refresh_start = source.index("private void refreshWifiLanTransport(")
+        refresh_end = source.index("private void registerNetworkCallback(", refresh_start)
+        refresh = source[refresh_start:refresh_end]
+        self.assertIn("previous.equals(current)", refresh)
+        self.assertIn("invalidateVerifiedChatPeers(", refresh)
+        self.assertIn("oldSocket.close()", refresh)
+
+        listener_start = source.index("private void startRescueListener()")
+        listener_end = source.index("private void parseResponse(", listener_start)
+        listener = source[listener_start:listener_end]
+        bind = listener.index("bindSocketToWifi(rescueSocket)")
+        socket_ready = listener.index("rescueSocketRef = rescueSocket")
+        recovery = listener.index('scheduleLanChatTask("listener-outbox-recovery"')
+        self.assertLess(bind, socket_ready)
+        self.assertLess(socket_ready, recovery)
+        self.assertIn("rescueSocketRef = null", listener)
+        self.assertIn("isListeningForRescue = false", listener)
+        self.assertIn("triggerRescueListener()", listener)
+
+
+    def test_android_exhausted_retry_epoch_has_persisted_recovery_cooldown(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        start = store.index("public int resumeExhaustedRetriesForRecoveryEvent(")
+        end = store.index("public int recordOutboxAttempt(", start)
+        method = store[start:end]
+        self.assertIn("last_event_retry_at_ms<=?", method)
+        self.assertIn("now - RETRY_RECOVERY_EVENT_COOLDOWN_MS", method)
+        self.assertIn("retry_attempt_count=0", method)
+        self.assertIn("state='discovery_pending'", method)
+        self.assertIn("state NOT IN ('delivered','expired','waiting_peers')", method)
+        self.assertIn("t.status!='acked'", method)
+
+        service = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        retry_start = service.index("private void retryPendingLanChatMessages(boolean recoveryEvent)")
+        retry_end = service.index("private void sendLocalUdpMessage(final String message, final String messageId)", retry_start)
+        retry = service[retry_start:retry_end]
+        self.assertIn("lanChatRecoveryEventPending.set(true)", retry)
+        self.assertIn("lanChatRetryInFlight.compareAndSet(false, true)", retry)
+        self.assertIn("lanChatRecoveryEventPending.getAndSet(false)", retry)
+        self.assertIn("if (lanChatRecoveryEventPending.get())", retry)
+        self.assertIn("retryPendingLanChatMessages(true)", retry)
+
+
+    def test_server2_udp_ack_requires_verified_route_and_durable_outbox_ack_before_fallback_cleanup(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "server2.py").read_text(encoding="utf-8")
+        start = source.index('if packet_type == "chat.ack":')
+        end = source.index('if packet_type != "chat.message":', start)
+        handler = source[start:end]
+        route = handler.index("peer_endpoint_matches(")
+        persist = handler.index("acknowledge_outgoing_message(")
+        cleanup = handler.index("_remove_chat_fallback_for_message(")
+        self.assertLess(route, persist)
+        self.assertLess(persist, cleanup)
+        self.assertIn("and active_route", handler)
+        self.assertIn('envelope.get("status") == "stored"', handler)
+
+
+    def test_server2_http_chat_fallback_shares_identity_and_is_queued_before_udp_dispatch(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "server2.py").read_text(encoding="utf-8")
+        start = source.index('elif action == "chat_msg":')
+        end = source.index('elif action == "upload_log":', start)
+        handler = source[start:end]
+        encode = handler.index("encode_chat_http_fallback_payload(")
+        queue = handler.index('enqueue_command(dev_id, "chat_msg", fallback_payload)')
+        udp = handler.index("send_server2_v2_chat_from_outbox(")
+        self.assertLess(encode, queue)
+        self.assertLess(queue, udp)
+        self.assertIn("chat_message_id", handler)
+        self.assertIn("message_id=chat_message_id", handler)
+        self.assertIn("if fallback_queued:", handler)
+
+
 if __name__ == "__main__":
     unittest.main()
