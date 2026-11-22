@@ -356,8 +356,7 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
                          and is_outgoing_discovery_pending(CHAT_DB, "chat.py", message_id))
         if (target == PEER_NODE_ID and envelope.get("status") == "stored"
                 and sender and (active_route or discovery_ack)):
-            if acknowledge_outgoing_message(CHAT_DB, "chat.py", message_id, sender):
-                
+            acknowledge_outgoing_message(CHAT_DB, "chat.py", message_id, sender)
         return
     if packet_type != "chat.message":
         return
