@@ -3893,12 +3893,16 @@ public class TrackingService extends Service implements LocationListener {
         for (LanChatStore.Target target : savedTargets) {
             if (!"acked".equals(target.status)) pendingTargetIds.add(target.peerId);
         }
-        if (pendingTargetIds.isEmpty() && store.isDiscoveryPending(messageId)) {
+        if (pendingTargetIds.isEmpty()) {
+            // Call the ledger even when its deadline has elapsed so legacy empty-target
+            // rows from earlier builds are migrated to waiting_peers and leave retry queues.
             boolean firstDispatch = store.beginDiscoveryWindow(messageId);
             if (!store.isDiscoveryPending(messageId)) {
-                FileLogger.log(this, "CHAT", "P2P 首次发现窗口已结束，空目标消息转为 waiting_peers，不向晚加入设备广播: "
-                        + messageId);
-                if (store.isWaitingForPeers(messageId)) removePendingLanChat(messageId);
+                if (store.isWaitingForPeers(messageId)) {
+                    FileLogger.log(this, "CHAT", "P2P 空目标消息已结算为 waiting_peers，不向晚加入设备广播: "
+                            + messageId);
+                    removePendingLanChat(messageId);
+                }
                 return;
             }
             if (firstDispatch) {
