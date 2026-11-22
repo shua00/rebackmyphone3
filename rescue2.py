@@ -579,10 +579,9 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
     body = str(envelope.get("body") or "")
     if not sender or not message_id:
         return
-    if sender in ("Web_Console", "PC_Terminal", "Guest_"):
-        claim_result = True
-    else:
-        claim_result = _claim_chat_message(sender, message_id, body)
+    # Every authenticated v2 message is persisted before it can receive a stored ACK.
+    # Display names are presentation metadata, never sender identity or a persistence bypass.
+    claim_result = _claim_chat_message(sender, message_id, body)
     if claim_result is None:
         return
     record_peer(_CHAT_DEDUP_DB, "rescue2", sender, envelope.get("sender_peer_type", "unknown"),

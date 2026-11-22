@@ -2,6 +2,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from lan_p2p_core import load_stable_peer_id, record_peer
@@ -422,6 +423,20 @@ class LanP2PCoreTests(unittest.TestCase):
             self.assertFalse(complete_peer_challenge(
                 self.db_path, "server2", "nonce-expired", "android-a",
                 "192.168.1.10", 8888, "android", "android-main"))
+
+    def test_all_authenticated_v2_service_receivers_persist_before_stored_ack(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        for filename in ("server2.py", "rescue2.py", "chat.py"):
+            with self.subTest(service=filename):
+                source = (repo_root / filename).read_text(encoding="utf-8")
+                self.assertIn(
+                    "claim_result = _claim_chat_message(sender, message_id, body)",
+                    source,
+                )
+                self.assertNotIn(
+                    'if sender in ("Web_Console", "PC_Terminal", "Guest_")',
+                    source,
+                )
 
     def test_peer_challenge_rejects_unregistered_udp_service_ports(self):
         from lan_p2p_core import remember_peer_challenge, complete_peer_challenge

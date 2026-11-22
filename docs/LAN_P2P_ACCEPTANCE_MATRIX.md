@@ -167,6 +167,7 @@
 | Android challenge 身份/端点绑定 | 定向 peer challenge 将 nonce 绑定到预期 peer_id、IP 和端口；广播发现仍能在窗口内收集多个 peer；定向 nonce 单次使用；网络路径变化清理挑战缓存 | commit `320f5487c82686a9c6321e39f75d2ccad61ad256`；CI run [44985771503](https://github.com/shua00/rebackmyphone3/actions/runs/44985771503) 成功 |
 | Android API 21 兼容 | 移除 API 24 才提供的 ConcurrentHashMap.newKeySet() 和 Collection.removeIf() 用法，改用旧版 Android 可用的 Collections.newSetFromMap()/Iterator.remove()；不增加 desugaring 或依赖 | commits `f35a6fd84a100d9ee1047c2de3aae89fb6781c86`、`131f9dd3dc971a7a20855beffdcbfffcddc58016`；CI run [44986422892](https://github.com/shua00/rebackmyphone3/actions/runs/44986422892) 成功 |
 | Android 首次目标快照的主线程隔离 | 已知成员在消息持久化时固定；5.25 秒窗口收敛通过已有串行发送执行器运行 SQLite，不在 Android 主线程执行；回收失败时保留本地队列供下次恢复 | commit `0efe4ed860a5f92092d9f5468e7bfffea02d4a7a`；CI run [44986292399](https://github.com/shua00/rebackmyphone3/actions/runs/44986292399) 成功 |
+| Python v2 接收端 ACK 持久化语义 | 清除三个服务对固定显示名的持久化绕过；所有经认证的 v2 chat.message 都先写入各服务独立 SQLite Inbox/历史账本，再回 stored ACK；显示名仅作展示元数据 | 本轮新增跨服务源代码回归用例，随最新提交 CI 验证 |
 | 聊天窗口与留言代码边界 | 本轮通信核心改动未触碰 `ChatActivity.java`；悬浮留言接收/显示入口不在本轮改动文件中，仍须按 G01/G02 继续回归，不因 diff 未触及而宣布实机行为通过 | 对比冻结矩阵提交 `53a7ecb11901aa6f33d89e96257edad0947af317` 至本轮 HEAD 的文件清单；无 `ChatActivity.java` 变更 |
 | 最新累计 CI | 最新分支 HEAD `131f9dd3dc971a7a20855beffdcbfffcddc58016` 的 Python 检查、28 项单元测试、Android Java 编译、Debug APK 构建、artifact 上传全部成功 | [Actions run 44986422892](https://github.com/shua00/rebackmyphone3/actions/runs/44986422892)；仍不代表真实多手机实机验收 |
 
