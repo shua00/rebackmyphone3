@@ -286,11 +286,18 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
         return
     display_sender = str(envelope.get("display_name") or sender)
     if packet_type == "peer.hello":
-        record_peer(CHAT_DB, "chat.py", sender, envelope.get("sender_peer_type", "unknown"),
-                    envelope.get("service_id", ""), addr[0], addr[1], "suspect")
+        # A nonce-bound response is meaningful only after the authenticated peer route
+        # has been durably recorded. Never acknowledge an unpersisted HELLO.
+        nonce = str(envelope.get("nonce") or "")
+        if not sender or not nonce:
+            return
+        if not record_peer(CHAT_DB, "chat.py", sender, envelope.get("sender_peer_type", "unknown"),
+                           envelope.get("service_id", ""), addr[0], addr[1], "suspect"):
+            print(f"⚠️ chat.py peer HELLO persistence failed; withholding peer.ack")
+            return
         reply = {"type": "peer.ack", "sender_peer_id": PEER_NODE_ID,
                  "sender_peer_type": "chat.py", "service_id": PEER_NODE_ID,
-                 "reply_nonce": envelope.get("nonce", ""), "listen_port": UDP_PORT}
+                 "reply_nonce": nonce, "listen_port": UDP_PORT}
         try: sock.sendto(encode_packet(reply, RESCUE_SECRET), addr)
         except OSError: pass
         add_discovery_targets_for_peer(CHAT_DB, "chat.py", sender)
