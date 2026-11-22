@@ -8,6 +8,66 @@ from unittest.mock import patch
 from lan_p2p_core import load_stable_peer_id, record_peer
 
 
+import re
+
+def extract_java_method(source, signature):
+    """Extract one Java method using balanced braces, ignoring comments and literals."""
+    start = source.find(signature)
+    if start < 0:
+        raise AssertionError("Java method not found: " + signature)
+    opening = source.find("{", start + len(signature))
+    if opening < 0:
+        raise AssertionError("Java method body not found: " + signature)
+
+    depth = 0
+    state = "code"
+    escaped = False
+    i = opening
+    while i < len(source):
+        ch = source[i]
+        nxt = source[i + 1] if i + 1 < len(source) else ""
+        if state == "line_comment":
+            if ch == "\n":
+                state = "code"
+        elif state == "block_comment":
+            if ch == "*" and nxt == "/":
+                state = "code"
+                i += 1
+        elif state == "string":
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                state = "code"
+        elif state == "char":
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == "'":
+                state = "code"
+        else:
+            if ch == "/" and nxt == "/":
+                state = "line_comment"
+                i += 1
+            elif ch == "/" and nxt == "*":
+                state = "block_comment"
+                i += 1
+            elif ch == '"':
+                state = "string"
+            elif ch == "'":
+                state = "char"
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return source[start:i + 1]
+        i += 1
+    raise AssertionError("Unbalanced Java method body: " + signature)
+
+
 class LanP2PCoreTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -1028,13 +1088,18 @@ class LanP2PCoreTests(unittest.TestCase):
         default_end = source.index("cm.registerDefaultNetworkCallback(networkCallback)", default_start)
         default_callback = source[default_start:default_end]
         self.assertEqual(default_callback.count('executeMaintenance("peer-route-refresh"'), 4)
-        self.assertNotIn("refreshPeerRoutesForNetworkChange(", default_callback)
+        # Refresh calls belong inside queued Runnable lambdas, not on callback threads.
+        self.assertEqual(len(re.findall(
+            r'executeMaintenance\(\s*"peer-route-refresh"\s*,\s*\(\s*\)\s*->\s*refreshPeerRoutesForNetworkChange\s*\(',
+            default_callback)), 4)
 
         wifi_start = source.index("wifiLanNetworkCallback = new ConnectivityManager.NetworkCallback()")
         wifi_end = source.index("cm.registerNetworkCallback(wifiRequest, wifiLanNetworkCallback)", wifi_start)
         wifi_callback = source[wifi_start:wifi_end]
         self.assertEqual(wifi_callback.count('executeMaintenance("wifi-lan-refresh"'), 4)
-        self.assertNotIn("refreshWifiLanTransport(", wifi_callback)
+        self.assertEqual(len(re.findall(
+            r'executeMaintenance\(\s*"wifi-lan-refresh"\s*,\s*\(\s*\)\s*->\s*refreshWifiLanTransport\s*\(',
+            wifi_callback)), 4)
 
 
 
@@ -1101,9 +1166,13 @@ class LanP2PCoreTests(unittest.TestCase):
         source = (
             repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
         ).read_text(encoding="utf-8")
-        self.assertIn('"，固定目标 " + totalPeerCount', source)
-        self.assertIn('"，当前可达路由 " + reachablePeerCount', source)
-        self.assertNotIn('"，已验证成员 " + totalPeerCount', source)
+        method = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
+        # Check the meaning and counters, not one exact concatenation layout.
+        self.assertIn("固定目标", method)
+        self.assertIn("totalPeerCount", method)
+        self.assertIn("当前可达路由", method)
+        self.assertIn("reachablePeerCount", method)
+        self.assertNotIn("已验证成员", method)
 
 
 
@@ -1136,9 +1205,7 @@ class LanP2PCoreTests(unittest.TestCase):
             repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
         ).read_text(encoding="utf-8")
 
-        enqueue_start = store.index("public boolean enqueue(")
-        enqueue_end = store.index("\n    public ", enqueue_start + 12)
-        enqueue = store[enqueue_start:enqueue_end]
+        enqueue = extract_java_method(store, "public boolean enqueue(")
         self.assertIn('v.put("delivery_deadline_ms", 0L)', enqueue)
         self.assertNotIn("+ FIRST_DISCOVERY_WINDOW_MS", enqueue)
 
