@@ -2006,7 +2006,10 @@ public class TrackingService extends Service implements LocationListener {
 
     private String buildWifiLanFingerprint(ConnectivityManager cm) {
         if (cm == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return "UNAVAILABLE";
-        StringBuilder signature = new StringBuilder();
+        // ConnectivityManager does not promise a stable getAllNetworks() order.
+        // Canonicalize the complete Wi-Fi path set so enumeration reordering alone
+        // cannot revoke verified peers or restart the UDP listener.
+        List<String> wifiEntries = new ArrayList<>();
         try {
             for (Network network : cm.getAllNetworks()) {
                 NetworkCapabilities caps = cm.getNetworkCapabilities(network);
@@ -2023,15 +2026,21 @@ public class TrackingService extends Service implements LocationListener {
                         || links.getLinkAddresses().isEmpty()) {
                     return "UNAVAILABLE";
                 }
-                signature.append(network).append('|')
-                        .append(links.getInterfaceName()).append('|')
-                        .append(links.getLinkAddresses()).append('|')
-                        .append(links.getRoutes()).append(';');
+                wifiEntries.add(network.toString() + '|'
+                        + links.getInterfaceName() + '|'
+                        + links.getLinkAddresses() + '|'
+                        + links.getRoutes());
             }
         } catch (Exception e) {
             return "ERROR";
         }
-        return signature.length() == 0 ? "NO_WIFI" : signature.toString();
+        if (wifiEntries.isEmpty()) return "NO_WIFI";
+        java.util.Collections.sort(wifiEntries);
+        StringBuilder signature = new StringBuilder();
+        for (String entry : wifiEntries) {
+            signature.append(entry).append(';');
+        }
+        return signature.toString();
     }
 
     /**

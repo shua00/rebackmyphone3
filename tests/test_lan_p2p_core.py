@@ -2080,6 +2080,13 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn('if (links == null || links.getInterfaceName() == null', fingerprint)
         self.assertIn('|| links.getLinkAddresses().isEmpty())', fingerprint)
         self.assertIn('return "UNAVAILABLE";', fingerprint)
+        # getAllNetworks() ordering is unspecified; canonical sorting prevents
+        # false topology changes when Android enumerates the same networks differently.
+        sort_at = fingerprint.index("java.util.Collections.sort(wifiEntries)")
+        append_at = fingerprint.index("for (String entry : wifiEntries)")
+        self.assertLess(sort_at, append_at)
+        self.assertIn("wifiEntries.add(network.toString()", fingerprint)
+        self.assertIn('if (wifiEntries.isEmpty()) return "NO_WIFI";', fingerprint)
 
     def test_outbox_database_read_failures_raise_instead_of_looking_empty(self):
         operations = (
