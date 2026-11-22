@@ -16,6 +16,9 @@ import java.util.List;
  * A recipient ACK is only valid after storeIncoming() has committed successfully.
  */
 public final class LanChatStore extends SQLiteOpenHelper {
+
+    /** Bounded first-recipient collection window, started on the first actual discovery send. */
+    public static final long FIRST_DISCOVERY_WINDOW_MS = 10_000L;
     private static final String DB_NAME = "lan_p2p_delivery.db";
     private static final int DB_VERSION = 4;
     public static final int MAX_PENDING_MESSAGES = 50;
@@ -200,9 +203,9 @@ public final class LanChatStore extends SQLiteOpenHelper {
             v.put("created_at_ms", createdAtMs);
             v.put("protocol_version", 2);
             v.put("state", "discovery_pending");
-            // Freeze the first-discovery collection window from message creation,
-            // not from the first peer that happens to respond.
-            v.put("delivery_deadline_ms", System.currentTimeMillis() + 5_000L);
+            // A queued message may wait behind other sends before reaching the network.
+            // Keep the deadline unset until the first actual discovery transmission begins.
+            v.put("delivery_deadline_ms", 0L);
             long rowId = db.insertWithOnConflict("lan_outbox", null, v, SQLiteDatabase.CONFLICT_IGNORE);
             if (rowId < 0 && !rowExists(db, "lan_outbox", "message_id=?", new String[]{messageId})) {
                 return false;
@@ -243,7 +246,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 return true;
             }
             if (discoveryDeadline == 0L) {
-                discoveryDeadline = now + 5_000L;
+                discoveryDeadline = now + FIRST_DISCOVERY_WINDOW_MS;
                 ContentValues window = new ContentValues();
                 window.put("delivery_deadline_ms", discoveryDeadline);
                 if (db.update("lan_outbox", window, "message_id=?",
@@ -496,7 +499,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     if (existingStatus != null || !"discovery_pending".equals(state)
                             || (deadline > 0 && now > deadline)) return false;
                     if (deadline == 0L) {
-                        deadline = now + 5_000L;
+                        deadline = now + FIRST_DISCOVERY_WINDOW_MS;
                         ContentValues window = new ContentValues();
                         window.put("delivery_deadline_ms", deadline);
                         if (db.update("lan_outbox", window, "message_id=?",
@@ -549,6 +552,49 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
+
+    /**
+     * Start the bounded first-recipient window when the first actual LAN discovery
+     * send begins, not while a message is merely waiting in the sender executor.
+     * Repeated calls never extend an already-started window.
+     */
+    public boolean beginDiscoveryWindow(String messageId) {
+        if (messageId == null || messageId.length() == 0) return false;
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        Cursor c = null;
+        try {
+            c = db.rawQuery(
+                    "SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id=?",
+                    new String[]{messageId});
+            if (!c.moveToFirst()) return false;
+            String state = c.getString(0);
+            long deadline = c.getLong(1);
+            c.close();
+            c = null;
+            if (!"discovery_pending".equals(state)) {
+                db.setTransactionSuccessful();
+                return false;
+            }
+            long now = System.currentTimeMillis();
+            if (deadline > 0L) {
+                db.setTransactionSuccessful();
+                return now <= deadline;
+            }
+            ContentValues window = new ContentValues();
+            window.put("delivery_deadline_ms", now + FIRST_DISCOVERY_WINDOW_MS);
+            if (db.update("lan_outbox", window, "message_id=?",
+                    new String[]{messageId}) != 1) return false;
+            db.setTransactionSuccessful();
+            return true;
+        } catch (Exception e) {
+            return false;
+        } finally {
+            if (c != null) c.close();
+            db.endTransaction();
+        }
+    }
+
     public boolean isDiscoveryPending(String messageId) {
         Cursor c = null;
         try {
@@ -584,7 +630,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     }
                     if (deadline == 0L) {
                         ContentValues window = new ContentValues();
-                        window.put("delivery_deadline_ms", now + 5_000L);
+                        window.put("delivery_deadline_ms", now + FIRST_DISCOVERY_WINDOW_MS);
                         if (db.update("lan_outbox", window, "message_id=?",
                                 new String[]{messageId}) != 1) return false;
                     }
