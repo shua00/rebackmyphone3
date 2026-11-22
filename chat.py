@@ -31,7 +31,7 @@ UDP_PORT = 8890  # 独立监听端口，避免与 server2/rescue2 冲突
 UDP_LISTENER_SOCKET = None
 UDP_CHAT_SEND_LOCK = threading.Lock()
 RESCUE_SECRET = "your_private_secret_key"  # ⚠️ 必须与手机端一致
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.sqlite3"), "chat.py")
 SERVER2_URL = "http://127.0.0.1:8080"      # server2.py 的地址
 # ==========================================
@@ -351,9 +351,13 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
     if packet_type == "chat.ack":
         message_id = str(envelope.get("message_id") or "")
         target = str(envelope.get("target_peer_id") or "")
+        active_route = peer_endpoint_matches(CHAT_DB, "chat.py", sender, addr[0], addr[1])
+        discovery_ack = (int(addr[1]) in (8887, 8888, 8889, 8890)
+                         and is_outgoing_discovery_pending(CHAT_DB, "chat.py", message_id))
         if (target == PEER_NODE_ID and envelope.get("status") == "stored"
-                and peer_endpoint_matches(CHAT_DB, "chat.py", sender, addr[0], addr[1])):
-            acknowledge_outgoing_message(CHAT_DB, "chat.py", message_id, sender)
+                and sender and (active_route or discovery_ack)):
+            if acknowledge_outgoing_message(CHAT_DB, "chat.py", message_id, sender):
+                
         return
     if packet_type != "chat.message":
         return

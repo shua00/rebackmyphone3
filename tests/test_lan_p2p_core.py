@@ -164,6 +164,29 @@ class LanP2PCoreTests(unittest.TestCase):
                                                "192.168.1.10", 8888))
 
 
+    def test_unknown_recipient_ack_is_only_allowed_inside_open_discovery_window(self):
+        from lan_p2p_core import (
+            persist_outgoing_message, is_outgoing_discovery_pending,
+            acknowledge_outgoing_message,
+        )
+        with patch("lan_p2p_core.time.time", return_value=1000.0):
+            self.assertTrue(persist_outgoing_message(
+                self.db_path, "server2", "server2-id", "m-open-discovery", "hello", []))
+            self.assertTrue(is_outgoing_discovery_pending(
+                self.db_path, "server2", "m-open-discovery"))
+        with patch("lan_p2p_core.time.time", return_value=1006.0):
+            self.assertFalse(is_outgoing_discovery_pending(
+                self.db_path, "server2", "m-open-discovery"))
+            self.assertFalse(acknowledge_outgoing_message(
+                self.db_path, "server2", "m-open-discovery", "android-late"))
+
+    def test_fixed_target_message_does_not_open_discovery_ack_bypass(self):
+        from lan_p2p_core import persist_outgoing_message, is_outgoing_discovery_pending
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-fixed-ack", "hello", ["android-a"]))
+        self.assertFalse(is_outgoing_discovery_pending(
+            self.db_path, "server2", "m-fixed-ack"))
+
     def test_ack_route_requires_active_peer_and_rejects_changed_suspect_endpoint(self):
         from lan_p2p_core import record_peer, peer_endpoint_matches
         self.assertTrue(record_peer(
@@ -475,6 +498,7 @@ class LanP2PCoreTests(unittest.TestCase):
                     source,
                 )
                 self.assertIn("validate_incoming_message_claim(", source)
+                self.assertIn("is_outgoing_discovery_pending(", source)
 
     def test_peer_challenge_rejects_unregistered_udp_service_ports(self):
         from lan_p2p_core import remember_peer_challenge, complete_peer_challenge

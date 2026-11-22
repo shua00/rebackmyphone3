@@ -169,6 +169,7 @@
 | Android 首次目标快照的主线程隔离 | 已知成员在消息持久化时固定；5.25 秒窗口收敛通过已有串行发送执行器运行 SQLite，不在 Android 主线程执行；回收失败时保留本地队列供下次恢复 | commit `0efe4ed860a5f92092d9f5468e7bfffea02d4a7a`；CI run [44986292399](https://github.com/shua00/rebackmyphone3/actions/runs/44986292399) 成功 |
 | Python v2 接收端 ACK 持久化语义 | 清除三个服务对固定显示名的持久化绕过；所有经认证的 v2 chat.message 都先写入各服务独立 SQLite Inbox/历史账本，再回 stored ACK；显示名仅作展示元数据 | 跨服务源代码回归用例通过；commit `ae7880caa3697d4d4846f173bad21d6f0051dc82`；CI run [44986692609](https://github.com/shua00/rebackmyphone3/actions/runs/44986692609) 成功 |
 | 消息 ID 正文冲突防护 | Android 与 Python 三服务都区分相同 message_id 的相同正文重发和不同正文冲突；相同正文才可重新 ACK，正文冲突不覆盖原记录且拒绝 stored ACK | 共享核心函数 `validate_incoming_message_claim()`；commit `c8e91015cb5dd5bd7cf343e11e48ed93185eecdf`；30 项测试通过，见 [CI run 44986833840](https://github.com/shua00/rebackmyphone3/actions/runs/44986833840) |
+| Python 首次发现窗口 ACK 对齐 | Python 三服务与 Android 一致：初始无已知目标的 discovery_pending 消息，仅在 5 秒窗口内接受标准 UDP 端口的认证 ACK 并写入该消息目标；窗口关闭或消息已有固定目标后，不允许用发现 ACK 绕过 active route 验证 | 本轮新增窗口开放/过期/固定目标拒绝三类自动化用例，待 CI |
 | 聊天窗口与留言代码边界 | 本轮通信核心改动未触碰 `ChatActivity.java`；悬浮留言接收/显示入口不在本轮改动文件中，仍须按 G01/G02 继续回归，不因 diff 未触及而宣布实机行为通过 | 对比冻结矩阵提交 `53a7ecb11901aa6f33d89e96257edad0947af317` 至本轮 HEAD 的文件清单；无 `ChatActivity.java` 变更 |
 | 最新累计 CI | 最新代码提交 `c8e91015cb5dd5bd7cf343e11e48ed93185eecdf` 的 Python 检查、30 项单元测试、Android Java 编译、Debug APK 构建、artifact 上传全部成功 | [Actions run 44986833840](https://github.com/shua00/rebackmyphone3/actions/runs/44986833840)；仍不代表真实多手机实机验收 |
 

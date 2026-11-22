@@ -683,6 +683,28 @@ def send_startup_peer_beacon(sock, peer_id, peer_type, service_id, secret,
     return sent
 
 
+def is_outgoing_discovery_pending(db_path, sender_scope, message_id):
+    """Return true only while this message's bounded first-discovery ACK window is open."""
+    if not db_path or not sender_scope or not message_id:
+        return False
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        row = conn.execute("""SELECT state,delivery_deadline_ms FROM lan_outbox
+            WHERE sender_scope=? AND message_id=?""",
+            (sender_scope, message_id)).fetchone()
+        if row is None or row[0] != "discovery_pending":
+            return False
+        deadline = int(row[1] or 0)
+        return deadline <= 0 or deadline >= int(time.time() * 1000)
+    except Exception:
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def peer_endpoint_matches(db_path, receiver_scope, peer_id, endpoint_ip, endpoint_port):
     """Return true only when an ACK comes from the currently recorded route for its target peer."""
     if not receiver_scope or not peer_id or not endpoint_ip or not endpoint_port:

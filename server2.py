@@ -59,7 +59,7 @@ from urllib.parse import urlparse, parse_qs
 # ★ 新增ThreadPoolExecutor 补丁： 2026-11-05 13:50
 from concurrent.futures import ThreadPoolExecutor
 
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, peer_endpoint_matches, list_known_peer_snapshot, encode_chat_http_fallback_payload, decode_chat_http_fallback_payload, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, add_discovery_targets_for_peer, validate_incoming_message_claim
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, peer_endpoint_matches, list_known_peer_snapshot, encode_chat_http_fallback_payload, decode_chat_http_fallback_payload, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, add_discovery_targets_for_peer, validate_incoming_message_claim, is_outgoing_discovery_pending
 UDP_LISTEN_PORT = 8887  # server2 独立监听端口；发往 Android 的指令仍使用 8888
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "server2")
 
@@ -1360,12 +1360,16 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
     if packet_type == "chat.ack":
         message_id = str(envelope.get("message_id") or "")
         target = str(envelope.get("target_peer_id") or "")
-        if (target == PEER_NODE_ID and envelope.get("status") == "stored" and sender
-                and peer_endpoint_matches(CHAT_DEDUP_DB, "server2", sender, addr[0], addr[1])):
+        active_route = peer_endpoint_matches(CHAT_DEDUP_DB, "server2", sender, addr[0], addr[1])
+        discovery_ack = (int(addr[1]) in (8887, 8888, 8889, 8890)
+                         and is_outgoing_discovery_pending(CHAT_DEDUP_DB, "server2", message_id))
+        if (target == PEER_NODE_ID and envelope.get("status") == "stored"
+                and sender and (active_route or discovery_ack)):
             if acknowledge_outgoing_message(CHAT_DEDUP_DB, "server2", message_id, sender):
-                record_peer(CHAT_DEDUP_DB, "server2", sender, "android", "android-main",
-                            addr[0], addr[1], "active")
-                _remove_chat_fallback_for_message(sender, message_id)
+                if active_route:
+                    record_peer(CHAT_DEDUP_DB, "server2", sender, "android", "android-main",
+                                addr[0], addr[1], "active")
+                    _remove_chat_fallback_for_message(sender, message_id)
         return
     if packet_type != "chat.message":
         return
