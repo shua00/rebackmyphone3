@@ -3976,6 +3976,7 @@ public class TrackingService extends Service implements LocationListener {
                 synchronized (verifiedChatPeers) {
                     if (verifiedChatPeerSeen.remove(e.getKey(), e.getValue())) {
                         verifiedChatPeers.remove(e.getKey());
+                        verifiedChatPeerRouteVersions.remove(e.getKey());
                     }
                 }
             }
@@ -4075,15 +4076,14 @@ public class TrackingService extends Service implements LocationListener {
                 if (verifiedChatPeers.containsKey(peerId)) awaitingPeerIds.add(peerId);
             }
         }
-        // Snapshot route object identities at dispatch time. ACK grace cleanup may
-        // invalidate only the exact stale route used by this send, never a route
-        // that was freshly verified while the grace timer was pending.
-        final java.util.Map<String, java.net.InetSocketAddress> awaitingRouteSnapshot =
-                new java.util.HashMap<>();
-        synchronized (verifiedChatPeers) {
+        // Snapshot verified route generations at dispatch time. A same-endpoint
+        // refresh is still a new verification and must survive this message's stale
+        // ACK-grace cleanup.
+        final java.util.Map<String, Long> awaitingRouteVersionSnapshot = new java.util.HashMap<>();
+        synchronized (verifiedChatPeerRouteVersions) {
             for (String peerId : awaitingPeerIds) {
-                java.net.InetSocketAddress route = verifiedChatPeers.get(peerId);
-                if (route != null) awaitingRouteSnapshot.put(peerId, route);
+                Long version = verifiedChatPeerRouteVersions.get(peerId);
+                if (version != null) awaitingRouteVersionSnapshot.put(peerId, version);
             }
         }
         final int totalPeerCount = pendingTargetIds.size();
@@ -4148,8 +4148,8 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.log(this, "CHAT", "ℹ️ 固定目标当前均离线，保留逐设备待送达记录: " + messageId);
             }
             final java.util.Set<String> completionAwaitingPeerIds = awaitingPeerIds;
-            final java.util.Map<String, java.net.InetSocketAddress> completionRouteSnapshot =
-                    awaitingRouteSnapshot;
+            final java.util.Map<String, Long> completionRouteVersionSnapshot =
+                    awaitingRouteVersionSnapshot;
             final java.util.concurrent.CountDownLatch completionAck = ack;
             final int completionTotalPeerCount = totalPeerCount;
             final int completionReachablePeerCount = reachablePeerCount;
@@ -4161,7 +4161,7 @@ public class TrackingService extends Service implements LocationListener {
             ackCleanupDeferred = true;
             boolean completionScheduled = scheduleLanChatTask("chat-ack-grace-" + messageId, () -> {
                 Runnable completion = () -> completeLanChatAckWindow(messageId,
-                        completionAwaitingPeerIds, completionRouteSnapshot, completionAck,
+                        completionAwaitingPeerIds, completionRouteVersionSnapshot, completionAck,
                         completionTotalPeerCount, completionReachablePeerCount,
                         completionStore, completionStartedAt);
                 try {
@@ -4174,7 +4174,7 @@ public class TrackingService extends Service implements LocationListener {
                 lanChatAckGraceInFlight.remove(messageId);
                 ackCleanupDeferred = false;
                 completeLanChatAckWindow(messageId, completionAwaitingPeerIds,
-                        completionRouteSnapshot, completionAck, completionTotalPeerCount,
+                        completionRouteVersionSnapshot, completionAck, completionTotalPeerCount,
                         completionReachablePeerCount, completionStore, completionStartedAt);
             }
         } finally {
@@ -4192,7 +4192,7 @@ public class TrackingService extends Service implements LocationListener {
      */
     private void completeLanChatAckWindow(String messageId,
             java.util.Set<String> awaitingPeerIds,
-            java.util.Map<String, java.net.InetSocketAddress> routeSnapshot,
+            java.util.Map<String, Long> routeVersionSnapshot,
             java.util.concurrent.CountDownLatch ack,
             int totalPeerCount, int reachablePeerCount,
             LanChatStore store, long ackStartedAt) {
@@ -4216,12 +4216,14 @@ public class TrackingService extends Service implements LocationListener {
             } else {
                 lastPeerDiscoveryAt = 0L;
                 for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
-                    java.net.InetSocketAddress sentRoute = routeSnapshot.get(peerId);
-                    if (sentRoute != null) {
-                        synchronized (verifiedChatPeers) {
-                            if (verifiedChatPeers.get(peerId) == sentRoute) {
+                    Long sentVersion = routeVersionSnapshot.get(peerId);
+                    if (sentVersion != null) {
+                        synchronized (verifiedChatPeerRouteVersions) {
+                            Long currentVersion = verifiedChatPeerRouteVersions.get(peerId);
+                            if (sentVersion.equals(currentVersion)) {
                                 verifiedChatPeers.remove(peerId);
                                 verifiedChatPeerSeen.remove(peerId);
+                                verifiedChatPeerRouteVersions.remove(peerId);
                             }
                         }
                     }
