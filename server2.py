@@ -59,7 +59,7 @@ from urllib.parse import urlparse, parse_qs
 # ★ 新增ThreadPoolExecutor 补丁： 2026-11-05 13:50
 from concurrent.futures import ThreadPoolExecutor
 
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, peer_endpoint_matches, list_known_peer_snapshot, encode_chat_http_fallback_payload, decode_chat_http_fallback_payload
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, peer_endpoint_matches, list_known_peer_snapshot, encode_chat_http_fallback_payload, decode_chat_http_fallback_payload, send_startup_peer_beacon
 UDP_LISTEN_PORT = 8887  # server2 独立监听端口；发往 Android 的指令仍使用 8888
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "server2")
 
@@ -1399,11 +1399,16 @@ def udp_listener():
     while True:
         udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         try:
             udp_sock.bind(('0.0.0.0', UDP_LISTEN_PORT))
             UDP_LISTENER_SOCKET = udp_sock
             UDP_LISTENING = True
+            announced = send_startup_peer_beacon(
+                udp_sock, PEER_NODE_ID, "server2", PEER_NODE_ID, RESCUE_SECRET,
+                UDP_LISTEN_PORT, [8888, 8889, 8890], ["255.255.255.255"])
             print(f"🎧 UDP 监听已启动 port={UDP_LISTEN_PORT}，等待局域网对讲机消息...")
+            print(f"📡 server2 startup peer beacon sent={announced}")
             while True:
                 try:
                     data, addr = udp_sock.recvfrom(4096)
@@ -2516,7 +2521,8 @@ def handle_client(client_conn, client_addr):
                         # Use historical IDs for recipients, but keep UDP routing to current IPs only.
                         historical = list_known_peer_snapshot(CHAT_DEDUP_DB, "server2")
                         if target_ip in ("all", "255.255.255.255") or not target_ip:
-                            historical_ids = [peer["peer_id"] for peer in historical]
+                            historical_ids = [peer["peer_id"] for peer in historical
+                                              if peer.get("peer_type") == "android"]
                         else:
                             selected_ips = set(target_ip if isinstance(target_ip, list) else [target_ip])
                             historical_ids = [peer["peer_id"] for peer in historical

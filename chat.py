@@ -31,7 +31,7 @@ UDP_PORT = 8890  # 独立监听端口，避免与 server2/rescue2 冲突
 UDP_LISTENER_SOCKET = None
 UDP_CHAT_SEND_LOCK = threading.Lock()
 RESCUE_SECRET = "your_private_secret_key"  # ⚠️ 必须与手机端一致
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.sqlite3"), "chat.py")
 SERVER2_URL = "http://127.0.0.1:8080"      # server2.py 的地址
 # ==========================================
@@ -361,7 +361,16 @@ def udp_listener():
     try:
         udp_sock.bind(('0.0.0.0', UDP_PORT))
         UDP_LISTENER_SOCKET = udp_sock
+        try:
+            subnet_broadcast = get_subnet_broadcast()
+        except Exception:
+            subnet_broadcast = "255.255.255.255"
+        announced = send_startup_peer_beacon(
+            udp_sock, PEER_NODE_ID, "chat.py", PEER_NODE_ID, RESCUE_SECRET,
+            UDP_PORT, [8888, 8887, 8889],
+            [subnet_broadcast, "255.255.255.255"])
         print(f"🎧 UDP 监听已启动 (端口 {UDP_PORT})，等待对讲机消息...")
+        print(f"📡 chat.py startup peer beacon sent={announced}")
         while True:
             # [B2] 1024 → 4096，避免长消息被 UDP 层截断
             data, addr = udp_sock.recvfrom(4096)

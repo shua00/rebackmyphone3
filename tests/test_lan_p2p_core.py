@@ -338,5 +338,28 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertEqual(decoded["display_name"], "Web_Console")
         self.assertIsNone(decode_chat_http_fallback_payload("legacy plain chat text"))
 
+    def test_startup_peer_beacon_sends_authenticated_one_shot_hello(self):
+        from lan_p2p_core import send_startup_peer_beacon, decode_packet
+
+        class FakeSocket:
+            def __init__(self):
+                self.sent = []
+            def sendto(self, data, target):
+                self.sent.append((data, target))
+
+        sock = FakeSocket()
+        sent = send_startup_peer_beacon(
+            sock, "server2-stable", "server2", "server2-stable",
+            "test-secret", 8887, [8888, 8889],
+            ["255.255.255.255", "192.168.1.255"],
+        )
+        self.assertEqual(sent, 4)
+        self.assertEqual(len(sock.sent), 4)
+        decoded = [decode_packet(data, "test-secret") for data, _ in sock.sent]
+        self.assertTrue(all(packet["type"] == "peer.hello" for packet in decoded))
+        self.assertTrue(all(packet["sender_peer_id"] == "server2-stable" for packet in decoded))
+        self.assertTrue(all(packet["listen_port"] == 8887 for packet in decoded))
+        self.assertTrue(all(packet["nonce"] == decoded[0]["nonce"] for packet in decoded))
+
 if __name__ == "__main__":
     unittest.main()

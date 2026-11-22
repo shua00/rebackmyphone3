@@ -114,7 +114,7 @@ PACKAGE_NAME = "com.example.devicefinder"
 
 # ===== 配置区 =====
 RESCUE_SECRET = "your_private_secret_key"
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "rescue2")
 DEFAULT_SERVER_URL = "http://dingwei.bai001.de5.net/api/report"
 DEFAULT_CONFIG_URL = "https://your-config-url.com/config.txt"
@@ -635,7 +635,16 @@ def udp_listener():
             sock.bind(('0.0.0.0', UDP_PORT))
             UDP_LISTENER_SOCKET = sock
             UDP_OK = True
+            try:
+                subnet_broadcast = get_subnet_broadcast()
+            except Exception:
+                subnet_broadcast = "255.255.255.255"
+            announced = send_startup_peer_beacon(
+                sock, PEER_NODE_ID, "rescue2", PEER_NODE_ID, RESCUE_SECRET,
+                UDP_PORT, [8888, 8887, 8890],
+                [subnet_broadcast, "255.255.255.255"])
             print(f"{I.ok} UDP 监听已启动...")
+            print(f"{I.send} rescue2 startup peer beacon sent={announced}")
             while True:
                 data, addr = sock.recvfrom(4096)
                 msg = data.decode('utf-8', errors='ignore')

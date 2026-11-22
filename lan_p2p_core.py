@@ -494,6 +494,45 @@ def add_discovery_targets_for_peer(db_path, sender_scope, peer_id):
         conn.close()
 
 
+def send_startup_peer_beacon(sock, peer_id, peer_type, service_id, secret,
+                             listen_port, target_ports, broadcast_addresses=None):
+    """Send one authenticated HELLO burst after a service listener binds; no background scanner."""
+    import uuid
+    if sock is None or not peer_id or not service_id:
+        return 0
+    ports = sorted(set(int(port) for port in (target_ports or [])
+                       if 1 <= int(port) <= 65535))
+    addresses = list(dict.fromkeys(
+        str(address) for address in (broadcast_addresses or ["255.255.255.255"]) if address
+    ))
+    if not ports or not addresses:
+        return 0
+    packet = {
+        "type": "peer.hello",
+        "sender_peer_id": str(peer_id),
+        "sender_peer_type": str(peer_type or "unknown"),
+        "service_id": str(service_id),
+        "nonce": uuid.uuid4().hex,
+        "listen_port": int(listen_port),
+        "network_scope": "",
+        "capabilities": ["chat.text", "chat.ack"],
+        "challenge_only": False,
+    }
+    try:
+        raw = encode_packet(packet, secret)
+    except Exception:
+        return 0
+    sent = 0
+    for address in addresses:
+        for port in ports:
+            try:
+                sock.sendto(raw, (address, port))
+                sent += 1
+            except OSError:
+                continue
+    return sent
+
+
 def peer_endpoint_matches(db_path, receiver_scope, peer_id, endpoint_ip, endpoint_port):
     """Return true only when an ACK comes from the currently recorded route for its target peer."""
     if not receiver_scope or not peer_id or not endpoint_ip or not endpoint_port:
