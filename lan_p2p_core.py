@@ -668,16 +668,19 @@ def peer_endpoint_matches(db_path, receiver_scope, peer_id, endpoint_ip, endpoin
     """Return true only when an ACK comes from the currently recorded route for its target peer."""
     if not receiver_scope or not peer_id or not endpoint_ip or not endpoint_port:
         return False
-    conn = sqlite3.connect(db_path, timeout=10)
+    conn = None
     try:
+        conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("PRAGMA busy_timeout=10000")
-        row = conn.execute("""SELECT endpoint_ip,endpoint_port,lease_expires_at
+        row = conn.execute("""SELECT endpoint_ip,endpoint_port,lease_expires_at,status
             FROM lan_peers WHERE receiver_scope=? AND peer_id=?""",
             (receiver_scope, peer_id)).fetchone()
         return bool(row and str(row[0]) == str(endpoint_ip)
                     and int(row[1]) == int(endpoint_port)
-                    and float(row[2]) > time.time())
+                    and float(row[2]) > time.time()
+                    and str(row[3]) == "active")
     except Exception:
         return False
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()

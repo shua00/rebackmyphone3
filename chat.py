@@ -312,6 +312,8 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
         if (not sender or not nonce
                 or int(addr[1]) not in (8887, 8888, 8889, 8890)):
             return
+        # Receipt proves inbound reachability only. Keep the route suspect until
+        # our own nonce-bound challenge receives a matching peer.ack.
         if not record_peer(CHAT_DB, "chat.py", sender,
                            envelope.get("sender_peer_type", "unknown"),
                            envelope.get("service_id", ""), addr[0], addr[1], "suspect"):
@@ -324,15 +326,9 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
             sock.sendto(encode_packet(reply, RESCUE_SECRET), addr)
         except OSError:
             return
-        if envelope.get("challenge_only", False):
-            # We answered the peer's authenticated, nonce-bearing probe.
-            # Promote this exact source endpoint and resume only its fixed targets.
-            if record_peer(CHAT_DB, "chat.py", sender,
-                           envelope.get("sender_peer_type", "unknown"),
-                           envelope.get("service_id", ""), addr[0], addr[1], "active"):
-                _resume_pending_v2_for_peer(sock, sender, addr)
-        else:
-            # A regular HELLO is only an observation; challenge the reverse endpoint.
+        # Normal HELLO triggers a reverse challenge. challenge_only receives only
+        # the response; it must not activate the source endpoint on this side.
+        if not envelope.get("challenge_only", False):
             send_directed_peer_challenge(
                 sock, CHAT_DB, "chat.py", PEER_NODE_ID, "chat.py",
                 PEER_NODE_ID, RESCUE_SECRET, UDP_PORT,
@@ -369,7 +365,7 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
     if claim_result is None:
         return
     record_peer(CHAT_DB, "chat.py", sender, envelope.get("sender_peer_type", "unknown"),
-                envelope.get("service_id", ""), addr[0], addr[1], "active")
+                envelope.get("service_id", ""), addr[0], addr[1], "suspect")
     ack_packet = {"type": "chat.ack", "sender_peer_id": PEER_NODE_ID,
                   "sender_peer_type": "chat.py", "service_id": PEER_NODE_ID,
                   "target_peer_id": sender, "message_id": message_id, "status": "stored"}

@@ -163,6 +163,33 @@ class LanP2PCoreTests(unittest.TestCase):
                                                "192.168.1.10", 8888))
 
 
+    def test_ack_route_requires_active_peer_and_rejects_changed_suspect_endpoint(self):
+        from lan_p2p_core import record_peer, peer_endpoint_matches
+        self.assertTrue(record_peer(
+            self.db_path, "server2", "android-a", "android", "android-main",
+            "192.168.1.10", 8888, "suspect"))
+        self.assertFalse(peer_endpoint_matches(
+            self.db_path, "server2", "android-a", "192.168.1.10", 8888))
+        self.assertTrue(record_peer(
+            self.db_path, "server2", "android-a", "android", "android-main",
+            "192.168.1.10", 8888, "active"))
+        self.assertTrue(peer_endpoint_matches(
+            self.db_path, "server2", "android-a", "192.168.1.10", 8888))
+        self.assertTrue(record_peer(
+            self.db_path, "server2", "android-a", "android", "android-main",
+            "192.168.1.11", 8888, "suspect"))
+        self.assertFalse(peer_endpoint_matches(
+            self.db_path, "server2", "android-a", "192.168.1.11", 8888))
+        self.assertFalse(peer_endpoint_matches(
+            self.db_path, "server2", "android-a", "192.168.1.10", 8888))
+
+    def test_peer_endpoint_match_fails_closed_on_database_open_error(self):
+        from lan_p2p_core import peer_endpoint_matches
+        directory_path = os.path.join(self.temp_dir.name, "not-a-database")
+        os.mkdir(directory_path)
+        self.assertFalse(peer_endpoint_matches(
+            directory_path, "server2", "android-a", "192.168.1.10", 8888))
+
     def test_retry_only_returns_unacked_fixed_targets(self):
         from lan_p2p_core import (
             persist_outgoing_message, record_peer, load_pending_outgoing_for_peer,
