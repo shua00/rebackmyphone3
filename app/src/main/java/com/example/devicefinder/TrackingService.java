@@ -277,7 +277,8 @@ public class TrackingService extends Service implements LocationListener {
     private final java.util.Set<String> activeLanChatTransmissions =
             java.util.Collections.newSetFromMap(
                     new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
-    // Peer discovery is independently coalesced by peerDiscoveryInFlight; message sends need not share a global lock.
+    // Preserve FIFO send order while discovery/ACK state is shared across messages.
+    private final Object lanChatTransmitLock = new Object();
     // 仅缓存经本机 challenge/response 验证的 LAN peer；网络变化时必须清空。
     private final java.util.concurrent.ConcurrentHashMap<String, java.net.InetSocketAddress> verifiedChatPeers =
             new java.util.concurrent.ConcurrentHashMap<>();
@@ -425,17 +426,11 @@ public class TrackingService extends Service implements LocationListener {
                     new ThreadPoolExecutor.AbortPolicy()
             );
 
-    // 有界并发发送队列：不同 message_id 独立推进，某条消息等待 ACK/发现时不阻塞后续消息。
-    // 同一 message_id 仍由 activeLanChatTransmissions 原子去重；共享 peer 发现由 CAS 单独合并。
+    // 单线程有界发送队列保持同一会话的消息发送顺序；ACK 等待由持久化补发预算承担。
     private final java.util.concurrent.ExecutorService lanChatSendExecutor =
             new ThreadPoolExecutor(
-                    3, 3, 0L, TimeUnit.MILLISECONDS,
+                    1, 1, 0L, TimeUnit.MILLISECONDS,
                     new LinkedBlockingQueue<>(100),
-                    runnable -> {
-                        Thread thread = new Thread(runnable, "LanChat-Send");
-                        thread.setPriority(Thread.NORM_PRIORITY);
-                        return thread;
-                    },
                     new ThreadPoolExecutor.AbortPolicy()
             );
 
@@ -3820,9 +3815,16 @@ public class TrackingService extends Service implements LocationListener {
                 return;
             }
             attemptRecorded = true;
-            // Each message owns its ACK latch/recipient set and durable outbox row.
-            // Shared peer discovery is coalesced separately; do not serialize data sends behind ACK waits.
-            if (!serviceDestroyed) transmitLocalUdpMessageInternal(message, messageId);
+            // Preserve FIFO dispatch order; ACK retries are bounded and persisted in the outbox.
+            long lockRequestedAt = android.os.SystemClock.elapsedRealtime();
+            synchronized (lanChatTransmitLock) {
+                long lockWaitMs = android.os.SystemClock.elapsedRealtime() - lockRequestedAt;
+                if (lockWaitMs >= 150L) {
+                    FileLogger.log(this, "CHAT", "P2P 发送串行锁等待 message="
+                            + messageId + " waitMs=" + lockWaitMs);
+                }
+                if (!serviceDestroyed) transmitLocalUdpMessageInternal(message, messageId);
+            }
         } catch (Exception e) {
             FileLogger.log(this, "CHAT", "⚠️ LAN 对讲发送/恢复异常: " + e.getClass().getSimpleName());
         } finally {
@@ -4064,7 +4066,7 @@ public class TrackingService extends Service implements LocationListener {
                 try { ack.await(250, TimeUnit.MILLISECONDS); }
                 catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             } else if (reachablePeerCount > 0) {
-                for (int attempt = 1; attempt <= 3 && ack.getCount() > 0; attempt++) {
+                for (int attempt = 1; attempt <= 1 && ack.getCount() > 0; attempt++) {
                     ackRounds = attempt;
                     if (socket.isClosed()) break;
                     for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
