@@ -553,8 +553,9 @@ public final class LanChatStore extends SQLiteOpenHelper {
         Cursor c = null;
         try {
             c = getReadableDatabase().rawQuery(
-                    "SELECT 1 FROM lan_outbox WHERE message_id=? AND state='discovery_pending'",
-                    new String[]{messageId});
+                    "SELECT 1 FROM lan_outbox WHERE message_id=? AND state='discovery_pending' " +
+                    "AND (delivery_deadline_ms<=0 OR delivery_deadline_ms>=?)",
+                    new String[]{messageId, String.valueOf(System.currentTimeMillis())});
             return c.moveToFirst();
         } catch (Exception e) {
             return false;
