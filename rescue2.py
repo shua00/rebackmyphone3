@@ -509,15 +509,15 @@ def start_log_receiver():
     except Exception as e: print(f"{I.warn} 接收端启动失败: {e}")
 
 def _resume_pending_v2_for_peer(sock, peer_id, addr):
-    """Attach the verified peer to open discovery snapshots and replay its pending rows."""
+    """Attach a verified peer to open discovery snapshots and replay durable pending rows."""
     try:
-        add_discovery_targets_for_peer(CHAT_DEDUP_DB, "rescue2", peer_id)
-        pending_rows = load_pending_outgoing_for_peer(CHAT_DEDUP_DB, "rescue2", peer_id, limit=10)
+        add_discovery_targets_for_peer(_CHAT_DEDUP_DB, "rescue2", peer_id)
+        pending_rows = load_pending_outgoing_for_peer(_CHAT_DEDUP_DB, "rescue2", peer_id, limit=10)
     except Exception as e:
         with print_lock:
             print(f"⚠️ rescue2 LAN outbox recovery deferred; durable ledger read failed: {type(e).__name__}")
         return
-    for pending in pending_rows_CHAT_DEDUP_DB, "rescue2", peer_id, limit=10):
+    for pending in pending_rows:
         chat_packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
                        "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
                        "target_peer_id": peer_id, "message_id": pending["message_id"],
@@ -528,14 +528,12 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr):
             raw = encode_packet(chat_packet, RESCUE_SECRET)
             if not mark_outgoing_attempt(_CHAT_DEDUP_DB, pending["message_id"], peer_id,
                                          pending["endpoint_ip"], target_port):
-                # Do not send a replay unless its durable attempt is recorded.
                 continue
             with UDP_CHAT_SEND_LOCK:
                 sock.sendto(raw, (pending["endpoint_ip"], target_port))
         except Exception as e:
             with print_lock:
                 print(f"⚠️ rescue2 pending chat retry failed peer={peer_id}: {type(e).__name__}")
-
 
 def _handle_authenticated_v2_packet(envelope, sock, addr):
     packet_type = envelope.get("type")

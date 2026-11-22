@@ -289,7 +289,7 @@ def send_chat_v2(body, display_name, message_id):
 
 # UDP 监听线程：仅独立模式启动
 def _resume_pending_v2_for_peer(sock, peer_id, addr):
-    """Attach the verified peer to open discovery snapshots and replay its pending rows."""
+    """Attach a verified peer to open discovery snapshots and replay durable pending rows."""
     try:
         add_discovery_targets_for_peer(CHAT_DB, "chat.py", peer_id)
         pending_rows = load_pending_outgoing_for_peer(CHAT_DB, "chat.py", peer_id, limit=10)
@@ -297,7 +297,7 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr):
         with print_lock:
             print(f"⚠️ chat.py LAN outbox recovery deferred; durable ledger read failed: {type(e).__name__}")
         return
-    for pending in pending_rowsCHAT_DB, "chat.py", peer_id, limit=10):
+    for pending in pending_rows:
         chat_packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
                        "sender_peer_type": "chat.py", "service_id": PEER_NODE_ID,
                        "target_peer_id": peer_id, "message_id": pending["message_id"],
@@ -308,14 +308,12 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr):
             raw = encode_packet(chat_packet, RESCUE_SECRET)
             if not mark_outgoing_attempt(CHAT_DB, pending["message_id"], peer_id,
                                          pending["endpoint_ip"], target_port):
-                # Do not send a replay unless its durable attempt is recorded.
                 continue
             with UDP_CHAT_SEND_LOCK:
                 sock.sendto(raw, (pending["endpoint_ip"], target_port))
         except Exception as e:
             with print_lock:
                 print(f"⚠️ chat.py pending chat retry failed peer={peer_id}: {type(e).__name__}")
-
 
 def _handle_authenticated_v2_packet(envelope, sock, addr):
     packet_type = envelope.get("type")
