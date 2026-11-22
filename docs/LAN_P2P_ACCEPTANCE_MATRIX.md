@@ -153,7 +153,11 @@
 | 目标快照与重试测试 | 新增固定目标、部分 ACK 后只重试未确认目标、发现窗口冻结、空目标不误报送达、错误密钥拒绝等自动化用例 | commit `4b4cc9229481d4f5da21a9d302463ba389d8681d`；该提交 CI 中 12 项 Python 单测通过 |
 | SQLite 写入失败安全 | Android Outbox、Targets、Inbox、Peer 和 ACK 写入现核查 insert/update 结果；peer.hello/peer.ack 只有相关持久化成功后才启用路由或回 ACK | commit `aa85ce537f211020c969c93ec77a0141c644c451` |
 | Python 握手失败安全 | 三个 Python 服务仅在 peer 路由成功落库且 nonce 有效时回应 peer.ack | commit `623cd7bfa67f4933c719a7e7e61ab125c14bfa70` |
-| v2 同文不同消息 | 取消按 3 秒相同正文吞消息；不同 message_id 即使正文相同，也各自写入历史 | 本次更新 commit（见本节文件历史） |
+| v2 同文不同消息 | 取消按 3 秒相同正文吞消息；不同 message_id 即使正文相同，也各自写入历史 | commit `aeeb91770ff50f32416ecf3bf6f468b924421a85` |
+| Python 离线成员目标快照 | server2/rescue2/chat.py 把历史已知成员纳入固定目标集合；即时 UDP 仅使用当前有效租约路由，不向过期 IP 盲目单播 | commits `8e10325aa3c66a895332e55e1e4f9be5c0486e62`、`6dcddb5cd67346fb8757e07c75408c892a3af58a` |
+| 网页 HTTP 与 LAN v2 统一身份 | 同一网页消息的 UDP v2 与 HTTP 兜底使用同一 message_id/sender；Android 两路进入同一 SQLite Inbox；先到的一路显示一次，后到一路只确认；stored ACK 撤销另一条队列；HTTP accepted 只有在 Inbox 持久化后才确认 Outbox | commits `fcafe8cb37c544e5345a17beb4ab89d62a677d43`、`49163306e4206d1ca52a933bbbe93f459dd8d969` |
+| HTTP 聊天中断恢复 | chat_msg 遇到 executing/uncertain/failed 后可用同一 message_id 幂等重试；其他有副作用命令保留原来的不自动重放规则；Python ACK 重复到达保持幂等 | commit `49163306e4206d1ca52a933bbbe93f459dd8d969` |
+| 当前累计 CI | 本轮多次增量提交均通过；最新提交执行 16 项 Python 单元测试、Android Java 编译、Debug APK 构建和 artifact 上传 | [Actions run 44984007653](https://github.com/shua00/rebackmyphone3/actions/runs/44984007653)，对应 commit `49163306e4206d1ca52a933bbbe93f459dd8d969` |
 | 最新 CI | Python 检查、12 项单元测试、Android Java 编译、Debug APK 构建和 artifact 上传均通过 | [Actions run 44983112090](https://github.com/shua00/rebackmyphone3/actions/runs/44983112090)，对应 commit `623cd7bfa67f4933c719a7e7e61ab125c14bfa70` |
 
 **未完成/未宣称通过**：A01–A10 中要求真实设备的 LAN 双向、多设备、网络切换、三服务全关闭验收；M-A/M-B/M-C 实机运行；F02/F03/F04/F09/F10/F12 完整故障注入；G01–G06 完整回归。Android SQLite 故障注入及真实 APK 在真实设备上的运行仍缺证据。不得以以上 CI 结果替代这些项目。

@@ -189,7 +189,7 @@ IP 地址永远不能作为设备身份。网络变化时应使旧端点路由�
 本次工作只改造设备间对讲/聊天：
 
 - LAN 设备间对讲：只使用 v2 JSON `chat.message` / `chat.ack` 信封；Android 先通过 `persistIncomingLanChat()` 写入 SQLite Inbox 与本地对讲历史，成功后才发送 stored ACK 并通知对讲 UI。旧字符串式 `FIND_ME_CHAT` / `FIND_ME_CHAT_ACK` / `FIND_ME_PEER_*` 不再作为接收协议。
-- 跨网络网页/HTTP 对讲：继续使用服务端现有 `chat_msg` 动作和独立服务端 Outbox，不与 LAN Inbox 或悬浮留言合并。
+- 跨网络网页/HTTP 对讲：继续使用服务端现有 `chat_msg` 动作和独立服务端 Outbox，不与悬浮留言合并。每条网页对讲只生成一个 message_id，LAN v2 UDP 包和 HTTP 兜底命令封装携带相同的 sender_peer_id/message_id/body；Android 两路都进入同一 `persistIncomingLanChat()` / SQLite Inbox，先到的一路写入并显示，后到的一路识别为相同消息后只返回确认、不重复显示。UDP stored ACK 会撤销该设备对应的 HTTP 兜底；HTTP 侧只有收到设备 `accepted` 反馈且服务端持久化该反馈后，才确认对应 Outbox 目标。对讲命令在中断后可沿用同一 ID 幂等重放；其他有副作用指令仍保持原有不自动重放策略。
 - 远程悬浮留言：继续使用 `FIND_ME_FLOAT_MSG` / `custom_msg` 和 `showFloatingMessage(content)`，其接收、显示、关闭、已读/清理和服务端队列保持独立。
 
 悬浮留言的协议、显示、关闭行为、历史、已读/清理行为、服务端队列和路由必须保持不变。对讲和悬浮留言不得共享去重命名空间、收件箱记录、队列清理逻辑或 UI 通知路径。传输层实施期间不得修改 `ChatActivity.java`。
@@ -262,7 +262,12 @@ IP 地址永远不能作为设备身份。网络变化时应使旧端点路由�
 - Android 当前仍同时写入旧 SharedPreferences 发送队列和 SQLite 发送箱。旧队列继续作为兼容/恢复镜像，直到迁移和重启恢复行为得到完整验证；不能静默丢弃旧队列。
 - Android 已支持在有界发现刷新窗口之间复用已验证的局域网路由，避免每发一条消息都等待 500 毫秒。
 - CI 已编译 Python 服务，并运行稳定身份和 peer 作用域持久化相关单元测试。
-- 最新已核实的 GitHub Actions 构建通过，提交为 `0bc9abf5a4471eecf19d61b4e528acedc0a0d237`。这只证明该提交通过自动构建，不代表真实设备通信已验收。
+- 最新已核实的 GitHub Actions 构建通过：16 项 Python 单元测试、Android Java 编译、Debug APK 构建及 artifact 上传均成功；提交 `49163306e4206d1ca52a933bbbe93f459dd8d969`，[Actions run 44984007653](https://github.com/shua00/rebackmyphone3/actions/runs/44984007653)。这只证明该提交通过自动检查与云构建，不代表真实设备通信已验收。
+
+
+- LAN v2 与网页 HTTP 兜底现共用同一 message_id 和发送者身份；Android 两路均进入同一持久化 Inbox，避免同一网页消息经 UDP/HTTP 到达时重复显示；已加入 HTTP accepted 与 P2P stored ACK 的逐设备 Outbox 收敛逻辑。
+- Python 已知离线成员现进入服务端发起消息的固定接收目标快照；立即发送仍只使用有效租约端点，设备重新上线后按原 message_id 补发。
+- v2 接收面已移除旧字符串式 FIND_ME_CHAT/FIND_ME_PEER 分支；悬浮留言 FIND_ME_FLOAT_MSG/custom_msg 与非聊天救援命令保留。
 
 ### 仍需完成或验证
 
