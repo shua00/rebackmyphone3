@@ -18,7 +18,7 @@ public final class BuildInfo {
      * ★【手动编号/标签】：
      * v2.0.1 通用架构优化批次：通道可视化 + 闹钟防抖 + 定位解耦
      */
-    private static final String CUSTOM_TAG = "-V2515";
+    private static final String CUSTOM_TAG = "-V2516";
 
     public static final String BUILD_VERSION = BuildConfig.AUTO_BUILD_VERSION + CUSTOM_TAG;
 
