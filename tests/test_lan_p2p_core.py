@@ -991,6 +991,10 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertLess(attempt_pos, udp_pos)
         self.assertLess(udp_pos, endpoint_pos)
         self.assertIn("recordTargetSendError(", send_method)
+        udp_helper_start = tracking.index("private void sendLanUdpPacket(")
+        udp_helper = tracking[udp_helper_start:udp_helper_start + 1500]
+        self.assertIn("throw new java.net.SocketException", udp_helper)
+        self.assertNotIn("if (socket.isClosed()) return", udp_helper)
 
 
 
