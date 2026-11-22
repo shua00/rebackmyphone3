@@ -284,3 +284,24 @@ def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_po
         return False
     finally:
         conn.close()
+
+
+def list_known_peers(db_path, receiver_scope, limit=100):
+    """Return currently leased peers for a service scope; endpoint is a temporary route."""
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        conn.execute("PRAGMA busy_timeout=10000")
+        rows = conn.execute("""SELECT peer_id,peer_type,service_id,endpoint_ip,endpoint_port,
+                    last_seen_at,lease_expires_at,status
+            FROM lan_peers WHERE receiver_scope=? AND lease_expires_at>?
+              AND status IN ('active','suspect')
+            ORDER BY last_seen_at DESC LIMIT ?""",
+            (receiver_scope, time.time(), max(1, min(500, int(limit))))).fetchall()
+        return [{"peer_id": r[0], "peer_type": r[1], "service_id": r[2],
+                 "endpoint_ip": r[3], "endpoint_port": r[4],
+                 "last_seen_at": r[5], "lease_expires_at": r[6], "status": r[7]}
+                for r in rows]
+    except Exception:
+        return []
+    finally:
+        conn.close()
