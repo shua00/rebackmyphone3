@@ -1363,16 +1363,13 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
         message_id = str(envelope.get("message_id") or "")
         target = str(envelope.get("target_peer_id") or "")
         active_route = peer_endpoint_matches(CHAT_DEDUP_DB, "server2", sender, addr[0], addr[1])
-        discovery_ack = (int(addr[1]) in (8887, 8888, 8889, 8890)
-                         and is_outgoing_discovery_pending(CHAT_DEDUP_DB, "server2", message_id))
         if (target == PEER_NODE_ID and envelope.get("status") == "stored"
-                and sender and (active_route or discovery_ack)):
+                and sender and active_route):
             if acknowledge_outgoing_message(CHAT_DEDUP_DB, "server2", message_id, sender):
                 if active_route:
                     record_peer(CHAT_DEDUP_DB, "server2", sender, "android", "android-main",
                                 addr[0], addr[1], "active")
-                # A valid stored ACK also completes this recipient's HTTP fallback,
-                # even when it arrived through the bounded first-discovery window.
+                # Only a verified peer route may complete the recipient's HTTP fallback.
                 _remove_chat_fallback_for_message(sender, message_id)
         return
     if packet_type != "chat.message":

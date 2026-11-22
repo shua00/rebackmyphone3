@@ -570,52 +570,86 @@ def remember_peer_challenge(db_path, receiver_scope, nonce, expected_peer_id="",
 def complete_peer_challenge(db_path, receiver_scope, nonce, peer_id,
                             endpoint_ip, endpoint_port, peer_type="unknown",
                             service_id=""):
-    """Activate a route only after a live nonce matches the expected peer and source endpoint."""
+    """Atomically consume a directed nonce and activate only its bound peer route."""
     if (not db_path or not receiver_scope or not nonce or not peer_id
             or not endpoint_ip or int(endpoint_port or 0) not in (8887, 8888, 8889, 8890)):
         return False
     conn = None
     try:
+        now = time.time()
         conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("""CREATE TABLE IF NOT EXISTS lan_peer_challenges (
+            receiver_scope TEXT NOT NULL,
+            nonce TEXT NOT NULL,
+            expected_peer_id TEXT NOT NULL DEFAULT '',
+            expected_ip TEXT NOT NULL DEFAULT '',
+            expected_port INTEGER NOT NULL DEFAULT 0,
+            expires_at REAL NOT NULL,
+            PRIMARY KEY(receiver_scope, nonce)
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS lan_peers (
+            receiver_scope TEXT NOT NULL,
+            peer_id TEXT NOT NULL,
+            peer_type TEXT NOT NULL DEFAULT 'unknown',
+            service_id TEXT NOT NULL DEFAULT '',
+            protocol_version INTEGER NOT NULL DEFAULT 2,
+            capabilities TEXT NOT NULL DEFAULT '',
+            network_scope TEXT NOT NULL DEFAULT '',
+            endpoint_ip TEXT NOT NULL DEFAULT '',
+            endpoint_port INTEGER NOT NULL DEFAULT 0,
+            last_seen_at REAL NOT NULL DEFAULT 0,
+            last_verified_at REAL NOT NULL DEFAULT 0,
+            lease_expires_at REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'suspect',
+            PRIMARY KEY(receiver_scope, peer_id)
+        )""")
         row = conn.execute("""SELECT expected_peer_id,expected_ip,expected_port,expires_at
             FROM lan_peer_challenges WHERE receiver_scope=? AND nonce=?""",
             (receiver_scope, str(nonce))).fetchone()
+        if row is None:
+            conn.rollback()
+            return False
+        expected_peer_id, expected_ip, expected_port, expires_at = row
+        if (float(expires_at) <= now
+                or (expected_peer_id and str(expected_peer_id) != str(peer_id))
+                or (expected_ip and str(expected_ip) != str(endpoint_ip))
+                or (expected_port and int(expected_port) != int(endpoint_port))):
+            conn.rollback()
+            return False
+        # Validation, route activation, and directed nonce consumption share one
+        # write transaction. Concurrent replay cannot race between SELECT/DELETE.
+        conn.execute("""INSERT INTO lan_peers
+            (receiver_scope,peer_id,peer_type,service_id,protocol_version,
+             endpoint_ip,endpoint_port,last_seen_at,last_verified_at,lease_expires_at,status)
+            VALUES(?,?,?,?,2,?,?,?,?,?,'active')
+            ON CONFLICT(receiver_scope,peer_id) DO UPDATE SET
+                peer_type=excluded.peer_type,
+                service_id=excluded.service_id,
+                endpoint_ip=excluded.endpoint_ip,
+                endpoint_port=excluded.endpoint_port,
+                last_seen_at=excluded.last_seen_at,
+                last_verified_at=excluded.last_verified_at,
+                lease_expires_at=excluded.lease_expires_at,
+                status='active'""",
+            (receiver_scope, str(peer_id), peer_type or "unknown", service_id or "",
+             str(endpoint_ip), int(endpoint_port), now, now, now + 120.0))
+        if expected_peer_id:
+            conn.execute("DELETE FROM lan_peer_challenges WHERE receiver_scope=? AND nonce=?",
+                         (receiver_scope, str(nonce)))
+        conn.commit()
+        return True
     except Exception:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         return False
     finally:
         if conn is not None:
             conn.close()
-    if row is None:
-        return False
-    expected_peer_id, expected_ip, expected_port, expires_at = row
-    if float(expires_at) <= time.time():
-        return False
-    if expected_peer_id and str(expected_peer_id) != str(peer_id):
-        return False
-    if expected_ip and str(expected_ip) != str(endpoint_ip):
-        return False
-    if expected_port and int(expected_port) != int(endpoint_port):
-        return False
-    if not record_peer(db_path, receiver_scope, peer_id, peer_type, service_id,
-                       endpoint_ip, endpoint_port, "active"):
-        return False
-    # Directed challenges are single-use. A broadcast nonce may authenticate
-    # several independent peers during its short discovery lifetime.
-    if expected_peer_id:
-        delete_conn = None
-        try:
-            delete_conn = sqlite3.connect(db_path, timeout=10)
-            delete_conn.execute("PRAGMA busy_timeout=10000")
-            delete_conn.execute("DELETE FROM lan_peer_challenges WHERE receiver_scope=? AND nonce=?",
-                                (receiver_scope, str(nonce)))
-            delete_conn.commit()
-        except Exception:
-            return False
-        finally:
-            if delete_conn is not None:
-                delete_conn.close()
-    return True
 
 
 def send_directed_peer_challenge(sock, db_path, receiver_scope, sender_peer_id,

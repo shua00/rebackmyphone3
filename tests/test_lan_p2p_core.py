@@ -758,6 +758,34 @@ class LanP2PCoreTests(unittest.TestCase):
                 self.assertIn("validate_incoming_message_claim(", source)
                 self.assertIn("is_outgoing_discovery_pending(", source)
 
+    def test_directed_peer_challenge_nonce_is_consumed_atomically_under_replay(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from lan_p2p_core import remember_peer_challenge, complete_peer_challenge
+
+        self.assertTrue(remember_peer_challenge(
+            self.db_path, "server2", "nonce-race", "android-a",
+            "192.168.1.10", 8888))
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(
+                lambda _: complete_peer_challenge(
+                    self.db_path, "server2", "nonce-race", "android-a",
+                    "192.168.1.10", 8888, "android", "android-main"),
+                range(2)))
+        self.assertEqual(sum(1 for result in results if result), 1)
+
+    def test_python_chat_ack_requires_verified_peer_route_in_all_services(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        for filename in ("rescue2.py", "chat.py", "server2.py"):
+            with self.subTest(service=filename):
+                source = (repo_root / filename).read_text(encoding="utf-8")
+                start = source.index('if packet_type == "chat.ack":')
+                end = source.index('if packet_type != "chat.message":', start)
+                handler = source[start:end]
+                self.assertIn("active_route = peer_endpoint_matches(", handler)
+                self.assertIn("and sender and active_route)", handler)
+                self.assertNotIn("discovery_ack", handler)
+                self.assertNotIn("is_outgoing_discovery_pending(", handler)
+
     def test_peer_challenge_rejects_unregistered_udp_service_ports(self):
         from lan_p2p_core import remember_peer_challenge, complete_peer_challenge
         self.assertTrue(remember_peer_challenge(
