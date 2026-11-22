@@ -3694,14 +3694,21 @@ public class TrackingService extends Service implements LocationListener {
             return;
         }
         LanChatStore store = lanChatStore;
-        if (store != null && !store.hasTargets(messageId) && !verifiedChatPeers.isEmpty()) {
-            List<LanChatStore.Target> snapshot = new ArrayList<>();
+        if (store != null && !store.hasTargets(messageId)) {
+            // Include previously registered offline peers in the fixed target set.
+            // Current verified routes are a fallback for peers discovered during this first send.
+            List<LanChatStore.Target> snapshot = store.loadKnownPeers();
+            java.util.Set<String> snapshotIds = new java.util.HashSet<>();
+            for (LanChatStore.Target target : snapshot) snapshotIds.add(target.peerId);
             for (java.util.Map.Entry<String, java.net.InetSocketAddress> entry : verifiedChatPeers.entrySet()) {
-                java.net.InetSocketAddress endpoint = entry.getValue();
-                snapshot.add(new LanChatStore.Target(entry.getKey(), "pending", 0,
-                        endpoint.getAddress().getHostAddress(), endpoint.getPort()));
+                if (snapshotIds.add(entry.getKey())) {
+                    java.net.InetSocketAddress endpoint = entry.getValue();
+                    snapshot.add(new LanChatStore.Target(entry.getKey(), "pending", 0,
+                            endpoint.getAddress().getHostAddress(), endpoint.getPort()));
+                }
             }
-            store.setTargets(messageId, snapshot);
+            snapshot.removeIf(target -> getUniqueDeviceId().equals(target.peerId));
+            if (!snapshot.isEmpty()) store.setTargets(messageId, snapshot);
         }
         List<LanChatStore.Target> savedTargets = store != null
                 ? store.loadTargets(messageId) : new ArrayList<>();

@@ -219,6 +219,23 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
+    /** Stable known-member snapshot, including currently offline peers; routes must be rediscovered before use. */
+    public List<Target> loadKnownPeers() {
+        ArrayList<Target> result = new ArrayList<>();
+        Cursor c = null;
+        try {
+            c = getReadableDatabase().rawQuery(
+                    "SELECT peer_id,endpoint_ip,endpoint_port FROM lan_peers ORDER BY last_seen_at DESC",
+                    null);
+            while (c.moveToNext()) result.add(new Target(c.getString(0), "pending", 0,
+                    c.getString(1), c.getInt(2)));
+        } catch (Exception ignored) {
+        } finally {
+            if (c != null) c.close();
+        }
+        return result;
+    }
+
     public List<PendingMessage> loadPending(int limit) {
         ArrayList<PendingMessage> result = new ArrayList<>();
         Cursor c = null;
