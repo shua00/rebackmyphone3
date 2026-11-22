@@ -819,8 +819,8 @@ class LanP2PCoreTests(unittest.TestCase):
         rejected = handler.index("catch (java.util.concurrent.RejectedExecutionException", cleanup)
         rejected_cleanup = handler.index("pendingLanChatReceives.remove(receiveKey)", rejected)
 
-        self.assertLess(claim, duplicate_guard)
-        self.assertLess(duplicate_guard, dispatch)
+        self.assertLess(duplicate_guard, claim)
+        self.assertLess(claim, dispatch)
         self.assertLess(dispatch, persist)
         self.assertLess(persist, ack)
         self.assertLess(ack, cleanup)
