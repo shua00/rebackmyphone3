@@ -865,7 +865,7 @@ class LanP2PCoreTests(unittest.TestCase):
         store = (
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         ).read_text(encoding="utf-8")
-        self.assertIn("DB_VERSION = 4", store)
+        self.assertIn("DB_VERSION = 5", store)
         self.assertIn("retry_attempt_count INTEGER NOT NULL DEFAULT 0", store)
         self.assertIn('if (oldVersion < 4)', store)
         self.assertIn('ALTER TABLE lan_outbox ADD COLUMN retry_attempt_count', store)
@@ -888,16 +888,43 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("scheduleLanChatRetryFromOutbox()", recovery)
         self.assertIn("lanChatRetryWakeScheduled", tracking)
         self.assertIn("item.retryAttempts > 0", tracking)
+        self.assertIn("MAX_AUTOMATIC_RETRY_ATTEMPTS", tracking)
+        self.assertIn("retryPendingLanChatMessages(true)", tracking)
         self.assertNotIn("item.retryAttempts < 3", tracking)
+        self.assertIn("resumeExhaustedRetriesForRecoveryEvent", tracking)
         self.assertIn("boolean attemptRecorded = false", tracking)
         self.assertIn("if (attemptRecorded) scheduleLanChatRetryFromOutbox()", tracking)
         self.assertIn("minimumAttempts == 2 ? 4_000L", tracking)
         self.assertIn("Math.min(60_000L, 10_000L << Math.min(3, minimumAttempts - 3))", tracking)
-        self.assertIn("known, still-pending recipients until ACK", tracking)
+        self.assertIn("finite per-epoch attempt budget", tracking)
+        self.assertIn("waiting_peers", tracking)
         self.assertIn("waiting_peers", tracking)
         self.assertIn("handler.postDelayed", tracking)
         self.assertIn("lanChatRetryInFlight.set(false);", recovery)
         self.assertIn("if (serviceDestroyed || !lanChatRetryInFlight.compareAndSet(false, true)) return", recovery)
+
+
+    def test_android_exhausted_retry_budget_is_preserved_and_only_rearmed_by_cooldown_event(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        load_start = store.index("public List<PendingMessage> loadPending(int limit)")
+        load_end = store.index("public int recordOutboxAttempt(String messageId)", load_start)
+        load = store[load_start:load_end]
+        self.assertIn("retry_attempt_count<?", load)
+        self.assertIn("MAX_AUTOMATIC_RETRY_ATTEMPTS", load)
+        resume_start = store.index("public int resumeExhaustedRetriesForRecoveryEvent(long now)")
+        resume_end = store.index("public int recordOutboxAttempt(String messageId)", resume_start)
+        resume = store[resume_start:resume_end]
+        self.assertIn("last_event_retry_at_ms<=?", resume)
+        self.assertIn("RETRY_RECOVERY_EVENT_COOLDOWN_MS", resume)
+        self.assertIn("t.status!='acked'", resume)
+        self.assertIn("retry_attempt_count=0", resume)
+        attempt_start = store.index("public int recordOutboxAttempt(String messageId)")
+        attempt_end = store.index("public List<Target> loadTargets", attempt_start)
+        attempt = store[attempt_start:attempt_end]
+        self.assertIn("retry_attempt_count<?", attempt)
+        self.assertIn("MAX_AUTOMATIC_RETRY_ATTEMPTS", attempt)
+        self.assertNotIn("DELETE FROM lan_outbox", resume)
 
 
     def test_android_peer_and_target_reads_do_not_collapse_database_errors_to_empty(self):
@@ -1129,7 +1156,8 @@ class LanP2PCoreTests(unittest.TestCase):
         end = source.index("private void sendLanUdpPacket(", start)
         method = source[start:end]
         self.assertIn("LAN_PEER_CHALLENGE_TIMEOUT_MS", method)
-        self.assertIn("Thread.sleep(500L)", method)
+        self.assertNotIn("Thread.sleep(500L)", method)
+        self.assertIn("Discovery is deliberately non-blocking", method)
         self.assertNotIn("clearPendingPeerChallenge(nonce);", method.split("finally {", 1)[-1])
 
     def test_android_known_offline_targets_are_rechallenged_at_saved_endpoint(self):
