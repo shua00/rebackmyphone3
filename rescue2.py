@@ -8,7 +8,7 @@ rescue2.py — 局域网救援/调试终端（Ultimate v2 协议）
 协议版本 : v2-only
 最后修改 : 2026-11-22（v2-only；peer challenge；消息 ID/ACK）
 ------------------------------------------------------------
-本轮约束 : 保留救援、ADB、日志与陪护能力；聊天使用带 message_id 的 FIND_ME_CHAT v2 帧；响应随机 nonce peer challenge；会话 peer ID 每次启动唯一。
+本轮约束 : 保留救援、ADB、日志与陪护能力；聊天使用带 message_id 的 FIND_ME_CHAT v2 帧；响应随机 nonce peer challenge；服务 peer ID 持久化保存，进程重启后保持不变。
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
   2026-11-20 1:30  v2.0.2 新增p远程陪伴特权推流
   2026-11-13 00:30  v2.0.2 紧急三连击 + ADB 安装工具箱 + 并发防弹

@@ -225,3 +225,23 @@ Required before calling the feature complete:
 - Do not claim end-to-end delivery from UDP send success or server HTTP 200.
 - Do not claim real-device acceptance based on compilation or static inspection.
 - Any unsupported network type (for example, LANs without usable IPv4 broadcast) must be documented rather than silently claimed to work.
+
+
+## 13. Implementation status (2026-11-22)
+
+Completed foundations on `feature/lan-p2p-v2-only`:
+- The design is committed as the approved implementation baseline.
+- Python service IDs are persisted in SQLite and are stable across process restarts. server2 and rescue2 use separate service identities even though they share the dedup database; chat.py uses its own database.
+- A shared `lan_p2p_core.py` persists Python-side peer observations with service-specific receiver scopes. A HELLO observation is recorded as `suspect`; a message that is durably accepted refreshes the peer as `active`.
+- Android has a native SQLite `LanChatStore` with peer, outbox, per-recipient target, inbox, and metadata tables. It is wired to outgoing chat persistence, target snapshots, per-peer ACK persistence, and inbox-before-ACK storage.
+- Android currently dual-writes the legacy SharedPreferences outbox and SQLite outbox. The old queue remains the compatibility/recovery mirror until migration and restart-recovery behavior are fully validated; it is not silently discarded.
+- Android reuses verified LAN routes between bounded discovery refresh windows instead of waiting 500 ms before every message.
+- CI now compiles the Python services and runs unit tests for stable identity and peer-scope persistence.
+
+Not yet complete:
+- The coordinated authenticated JSON v2 envelope and its Android/Python codec.
+- Python-side per-recipient outbox/ACK tracking and durable web-originated chat delivery.
+- Full migration of legacy Android receive IDs/history and retirement of the SharedPreferences compatibility mirror.
+- End-to-end multi-device tests, including process restart, partial ACK, and floating-message isolation.
+
+A successful APK build is only a compile check. The communication feature must not be declared complete until the remaining protocol/server work and real-device acceptance matrix pass.

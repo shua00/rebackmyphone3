@@ -6,7 +6,7 @@ server2.py — 全功能同步服务（v2 协议稳定版）
 协议版本 : v2-only / v2.7 LAN P2P peer discovery and per-peer ACK
 最后修改 : 2026-11-22（v2-only 信令；消息 ACK 闭环；跨进程重启持久化去重）
 ------------------------------------------------------------
-本轮改动 : v2-only；custom_msg 仅发 FIND_ME_FLOAT，chat_msg 仅发带 message_id 的 FIND_ME_CHAT；响应 Android peer challenge 与消息 ACK；每次进程启动生成唯一会话 peer ID。
+本轮改动 : v2-only；custom_msg 仅发 FIND_ME_FLOAT，chat_msg 仅发带 message_id 的 FIND_ME_CHAT；响应 Android peer challenge 与消息 ACK；使用 SQLite 持久化逻辑服务 peer ID，进程重启后保持不变。
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
   2026-11-21 09:30  v2.5.13-r1 重建：服务端严格以 v2.5.12 为基线，增加网络前缀/接口/传输状态落库、command_feedback 持久化与幂等处理；修正 Cloudflare HTTP source_ip 不得作为设备 UDP 目标；兼容旧 executed_ids。
   2026-11-21 09:15  v2.5.12 设备管理整合：统一离线阈值并支持持久化自定义；设备列表增加在线/离线/异常筛选；在线/离线设备均可删除；待执行指令数直接跳转到该设备队列；删除前阻止遗留待确认指令；时间格式人类可读；保留最后有效 IP 与定位采集时间；增加删除审计。
