@@ -1164,7 +1164,7 @@ class LanP2PCoreTests(unittest.TestCase):
             repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
         ).read_text(encoding="utf-8")
         start = source.index("private boolean handleAuthenticatedLanPacket(")
-        end = source.index("private void sendAuthenticatedChatAck(", start)
+        end = source.index("private boolean sendAuthenticatedChatAck(", start)
         handler = source[start:end]
         self.assertEqual(handler.count("lanChatIoExecutor.execute(() -> {"), 4)
         self.assertNotIn("reportExecutor.execute(", handler)
