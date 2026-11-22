@@ -1869,7 +1869,7 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.log(this, "NETWORK", "Wi-Fi LAN changed; closing old UDP socket for rebind");
                 oldSocket.close();
             }
-            handler.postDelayed(this::retryPendingLanChatMessages, 1200L);
+            // 队列补发改由 UDP socket 重新绑定成功后触发，避免对着已关闭/未就绪 socket 空跑。
         } catch (Exception e) {
             FileLogger.log(this, "NETWORK", "Wi-Fi LAN refresh failed: " + e.getClass().getSimpleName());
         }
@@ -4090,6 +4090,8 @@ public class TrackingService extends Service implements LocationListener {
                 rescueSocketRef = rescueSocket;
                 udpBindFailCount = 0;
                 FileLogger.log(this, "UDP", "✅ 监听已绑定 8888");
+                // 初次启动及网络切换重绑定后统一恢复待确认队列；此时 socket 已可用。
+                handler.postDelayed(this::retryPendingLanChatMessages, 1200L);
 
                 byte[] buffer = new byte[4096];
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
