@@ -3701,7 +3701,9 @@ public class TrackingService extends Service implements LocationListener {
             List<LanChatStore.PendingMessage> pending = store.loadPending(50);
             int minimumAttempts = Integer.MAX_VALUE;
             for (LanChatStore.PendingMessage item : pending) {
-                if (item.retryAttempts < 3) minimumAttempts = Math.min(minimumAttempts, item.retryAttempts);
+                if (item.retryAttempts > 0 && item.retryAttempts < 3) {
+                    minimumAttempts = Math.min(minimumAttempts, item.retryAttempts);
+                }
             }
             if (minimumAttempts == Integer.MAX_VALUE) return;
             final long delayMs = minimumAttempts <= 1 ? 1_500L : 4_000L;
