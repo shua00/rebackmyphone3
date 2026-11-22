@@ -1859,7 +1859,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertLess(queue, udp)
         self.assertIn("chat_message_id", handler)
         self.assertIn("message_id=chat_message_id", handler)
-        self.assertIn("if fallback_queued:", handler)
+        self.assertIn("fallback_queued_count = 0", handler)
+        self.assertIn("queued_count = fallback_queued_count", handler)
 
 
     def test_server2_executed_chat_id_persists_outbox_ack_before_http_queue_removal(self):
