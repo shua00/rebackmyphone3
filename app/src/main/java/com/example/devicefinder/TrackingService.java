@@ -257,7 +257,8 @@ public class TrackingService extends Service implements LocationListener {
             new java.util.concurrent.ConcurrentHashMap<>();
     // 防止发送端重试/多端口重复广播时，同一消息在持久化完成前重复占用后台队列。
     private final java.util.Set<String> pendingLanChatReceives =
-            java.util.concurrent.ConcurrentHashMap.newKeySet();
+            java.util.Collections.newSetFromMap(
+                    new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
     // LAN 对讲先持久化消息正文与消息 ID，再发 ACK；防止进程在 ACK 后、历史写入前退出。
     private final Object lanChatReceiveLock = new Object();
     private static final String PREF_LAN_CHAT_RECEIVED_IDS = "lan_chat_received_message_ids";
@@ -270,7 +271,8 @@ public class TrackingService extends Service implements LocationListener {
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRetryInFlight =
             new java.util.concurrent.atomic.AtomicBoolean(false);
     private final java.util.Set<String> activeLanChatTransmissions =
-            java.util.concurrent.ConcurrentHashMap.newKeySet();
+            java.util.Collections.newSetFromMap(
+                    new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
     // Serialize message sends so concurrent messages cannot race the shared peer-discovery window.
     private final Object lanChatTransmitLock = new Object();
     // 仅缓存经本机 challenge/response 验证的 LAN peer；网络变化时必须清空。
@@ -3754,7 +3756,8 @@ public class TrackingService extends Service implements LocationListener {
         for (LanChatStore.Target target : savedTargets) {
             if (!"acked".equals(target.status)) pendingTargetIds.add(target.peerId);
         }
-        java.util.Set<String> awaitingPeerIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        java.util.Set<String> awaitingPeerIds = java.util.Collections.newSetFromMap(
+                new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
         if (store == null) {
             awaitingPeerIds.addAll(verifiedChatPeers.keySet());
         } else {
