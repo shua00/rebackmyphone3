@@ -3561,6 +3561,11 @@ public class TrackingService extends Service implements LocationListener {
                             String id = item.optString("message_id", "");
                             String content = item.optString("content", "");
                             if (!id.isEmpty() && !content.isEmpty() && !serviceDestroyed) {
+                                if (store.allTargetsAcked(id)) {
+                                    // Recover the crash window between SQLite delivery commit and legacy queue cleanup.
+                                    removePendingLanChat(id);
+                                    continue;
+                                }
                                 transmitLocalUdpMessage(content, id);
                             }
                         }
