@@ -495,6 +495,54 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertEqual(acked_sends, 1)
 
 
+    def test_partial_ack_retries_only_the_remaining_fixed_peer(self):
+        from lan_p2p_core import (
+            record_peer, persist_outgoing_message,
+            send_outbox_to_active_peers, acknowledge_outgoing_message,
+        )
+
+        class FakeSocket:
+            def __init__(self):
+                self.sent = []
+            def sendto(self, payload, destination):
+                self.sent.append((payload, destination))
+                if destination[0] == "192.168.1.10":
+                    acknowledge_outgoing_message(
+                        self.db_path, "server2", "group-retry", "android-a")
+
+        record_peer(self.db_path, "server2", "android-a", "android", "android-main",
+                    "192.168.1.10", 8888, "active")
+        record_peer(self.db_path, "server2", "android-b", "android", "android-main",
+                    "192.168.1.11", 8888, "active")
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "group-retry", "hello",
+            ["android-a", "android-b"]))
+        socket = FakeSocket()
+        socket.db_path = self.db_path
+        packet = {
+            "type": "chat.message", "sender_peer_id": "server2-id",
+            "sender_peer_type": "server2", "service_id": "server2-id",
+            "target_peer_id": "*", "message_id": "group-retry",
+            "created_at_ms": 123, "body": "hello",
+        }
+        with patch("lan_p2p_core.time.sleep", return_value=None):
+            sent = send_outbox_to_active_peers(
+                socket, self.db_path, "server2", "group-retry", packet,
+                "test-secret", attempts=3, retry_delay_seconds=0.25)
+        self.assertEqual(sent, 4)
+        ips = [destination[0] for _, destination in socket.sent]
+        self.assertEqual(ips.count("192.168.1.10"), 1)
+        self.assertEqual(ips.count("192.168.1.11"), 3)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            rows = dict(conn.execute(
+                "SELECT peer_id,status FROM lan_outbox_targets WHERE message_id='group-retry'"
+            ).fetchall())
+        finally:
+            conn.close()
+        self.assertEqual(rows["android-a"], "acked")
+        self.assertEqual(rows["android-b"], "sent")
+
     def test_broadcast_retries_are_bounded_and_keep_identical_payload(self):
         from lan_p2p_core import send_broadcast_packet_with_retries
 
