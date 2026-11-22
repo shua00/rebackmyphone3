@@ -300,5 +300,43 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertEqual([peer["peer_id"] for peer in snapshot], ["android-offline"])
         self.assertEqual(snapshot[0]["endpoint_ip"], "192.168.1.20")
 
+    def test_outgoing_ack_is_idempotent_after_delivery(self):
+        from lan_p2p_core import persist_outgoing_message, acknowledge_outgoing_message
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-ack-idempotent",
+            "hello", ["android-a"]))
+        self.assertTrue(acknowledge_outgoing_message(
+            self.db_path, "server2", "m-ack-idempotent", "android-a"))
+        self.assertTrue(acknowledge_outgoing_message(
+            self.db_path, "server2", "m-ack-idempotent", "android-a"))
+        self.assertFalse(acknowledge_outgoing_message(
+            self.db_path, "server2", "m-ack-idempotent", "android-unknown"))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            state = conn.execute(
+                "SELECT state FROM lan_outbox WHERE message_id='m-ack-idempotent'"
+            ).fetchone()[0]
+            count = conn.execute(
+                "SELECT COUNT(*) FROM lan_outbox_targets WHERE message_id='m-ack-idempotent'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(state, "delivered")
+        self.assertEqual(count, 1)
+
+    def test_http_fallback_envelope_preserves_v2_message_identity(self):
+        from lan_p2p_core import (
+            encode_chat_http_fallback_payload, decode_chat_http_fallback_payload,
+        )
+        payload = encode_chat_http_fallback_payload(
+            "message-unique-1", "server2-stable-id", "Web_Console", "同一消息：中文|内容"
+        )
+        decoded = decode_chat_http_fallback_payload(payload)
+        self.assertEqual(decoded["message_id"], "message-unique-1")
+        self.assertEqual(decoded["sender_peer_id"], "server2-stable-id")
+        self.assertEqual(decoded["body"], "同一消息：中文|内容")
+        self.assertEqual(decoded["display_name"], "Web_Console")
+        self.assertIsNone(decode_chat_http_fallback_payload("legacy plain chat text"))
+
 if __name__ == "__main__":
     unittest.main()

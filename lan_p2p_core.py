@@ -214,6 +214,53 @@ def persist_outgoing_message(db_path, sender_scope, sender_peer_id, message_id,
         conn.close()
 
 
+def encode_chat_http_fallback_payload(message_id, sender_peer_id, display_name, body):
+    """Serialize the HTTP fallback for a v2 LAN chat using the identical message identity."""
+    import json
+    if not message_id or not sender_peer_id or body is None:
+        raise ValueError("chat fallback requires message_id, sender_peer_id and body")
+    envelope = {
+        "transport": "lan-p2p-v2",
+        "message_id": str(message_id),
+        "sender_peer_id": str(sender_peer_id),
+        "display_name": str(display_name or sender_peer_id),
+        "body": str(body),
+    }
+    return json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
+
+
+def decode_chat_http_fallback_payload(payload):
+    """Return a validated shared-ID HTTP fallback envelope, or None for legacy text commands."""
+    import json
+    if not isinstance(payload, str):
+        return None
+    try:
+        envelope = json.loads(payload)
+    except Exception:
+        return None
+    if not isinstance(envelope, dict) or envelope.get("transport") != "lan-p2p-v2":
+        return None
+    message_id = envelope.get("message_id")
+    sender_peer_id = envelope.get("sender_peer_id")
+    body = envelope.get("body")
+    display_name = envelope.get("display_name") or sender_peer_id
+    if not isinstance(message_id, str) or not message_id:
+        return None
+    if not isinstance(sender_peer_id, str) or not sender_peer_id:
+        return None
+    if not isinstance(body, str):
+        return None
+    if not isinstance(display_name, str) or not display_name:
+        return None
+    return {
+        "transport": "lan-p2p-v2",
+        "message_id": message_id,
+        "sender_peer_id": sender_peer_id,
+        "display_name": display_name,
+        "body": body,
+    }
+
+
 def acknowledge_outgoing_message(db_path, sender_scope, message_id, peer_id):
     """Persist exactly one recipient ACK; unknown/non-target ACKs never complete an outbox row."""
     if not sender_scope or not message_id or not peer_id:
@@ -233,24 +280,32 @@ def acknowledge_outgoing_message(db_path, sender_scope, message_id, peer_id):
             WHERE message_id=? AND peer_id=? AND status!='acked'""",
             (now_ms, message_id, peer_id))
         if cur.rowcount == 0:
-            # With no known members at send time, authenticated ACKs populate the first bounded
-            # discovery snapshot. Once the window closes, non-target ACKs are rejected.
-            row = conn.execute("SELECT state,delivery_deadline_ms FROM lan_outbox WHERE sender_scope=? AND message_id=?",
-                               (sender_scope, message_id)).fetchone()
-            if row is None or row[0] != "discovery_pending":
-                conn.rollback()
-                return False
-            deadline = int(row[1] or 0)
-            if deadline and now_ms > deadline:
-                conn.rollback()
-                return False
-            if not deadline:
-                deadline = now_ms + 5000
-                conn.execute("UPDATE lan_outbox SET delivery_deadline_ms=? WHERE message_id=?",
-                             (deadline, message_id))
-            conn.execute("""INSERT OR IGNORE INTO lan_outbox_targets
-                (message_id,peer_id,status,last_ack_at) VALUES(?,?,'acked',?)""",
-                (message_id, peer_id, now_ms))
+            existing = conn.execute(
+                "SELECT status FROM lan_outbox_targets WHERE message_id=? AND peer_id=?",
+                (message_id, peer_id)
+            ).fetchone()
+            if existing and existing[0] == "acked":
+                # Duplicate ACKs are idempotent, including after aggregate delivery.
+                pass
+            else:
+                # With no known members at send time, authenticated ACKs populate the first bounded
+                # discovery snapshot. Once the window closes, non-target ACKs are rejected.
+                row = conn.execute("SELECT state,delivery_deadline_ms FROM lan_outbox WHERE sender_scope=? AND message_id=?",
+                                   (sender_scope, message_id)).fetchone()
+                if row is None or row[0] != "discovery_pending":
+                    conn.rollback()
+                    return False
+                deadline = int(row[1] or 0)
+                if deadline and now_ms > deadline:
+                    conn.rollback()
+                    return False
+                if not deadline:
+                    deadline = now_ms + 5000
+                    conn.execute("UPDATE lan_outbox SET delivery_deadline_ms=? WHERE sender_scope=? AND message_id=?",
+                                 (deadline, sender_scope, message_id))
+                conn.execute("""INSERT OR IGNORE INTO lan_outbox_targets
+                    (message_id,peer_id,status,last_ack_at) VALUES(?,?,'acked',?)""",
+                    (message_id, peer_id, now_ms))
         total, acked = conn.execute("""SELECT COUNT(*),
             SUM(CASE WHEN status='acked' THEN 1 ELSE 0 END)
             FROM lan_outbox_targets WHERE message_id=?""", (message_id,)).fetchone()

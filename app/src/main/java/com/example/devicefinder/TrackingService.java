@@ -4666,16 +4666,18 @@ public class TrackingService extends Service implements LocationListener {
                         // 并发的普通上报与离线补发可能同时解析同一队列；同一进程内只允许一个执行入口。
                         if (commandsInFlight.contains(cmdId)) continue;
 
-                        // 本地反馈已到 accepted/最终状态时，即使进程在保存 executed_ids 前重启，也不能重复执行。
+                        // chat_msg has a stable Inbox message_id and is safe to replay after
+                        // process interruption. Other side-effecting commands keep the no-replay rule.
                         String priorFeedback = getCommandFeedbackStatus(cmdId);
-                        if ("accepted".equals(priorFeedback) || "uncertain".equals(priorFeedback)
-                                || "succeeded".equals(priorFeedback) || "failed".equals(priorFeedback)) {
+                        boolean retryableChat = "chat_msg".equals(cmdType);
+                        if ("accepted".equals(priorFeedback) || "succeeded".equals(priorFeedback)
+                                || (!retryableChat && ("uncertain".equals(priorFeedback)
+                                || "failed".equals(priorFeedback)))) {
                             executedIds.add(cmdId);
                             continue;
                         }
-                        if ("executing".equals(priorFeedback)) {
+                        if ("executing".equals(priorFeedback) && !retryableChat) {
                             if (commandsInFlight.contains(cmdId)) continue;
-                            // 上次进程在执行阶段中断，结果无法确定；不自动重放可能已有副作用的指令。
                             recordCommandFeedback(cmdId, cmdType, "uncertain", "进程在执行阶段中断，结果无法确认；为避免重复执行，不自动重放");
                             executedIds.add(cmdId);
                             continue;
@@ -4882,8 +4884,12 @@ public class TrackingService extends Service implements LocationListener {
                     if (commandId.equals(item.optString("command_id", ""))) {
                         if (!replaced) {
                             String oldStatus = item.optString("status", "");
-                            boolean oldFinal = "succeeded".equals(oldStatus) || "failed".equals(oldStatus);
-                            boolean oldTerminalDelivery = "accepted".equals(oldStatus) || "uncertain".equals(oldStatus);
+                            boolean retryableChat = "chat_msg".equals(action);
+                            boolean oldFinal = ("succeeded".equals(oldStatus) || "failed".equals(oldStatus))
+                                    && !("failed".equals(oldStatus) && retryableChat);
+                            boolean oldTerminalDelivery = ("accepted".equals(oldStatus)
+                                    || "uncertain".equals(oldStatus))
+                                    && !("uncertain".equals(oldStatus) && retryableChat);
                             boolean newEarly = "received".equals(status) || "executing".equals(status) || "retry_wait".equals(status);
                             // 迟到的早期状态不得覆盖 accepted/uncertain 或最终 succeeded/failed。
                             next.put((oldFinal || (oldTerminalDelivery && newEarly)) ? item : entry);
@@ -4918,13 +4924,35 @@ public class TrackingService extends Service implements LocationListener {
                     if (payload != null && !payload.isEmpty()) showFloatingMessage(payload);
                     return true;
                 case "chat_msg":
-                    if (payload != null && !payload.isEmpty()) {
-                        // ★ 2026-11-07 对齐：与 UDP 路径的 handleIncomingChat 保持同一发送者前缀
-                        String shortName = "Web_Console";
-                        saveChatToHistory("[" + shortName + "] " + payload);
-                        notifyChatUi();
-                        FileLogger.log(this, "CHAT", "收到 HTTP 聊天: " + payload);
+                    if (payload == null || payload.isEmpty()) return true;
+                    String trimmedChatPayload = payload.trim();
+                    if (trimmedChatPayload.startsWith("{")) {
+                        try {
+                            JSONObject fallback = new JSONObject(trimmedChatPayload);
+                            if ("lan-p2p-v2".equals(fallback.optString("transport", ""))) {
+                                String messageId = fallback.optString("message_id", "");
+                                String senderPeerId = fallback.optString("sender_peer_id", "");
+                                String displayName = fallback.optString("display_name", "Web_Console");
+                                String body = fallback.optString("body", "");
+                                if (messageId.isEmpty() || senderPeerId.isEmpty()) {
+                                    FileLogger.log(this, "CHAT", "⚠️ HTTP chat fallback envelope incomplete; keep queued");
+                                    return false;
+                                }
+                                // HTTP and LAN v2 converge on one durable Inbox key. Whichever
+                                // arrives second is an acknowledged duplicate, never a second display.
+                                return persistIncomingLanChat(senderPeerId, messageId, body, displayName);
+                            }
+                        } catch (Exception malformed) {
+                            if (trimmedChatPayload.contains("lan-p2p-v2")) {
+                                FileLogger.log(this, "CHAT", "⚠️ HTTP chat fallback envelope malformed; keep queued");
+                                return false;
+                            }
+                        }
                     }
+                    // Legacy queued plain-text chat remains readable and is not reinterpreted as v2.
+                    saveChatToHistory("[Web_Console] " + payload);
+                    notifyChatUi();
+                    FileLogger.log(this, "CHAT", "收到 HTTP 聊天");
                     return true;
                 case "change_server":
                     if (!isValidUrl(payload)) return false;

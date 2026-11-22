@@ -59,7 +59,7 @@ from urllib.parse import urlparse, parse_qs
 # ★ 新增ThreadPoolExecutor 补丁： 2026-11-05 13:50
 from concurrent.futures import ThreadPoolExecutor
 
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, peer_endpoint_matches, list_known_peer_snapshot
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, peer_endpoint_matches, list_known_peer_snapshot, encode_chat_http_fallback_payload, decode_chat_http_fallback_payload
 UDP_LISTEN_PORT = 8887  # server2 独立监听端口；发往 Android 的指令仍使用 8888
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "server2")
 
@@ -880,12 +880,12 @@ def get_target_protocol(dev_id):
         return int(v) if isinstance(v, (int, str)) and str(v).isdigit() else 1
 
 
-def _build_version_aware_commands(target_devs, action_name, payload):
-    """v2-only 信令生成：不再依据设备版本双发旧协议。"""
+def _build_version_aware_commands(target_devs, action_name, payload, message_id=None):
+    """Build v2-only LAN packets; a caller may share message_id with the HTTP fallback."""
     if action_name == "custom_msg":
         return [f"FIND_ME_FLOAT:{RESCUE_SECRET}:{payload}"]
     if action_name == "chat_msg":
-        message_id = uuid.uuid4().hex
+        message_id = str(message_id or uuid.uuid4().hex)
         created_at_ms = int(time.time() * 1000)
         packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
                   "sender_peer_type": "server2", "service_id": PEER_NODE_ID,
@@ -896,12 +896,12 @@ def _build_version_aware_commands(target_devs, action_name, payload):
             encoded = encode_packet(packet, RESCUE_SECRET)
         except ValueError as e:
             with print_lock:
-                print(f"⚠️ Web chat message rejected before enqueue: {e}")
+                print(f"⚠️ Web chat UDP path unavailable; retain HTTP fallback: {e}")
             return []
         if not persist_outgoing_message(CHAT_DEDUP_DB, "server2", PEER_NODE_ID,
                                         message_id, str(payload), target_devs, created_at_ms):
             with print_lock:
-                print("⚠️ Web chat outbox persistence failed; refusing untracked UDP send")
+                print("⚠️ Web chat P2P outbox persistence failed; retain HTTP fallback only")
             return []
         return [encoded.decode("utf-8")]
     return []
@@ -924,6 +924,35 @@ def _persist_command_queue_locked(dev_id):
             conn.commit()
         finally:
             conn.close()
+
+
+def _remove_chat_fallback_for_message(dev_id, message_id):
+    """Remove only the HTTP fallback for a LAN chat already confirmed over v2 P2P."""
+    if not dev_id or not message_id:
+        return False
+    removed = 0
+    with _cmd_lock:
+        queue = PENDING_COMMANDS.get(dev_id, [])
+        kept = []
+        for command in queue:
+            if command.get("type") == "chat_msg":
+                envelope = decode_chat_http_fallback_payload(command.get("payload"))
+                if envelope and envelope["message_id"] == message_id:
+                    removed += 1
+                    continue
+            kept.append(command)
+        if removed:
+            if kept:
+                PENDING_COMMANDS[dev_id] = kept
+            else:
+                PENDING_COMMANDS.pop(dev_id, None)
+            try:
+                _persist_command_queue_locked(dev_id)
+            except Exception as exc:
+                # A stale persisted entry remains harmless because the same message_id is deduplicated.
+                with print_lock:
+                    print(f"⚠️ server2 chat fallback cleanup deferred for {dev_id}: {type(exc).__name__}")
+    return removed > 0
 
 
 def _load_pending_commands():
@@ -998,14 +1027,30 @@ def process_executed_commands(dev_id, executed_ids):
     id_set = {x for x in executed_ids if isinstance(x, str) and x}
     if not id_set: return
     removed = 0
+    completed_chat_fallbacks = []
     with _cmd_lock:
         queue = PENDING_COMMANDS.get(dev_id, [])
         if not queue: return
+        completed = [c for c in queue if c.get("id") in id_set]
+        for command in completed:
+            if command.get("type") == "chat_msg":
+                envelope = decode_chat_http_fallback_payload(command.get("payload"))
+                if envelope:
+                    completed_chat_fallbacks.append(envelope)
         new_queue = [c for c in queue if c["id"] not in id_set]
         removed = len(queue) - len(new_queue)
         if new_queue: PENDING_COMMANDS[dev_id] = new_queue
         else: PENDING_COMMANDS.pop(dev_id, None)
         _persist_command_queue_locked(dev_id)
+
+    # This is safe for the v2 fallback: chat_msg executed IDs are emitted only after the
+    # shared-ID Inbox commit, or after a prior accepted result. Duplicate ACK is idempotent.
+    for envelope in completed_chat_fallbacks:
+        if not acknowledge_outgoing_message(
+                CHAT_DEDUP_DB, "server2", envelope["message_id"], dev_id):
+            with print_lock:
+                print(f"⚠️ executed HTTP chat ACK reconcile deferred: {dev_id}")
+
     if removed > 0:
         with print_lock:
             print(f"✅ [HTTP队列] {dev_id} 已确认执行 {removed} 条")
@@ -1039,7 +1084,22 @@ def process_command_feedback(dev_id, feedback_items):
         valid.append((command_id, dev_id, action, status, detail[:500], now, now))
     if not valid:
         return 0
+
+    # Capture the shared v2 fallback envelope before terminal feedback removes its command row.
+    chat_fallback_candidates = []
+    with _cmd_lock:
+        pending_by_id = {c.get("id"): c for c in PENDING_COMMANDS.get(dev_id, [])}
+        for row in valid:
+            command_id, _, action, status = row[:4]
+            if action == "chat_msg" and status in ("accepted", "succeeded"):
+                command = pending_by_id.get(command_id)
+                if command:
+                    envelope = decode_chat_http_fallback_payload(command.get("payload"))
+                    if envelope:
+                        chat_fallback_candidates.append((command_id, envelope))
+
     # 先持久化反馈，再清理队列；任何 DB 失败都保留原队列等待下次上报。
+    persisted_chat_acks = []
     with db_write_lock:
         conn = sqlite3.connect('track_history.db', timeout=10)
         try:
@@ -1065,9 +1125,31 @@ def process_command_feedback(dev_id, feedback_items):
                       THEN command_feedback.updated_at
                     ELSE excluded.updated_at END""", valid)
             conn.commit()
+            for command_id, envelope in chat_fallback_candidates:
+                saved = conn.execute(
+                    "SELECT status FROM command_feedback WHERE command_id=? AND device_id=?",
+                    (command_id, dev_id)
+                ).fetchone()
+                if saved and saved[0] in ("accepted", "succeeded"):
+                    persisted_chat_acks.append(envelope)
         finally:
             conn.close()
-    terminal_ids = {row[0] for row in valid if row[3] in terminal_statuses}
+
+    # Only a persisted accepted status means dispatchHttpCommand committed the Android Inbox.
+    for envelope in persisted_chat_acks:
+        if acknowledge_outgoing_message(
+                CHAT_DEDUP_DB, "server2", envelope["message_id"], dev_id):
+            _remove_chat_fallback_for_message(dev_id, envelope["message_id"])
+        else:
+            with print_lock:
+                print(f"⚠️ HTTP chat accepted but outbox ACK reconcile deferred: {dev_id}")
+
+    # chat_msg is idempotently replayable, so uncertain/failed results must remain queued.
+    terminal_ids = {
+        row[0] for row in valid
+        if row[3] in terminal_statuses
+        and not (row[2] == "chat_msg" and row[3] in ("uncertain", "failed"))
+    }
     if terminal_ids:
         with _cmd_lock:
             queue = PENDING_COMMANDS.get(dev_id, [])
@@ -1246,6 +1328,7 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
             if acknowledge_outgoing_message(CHAT_DEDUP_DB, "server2", message_id, sender):
                 record_peer(CHAT_DEDUP_DB, "server2", sender, "android", "android-main",
                             addr[0], addr[1], "active")
+                _remove_chat_fallback_for_message(sender, message_id)
         return
     if packet_type != "chat.message":
         return
@@ -1979,9 +2062,9 @@ def handle_client(client_conn, client_addr):
                 if not save_report(dev_id, data, client_addr[0]):
                     client_conn.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                     return
+                feedback_accepted = process_command_feedback(dev_id, command_feedback) if command_feedback else 0
                 if executed_ids:
                     process_executed_commands(dev_id, executed_ids)
-                feedback_accepted = process_command_feedback(dev_id, command_feedback) if command_feedback else 0
 
                 with state_lock:
                     if dev_id not in ALL_DEVICES_STATUS:
@@ -2434,7 +2517,8 @@ def handle_client(client_conn, client_addr):
                                               if peer["endpoint_ip"] in selected_ips]
                         target_devs = sorted(set(target_devs) | set(historical_ids))
                     for dev_id in target_devs:
-                        enqueue_command(dev_id, action, payload)
+                        if action != "chat_msg":
+                            enqueue_command(dev_id, action, payload)
 
                 def smart_send(cmd_prefix):
                     nonlocal extra_msg          # ★ 2026-11-18：必须声明，否则下面赋值只改到局部变量
@@ -2509,15 +2593,34 @@ def handle_client(client_conn, client_addr):
                         success = False
                         extra_msg = "未能构造下行信令，留言已写入队列，等手机下次上报时下发"
                 elif action == "chat_msg":
-                    # v2-only：单一 CHAT 信令
+                    # LAN v2 and the existing HTTP command fallback share one message_id.
                     success = False
-                    for cmd_prefix in _build_version_aware_commands(target_devs, "chat_msg", payload):
+                    chat_message_id = uuid.uuid4().hex
+                    fallback_payload = encode_chat_http_fallback_payload(
+                        chat_message_id, PEER_NODE_ID, "Web_Console", str(payload))
+                    # Try the durable P2P Outbox first; a failure or >1200-byte packet does not
+                    # disable the existing authenticated HTTP fallback.
+                    chat_packets = _build_version_aware_commands(
+                        target_devs, "chat_msg", payload, message_id=chat_message_id)
+
+                    fallback_queued = False
+                    for dev_id in target_devs:
+                        if enqueue_command(dev_id, "chat_msg", fallback_payload):
+                            fallback_queued = True
+                        else:
+                            with print_lock:
+                                print(f"⚠️ Web chat HTTP fallback queue rejected for {dev_id}")
+
+                    # Queue fallback before UDP send so a fast stored ACK can cancel that exact row.
+                    for cmd_prefix in chat_packets:
                         if smart_send(cmd_prefix):
                             success = True
+                    if fallback_queued:
+                        success = True
+
                     if success:
                         ts = datetime.datetime.now().strftime("%H:%M:%S")
-                        # 本机发出的网页对讲也进入 server2 自己的持久化历史。
-                        local_saved = _claim_chat_message("Web_Console", "web-" + uuid.uuid4().hex, payload)
+                        local_saved = _claim_chat_message("Web_Console", "web-" + chat_message_id, payload)
                         if local_saved is None:
                             with print_lock:
                                 print("⚠️ 网页对讲已尝试发送，但本机历史持久化失败")
