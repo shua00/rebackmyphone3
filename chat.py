@@ -31,7 +31,7 @@ UDP_PORT = 8890  # 独立监听端口，避免与 server2/rescue2 冲突
 UDP_LISTENER_SOCKET = None
 UDP_CHAT_SEND_LOCK = threading.Lock()
 RESCUE_SECRET = "your_private_secret_key"  # ⚠️ 必须与手机端一致
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, add_discovery_targets_for_peer
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.sqlite3"), "chat.py")
 SERVER2_URL = "http://127.0.0.1:8080"      # server2.py 的地址
 # ==========================================
@@ -280,6 +280,27 @@ def send_chat_v2(body, display_name, message_id):
 
 
 # UDP 监听线程：仅独立模式启动
+def _resume_pending_v2_for_peer(sock, peer_id, addr):
+    """Attach the verified peer to open discovery snapshots and replay its pending rows."""
+    add_discovery_targets_for_peer(CHAT_DB, "chat.py", peer_id)
+    for pending in load_pending_outgoing_for_peer(CHAT_DB, "chat.py", peer_id, limit=10):
+        chat_packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
+                       "sender_peer_type": "chat.py", "service_id": PEER_NODE_ID,
+                       "target_peer_id": peer_id, "message_id": pending["message_id"],
+                       "created_at_ms": pending["created_at_ms"],
+                       "display_name": "PEER_NODE_ID", "body": pending["body"]}
+        try:
+            target_port = int(pending.get("endpoint_port") or addr[1])
+            raw = encode_packet(chat_packet, RESCUE_SECRET)
+            with UDP_CHAT_SEND_LOCK:
+                sock.sendto(raw, (pending["endpoint_ip"], target_port))
+            mark_outgoing_attempt(CHAT_DB, pending["message_id"], peer_id,
+                                  pending["endpoint_ip"], target_port)
+        except Exception as e:
+            with print_lock:
+                print(f"⚠️ chat.py pending chat retry failed peer={peer_id}: {type(e).__name__}")
+
+
 def _handle_authenticated_v2_packet(envelope, sock, addr):
     packet_type = envelope.get("type")
     sender = str(envelope.get("sender_peer_id") or "")
@@ -288,7 +309,8 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
     display_sender = str(envelope.get("display_name") or sender)
     if packet_type == "peer.hello":
         nonce = str(envelope.get("nonce") or "")
-        if not sender or not nonce:
+        if (not sender or not nonce
+                or int(addr[1]) not in (8887, 8888, 8889, 8890)):
             return
         if not record_peer(CHAT_DB, "chat.py", sender,
                            envelope.get("sender_peer_type", "unknown"),
@@ -301,10 +323,16 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
         try:
             sock.sendto(encode_packet(reply, RESCUE_SECRET), addr)
         except OSError:
-            pass
-        # challenge_only means the sender is already probing this endpoint;
-        # a normal beacon triggers a reciprocal, endpoint-bound challenge.
-        if not envelope.get("challenge_only", False):
+            return
+        if envelope.get("challenge_only", False):
+            # We answered the peer's authenticated, nonce-bearing probe.
+            # Promote this exact source endpoint and resume only its fixed targets.
+            if record_peer(CHAT_DB, "chat.py", sender,
+                           envelope.get("sender_peer_type", "unknown"),
+                           envelope.get("service_id", ""), addr[0], addr[1], "active"):
+                _resume_pending_v2_for_peer(sock, sender, addr)
+        else:
+            # A regular HELLO is only an observation; challenge the reverse endpoint.
             send_directed_peer_challenge(
                 sock, CHAT_DB, "chat.py", PEER_NODE_ID, "chat.py",
                 PEER_NODE_ID, RESCUE_SECRET, UDP_PORT,
@@ -316,24 +344,7 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
                 CHAT_DB, "chat.py", reply_nonce, sender, addr[0], addr[1],
                 envelope.get("sender_peer_type", "unknown"),
                 envelope.get("service_id", "")):
-            # Only a nonce/identity/endpoint match upgrades a suspect route.
-            add_discovery_targets_for_peer(CHAT_DB, "chat.py", sender)
-            for pending in load_pending_outgoing_for_peer(
-                    CHAT_DB, "chat.py", sender, limit=10):
-                chat_packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
-                               "sender_peer_type": "chat.py", "service_id": PEER_NODE_ID,
-                               "target_peer_id": sender, "message_id": pending["message_id"],
-                               "created_at_ms": pending["created_at_ms"],
-                               "display_name": "Web_Guest", "body": pending["body"]}
-                try:
-                    target_port = int(pending.get("endpoint_port") or addr[1])
-                    raw = encode_packet(chat_packet, RESCUE_SECRET)
-                    with UDP_CHAT_SEND_LOCK:
-                        sock.sendto(raw, (pending["endpoint_ip"], target_port))
-                    mark_outgoing_attempt(CHAT_DB, pending["message_id"], sender,
-                                          pending["endpoint_ip"], target_port)
-                except Exception as e:
-                    pass
+            _resume_pending_v2_for_peer(sock, sender, addr)
         return
     if packet_type == "chat.ack":
         message_id = str(envelope.get("message_id") or "")

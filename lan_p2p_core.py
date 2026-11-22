@@ -549,7 +549,7 @@ def complete_peer_challenge(db_path, receiver_scope, nonce, peer_id,
                             service_id=""):
     """Activate a route only after a live nonce matches the expected peer and source endpoint."""
     if (not db_path or not receiver_scope or not nonce or not peer_id
-            or not endpoint_ip or not endpoint_port):
+            or not endpoint_ip or int(endpoint_port or 0) not in (8887, 8888, 8889, 8890)):
         return False
     conn = sqlite3.connect(db_path, timeout=10)
     try:
@@ -597,7 +597,7 @@ def send_directed_peer_challenge(sock, db_path, receiver_scope, sender_peer_id,
     """Challenge one observed route; only its matching reply can activate it."""
     import uuid
     if (sock is None or not target_peer_id or not target_ip
-            or not (1 <= int(target_port or 0) <= 65535)):
+            or int(target_port or 0) not in (8887, 8888, 8889, 8890)):
         return False
     nonce = uuid.uuid4().hex
     if not remember_peer_challenge(db_path, receiver_scope, nonce,

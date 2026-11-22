@@ -376,6 +376,15 @@ class LanP2PCoreTests(unittest.TestCase):
                 self.db_path, "server2", "nonce-expired", "android-a",
                 "192.168.1.10", 8888, "android", "android-main"))
 
+    def test_peer_challenge_rejects_unregistered_udp_service_ports(self):
+        from lan_p2p_core import remember_peer_challenge, complete_peer_challenge
+        self.assertTrue(remember_peer_challenge(
+            self.db_path, "server2", "nonce-bad-port", "android-a",
+            "192.168.1.10", 9999))
+        self.assertFalse(complete_peer_challenge(
+            self.db_path, "server2", "nonce-bad-port", "android-a",
+            "192.168.1.10", 9999, "android", "android-main"))
+
     def test_suspect_peer_is_not_an_active_unicast_route(self):
         from lan_p2p_core import record_peer, list_known_peers, persist_outgoing_message, load_pending_outgoing_for_peer
         self.assertTrue(record_peer(self.db_path, "server2", "android-a",
