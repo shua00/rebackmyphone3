@@ -406,7 +406,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
         db.beginTransaction();
         try {
             android.database.sqlite.SQLiteStatement update = db.compileStatement(
-                    "UPDATE lan_outbox SET retry_attempt_count=0,last_event_retry_at_ms=?,state='pending' " +
+                    "UPDATE lan_outbox SET retry_attempt_count=0,last_event_retry_at_ms=?,state=CASE WHEN state='discovery_pending' THEN 'discovery_pending' ELSE 'pending' END " +
                     "WHERE retry_attempt_count>=? " +
                     "AND state NOT IN ('delivered','expired','waiting_peers') " +
                     "AND last_event_retry_at_ms<=? " +
