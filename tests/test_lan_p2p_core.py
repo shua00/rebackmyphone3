@@ -995,5 +995,27 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn('executeMaintenance("keep-alive"', method)
         self.assertNotIn('selfHeal();\\n            } else if ("ACTION_JOB_WAKE_UP"', method)
 
+
+    def test_android_network_refresh_and_offline_flush_do_not_run_on_main_handler(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+
+        start = source.index("private final Runnable networkRefreshRunnable")
+        end = source.index("private JSONObject buildNetworkSnapshot()", start)
+        runnable = source[start:end]
+        self.assertIn('executeMaintenance("network-refresh"', runnable)
+        self.assertIn("buildNetworkSnapshot()", runnable)
+        self.assertIn("flushPendingReports()", runnable)
+        self.assertIn("retryPendingLanChatMessages()", runnable)
+
+        callback_start = source.index("public void onAvailable(Network network)")
+        callback_end = source.index("public void onLost(Network network)", callback_start)
+        callback = source[callback_start:callback_end]
+        self.assertIn("handler.postDelayed(networkRefreshRunnable, 1200L)", callback)
+        self.assertIn('executeMaintenance("network-available-flush"', callback)
+        self.assertNotIn("flushPendingReports();", callback)
+
 if __name__ == "__main__":
     unittest.main()
