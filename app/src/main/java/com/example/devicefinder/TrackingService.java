@@ -257,6 +257,9 @@ public class TrackingService extends Service implements LocationListener {
             new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, Long> receivedChatMessageIds =
             new java.util.concurrent.ConcurrentHashMap<>();
+    // 防止发送端重试/多端口重复广播时，同一消息在持久化完成前重复占用后台队列。
+    private final java.util.Set<String> pendingLanChatReceives =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
     // LAN 对讲先持久化消息正文与消息 ID，再发 ACK；防止进程在 ACK 后、历史写入前退出。
     private final Object lanChatReceiveLock = new Object();
     private static final String PREF_LAN_CHAT_RECEIVED_IDS = "lan_chat_received_message_ids";
@@ -3712,21 +3715,30 @@ public class TrackingService extends Service implements LocationListener {
                     // 磁盘持久化放入现有有界后台执行器，避免 UDP 接收循环被 commit 阻塞。
                     // 仍然严格在持久化成功/确认重复后才 ACK；队列拒绝时不 ACK，发送端可重试。
                     final String ackMessageId = messageId;
+                    final String receiveKey = senderId + ":" + ackMessageId;
+                    if (!pendingLanChatReceives.add(receiveKey)) {
+                        // 同一消息已有持久化任务在途；由首个任务完成后统一 ACK。
+                        return true;
+                    }
                     final java.net.InetAddress ackAddress = packet.getAddress();
                     final int ackPort = packet.getPort();
                     try {
                         reportExecutor.execute(() -> {
-                            if (persistIncomingLanChat(senderId, ackMessageId, content)) {
-                                receivedChatMessageIds.put(senderId + ":" + ackMessageId,
-                                        System.currentTimeMillis());
-                                if (receivedChatMessageIds.size() > 500) {
-                                    long cutoff = System.currentTimeMillis() - 10 * 60 * 1000L;
-                                    receivedChatMessageIds.entrySet().removeIf(e -> e.getValue() < cutoff);
+                            try {
+                                if (persistIncomingLanChat(senderId, ackMessageId, content)) {
+                                    receivedChatMessageIds.put(receiveKey, System.currentTimeMillis());
+                                    if (receivedChatMessageIds.size() > 500) {
+                                        long cutoff = System.currentTimeMillis() - 10 * 60 * 1000L;
+                                        receivedChatMessageIds.entrySet().removeIf(e -> e.getValue() < cutoff);
+                                    }
+                                    sendChatAck(socket, ackAddress, ackPort, ackMessageId);
                                 }
-                                sendChatAck(socket, ackAddress, ackPort, ackMessageId);
+                            } finally {
+                                pendingLanChatReceives.remove(receiveKey);
                             }
                         });
                     } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                        pendingLanChatReceives.remove(receiveKey);
                         FileLogger.log(this, "CHAT",
                                 "⚠️ LAN 对讲持久化任务队列已满/关闭，本条不 ACK，等待发送端重试");
                     }
