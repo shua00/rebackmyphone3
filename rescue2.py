@@ -184,7 +184,7 @@ def _claim_chat_message(sender, message_id, content):
     key = str(message_id or content or "")
     if not key: return None
     now = time.time()
-    display_time = datetime.datetime.now().strftime("%H:%M:%S")
+    display_time = time.strftime("%H:%M:%S", time.localtime(now))
     try:
         with _CHAT_DEDUP_LOCK:
             conn = sqlite3.connect(_CHAT_DEDUP_DB, timeout=5)
@@ -1528,7 +1528,7 @@ if __name__ == "__main__":
     print(f"   本机 IP: {get_local_ip()}")
     restored_chat = _restore_chat_history()
     if restored_chat:
-        print(f"\\n{I.chat} 已恢复最近 {len(restored_chat)} 条本机对讲记录：")
+        print(f"\n{I.chat} 已恢复最近 {len(restored_chat)} 条本机对讲记录：")
         for msg_time, sender, content in restored_chat:
             print(f"  [{msg_time}] [{sender}] {content}")
 
