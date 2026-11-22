@@ -4070,6 +4070,15 @@ public class TrackingService extends Service implements LocationListener {
                 if (verifiedChatPeers.containsKey(peerId)) awaitingPeerIds.add(peerId);
             }
         }
+        // Snapshot route object identities at dispatch time. ACK grace cleanup may
+        // invalidate only the exact stale route used by this send, never a route
+        // that was freshly verified while the grace timer was pending.
+        final java.util.Map<String, java.net.InetSocketAddress> awaitingRouteSnapshot =
+                new java.util.HashMap<>();
+        for (String peerId : awaitingPeerIds) {
+            java.net.InetSocketAddress route = verifiedChatPeers.get(peerId);
+            if (route != null) awaitingRouteSnapshot.put(peerId, route);
+        }
         final int totalPeerCount = pendingTargetIds.size();
         final int reachablePeerCount = awaitingPeerIds.size();
         final boolean firstDiscoveryWindowOpen = store.isDiscoveryPending(messageId);
@@ -4132,6 +4141,8 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.log(this, "CHAT", "ℹ️ 固定目标当前均离线，保留逐设备待送达记录: " + messageId);
             }
             final java.util.Set<String> completionAwaitingPeerIds = awaitingPeerIds;
+            final java.util.Map<String, java.net.InetSocketAddress> completionRouteSnapshot =
+                    awaitingRouteSnapshot;
             final java.util.concurrent.CountDownLatch completionAck = ack;
             final int completionTotalPeerCount = totalPeerCount;
             final int completionReachablePeerCount = reachablePeerCount;
@@ -4143,7 +4154,7 @@ public class TrackingService extends Service implements LocationListener {
             ackCleanupDeferred = true;
             boolean completionScheduled = scheduleLanChatTask("chat-ack-grace-" + messageId, () -> {
                 Runnable completion = () -> completeLanChatAckWindow(messageId,
-                        completionAwaitingPeerIds, completionAck,
+                        completionAwaitingPeerIds, completionRouteSnapshot, completionAck,
                         completionTotalPeerCount, completionReachablePeerCount,
                         completionStore, completionStartedAt);
                 try {
@@ -4155,9 +4166,9 @@ public class TrackingService extends Service implements LocationListener {
             if (!completionScheduled) {
                 lanChatAckGraceInFlight.remove(messageId);
                 ackCleanupDeferred = false;
-                completeLanChatAckWindow(messageId, completionAwaitingPeerIds, completionAck,
-                        completionTotalPeerCount, completionReachablePeerCount,
-                        completionStore, completionStartedAt);
+                completeLanChatAckWindow(messageId, completionAwaitingPeerIds,
+                        completionRouteSnapshot, completionAck, completionTotalPeerCount,
+                        completionReachablePeerCount, completionStore, completionStartedAt);
             }
         } finally {
             if (!ackCleanupDeferred) {
@@ -4174,6 +4185,7 @@ public class TrackingService extends Service implements LocationListener {
      */
     private void completeLanChatAckWindow(String messageId,
             java.util.Set<String> awaitingPeerIds,
+            java.util.Map<String, java.net.InetSocketAddress> routeSnapshot,
             java.util.concurrent.CountDownLatch ack,
             int totalPeerCount, int reachablePeerCount,
             LanChatStore store, long ackStartedAt) {
@@ -4197,8 +4209,11 @@ public class TrackingService extends Service implements LocationListener {
             } else {
                 lastPeerDiscoveryAt = 0L;
                 for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
-                    verifiedChatPeers.remove(peerId);
-                    verifiedChatPeerSeen.remove(peerId);
+                    java.net.InetSocketAddress sentRoute = routeSnapshot.get(peerId);
+                    if (sentRoute != null && verifiedChatPeers.get(peerId) == sentRoute) {
+                        verifiedChatPeers.remove(peerId);
+                        verifiedChatPeerSeen.remove(peerId);
+                    }
                 }
                 FileLogger.log(this, "CHAT", "⚠️ P2P 消息仍待确认并保留本地队列: "
                         + deliveredPeers + "/" + totalPeerCount + "，失联成员已清理，消息 " + messageId);
