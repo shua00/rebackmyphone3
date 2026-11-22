@@ -511,6 +511,27 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
+    /**
+     * Accept a delayed ACK only from the endpoint durably recorded for this fixed recipient.
+     * This remains valid after the short-lived in-memory route cache is evicted.
+     */
+    public boolean matchesExpectedAckEndpoint(String messageId, String peerId,
+                                              String endpointIp, int endpointPort) {
+        if (messageId == null || peerId == null || endpointIp == null || endpointIp.length() == 0
+                || endpointPort <= 0 || endpointPort > 65535) return false;
+        Cursor c = null;
+        try {
+            c = getReadableDatabase().rawQuery(
+                    "SELECT 1 FROM lan_outbox_targets WHERE message_id=? AND peer_id=? AND last_endpoint=? LIMIT 1",
+                    new String[]{messageId, peerId, endpointIp + ":" + endpointPort});
+            return c.moveToFirst();
+        } catch (Exception e) {
+            return false;
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
     public boolean acknowledge(String messageId, String peerId) {
         if (messageId == null || peerId == null) return false;
         SQLiteDatabase db = getWritableDatabase();
