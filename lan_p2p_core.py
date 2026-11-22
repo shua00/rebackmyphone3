@@ -100,7 +100,7 @@ def _envelope_key(secret):
     import hashlib
     if not isinstance(secret, str) or not secret:
         raise ValueError("shared secret is required")
-    return hashlib.sha256(b"lan-p2p-v2\\x00" + secret.encode("utf-8")).digest()
+    return hashlib.sha256(b"lan-p2p-v2\x00" + secret.encode("utf-8")).digest()
 
 
 def encode_packet(fields, secret, max_bytes=1200):

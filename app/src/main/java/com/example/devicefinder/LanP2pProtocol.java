@@ -90,7 +90,7 @@ public final class LanP2pProtocol {
     private static String hmac(String canonical, String secret) throws Exception {
         if (secret == null || secret.isEmpty()) throw new IllegalArgumentException("Missing shared secret");
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        byte[] key = digest.digest(("lan-p2p-v2\u0000" + secret).getBytes(StandardCharsets.UTF_8));
+        byte[] key = digest.digest(("lan-p2p-v2" + ((char) 0) + secret).getBytes(StandardCharsets.UTF_8));
         Mac mac = Mac.getInstance("HmacSHA256");
         mac.init(new SecretKeySpec(key, "HmacSHA256"));
         byte[] result = mac.doFinal(canonical.getBytes(StandardCharsets.UTF_8));

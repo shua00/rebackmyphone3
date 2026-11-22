@@ -54,9 +54,34 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertEqual(count, 2)
 
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_authenticated_v2_packet_round_trip_and_tamper_rejection(self):
+        from lan_p2p_core import encode_packet, decode_packet
+        packet = {
+            "type": "chat.message",
+            "sender_peer_id": "android-a",
+            "sender_peer_type": "android",
+            "service_id": "android-main",
+            "message_id": "message-1",
+            "target_peer_id": "android-b",
+            "created_at_ms": 123456,
+            "body": "老人好，今天记得吃药"
+        }
+        encoded = encode_packet(packet, "test-secret")
+        decoded = decode_packet(encoded, "test-secret")
+        self.assertEqual(decoded["body"], packet["body"])
+        tampered = encoded.replace("老人好".encode("utf-8"), "老人坏".encode("utf-8"))
+        with self.assertRaises(ValueError):
+            decode_packet(tampered, "test-secret")
 
+    def test_authenticated_v2_packet_rejects_oversized_datagrams(self):
+        from lan_p2p_core import encode_packet
+        packet = {
+            "type": "chat.message",
+            "sender_peer_id": "android-a",
+            "body": "x" * 2000
+        }
+        with self.assertRaises(ValueError):
+            encode_packet(packet, "test-secret")
 
     def test_authenticated_v2_packet_round_trip_and_tamper_rejection(self):
         from lan_p2p_core import encode_packet, decode_packet
@@ -86,3 +111,7 @@ if __name__ == "__main__":
         }
         with self.assertRaises(ValueError):
             encode_packet(packet, "test-secret")
+
+
+if __name__ == "__main__":
+    unittest.main()
