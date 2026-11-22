@@ -833,6 +833,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("minimumAttempts <= 1 ? 1_500L : 4_000L", tracking)
         self.assertIn("handler.postDelayed", tracking)
         self.assertIn("lanChatRetryInFlight.set(false);", recovery)
+        self.assertIn("if (serviceDestroyed || !lanChatRetryInFlight.compareAndSet(false, true)) return", recovery)
 
 
     def test_android_peer_and_target_reads_do_not_collapse_database_errors_to_empty(self):
