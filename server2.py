@@ -59,7 +59,7 @@ from urllib.parse import urlparse, parse_qs
 # ★ 新增ThreadPoolExecutor 补丁： 2026-11-05 13:50
 from concurrent.futures import ThreadPoolExecutor
 
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, peer_endpoint_matches, list_known_peer_snapshot, encode_chat_http_fallback_payload, decode_chat_http_fallback_payload, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, add_discovery_targets_for_peer
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, peer_endpoint_matches, list_known_peer_snapshot, encode_chat_http_fallback_payload, decode_chat_http_fallback_payload, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, add_discovery_targets_for_peer, validate_incoming_message_claim
 UDP_LISTEN_PORT = 8887  # server2 独立监听端口；发往 Android 的指令仍使用 8888
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "server2")
 
@@ -222,15 +222,22 @@ def _claim_chat_message(sender, message_id, content):
                 cur = conn.execute("""INSERT OR IGNORE INTO received_chat_messages
                     (receiver_scope,sender,message_key,content,received_at,display_time) VALUES(?,?,?,?,?,?)""",
                     ("server2", str(sender), key, str(content), now, display_time))
-                CHAT_DEDUP_OPS += 1
-                if CHAT_DEDUP_OPS % 128 == 0:
+                claim = validate_incoming_message_claim(
+                    conn, cur.rowcount, "server2", str(sender), key, str(content))
+                if claim is None:
+                    conn.rollback()
+                    with print_lock:
+                        print("⚠️ server2 message_id payload conflict; refusing stored ACK")
+                    return None
+                CHAT_DEDUP_OPS += 1 if claim else 0
+                if claim and CHAT_DEDUP_OPS % 128 == 0:
                     conn.execute("DELETE FROM received_chat_messages WHERE receiver_scope=? AND received_at<?",
                                  ("server2", now - 7 * 86400))
                     conn.execute("""DELETE FROM received_chat_messages WHERE receiver_scope=? AND rowid IN (
                         SELECT rowid FROM received_chat_messages WHERE receiver_scope=?
                         ORDER BY received_at DESC LIMIT -1 OFFSET 10000)""", ("server2", "server2"))
                 conn.commit()
-                return cur.rowcount == 1
+                return claim
             finally: conn.close()
     except Exception as e:
         with print_lock: print(f"⚠️ 聊天消息持久化失败，本条不确认: {type(e).__name__}")

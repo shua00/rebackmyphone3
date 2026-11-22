@@ -160,6 +160,21 @@ def decode_packet(data, secret, max_bytes=1200):
     return packet
 
 
+def validate_incoming_message_claim(conn, insert_rowcount, receiver_scope,
+                                    sender_peer_id, message_id, body):
+    """Return True for a new row, False for an identical duplicate, None for payload conflict."""
+    if conn is None or not receiver_scope or not sender_peer_id or not message_id:
+        return None
+    if int(insert_rowcount or 0) == 1:
+        return True
+    row = conn.execute("""SELECT content FROM received_chat_messages
+        WHERE receiver_scope=? AND sender=? AND message_key=?""",
+        (str(receiver_scope), str(sender_peer_id), str(message_id))).fetchone()
+    if row is None or str(row[0]) != str(body):
+        return None
+    return False
+
+
 def persist_outgoing_message(db_path, sender_scope, sender_peer_id, message_id,
                              body, target_peer_ids, created_at_ms=None):
     """Atomically persist a Python-originated chat message and its fixed recipient snapshot."""

@@ -31,7 +31,7 @@ UDP_PORT = 8890  # 独立监听端口，避免与 server2/rescue2 冲突
 UDP_LISTENER_SOCKET = None
 UDP_CHAT_SEND_LOCK = threading.Lock()
 RESCUE_SECRET = "your_private_secret_key"  # ⚠️ 必须与手机端一致
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.sqlite3"), "chat.py")
 SERVER2_URL = "http://127.0.0.1:8080"      # server2.py 的地址
 # ==========================================
@@ -62,15 +62,21 @@ def _claim_chat_message(sender, message_id, content):
             cur = conn.execute("""INSERT OR IGNORE INTO received_chat_messages
                 (receiver_scope,sender,message_key,content,received_at,display_time)
                 VALUES(?,?,?,?,?,?)""", ("chat.py", str(sender), key, str(content), now, display_time))
-            _CHAT_DB_OPS += 1
-            if _CHAT_DB_OPS % 128 == 0:
+            claim = validate_incoming_message_claim(
+                conn, cur.rowcount, "chat.py", str(sender), key, str(content))
+            if claim is None:
+                conn.rollback()
+                print("⚠️ chat.py message_id payload conflict; refusing stored ACK")
+                return None
+            _CHAT_DB_OPS += 1 if claim else 0
+            if claim and _CHAT_DB_OPS % 128 == 0:
                 conn.execute("DELETE FROM received_chat_messages WHERE receiver_scope=? AND received_at<?",
                              ("chat.py", now - 7 * 86400))
                 conn.execute("""DELETE FROM received_chat_messages WHERE receiver_scope=? AND rowid IN (
                     SELECT rowid FROM received_chat_messages WHERE receiver_scope=?
                     ORDER BY received_at DESC LIMIT -1 OFFSET 10000)""", ("chat.py", "chat.py"))
             conn.commit()
-            return cur.rowcount == 1
+            return claim
         finally:
             conn.close()
     except Exception as e:

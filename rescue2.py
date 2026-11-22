@@ -115,7 +115,7 @@ PACKAGE_NAME = "com.example.devicefinder"
 
 # ===== 配置区 =====
 RESCUE_SECRET = "your_private_secret_key"
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "rescue2")
 DEFAULT_SERVER_URL = "http://dingwei.bai001.de5.net/api/report"
 DEFAULT_CONFIG_URL = "https://your-config-url.com/config.txt"
@@ -202,15 +202,22 @@ def _claim_chat_message(sender, message_id, content):
                 cur = conn.execute("""INSERT OR IGNORE INTO received_chat_messages
                     (receiver_scope,sender,message_key,content,received_at,display_time) VALUES(?,?,?,?,?,?)""",
                     ("rescue2", str(sender), key, str(content), now, display_time))
-                _CHAT_DEDUP_OPS += 1
-                if _CHAT_DEDUP_OPS % 128 == 0:
+                claim = validate_incoming_message_claim(
+                    conn, cur.rowcount, "rescue2", str(sender), key, str(content))
+                if claim is None:
+                    conn.rollback()
+                    with print_lock:
+                        print("⚠️ rescue2 message_id payload conflict; refusing stored ACK")
+                    return None
+                _CHAT_DEDUP_OPS += 1 if claim else 0
+                if claim and _CHAT_DEDUP_OPS % 128 == 0:
                     conn.execute("DELETE FROM received_chat_messages WHERE receiver_scope=? AND received_at<?",
                                  ("rescue2", now - 7 * 86400))
                     conn.execute("""DELETE FROM received_chat_messages WHERE receiver_scope=? AND rowid IN (
                         SELECT rowid FROM received_chat_messages WHERE receiver_scope=?
                         ORDER BY received_at DESC LIMIT -1 OFFSET 10000)""", ("rescue2", "rescue2"))
                 conn.commit()
-                return cur.rowcount == 1
+                return claim
             finally: conn.close()
     except Exception as e:
         with print_lock: print(f"⚠️ 聊天消息持久化失败，本条不确认: {type(e).__name__}")

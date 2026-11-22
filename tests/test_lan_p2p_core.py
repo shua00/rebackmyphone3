@@ -424,6 +424,43 @@ class LanP2PCoreTests(unittest.TestCase):
                 self.db_path, "server2", "nonce-expired", "android-a",
                 "192.168.1.10", 8888, "android", "android-main"))
 
+    def test_incoming_message_claim_rejects_same_id_with_different_body(self):
+        from lan_p2p_core import validate_incoming_message_claim
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute("""CREATE TABLE received_chat_messages (
+                receiver_scope TEXT NOT NULL, sender TEXT NOT NULL, message_key TEXT NOT NULL,
+                content TEXT NOT NULL, PRIMARY KEY(receiver_scope,sender,message_key))""")
+            conn.execute("BEGIN IMMEDIATE")
+            first = conn.execute(
+                "INSERT OR IGNORE INTO received_chat_messages VALUES(?,?,?,?)",
+                ("server2", "android-a", "message-1", "original body"))
+            self.assertTrue(validate_incoming_message_claim(
+                conn, first.rowcount, "server2", "android-a", "message-1", "original body"))
+            conn.commit()
+
+            conn.execute("BEGIN IMMEDIATE")
+            duplicate = conn.execute(
+                "INSERT OR IGNORE INTO received_chat_messages VALUES(?,?,?,?)",
+                ("server2", "android-a", "message-1", "original body"))
+            self.assertFalse(validate_incoming_message_claim(
+                conn, duplicate.rowcount, "server2", "android-a", "message-1", "original body"))
+            conn.commit()
+
+            conn.execute("BEGIN IMMEDIATE")
+            conflict = conn.execute(
+                "INSERT OR IGNORE INTO received_chat_messages VALUES(?,?,?,?)",
+                ("server2", "android-a", "message-1", "tampered body"))
+            self.assertIsNone(validate_incoming_message_claim(
+                conn, conflict.rowcount, "server2", "android-a", "message-1", "tampered body"))
+            conn.rollback()
+            stored = conn.execute(
+                "SELECT content FROM received_chat_messages WHERE receiver_scope=? AND sender=? AND message_key=?",
+                ("server2", "android-a", "message-1")).fetchone()[0]
+            self.assertEqual(stored, "original body")
+        finally:
+            conn.close()
+
     def test_all_authenticated_v2_service_receivers_persist_before_stored_ack(self):
         repo_root = Path(__file__).resolve().parents[1]
         for filename in ("server2.py", "rescue2.py", "chat.py"):
@@ -437,6 +474,7 @@ class LanP2PCoreTests(unittest.TestCase):
                     'if sender in ("Web_Console", "PC_Terminal", "Guest_")',
                     source,
                 )
+                self.assertIn("validate_incoming_message_claim(", source)
 
     def test_peer_challenge_rejects_unregistered_udp_service_ports(self):
         from lan_p2p_core import remember_peer_challenge, complete_peer_challenge
