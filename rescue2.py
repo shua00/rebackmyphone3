@@ -115,7 +115,7 @@ PACKAGE_NAME = "com.example.devicefinder"
 
 # ===== 配置区 =====
 RESCUE_SECRET = "your_private_secret_key"
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, load_active_pending_targets
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "rescue2")
 DEFAULT_SERVER_URL = "http://dingwei.bai001.de5.net/api/report"
 DEFAULT_CONFIG_URL = "https://your-config-url.com/config.txt"
@@ -646,8 +646,7 @@ def send_chat_v2(body, target_ips):
     try:
         if selected_peers:
             send_outbox_to_active_peers(
-                sock, _CHAT_DEDUP_DB, "rescue2", message_id, probe,
-                [peer["peer_id"] for peer in selected_peers], RESCUE_SECRET,
+                sock, _CHAT_DEDUP_DB, "rescue2", message_id, probe, RESCUE_SECRET,
                 send_lock=UDP_CHAT_SEND_LOCK, attempts=3, retry_delay_seconds=0.25)
         else:
             destinations = [(ip, UDP_DEVICE_PORT) for ip in selected_ips]

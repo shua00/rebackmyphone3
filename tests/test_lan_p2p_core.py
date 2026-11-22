@@ -464,36 +464,35 @@ class LanP2PCoreTests(unittest.TestCase):
 
         record_peer(self.db_path, "rescue2", "android-a", "android", "android-main",
                     "192.168.1.10", 8888, "active")
-        self.assertTrue(persist_outgoing_message(
-            self.db_path, "rescue2", "rescue2-id", "retry-m1", "hello", ["android-a"]))
         packet = {
             "type": "chat.message", "sender_peer_id": "rescue2-id",
             "sender_peer_type": "rescue2", "service_id": "rescue2-id",
-            "target_peer_id": "*", "message_id": "retry-m1",
-            "created_at_ms": 123, "body": "hello",
+            "target_peer_id": "*", "created_at_ms": 123, "body": "hello",
         }
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "rescue2", "rescue2-id", "retry-m1", "hello", ["android-a"]))
         socket = FakeSocket()
         with patch("lan_p2p_core.time.sleep", return_value=None):
             sent = send_outbox_to_active_peers(
                 socket, self.db_path, "rescue2", "retry-m1", packet,
-                ["android-a"], "test-secret", attempts=3, retry_delay_seconds=0.25)
+                "test-secret", attempts=3, retry_delay_seconds=0.25)
         self.assertEqual(sent, 3)
         self.assertEqual(len(socket.sent), 3)
         self.assertTrue(all(addr == ("192.168.1.10", 8888) for _, addr in socket.sent))
 
-        def ack_first_send(_payload, _destination):
-            acknowledge_outgoing_message(
-                self.db_path, "rescue2", "retry-m1", "android-a")
-        # Use a new message so the first successful datagram receives an immediate durable ACK.
         self.assertTrue(persist_outgoing_message(
             self.db_path, "rescue2", "rescue2-id", "retry-m2", "hello", ["android-a"]))
         packet["message_id"] = "retry-m2"
+        def ack_first_send(_payload, _destination):
+            acknowledge_outgoing_message(
+                self.db_path, "rescue2", "retry-m2", "android-a")
         ack_socket = FakeSocket(on_send=ack_first_send)
         with patch("lan_p2p_core.time.sleep", return_value=None):
             acked_sends = send_outbox_to_active_peers(
                 ack_socket, self.db_path, "rescue2", "retry-m2", packet,
-                ["android-a"], "test-secret", attempts=3, retry_delay_seconds=0.25)
+                "test-secret", attempts=3, retry_delay_seconds=0.25)
         self.assertEqual(acked_sends, 1)
+
 
     def test_broadcast_retries_are_bounded_and_keep_identical_payload(self):
         from lan_p2p_core import send_broadcast_packet_with_retries

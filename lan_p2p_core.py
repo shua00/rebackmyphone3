@@ -705,53 +705,68 @@ def is_outgoing_discovery_pending(db_path, sender_scope, message_id):
             conn.close()
 
 
+def load_active_pending_targets(db_path, sender_scope, message_id, limit=500):
+    """Load the active, unacked fixed targets for one durable outbox message in one query."""
+    if not db_path or not sender_scope or not message_id:
+        return []
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        rows = conn.execute("""SELECT t.peer_id,p.endpoint_ip,p.endpoint_port
+            FROM lan_outbox o
+            JOIN lan_outbox_targets t ON t.message_id=o.message_id
+            JOIN lan_peers p ON p.receiver_scope=? AND p.peer_id=t.peer_id
+            WHERE o.sender_scope=? AND o.message_id=?
+              AND o.state NOT IN ('delivered','expired')
+              AND t.status!='acked' AND p.status='active' AND p.lease_expires_at>?
+            ORDER BY t.peer_id LIMIT ?""",
+            (sender_scope, sender_scope, message_id, time.time(),
+             max(1, min(1000, int(limit))))).fetchall()
+        return [{"peer_id": row[0], "endpoint_ip": row[1],
+                 "endpoint_port": row[2]} for row in rows]
+    except Exception:
+        return []
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def send_outbox_to_active_peers(sock, db_path, sender_scope, message_id,
-                                   packet_template, peer_ids, secret, send_lock=None,
-                                   attempts=3, retry_delay_seconds=0.25):
-    """Send one durable message to active fixed targets; retry only those still unacked."""
+                                packet_template, secret, send_lock=None,
+                                attempts=3, retry_delay_seconds=0.25):
+    """Send to active fixed targets; retry only those still unacked, with one route query per round."""
     if sock is None or not db_path or not sender_scope or not message_id:
         return 0
     max_attempts = max(1, min(3, int(attempts)))
     delay = max(0.0, min(1.0, float(retry_delay_seconds)))
-    targets = sorted(set(str(peer_id) for peer_id in (peer_ids or []) if peer_id))
     sent_total = 0
     for attempt in range(max_attempts):
-        sent_this_round = 0
-        for peer_id in targets:
-            pending = load_pending_outgoing_for_peer(
-                db_path, sender_scope, peer_id, limit=50)
-            message = next((item for item in pending
-                            if item.get("message_id") == message_id), None)
-            if message is None:
-                continue
+        targets = load_active_pending_targets(db_path, sender_scope, message_id)
+        if not targets:
+            break
+        for target in targets:
             packet = dict(packet_template or {})
-            packet["target_peer_id"] = peer_id
+            packet["target_peer_id"] = target["peer_id"]
+            destination = (target["endpoint_ip"], int(target["endpoint_port"]))
             try:
                 raw = encode_packet(packet, secret)
-                destination = (message["endpoint_ip"], int(message["endpoint_port"]))
                 if send_lock is None:
                     sock.sendto(raw, destination)
                 else:
                     with send_lock:
                         sock.sendto(raw, destination)
-                mark_outgoing_attempt(db_path, message_id, peer_id,
+                mark_outgoing_attempt(db_path, message_id, target["peer_id"],
                                       destination[0], destination[1])
                 sent_total += 1
-                sent_this_round += 1
             except Exception:
                 continue
-        if attempt + 1 >= max_attempts or delay <= 0:
-            continue
-        still_pending = False
-        for peer_id in targets:
-            pending = load_pending_outgoing_for_peer(
-                db_path, sender_scope, peer_id, limit=50)
-            if any(item.get("message_id") == message_id for item in pending):
-                still_pending = True
-                break
-        if still_pending and (sent_this_round or attempt + 1 < max_attempts):
-            time.sleep(delay)
+        if attempt + 1 < max_attempts and delay > 0:
+            # Recheck once per round: do not sleep/retry when every target ACKed.
+            if load_active_pending_targets(db_path, sender_scope, message_id):
+                time.sleep(delay)
     return sent_total
+
 
 
 def send_broadcast_packet_with_retries(sock, packet_bytes, destinations,
