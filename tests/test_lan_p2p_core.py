@@ -873,7 +873,9 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn('ALTER TABLE lan_outbox ADD COLUMN retry_attempt_count', store)
         self.assertIn("public int recordOutboxAttempt(String messageId)", store)
         self.assertIn("update.bindLong(1, now)", store)
-        self.assertIn("update.bindString(2, messageId)", store)
+        self.assertIn("update.bindLong(2, MAX_AUTOMATIC_RETRY_ATTEMPTS)", store)
+        self.assertIn("update.bindString(3, messageId)", store)
+        self.assertIn("update.bindLong(4, MAX_AUTOMATIC_RETRY_ATTEMPTS)", store)
         self.assertIn("retry_attempt_count=retry_attempt_count+1", store)
         self.assertIn("c.getString(4), c.getInt(5)", store)
 
