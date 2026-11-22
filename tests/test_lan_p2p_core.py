@@ -2045,5 +2045,21 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertNotIn("resumeExhaustedRetriesForRecoveryEvent", wrapper)
 
 
+    def test_android_default_network_switch_does_not_revoke_unchanged_wifi_lan_peers(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        start = source.index("private void refreshPeerRoutesForNetworkChange(")
+        end = source.index("/** 网络路径变化立即撤销旧 LAN endpoint", start)
+        refresh = source[start:end]
+        self.assertIn("默认网络路径变化但保留 LAN peer", refresh)
+        self.assertNotIn("invalidateVerifiedChatPeers(", refresh)
+        self.assertNotIn("broadcastLanPeerHello", refresh)
+        wifi_start = source.index("private void refreshWifiLanTransport(")
+        wifi_end = source.index("private void registerNetworkCallback()", wifi_start)
+        wifi_refresh = source[wifi_start:wifi_end]
+        self.assertIn("invalidateVerifiedChatPeers(\"Wi-Fi LAN path changed", wifi_refresh)
+        self.assertIn("oldSocket.close()", wifi_refresh)
+
+
 if __name__ == "__main__":
     unittest.main()

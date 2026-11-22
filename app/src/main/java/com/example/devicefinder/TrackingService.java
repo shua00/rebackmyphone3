@@ -317,13 +317,19 @@ public class TrackingService extends Service implements LocationListener {
             long previous = lastPeerRouteGeneration;
             lastPeerRouteGeneration = generation;
             if (previous >= 0L && generation >= 0L && generation != previous) {
-                invalidateVerifiedChatPeers(reason + " (network generation " + previous + " -> " + generation + ")");
-                scheduleLanChatTask("network-peer-beacon", this::broadcastLanPeerHello, 1200L);
+                // The default Internet route can switch between cellular and Wi-Fi while
+                // the underlying Wi-Fi LAN remains reachable. Do not revoke UDP peers
+                // from this signal; refreshWifiLanTransport compares the actual Wi-Fi
+                // interface/address/routes and owns LAN route invalidation and socket rebind.
+                FileLogger.logD("CHAT", "默认网络路径变化但保留 LAN peer；等待 Wi-Fi LAN 指纹判断，generation="
+                        + previous + "->" + generation + "，回调=" + reason);
             } else {
-                FileLogger.logD("CHAT", "LAN P2P 保留已验证 peer：网络路径未变化，generation=" + generation + "，回调=" + reason);
+                FileLogger.logD("CHAT", "LAN P2P 保留已验证 peer：默认网络变化未影响 LAN，generation="
+                        + generation + "，回调=" + reason);
             }
         } catch (Exception e) {
-            FileLogger.log(this, "CHAT", "⚠️ 网络回调快照检查失败，暂不清除 peer：" + reason + " / " + e.getMessage());
+            FileLogger.log(this, "CHAT", "⚠️ 网络回调快照检查失败，保留 LAN peer 等待 Wi-Fi LAN 指纹检查："
+                    + reason + " / " + e.getMessage());
         }
     }
 
