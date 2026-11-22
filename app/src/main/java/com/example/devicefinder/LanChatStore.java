@@ -497,9 +497,10 @@ public final class LanChatStore extends SQLiteOpenHelper {
         try {
             SQLiteDatabase db = getWritableDatabase();
             db.execSQL("UPDATE lan_outbox_targets SET status='sent',attempt_count=attempt_count+1," +
-                    "last_attempt_at=?,last_endpoint=?,last_error=? WHERE message_id=? AND peer_id=? AND status!='acked'",
+                    "last_attempt_at=?,last_endpoint=CASE WHEN ?!='' THEN ? ELSE last_endpoint END," +
+                    "last_error=? WHERE message_id=? AND peer_id=? AND status!='acked'",
                     new Object[]{System.currentTimeMillis(), endpoint == null ? "" : endpoint,
-                            error == null ? "" : error, messageId, peerId});
+                            endpoint == null ? "" : endpoint, error == null ? "" : error, messageId, peerId});
             Cursor c = db.rawQuery(
                     "SELECT status FROM lan_outbox_targets WHERE message_id=? AND peer_id=?",
                     new String[]{messageId, peerId});
