@@ -414,6 +414,14 @@ public class TrackingService extends Service implements LocationListener {
                     new ThreadPoolExecutor.AbortPolicy()
             );
 
+    // 独立的有界发送队列：发送等待 ACK 时不占用接收持久化线程池，也不为每条消息新建线程。
+    private final java.util.concurrent.ExecutorService lanChatSendExecutor =
+            new ThreadPoolExecutor(
+                    1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(100),
+                    new ThreadPoolExecutor.AbortPolicy()
+            );
+
     private void logLifecycle(String event, String detail) {
         FileLogger.log(this, "LIFECYCLE",
                 "event=" + event
@@ -3427,21 +3435,24 @@ public class TrackingService extends Service implements LocationListener {
         startRescueListener();
     }
 
-    /** 新消息先持久化，再尝试发送；UI 调用入口和行为保持原样。 */
+    /** 新消息在有界发送队列中按顺序完成持久化和发送，UI 入口保持原样。 */
     private void sendLocalUdpMessage(final String message) {
         final String messageId = java.util.UUID.randomUUID().toString();
-        // ACTION_SEND_UDP_CHAT 由 Service 主线程接收；同步 commit 可能阻塞主线程。
-        // 将“先持久化、再发送”整体移至后台线程，顺序和不丢消息语义保持不变。
-        new Thread(() -> {
-            long persistStarted = android.os.SystemClock.elapsedRealtime();
-            if (!persistPendingLanChat(messageId, message)) {
-                FileLogger.log(this, "CHAT", "⚠️ LAN 消息未能持久化，已阻止发送以免断网丢失");
-                return;
-            }
-            FileLogger.log(this, "CHAT", "⏱️ P2P 持久化耗时 "
-                    + (android.os.SystemClock.elapsedRealtime() - persistStarted) + "ms，开始发送 " + messageId);
-            sendLocalUdpMessage(message, messageId);
-        }, "LAN-P2P-ChatPersist").start();
+        try {
+            lanChatSendExecutor.execute(() -> {
+                if (serviceDestroyed) return;
+                long persistStarted = android.os.SystemClock.elapsedRealtime();
+                if (!persistPendingLanChat(messageId, message)) {
+                    FileLogger.log(this, "CHAT", "⚠️ LAN 消息未能持久化，已阻止发送以免断网丢失");
+                    return;
+                }
+                FileLogger.log(this, "CHAT", "⏱️ P2P 持久化耗时 "
+                        + (android.os.SystemClock.elapsedRealtime() - persistStarted) + "ms，开始发送 " + messageId);
+                sendLocalUdpMessage(message, messageId);
+            });
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            FileLogger.log(this, "CHAT", "⚠️ LAN 发送队列已满，未接受新消息: " + messageId);
+        }
     }
 
     private boolean persistPendingLanChat(String messageId, String content) {
@@ -3493,54 +3504,62 @@ public class TrackingService extends Service implements LocationListener {
      */
     private void retryPendingLanChatMessages() {
         if (!lanChatRetryInFlight.compareAndSet(false, true)) return;
-        new Thread(() -> {
-            try {
-                final int batchSize = 3;
-                final int maxBatchesPerWake = 3;
-                for (int batchNo = 0; batchNo < maxBatchesPerWake; batchNo++) {
-                    List<JSONObject> batch = new ArrayList<>();
-                    int queuedBefore;
-                    synchronized (lanChatQueueLock) {
-                        JSONArray queue = new JSONArray(getSharedPreferences("device_finder_prefs", MODE_PRIVATE)
-                                .getString(PREF_LAN_CHAT_QUEUE, "[]"));
-                        queuedBefore = queue.length();
-                        int count = Math.min(batchSize, queuedBefore);
-                        for (int i = 0; i < count; i++) {
-                            JSONObject item = queue.optJSONObject(i);
-                            if (item != null) batch.add(new JSONObject(item.toString()));
+        try {
+            lanChatSendExecutor.execute(() -> {
+                try {
+                    final int batchSize = 3;
+                    final int maxBatchesPerWake = 3;
+                    for (int batchNo = 0; batchNo < maxBatchesPerWake && !serviceDestroyed; batchNo++) {
+                        List<JSONObject> batch = new ArrayList<>();
+                        int queuedBefore;
+                        synchronized (lanChatQueueLock) {
+                            JSONArray queue = new JSONArray(getSharedPreferences("device_finder_prefs", MODE_PRIVATE)
+                                    .getString(PREF_LAN_CHAT_QUEUE, "[]"));
+                            queuedBefore = queue.length();
+                            int count = Math.min(batchSize, queuedBefore);
+                            for (int i = 0; i < count; i++) {
+                                JSONObject item = queue.optJSONObject(i);
+                                if (item != null) batch.add(new JSONObject(item.toString()));
+                            }
                         }
-                    }
-                    if (batch.isEmpty()) break;
+                        if (batch.isEmpty()) break;
 
-                    for (JSONObject item : batch) {
-                        String id = item.optString("message_id", "");
-                        String content = item.optString("content", "");
-                        if (!id.isEmpty() && !content.isEmpty()) transmitLocalUdpMessage(content, id);
-                    }
+                        // 在同一串行执行器中同步等待每条发送/ACK事务完成，再判断队列是否真实缩短。
+                        for (JSONObject item : batch) {
+                            String id = item.optString("message_id", "");
+                            String content = item.optString("content", "");
+                            if (!id.isEmpty() && !content.isEmpty() && !serviceDestroyed) {
+                                transmitLocalUdpMessage(content, id);
+                            }
+                        }
 
-                    int queuedAfter;
-                    synchronized (lanChatQueueLock) {
-                        JSONArray queue = new JSONArray(getSharedPreferences("device_finder_prefs", MODE_PRIVATE)
-                                .getString(PREF_LAN_CHAT_QUEUE, "[]"));
-                        queuedAfter = queue.length();
+                        int queuedAfter;
+                        synchronized (lanChatQueueLock) {
+                            JSONArray queue = new JSONArray(getSharedPreferences("device_finder_prefs", MODE_PRIVATE)
+                                    .getString(PREF_LAN_CHAT_QUEUE, "[]"));
+                            queuedAfter = queue.length();
+                        }
+                        int progressed = queuedBefore - queuedAfter;
+                        FileLogger.log(this, "CHAT", "LAN 队列补发批次 " + (batchNo + 1)
+                                + "，发送 " + batch.size() + " 条，队列变化 "
+                                + queuedBefore + "->" + queuedAfter);
+                        if (progressed <= 0) break;
                     }
-                    int progressed = queuedBefore - queuedAfter;
-                    FileLogger.log(this, "CHAT", "LAN 队列补发批次 " + (batchNo + 1)
-                            + "，发送 " + batch.size() + " 条，队列变化 "
-                            + queuedBefore + "->" + queuedAfter);
-                    // 没有真实 ACK 回收就停止；留待下一次网络恢复/启动事件再试。
-                    if (progressed <= 0) break;
+                } catch (Exception e) {
+                    FileLogger.log(this, "CHAT", "⚠️ LAN 聊天补发失败: " + e.getMessage());
+                } finally {
+                    lanChatRetryInFlight.set(false);
                 }
-            } catch (Exception e) {
-                FileLogger.log(this, "CHAT", "⚠️ LAN 聊天补发失败: " + e.getMessage());
-            } finally {
-                lanChatRetryInFlight.set(false);
-            }
-        }, "LAN-P2P-QueueRetry").start();
+            });
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            lanChatRetryInFlight.set(false);
+            FileLogger.log(this, "CHAT", "⚠️ LAN 补发队列已满，等待下次网络恢复触发");
+        }
     }
 
+    // 仅由 lanChatSendExecutor 调用；同步执行确保补发批次能观察真实 ACK/队列进展。
     private void sendLocalUdpMessage(final String message, final String messageId) {
-        new Thread(() -> transmitLocalUdpMessage(message, messageId), "LAN-P2P-ChatSend").start();
+        transmitLocalUdpMessage(message, messageId);
     }
 
     private void transmitLocalUdpMessage(final String message, final String messageId) {
@@ -4963,6 +4982,7 @@ public class TrackingService extends Service implements LocationListener {
         cancelFastPoll();
 
         if (reportExecutor != null) reportExecutor.shutdown();
+        if (lanChatSendExecutor != null) lanChatSendExecutor.shutdown();
         if (rescueSocketRef != null) {
             try { rescueSocketRef.close(); } catch (Exception e) { FileLogger.log(this, "SERVICE", "⚠️ close rescueSocket 失败: " + e.getMessage()); }
             rescueSocketRef = null;
