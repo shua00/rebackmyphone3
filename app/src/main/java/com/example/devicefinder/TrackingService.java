@@ -3724,6 +3724,11 @@ public class TrackingService extends Service implements LocationListener {
             FileLogger.log(this, "CHAT", "⚠️ P2P UDP 监听尚未就绪，消息保留在本地待确认队列");
             return;
         }
+        LanChatStore store = lanChatStore;
+        if (store == null) {
+            FileLogger.log(this, "CHAT", "⚠️ LAN SQLite 账本尚未就绪，消息保留待恢复");
+            return;
+        }
         String myId = getUniqueDeviceId();
         String subnetBcast = getWifiBroadcastAddress();
         // 当前子网广播足以覆盖同一 LAN；同时发 255.255.255.255 会让同一包重复到达。
