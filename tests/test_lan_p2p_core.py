@@ -1095,5 +1095,16 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("P2P 发送串行锁等待 message=", source)
 
 
+
+    def test_android_p2p_send_log_distinguishes_fixed_targets_from_reachable_routes(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"，固定目标 " + totalPeerCount', source)
+        self.assertIn('"，当前可达路由 " + reachablePeerCount', source)
+        self.assertNotIn('"，已验证成员 " + totalPeerCount', source)
+
+
 if __name__ == "__main__":
     unittest.main()
