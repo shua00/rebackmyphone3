@@ -176,6 +176,10 @@ public final class LanChatStore extends SQLiteOpenHelper {
         if (oldVersion < 5 && !hasColumn(db, "lan_outbox", "last_event_retry_at_ms")) {
             db.execSQL("ALTER TABLE lan_outbox ADD COLUMN last_event_retry_at_ms INTEGER NOT NULL DEFAULT 0");
         }
+        if (oldVersion < 5) {
+            db.execSQL("UPDATE lan_outbox SET state='retry_paused' " +
+                    "WHERE retry_attempt_count>=8 AND state NOT IN ('delivered','expired','waiting_peers')");
+        }
     }
 
     /** Persist an outgoing message before any network send. */
@@ -379,7 +383,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
         try {
             c = getReadableDatabase().rawQuery(
                     "SELECT message_id,sender_peer_id,body,created_at_ms,state,retry_attempt_count FROM lan_outbox " +
-                    "WHERE state NOT IN ('delivered','expired','waiting_peers') " +
+                    "WHERE state NOT IN ('delivered','expired','waiting_peers','retry_paused') " +
                     "AND retry_attempt_count<? ORDER BY retry_attempt_count,created_at_ms LIMIT ?",
                     new String[]{String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS),
                             String.valueOf(Math.max(1, Math.min(50, limit)))});
@@ -402,7 +406,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
         db.beginTransaction();
         try {
             android.database.sqlite.SQLiteStatement update = db.compileStatement(
-                    "UPDATE lan_outbox SET retry_attempt_count=0,last_event_retry_at_ms=? " +
+                    "UPDATE lan_outbox SET retry_attempt_count=0,last_event_retry_at_ms=?,state='pending' " +
                     "WHERE retry_attempt_count>=? " +
                     "AND state NOT IN ('delivered','expired','waiting_peers') " +
                     "AND last_event_retry_at_ms<=? " +
@@ -433,14 +437,16 @@ public final class LanChatStore extends SQLiteOpenHelper {
         try {
             long now = System.currentTimeMillis();
             android.database.sqlite.SQLiteStatement update = db.compileStatement(
-                    "UPDATE lan_outbox SET retry_attempt_count=retry_attempt_count+1,last_retry_at_ms=? " +
-                    "WHERE message_id=? AND state NOT IN ('delivered','expired','waiting_peers') " +
+                    "UPDATE lan_outbox SET retry_attempt_count=retry_attempt_count+1,last_retry_at_ms=?," +
+                    "state=CASE WHEN retry_attempt_count+1>=? THEN 'retry_paused' ELSE state END " +
+                    "WHERE message_id=? AND state NOT IN ('delivered','expired','waiting_peers','retry_paused') " +
                     "AND retry_attempt_count<?");
             int changed;
             try {
                 update.bindLong(1, now);
-                update.bindString(2, messageId);
-                update.bindLong(3, MAX_AUTOMATIC_RETRY_ATTEMPTS);
+                update.bindLong(2, MAX_AUTOMATIC_RETRY_ATTEMPTS);
+                update.bindString(3, messageId);
+                update.bindLong(4, MAX_AUTOMATIC_RETRY_ATTEMPTS);
                 changed = update.executeUpdateDelete();
             } finally {
                 update.close();
@@ -584,7 +590,8 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     && deadline > 0 && now <= deadline;
             if (!discoveryOpen) {
                 ContentValues next = new ContentValues();
-                next.put("state", total > 0 && total == acked ? "delivered" : "pending");
+                next.put("state", total > 0 && total == acked ? "delivered"
+                        : ("retry_paused".equals(state) ? "retry_paused" : "pending"));
                 if (db.update("lan_outbox", next, "message_id=?", new String[]{messageId}) != 1) return false;
             }
             db.setTransactionSuccessful();
