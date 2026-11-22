@@ -515,8 +515,9 @@ def add_discovery_target(db_path, sender_scope, message_id, peer_id):
 
 def add_discovery_targets_for_peer(db_path, sender_scope, peer_id):
     """Attach a newly discovered peer to every still-open unknown-recipient message."""
-    conn = sqlite3.connect(db_path, timeout=10)
+    conn = None
     try:
+        conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("PRAGMA busy_timeout=10000")
         conn.execute("BEGIN IMMEDIATE")
         now_ms = int(time.time() * 1000)
@@ -544,7 +545,6 @@ def add_discovery_targets_for_peer(db_path, sender_scope, peer_id):
     finally:
         if conn is not None:
             conn.close()
-
 
 def remember_peer_challenge(db_path, receiver_scope, nonce, expected_peer_id="",
                             expected_ip="", expected_port=0, ttl_seconds=5):

@@ -2089,6 +2089,25 @@ class LanP2PCoreTests(unittest.TestCase):
                         operation()
 
     def test_outbox_queries_still_return_empty_for_a_valid_empty_ledger(self):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.executescript("""
+                CREATE TABLE lan_outbox (
+                    message_id TEXT PRIMARY KEY, sender_scope TEXT NOT NULL,
+                    sender_peer_id TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
+                    created_at_ms INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL,
+                    delivery_deadline_ms INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE lan_outbox_targets (
+                    message_id TEXT NOT NULL, peer_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending');
+                CREATE TABLE lan_peers (
+                    receiver_scope TEXT NOT NULL, peer_id TEXT NOT NULL,
+                    endpoint_ip TEXT NOT NULL DEFAULT '', endpoint_port INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'suspect', lease_expires_at REAL NOT NULL DEFAULT 0);
+            """)
+            conn.commit()
+        finally:
+            conn.close()
         self.assertEqual([], load_pending_outgoing_for_peer(self.db_path, "server2", "peer-a"))
         self.assertEqual(0, add_discovery_targets_for_peer(self.db_path, "server2", "peer-a"))
         self.assertEqual([], load_active_pending_targets(self.db_path, "server2", "message-a"))
