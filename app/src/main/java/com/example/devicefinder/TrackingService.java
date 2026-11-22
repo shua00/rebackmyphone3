@@ -4169,14 +4169,6 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     /**
-     * 统一串行化 UDP send，并仅在锁等待或系统 send 明显偏慢时输出诊断。
-     * 不记录数据包内容、认证字段或聊天正文。
-     */
-        /**
-     * Complete the short ACK observation window away from the FIFO sender.
-     * UDP dispatch remains ordered, while ACK persistence continues on LanChat-IO.
-     */
-    /**
      * Complete the short ACK observation window away from the FIFO sender.
      * UDP dispatch remains ordered, while ACK persistence continues on LanChat-IO.
      */
@@ -4228,7 +4220,11 @@ public class TrackingService extends Service implements LocationListener {
         }
     }
 
-private void sendLanUdpPacket(DatagramSocket socket, DatagramPacket packet, String kind)
+    /**
+     * Serialize UDP sends and log only materially slow lock waits or socket sends.
+     * Packet contents, authentication fields and chat bodies are never logged.
+     */
+    private void sendLanUdpPacket(DatagramSocket socket, DatagramPacket packet, String kind)
             throws java.io.IOException {
         long lockWaitStarted = android.os.SystemClock.elapsedRealtime();
         long lockWaitMs;
