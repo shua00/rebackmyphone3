@@ -264,6 +264,7 @@ public class TrackingService extends Service implements LocationListener {
     // 本地 LAN 聊天待确认队列：SharedPreferences 同步 commit，最多保留 50 条。
     private static final String PREF_LAN_CHAT_QUEUE = "lan_p2p_pending_messages";
     private static final int LAN_CHAT_QUEUE_MAX = 50;
+    private static final long LAN_CHAT_DISCOVERY_WINDOW_MS = 5_000L;
     private final Object lanChatQueueLock = new Object();
     private volatile LanChatStore lanChatStore;
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRetryInFlight =
@@ -3494,12 +3495,47 @@ public class TrackingService extends Service implements LocationListener {
                     FileLogger.log(this, "CHAT", "⚠️ LAN SQLite outbox 写入失败；SharedPreferences 原队列保留，等待补偿迁移");
                     return false;
                 }
+                if (!initializeLanChatRecipientSnapshot(store, messageId)) {
+                    FileLogger.log(this, "CHAT", "⚠️ LAN 首次收件人快照持久化失败；消息保留本地待确认队列: " + messageId);
+                    return false;
+                }
+                // Close the first-discovery window after its fixed deadline without forcing
+                // another network send. All ACKed targets are reclaimed; partial targets stay pending.
+                handler.postDelayed(() -> removePendingLanChat(messageId),
+                        LAN_CHAT_DISCOVERY_WINDOW_MS + 250L);
                 return true;
             } catch (Exception e) {
                 FileLogger.log(this, "CHAT", "⚠️ LAN 聊天队列持久化异常: " + e.getMessage());
                 return false;
             }
         }
+    }
+
+    /**
+     * Freeze historically known members at message creation. If none are known,
+     * leave the bounded first-discovery window open so newly verified peers can join it.
+     */
+    private boolean initializeLanChatRecipientSnapshot(LanChatStore store, String messageId) {
+        if (store == null || messageId == null || messageId.isEmpty()) return false;
+        if (!store.isDiscoveryPending(messageId)) return true;
+        List<LanChatStore.Target> snapshot = store.loadKnownPeers();
+        java.util.Set<String> snapshotIds = new java.util.HashSet<>();
+        for (LanChatStore.Target target : snapshot) {
+            if (target != null && target.peerId != null) snapshotIds.add(target.peerId);
+        }
+        for (java.util.Map.Entry<String, java.net.InetSocketAddress> entry : verifiedChatPeers.entrySet()) {
+            if (snapshotIds.add(entry.getKey())) {
+                java.net.InetSocketAddress endpoint = entry.getValue();
+                snapshot.add(new LanChatStore.Target(entry.getKey(), "pending", 0,
+                        endpoint.getAddress().getHostAddress(), endpoint.getPort()));
+            }
+        }
+        for (java.util.Iterator<LanChatStore.Target> it = snapshot.iterator(); it.hasNext();) {
+            LanChatStore.Target target = it.next();
+            if (target == null || target.peerId == null
+                    || getUniqueDeviceId().equals(target.peerId)) it.remove();
+        }
+        return snapshot.isEmpty() || store.setTargets(messageId, snapshot);
     }
 
     private void removePendingLanChat(String messageId) {
@@ -3544,10 +3580,16 @@ public class TrackingService extends Service implements LocationListener {
                             if (item == null) continue;
                             String id = item.optString("message_id", "");
                             String body = item.optString("content", "");
-                            if (!id.isEmpty() && !store.enqueue(id, getUniqueDeviceId(), body,
-                                    item.optLong("created_at", System.currentTimeMillis()))) {
-                                FileLogger.log(this, "CHAT", "⚠️ SQLite outbox 补偿迁移失败，保留旧队列");
-                                return;
+                            if (!id.isEmpty()) {
+                                if (!store.enqueue(id, getUniqueDeviceId(), body,
+                                        item.optLong("created_at", System.currentTimeMillis()))) {
+                                    FileLogger.log(this, "CHAT", "⚠️ SQLite outbox 补偿迁移失败，保留旧队列");
+                                    return;
+                                }
+                                if (!initializeLanChatRecipientSnapshot(store, id)) {
+                                    FileLogger.log(this, "CHAT", "⚠️ SQLite 旧队列收件人快照补偿失败，保留旧队列");
+                                    return;
+                                }
                             }
                         }
                     }
@@ -3698,27 +3740,8 @@ public class TrackingService extends Service implements LocationListener {
             return;
         }
         LanChatStore store = lanChatStore;
-        if (store != null && !store.hasTargets(messageId)) {
-            // Include previously registered offline peers in the fixed target set.
-            // Current verified routes are a fallback for peers discovered during this first send.
-            List<LanChatStore.Target> snapshot = store.loadKnownPeers();
-            java.util.Set<String> snapshotIds = new java.util.HashSet<>();
-            for (LanChatStore.Target target : snapshot) snapshotIds.add(target.peerId);
-            for (java.util.Map.Entry<String, java.net.InetSocketAddress> entry : verifiedChatPeers.entrySet()) {
-                if (snapshotIds.add(entry.getKey())) {
-                    java.net.InetSocketAddress endpoint = entry.getValue();
-                    snapshot.add(new LanChatStore.Target(entry.getKey(), "pending", 0,
-                            endpoint.getAddress().getHostAddress(), endpoint.getPort()));
-                }
-            }
-            for (java.util.Iterator<LanChatStore.Target> it = snapshot.iterator(); it.hasNext();) {
-                if (getUniqueDeviceId().equals(it.next().peerId)) it.remove();
-            }
-            if (!snapshot.isEmpty() && !store.setTargets(messageId, snapshot)) {
-                FileLogger.log(this, "CHAT", "⚠️ LAN 固定目标集合持久化失败，本条暂不发送: " + messageId);
-                return;
-            }
-        }
+        // Recipient membership was snapshotted at enqueue time. Only an empty initial
+        // snapshot may collect newly verified peers through addDiscoveryPeerToOpenMessages().
         List<LanChatStore.Target> savedTargets = store != null
                 ? store.loadTargets(messageId) : new ArrayList<>();
         java.util.Set<String> pendingTargetIds = new java.util.HashSet<>();

@@ -221,9 +221,15 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     discoveryDeadline = message.getLong(1);
                 }
             } finally { message.close(); }
+            if (messageState.isEmpty()) return false;
             long now = System.currentTimeMillis();
+            // A previously frozen or expired message must never acquire new recipients.
+            // Treat this as an idempotent no-op rather than a retryable storage failure.
             if (!"discovery_pending".equals(messageState)
-                    || (discoveryDeadline > 0 && now > discoveryDeadline)) return false;
+                    || (discoveryDeadline > 0 && now > discoveryDeadline)) {
+                db.setTransactionSuccessful();
+                return true;
+            }
             if (discoveryDeadline == 0L) {
                 discoveryDeadline = now + 5_000L;
                 ContentValues window = new ContentValues();
@@ -297,9 +303,19 @@ public final class LanChatStore extends SQLiteOpenHelper {
             long deadline = c.getLong(1);
             int total = c.getInt(2);
             int acked = c.isNull(3) ? 0 : c.getInt(3);
-            boolean discoveryOpen = "discovery_pending".equals(state)
-                    && deadline > System.currentTimeMillis();
-            if (discoveryOpen || total == 0 || total != acked) return false;
+            long now = System.currentTimeMillis();
+            boolean discoveryOpen = "discovery_pending".equals(state) && deadline > now;
+            if (discoveryOpen || total == 0) return false;
+            if (total != acked) {
+                if ("discovery_pending".equals(state)) {
+                    ContentValues next = new ContentValues();
+                    next.put("state", "pending");
+                    if (db.update("lan_outbox", next, "message_id=?", new String[]{messageId}) != 1) {
+                        return false;
+                    }
+                }
+                return false;
+            }
             if (!"delivered".equals(state)) {
                 ContentValues next = new ContentValues();
                 next.put("state", "delivered");
