@@ -710,7 +710,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("if (routeMatches) {", ack_handler)
         self.assertIn("verifiedChatPeerRouteVersions.put(senderId", ack_handler)
         self.assertIn("verifiedChatPeerSeen.put(senderId, System.currentTimeMillis())", ack_handler)
-        self.assertIn("synchronized (verifiedChatPeers)", ack_handler)
+        self.assertIn("synchronized (verifiedChatPeerRouteVersions)", ack_handler)
         self.assertIn("if (store.allTargetsAcked(messageId))", ack_handler)
         self.assertIn("removePendingLanChat(messageId)", ack_handler)
         self.assertIn("P2P 最终 ACK 已落账并回收兼容队列", ack_handler)
