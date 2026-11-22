@@ -3779,8 +3779,14 @@ public class TrackingService extends Service implements LocationListener {
         }
         // Recipient membership was snapshotted at enqueue time. Only an empty initial
         // snapshot may collect newly verified peers through addDiscoveryPeerToOpenMessages().
-        List<LanChatStore.Target> savedTargets = store != null
-                ? store.loadTargets(messageId) : new ArrayList<>();
+        final List<LanChatStore.Target> savedTargets;
+        try {
+            savedTargets = store.loadTargets(messageId);
+        } catch (Exception e) {
+            FileLogger.log(this, "CHAT", "⚠️ LAN 目标账本读取失败，本轮拒绝发送以免误投: "
+                    + e.getClass().getSimpleName());
+            return;
+        }
         java.util.Set<String> pendingTargetIds = new java.util.HashSet<>();
         for (LanChatStore.Target target : savedTargets) {
             if (!"acked".equals(target.status)) pendingTargetIds.add(target.peerId);
