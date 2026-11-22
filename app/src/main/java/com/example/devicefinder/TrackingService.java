@@ -3634,9 +3634,10 @@ public class TrackingService extends Service implements LocationListener {
                 verifiedChatPeers.remove(e.getKey());
             }
         }
-        // Refresh the peer snapshot for each serialized message send so newly joined LAN devices
-        // are included immediately instead of waiting for the 30-second background refresh interval.
-        boolean discoveryDue = true;
+        // Reuse verified routes for up to 30 seconds; rediscover on first send, route expiry,
+        // network change, or partial delivery. Avoid adding a 500 ms discovery wait to every message.
+        boolean discoveryDue = verifiedChatPeers.isEmpty() || lastPeerDiscoveryAt == 0L
+                || now - lastPeerDiscoveryAt >= 30_000L;
         boolean shouldDiscoverPeers = discoveryDue
                 && peerDiscoveryInFlight.compareAndSet(false, true);
         if (shouldDiscoverPeers) {
