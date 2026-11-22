@@ -3834,8 +3834,9 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     /**
-     * Persisted bounded retry wakeups: three send transactions at increasing delays.
-     * A network/service restart can still resume pending rows after this automatic budget.
+     * Persisted retry wakeups use exponential backoff with a capped interval.
+     * Known recipients remain retryable until durable per-peer ACK; waiting_peers rows
+     * are excluded so late devices never receive an old broadcast message.
      */
     private void scheduleLanChatRetryFromOutbox() {
         if (serviceDestroyed || lanChatRetryWakeScheduled.get()) return;
@@ -3846,12 +3847,18 @@ public class TrackingService extends Service implements LocationListener {
             List<LanChatStore.PendingMessage> pending = store.loadPending(50);
             int minimumAttempts = Integer.MAX_VALUE;
             for (LanChatStore.PendingMessage item : pending) {
-                if (item.retryAttempts > 0 && item.retryAttempts < 3) {
+                if (item.retryAttempts > 0) {
                     minimumAttempts = Math.min(minimumAttempts, item.retryAttempts);
                 }
             }
             if (minimumAttempts == Integer.MAX_VALUE) return;
-            final long delayMs = minimumAttempts <= 1 ? 1_500L : 4_000L;
+            // Retry known, still-pending recipients until ACK; cap the interval, not the
+            // number of attempts. This preserves recovery after transient packet loss while
+            // keeping background traffic bounded. Empty discovery snapshots are finalized
+            // separately as waiting_peers and are not included in loadPending().
+            final long delayMs = minimumAttempts <= 1 ? 1_500L
+                    : (minimumAttempts == 2 ? 4_000L
+                    : Math.min(60_000L, 10_000L << Math.min(3, minimumAttempts - 3)));
             if (!lanChatRetryWakeScheduled.compareAndSet(false, true)) return;
             boolean scheduled = scheduleLanChatTask("outbox-retry", () -> {
                 lanChatRetryWakeScheduled.set(false);
