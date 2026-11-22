@@ -20,6 +20,8 @@ import json
 import time                                      # [F1] 子网广播重试间隔需要
 import uuid
 import urllib.request
+import os
+import sqlite3
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ================= 配置区 =================
@@ -32,8 +34,58 @@ SERVER2_URL = "http://127.0.0.1:8080"      # server2.py 的地址
 # ==========================================
 
 PROXY_MODE = False          # 由启动时探测决定
-CHAT_MESSAGES = []
+CHAT_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.sqlite3")
 print_lock = threading.Lock()
+
+
+def _claim_chat_message(sender, message_id, content):
+    """Persist independent chat-mode message body and ID before ACK."""
+    key = str(message_id or content or "")
+    if not key:
+        return None
+    now = time.time()
+    display_time = datetime.datetime.now().strftime("%H:%M:%S")
+    try:
+        conn = sqlite3.connect(CHAT_DB, timeout=5)
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("""CREATE TABLE IF NOT EXISTS received_chat_messages (
+                receiver_scope TEXT NOT NULL, sender TEXT NOT NULL, message_key TEXT NOT NULL,
+                content TEXT NOT NULL, received_at REAL NOT NULL, display_time TEXT NOT NULL,
+                PRIMARY KEY(receiver_scope, sender, message_key))""")
+            conn.execute("BEGIN IMMEDIATE")
+            cur = conn.execute("""INSERT OR IGNORE INTO received_chat_messages
+                (receiver_scope,sender,message_key,content,received_at,display_time)
+                VALUES(?,?,?,?,?,?)""", ("chat.py", str(sender), key, str(content), now, display_time))
+            conn.commit()
+            return cur.rowcount == 1
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"⚠️ 聊天消息持久化失败，本条不确认: {type(e).__name__}")
+        return None
+
+
+def _load_chat_history():
+    try:
+        conn = sqlite3.connect(CHAT_DB, timeout=5)
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("""CREATE TABLE IF NOT EXISTS received_chat_messages (
+                receiver_scope TEXT NOT NULL, sender TEXT NOT NULL, message_key TEXT NOT NULL,
+                content TEXT NOT NULL, received_at REAL NOT NULL, display_time TEXT NOT NULL,
+                PRIMARY KEY(receiver_scope, sender, message_key))""")
+            rows = conn.execute("""SELECT display_time,sender,content FROM received_chat_messages
+                WHERE receiver_scope=? ORDER BY received_at DESC LIMIT 100""", ("chat.py",)).fetchall()
+            return [{"time": row[0], "sender": row[1], "content": row[2]} for row in reversed(rows)]
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"⚠️ 对讲历史恢复失败: {type(e).__name__}")
+        return []
+
+
+CHAT_MESSAGES = _load_chat_history()
 
 # 极简 HTML 网页（与原来完全一致，无需改动）
 HTML_PAGE = """<!DOCTYPE html>
@@ -195,20 +247,27 @@ def udp_listener():
                     sender = parts[2]
                     message_id = parts[3]
                     content = parts[4]
+                    # 保留原有 Guest_/Web_Console 过滤及其ACK语义，防止网页自身广播回环。
+                    if sender.startswith("Guest_") or sender == "Web_Console":
+                        if message_id:
+                            ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:{PEER_NODE_ID}".encode("utf-8")
+                            try: udp_sock.sendto(ack, addr)
+                            except OSError: pass
+                        continue
+                    claim_result = _claim_chat_message(sender, message_id, content)
+                    if claim_result is None:
+                        continue  # 未持久化成功，不ACK，允许发送端重试
                     if message_id:
                         ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:{PEER_NODE_ID}".encode("utf-8")
                         try: udp_sock.sendto(ack, addr)
                         except OSError: pass
-                    # 保留原有过滤：浏览器网页自身发送的 Guest_xxx 消息已在 do_POST 中本地追加，
-                    # 这里过滤掉可以避免 loopback 广播造成重复。
-                    # 注意：这导致跨 PC 的两台 chat.py 之间无法看到对方浏览器发出的消息，
-                    # 跨 PC 场景建议使用 server2 面板。
-                    if not sender.startswith("Guest_") and sender != "Web_Console":
-                        ts = datetime.datetime.now().strftime("%H:%M:%S")
-                        with print_lock:
-                            print(f"\n🗣️ [对讲机] {sender} 说: {content}")
-                            CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": content})
-                            if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
+                    if not claim_result:
+                        continue  # 重复消息仍ACK，但不重复展示
+                    ts = datetime.datetime.now().strftime("%H:%M:%S")
+                    with print_lock:
+                        print(f"\\n🗣️ [对讲机] {sender} 说: {content}")
+                        CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": content})
+                        if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
     except OSError as e:
         if e.errno == 98:
             print(f"❌ UDP {UDP_PORT} 被占用（可能 rescue2.py 已在运行）。")
@@ -282,12 +341,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                 else:
                     # 独立模式：本地记录 + 子网/全局双发广播
                     ts = datetime.datetime.now().strftime("%H:%M:%S")
-                    with print_lock:
-                        print(f"\n💻 [网页] {sender} 说: {content}")
-                        CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": content})
-                        if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
+                    message_id = str(uuid.uuid4())
+                    local_saved = _claim_chat_message(sender, message_id, content)
+                    if local_saved:
+                        with print_lock:
+                            print(f"\\n💻 [网页] {sender} 说: {content}")
+                            CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": content})
+                            if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
 
-                    payload = f"FIND_ME_CHAT:{RESCUE_SECRET}:{sender}:{uuid.uuid4()}:{content}"
+                    payload = f"FIND_ME_CHAT:{RESCUE_SECRET}:{sender}:{message_id}:{content}"
                     # [F1] 子网 + 全局双发，每目标 3 次
                     broadcast_chat_message(payload)
 
