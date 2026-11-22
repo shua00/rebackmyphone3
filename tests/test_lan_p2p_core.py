@@ -702,6 +702,9 @@ class LanP2PCoreTests(unittest.TestCase):
         start = source.index('if ("chat.ack".equals(type))')
         end = source.index('if ("chat.message".equals(type))', start)
         ack_handler = source[start:end]
+        store_source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
         self.assertIn("boolean routeMatches", ack_handler)
         self.assertIn("boolean discoveryAck", ack_handler)
         self.assertIn("if (routeMatches) verifiedChatPeerSeen.put", ack_handler)
