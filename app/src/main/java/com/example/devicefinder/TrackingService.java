@@ -3826,10 +3826,10 @@ public class TrackingService extends Service implements LocationListener {
         }
         boolean attemptRecorded = false;
         int attemptNumber = -1;
+        LanChatStore store = lanChatStore;
         try {
             if (serviceDestroyed) return;
             DatagramSocket socket = rescueSocketRef;
-            LanChatStore store = lanChatStore;
             if (socket == null || socket.isClosed() || store == null) {
                 FileLogger.log(this, "CHAT", "ℹ️ LAN 监听或账本尚未就绪，消息保留待恢复");
                 return;
