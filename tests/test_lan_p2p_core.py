@@ -1277,5 +1277,18 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("store.isWaitingForPeers(messageId)", send)
 
 
+    def test_chat_send_restores_editor_focus_for_continuous_typing(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/ChatActivity.java"
+        ).read_text(encoding="utf-8")
+        start = source.index("private void sendMessage()")
+        end = source.index("\\n    private void refreshHistory(", start)
+        send = source[start:end]
+        self.assertIn('inputMsg.setText("");', send)
+        self.assertIn("inputMsg.requestFocus();", send)
+        self.assertLess(send.index('inputMsg.setText("");'), send.index("inputMsg.requestFocus();"))
+
+
 if __name__ == "__main__":
     unittest.main()
