@@ -177,7 +177,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
-            Cursor c = db.rawQuery("SELECT COUNT(*) FROM lan_outbox WHERE state NOT IN ('delivered','expired')", null);
+            Cursor c = db.rawQuery("SELECT COUNT(*) FROM lan_outbox WHERE state NOT IN ('delivered','expired','waiting_peers')", null);
             int count = 0;
             try { if (c.moveToFirst()) count = c.getInt(0); } finally { c.close(); }
 
@@ -371,7 +371,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
         try {
             c = getReadableDatabase().rawQuery(
                     "SELECT message_id,sender_peer_id,body,created_at_ms,state,retry_attempt_count FROM lan_outbox " +
-                    "WHERE state NOT IN ('delivered','expired') ORDER BY retry_attempt_count,created_at_ms LIMIT ?",
+                    "WHERE state NOT IN ('delivered','expired','waiting_peers') ORDER BY retry_attempt_count,created_at_ms LIMIT ?",
                     new String[]{String.valueOf(Math.max(1, Math.min(50, limit)))});
             while (c.moveToNext()) result.add(new PendingMessage(
                     c.getString(0), c.getString(1), c.getString(2), c.getLong(3),
@@ -578,13 +578,50 @@ public final class LanChatStore extends SQLiteOpenHelper {
             }
             long now = System.currentTimeMillis();
             if (deadline > 0L) {
+                if (now > deadline) {
+                    // Preserve an empty expired snapshot for diagnostics without retrying forever.
+                    finalizeDiscoveryMessage(db, messageId);
+                    db.setTransactionSuccessful();
+                    return false;
+                }
                 db.setTransactionSuccessful();
-                return now <= deadline;
+                return false; // Already started: open, but never extend or re-arm.
             }
             ContentValues window = new ContentValues();
             window.put("delivery_deadline_ms", now + FIRST_DISCOVERY_WINDOW_MS);
             if (db.update("lan_outbox", window, "message_id=?",
                     new String[]{messageId}) != 1) return false;
+            db.setTransactionSuccessful();
+            return true;
+        } catch (Exception e) {
+            return false;
+        } finally {
+            if (c != null) c.close();
+            db.endTransaction();
+        }
+    }
+
+
+    /** Close an elapsed first-discovery window and settle its durable outbox state. */
+    public boolean finalizeDiscoveryWindow(String messageId) {
+        if (messageId == null || messageId.length() == 0) return false;
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        Cursor c = null;
+        try {
+            c = db.rawQuery("SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id=?",
+                    new String[]{messageId});
+            if (!c.moveToFirst()) return false;
+            String state = c.getString(0);
+            long deadline = c.getLong(1);
+            c.close();
+            c = null;
+            if (!"discovery_pending".equals(state) || deadline <= 0L
+                    || System.currentTimeMillis() < deadline) {
+                db.setTransactionSuccessful();
+                return false;
+            }
+            if (!finalizeDiscoveryMessage(db, messageId)) return false;
             db.setTransactionSuccessful();
             return true;
         } catch (Exception e) {
@@ -667,7 +704,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
         } finally { c.close(); }
         ContentValues next = new ContentValues();
         next.put("state", total > 0 && total == acked
-                ? "delivered" : (total > 0 ? "pending" : "discovery_pending"));
+                ? "delivered" : (total > 0 ? "pending" : "waiting_peers"));
         return db.update("lan_outbox", next, "message_id=?", new String[]{messageId}) == 1;
     }
 
