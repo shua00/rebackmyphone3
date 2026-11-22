@@ -4,7 +4,7 @@
  * ------------------------------------------------------------
  *  构建批次 : 20261122-ANR-UI
  *  协议版本 : v2
- *  最后修改 : 2026-11-22（首次启动主线程阻塞/授权完成卡死修复）
+ *  最后修改 : 2026-11-22（启动主线程与网络回调阻塞修复）
  * ============================================================
  */
 
@@ -18,7 +18,7 @@ public final class BuildInfo {
      * ★【手动编号/标签】：
      * v2.0.1 通用架构优化批次：通道可视化 + 闹钟防抖 + 定位解耦
      */
-    private static final String CUSTOM_TAG = "-V2514";
+    private static final String CUSTOM_TAG = "-V2515";
 
     public static final String BUILD_VERSION = BuildConfig.AUTO_BUILD_VERSION + CUSTOM_TAG;
 
