@@ -253,8 +253,6 @@ public class TrackingService extends Service implements LocationListener {
             new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, Long> pendingChatAckStartedAt =
             new java.util.concurrent.ConcurrentHashMap<>();
-    private final java.util.concurrent.ConcurrentHashMap<String, Long> receivedChatMessageIds =
-            new java.util.concurrent.ConcurrentHashMap<>();
     // 防止发送端重试/多端口重复广播时，同一消息在持久化完成前重复占用后台队列。
     private final java.util.Set<String> pendingLanChatReceives =
             java.util.Collections.newSetFromMap(
@@ -4475,8 +4473,13 @@ public class TrackingService extends Service implements LocationListener {
                                         + " stored=" + stored);
                             }
                             if (stored) {
-                                receivedChatMessageIds.put(receiveKey, System.currentTimeMillis());
-                                sendAuthenticatedChatAck(socket, ackAddress, ackPort, senderId, messageId);
+                                boolean ackSent = sendAuthenticatedChatAck(
+                                        socket, ackAddress, ackPort, senderId, messageId);
+                                FileLogger.log(this, "CHAT", "P2P RX durable message=" + messageId
+                                        + " sender=" + senderId + " persisted=true ackSent=" + ackSent);
+                            } else {
+                                FileLogger.log(this, "CHAT", "P2P RX message=" + messageId
+                                        + " sender=" + senderId + " persisted=false ackSent=false");
                             }
                         } finally {
                             pendingLanChatReceives.remove(receiveKey);
@@ -4493,9 +4496,10 @@ public class TrackingService extends Service implements LocationListener {
         return true;
     }
 
-    private void sendAuthenticatedChatAck(DatagramSocket socket, java.net.InetAddress address,
-                                          int port, String targetPeerId, String messageId) {
+    private boolean sendAuthenticatedChatAck(DatagramSocket socket, java.net.InetAddress address,
+                                             int port, String targetPeerId, String messageId) {
         try {
+            if (socket == null || socket.isClosed() || address == null) return false;
             JSONObject ack = LanP2pProtocol.create("chat.ack", getUniqueDeviceId(), "android", "android-main");
             ack.put("target_peer_id", targetPeerId);
             ack.put("message_id", messageId);
@@ -4503,8 +4507,11 @@ public class TrackingService extends Service implements LocationListener {
             byte[] bytes = LanP2pProtocol.encode(ack, RESCUE_SECRET);
             DatagramPacket response = new DatagramPacket(bytes, bytes.length, address, port);
             sendLanUdpPacket(socket, response, "CHAT_ACK_V2");
+            return !socket.isClosed();
         } catch (Exception e) {
-            FileLogger.log(this, "CHAT", "⚠️ v2 ACK 发送失败: " + e.getClass().getSimpleName());
+            FileLogger.log(this, "CHAT", "⚠️ v2 ACK 发送失败 message=" + messageId
+                    + " peer=" + targetPeerId + " error=" + e.getClass().getSimpleName());
+            return false;
         }
     }
 
