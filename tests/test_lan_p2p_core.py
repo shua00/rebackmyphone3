@@ -1443,6 +1443,30 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("store.isWaitingForPeers(messageId)", send)
 
 
+    def test_android_peer_ack_is_durable_before_route_activation_and_discovery_snapshot(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        service = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        start = service.index('if ("peer.ack".equals(type))')
+        end = service.index('if ("chat.ack".equals(type))', start)
+        handler = service[start:end]
+
+        # A peer must be durably recorded and added to every still-open first-discovery
+        # snapshot before it becomes an active unicast route or releases discovery waiters.
+        persist = handler.index("store.upsertPeer(")
+        snapshot = handler.index("store.addDiscoveryPeerToOpenMessages(senderId)")
+        route = handler.index("verifiedChatPeers.put(senderId")
+        release = handler.index("latch.countDown()")
+        self.assertLess(persist, snapshot)
+        self.assertLess(snapshot, route)
+        self.assertLess(route, release)
+        self.assertIn("if (!persisted)", handler)
+        self.assertIn("if (!store.addDiscoveryPeerToOpenMessages(senderId))", handler)
+        self.assertIn("return;", handler[persist:route])
+        self.assertIn("lanChatIoExecutor.execute", handler)
+
+
     def test_chat_send_restores_editor_focus_for_continuous_typing(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (
