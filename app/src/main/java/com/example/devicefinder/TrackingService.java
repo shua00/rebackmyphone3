@@ -3706,9 +3706,12 @@ public class TrackingService extends Service implements LocationListener {
             int deliveredPeers = totalPeerCount - (int) ack.getCount();
             if (totalPeerCount == 0) {
                 if (ack.getCount() == 0) {
-                    removePendingLanChat(messageId);
-                    FileLogger.log(this, "CHAT", "✅ P2P 广播 ACK 已确认至少一个接收端，消息 "
-                            + messageId);
+                    // 广播首个 ACK 只证明至少一个节点收到，不能证明当前 LAN 的全部目标节点收到。
+                    // 因此不能回收持久化队列；下一次网络恢复/重试时重新 challenge，
+                    // 获得明确成员名单后再按每个 peer 的 ACK 完成回收。
+                    lastPeerDiscoveryAt = 0L;
+                    FileLogger.log(this, "CHAT", "ℹ️ P2P 广播至少一个接收端已确认，但成员名单未建立；"
+                            + "保留消息并等待逐节点确认: " + messageId);
                 } else {
                     FileLogger.log(this, "CHAT", "⚠️ P2P 广播暂未收到 ACK，消息保留待确认队列: "
                             + messageId);
