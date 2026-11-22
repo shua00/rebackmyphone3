@@ -3,6 +3,10 @@ import sqlite3
 import time
 
 
+class LanP2PStorageError(RuntimeError):
+    """A durable LAN P2P ledger operation failed; callers must not treat it as empty state."""
+
+
 def record_peer(db_path, receiver_scope, peer_id, peer_type, service_id,
                 endpoint_ip, endpoint_port, status="suspect"):
     """Persist a discovered peer without treating an unconfirmed HELLO as active."""
@@ -403,8 +407,9 @@ def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10):
         return [{"message_id": r[0], "sender_peer_id": r[1], "body": r[2],
                  "created_at_ms": r[3], "endpoint_ip": r[4], "endpoint_port": r[5]}
                 for r in rows]
-    except Exception:
-        return []
+    except Exception as exc:
+        conn.rollback()
+        raise LanP2PStorageError("failed to load pending LAN outbox rows for peer") from exc
     finally:
         conn.close()
 
@@ -528,9 +533,9 @@ def add_discovery_targets_for_peer(db_path, sender_scope, peer_id):
             added += max(0, cur.rowcount)
         conn.commit()
         return added
-    except Exception:
+    except Exception as exc:
         conn.rollback()
-        return 0
+        raise LanP2PStorageError("failed to attach peer to LAN discovery snapshots") from exc
     finally:
         conn.close()
 
@@ -771,8 +776,8 @@ def load_active_pending_targets(db_path, sender_scope, message_id, limit=500):
              max(1, min(1000, int(limit))))).fetchall()
         return [{"peer_id": row[0], "endpoint_ip": row[1],
                  "endpoint_port": row[2]} for row in rows]
-    except Exception:
-        return []
+    except Exception as exc:
+        raise LanP2PStorageError("failed to load active LAN outbox targets") from exc
     finally:
         if conn is not None:
             conn.close()

@@ -1369,8 +1369,14 @@ def cmd_cleaner():
 
 def _resume_pending_v2_for_peer(sock, peer_id, addr):
     """Attach the verified peer to open discovery snapshots and replay its pending rows."""
-    add_discovery_targets_for_peer(CHAT_DEDUP_DB, "server2", peer_id)
-    for pending in load_pending_outgoing_for_peer(CHAT_DEDUP_DB, "server2", peer_id, limit=10):
+    try:
+        add_discovery_targets_for_peer(CHAT_DEDUP_DB, "server2", peer_id)
+        pending_rows = load_pending_outgoing_for_peer(CHAT_DEDUP_DB, "server2", peer_id, limit=10)
+    except Exception as e:
+        with print_lock:
+            print(f"⚠️ server2 LAN outbox recovery deferred; durable ledger read failed: {type(e).__name__}")
+        return
+    for pending in pending_rowsCHAT_DEDUP_DB, "server2", peer_id, limit=10):
         chat_packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
                        "sender_peer_type": "server2", "service_id": PEER_NODE_ID,
                        "target_peer_id": peer_id, "message_id": pending["message_id"],

@@ -5,7 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from lan_p2p_core import load_stable_peer_id, record_peer
+from lan_p2p_core import (LanP2PStorageError, load_stable_peer_id, record_peer,
+                          load_pending_outgoing_for_peer, add_discovery_targets_for_peer,
+                          load_active_pending_targets)
 
 
 import re
@@ -2072,6 +2074,37 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn('if (links == null || links.getInterfaceName() == null', fingerprint)
         self.assertIn('|| links.getLinkAddresses().isEmpty())', fingerprint)
         self.assertIn('return "UNAVAILABLE";', fingerprint)
+
+    def test_outbox_database_read_failures_raise_instead_of_looking_empty(self):
+        operations = (
+            lambda: load_pending_outgoing_for_peer(self.db_path, "server2", "peer-a"),
+            lambda: add_discovery_targets_for_peer(self.db_path, "server2", "peer-a"),
+            lambda: load_active_pending_targets(self.db_path, "server2", "message-a"),
+        )
+        for operation in operations:
+            with self.subTest(operation=operation):
+                with patch("lan_p2p_core.sqlite3.connect",
+                           side_effect=sqlite3.OperationalError("database is locked")):
+                    with self.assertRaises(LanP2PStorageError):
+                        operation()
+
+    def test_outbox_queries_still_return_empty_for_a_valid_empty_ledger(self):
+        self.assertEqual([], load_pending_outgoing_for_peer(self.db_path, "server2", "peer-a"))
+        self.assertEqual(0, add_discovery_targets_for_peer(self.db_path, "server2", "peer-a"))
+        self.assertEqual([], load_active_pending_targets(self.db_path, "server2", "message-a"))
+
+    def test_all_python_services_defer_peer_recovery_on_ledger_read_failure(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        for filename in ("rescue2.py", "chat.py", "server2.py"):
+            source = (repo_root / filename).read_text(encoding="utf-8")
+            start = source.index("def _resume_pending_v2_for_peer(")
+            end = source.index("\ndef _handle_authenticated_v2_packet", start)
+            recovery = source[start:end]
+            self.assertIn("try:", recovery, filename)
+            self.assertIn("except Exception as e:", recovery, filename)
+            self.assertIn("durable ledger read failed", recovery, filename)
+            self.assertIn("load_pending_outgoing_for_peer(", recovery, filename)
+
 
 
 if __name__ == "__main__":
