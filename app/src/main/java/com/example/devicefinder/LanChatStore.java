@@ -346,6 +346,11 @@ public final class LanChatStore extends SQLiteOpenHelper {
         return result;
     }
 
+    /**
+     * Load the durable retry source. Database/query failures must propagate to the
+     * recovery owner; returning an empty list would falsely turn a storage failure
+     * into "no pending messages" and could silently strand the outbox.
+     */
     public List<PendingMessage> loadPending(int limit) {
         ArrayList<PendingMessage> result = new ArrayList<>();
         Cursor c = null;
@@ -356,11 +361,10 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     new String[]{String.valueOf(Math.max(1, Math.min(50, limit)))});
             while (c.moveToNext()) result.add(new PendingMessage(
                     c.getString(0), c.getString(1), c.getString(2), c.getLong(3), c.getString(4)));
-        } catch (Exception ignored) {
+            return result;
         } finally {
             if (c != null) c.close();
         }
-        return result;
     }
 
     public List<Target> loadTargets(String messageId) {
