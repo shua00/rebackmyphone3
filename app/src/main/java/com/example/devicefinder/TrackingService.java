@@ -3711,7 +3711,9 @@ public class TrackingService extends Service implements LocationListener {
                             endpoint.getAddress().getHostAddress(), endpoint.getPort()));
                 }
             }
-            snapshot.removeIf(target -> getUniqueDeviceId().equals(target.peerId));
+            for (java.util.Iterator<LanChatStore.Target> it = snapshot.iterator(); it.hasNext();) {
+                if (getUniqueDeviceId().equals(it.next().peerId)) it.remove();
+            }
             if (!snapshot.isEmpty() && !store.setTargets(messageId, snapshot)) {
                 FileLogger.log(this, "CHAT", "⚠️ LAN 固定目标集合持久化失败，本条暂不发送: " + messageId);
                 return;
@@ -4184,7 +4186,12 @@ public class TrackingService extends Service implements LocationListener {
         }
 
         if (recentExecutions.size() > RECENT_EXECUTIONS_MAX) {
-            recentExecutions.entrySet().removeIf(e -> now - e.getValue() > CMD_TIME_WINDOW_MS);
+            java.util.Iterator<java.util.Map.Entry<String, Long>> it =
+                    recentExecutions.entrySet().iterator();
+            while (it.hasNext()) {
+                java.util.Map.Entry<String, Long> entry = it.next();
+                if (now - entry.getValue() > CMD_TIME_WINDOW_MS) it.remove();
+            }
         }
         return false;
     }
@@ -4426,7 +4433,11 @@ public class TrackingService extends Service implements LocationListener {
                         udpCmdDedup.put(dedupKey, nowMs);
                         if (udpCmdDedup.size() > 50) {
                             long cutoff = nowMs - 30000;
-                            udpCmdDedup.entrySet().removeIf(e -> e.getValue() < cutoff);
+                            java.util.Iterator<java.util.Map.Entry<String, Long>> it =
+                                    udpCmdDedup.entrySet().iterator();
+                            while (it.hasNext()) {
+                                if (it.next().getValue() < cutoff) it.remove();
+                            }
                         }
                     }
 
