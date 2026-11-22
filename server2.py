@@ -2417,6 +2417,11 @@ def handle_client(client_conn, client_addr):
                             success = True
                     if success:
                         ts = datetime.datetime.now().strftime("%H:%M:%S")
+                        # 本机发出的网页对讲也进入 server2 自己的持久化历史。
+                        local_saved = _claim_chat_message("Web_Console", "web-" + uuid.uuid4().hex, payload)
+                        if local_saved is None:
+                            with print_lock:
+                                print("⚠️ 网页对讲已尝试发送，但本机历史持久化失败")
                         with state_lock:
                             CHAT_MESSAGES.append({"time": ts, "sender": "Web_Console", "content": payload})
                             if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
