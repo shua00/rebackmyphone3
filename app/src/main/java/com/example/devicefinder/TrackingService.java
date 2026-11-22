@@ -3442,6 +3442,14 @@ public class TrackingService extends Service implements LocationListener {
     private void sendLocalUdpMessage(final String message) {
         final String messageId = java.util.UUID.randomUUID().toString();
         try {
+            // Reject an oversized UDP text before creating a durable pending row that can never be sent.
+            buildAuthenticatedLanChatPacket(getUniqueDeviceId(), "*", messageId, message);
+        } catch (Exception tooLargeOrInvalid) {
+            FileLogger.log(this, "CHAT", "⚠️ LAN 对讲消息超过单个 UDP 数据包限制，未入队: "
+                    + tooLargeOrInvalid.getClass().getSimpleName());
+            return;
+        }
+        try {
             lanChatSendExecutor.execute(() -> {
                 if (serviceDestroyed) return;
                 long persistStarted = android.os.SystemClock.elapsedRealtime();

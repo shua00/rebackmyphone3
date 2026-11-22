@@ -887,17 +887,23 @@ def _build_version_aware_commands(target_devs, action_name, payload):
     if action_name == "chat_msg":
         message_id = uuid.uuid4().hex
         created_at_ms = int(time.time() * 1000)
-        if not persist_outgoing_message(CHAT_DEDUP_DB, "server2", PEER_NODE_ID,
-                                        message_id, str(payload), target_devs, created_at_ms):
-            with print_lock:
-                print("⚠️ Web chat outbox persistence failed; refusing untracked UDP send")
-            return []
         packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
                   "sender_peer_type": "server2", "service_id": PEER_NODE_ID,
                   "target_peer_id": "*", "message_id": message_id,
                   "created_at_ms": created_at_ms,
                   "display_name": "Web_Console", "body": str(payload)}
-        return [encode_packet(packet, RESCUE_SECRET).decode("utf-8")]
+        try:
+            encoded = encode_packet(packet, RESCUE_SECRET)
+        except ValueError as e:
+            with print_lock:
+                print(f"⚠️ Web chat message rejected before enqueue: {e}")
+            return []
+        if not persist_outgoing_message(CHAT_DEDUP_DB, "server2", PEER_NODE_ID,
+                                        message_id, str(payload), target_devs, created_at_ms):
+            with print_lock:
+                print("⚠️ Web chat outbox persistence failed; refusing untracked UDP send")
+            return []
+        return [encoded.decode("utf-8")]
     return []
 
 
