@@ -301,8 +301,9 @@ def acknowledge_outgoing_message(db_path, sender_scope, message_id, peer_id):
     """Persist exactly one recipient ACK; unknown/non-target ACKs never complete an outbox row."""
     if not sender_scope or not message_id or not peer_id:
         return False
-    conn = sqlite3.connect(db_path, timeout=10)
+    conn = None
     try:
+        conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("PRAGMA busy_timeout=10000")
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT state FROM lan_outbox WHERE sender_scope=? AND message_id=?",
@@ -386,8 +387,9 @@ def _finalize_expired_discovery_windows(conn, sender_scope, now_ms):
 
 def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10):
     """Load only unacked messages addressed to a peer whose current LAN lease is valid."""
-    conn = sqlite3.connect(db_path, timeout=10)
+    conn = None
     try:
+        conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("PRAGMA busy_timeout=10000")
         now = time.time()
         now_ms = int(now * 1000)
@@ -408,10 +410,12 @@ def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10):
                  "created_at_ms": r[3], "endpoint_ip": r[4], "endpoint_port": r[5]}
                 for r in rows]
     except Exception as exc:
-        conn.rollback()
+        if conn is not None:
+            conn.rollback()
         raise LanP2PStorageError("failed to load pending LAN outbox rows for peer") from exc
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_port):
@@ -534,10 +538,12 @@ def add_discovery_targets_for_peer(db_path, sender_scope, peer_id):
         conn.commit()
         return added
     except Exception as exc:
-        conn.rollback()
+        if conn is not None:
+            conn.rollback()
         raise LanP2PStorageError("failed to attach peer to LAN discovery snapshots") from exc
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def remember_peer_challenge(db_path, receiver_scope, nonce, expected_peer_id="",
