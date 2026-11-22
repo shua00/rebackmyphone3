@@ -633,41 +633,6 @@ def udp_listener():
                     if envelope is not None:
                         _handle_authenticated_v2_packet(envelope, sock, addr)
                         continue
-                if msg.startswith("FIND_ME_PEER_HELLO:"):
-                    parts = msg.split(":", 3)
-                    if len(parts) == 4 and parts[1] == RESCUE_SECRET:
-                        record_peer(_CHAT_DEDUP_DB, "rescue2", parts[2], "android", "android-main", addr[0], addr[1], "suspect")
-                        response = f"FIND_ME_PEER_ACK:{RESCUE_SECRET}:{parts[3]}:{PEER_NODE_ID}".encode("utf-8")
-                        try: sock.sendto(response, addr)
-                        except OSError: pass
-                elif msg.startswith("FIND_ME_CHAT:"):
-                    parts = msg.split(":", 4)
-                    if len(parts) == 5 and parts[1] == RESCUE_SECRET:
-                        sender = parts[2]
-                        message_id = parts[3]
-                        content = parts[4]
-                        if sender in ("PC_Terminal", "Web_Console", "Guest_"):
-                            if message_id:
-                                ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:{PEER_NODE_ID}".encode("utf-8")
-                                try: sock.sendto(ack, addr)
-                                except OSError: pass
-                            continue
-                        claim_result = _claim_chat_message(sender, message_id, content)
-                        if claim_result is not None:
-                            record_peer(_CHAT_DEDUP_DB, "rescue2", sender, "android", "android-main", addr[0], addr[1], "active")
-                        if claim_result is None:
-                            continue  # 持久化失败：不 ACK，允许发送端重试
-                        if message_id:
-                            ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:{PEER_NODE_ID}".encode("utf-8")
-                            try: sock.sendto(ack, addr)
-                            except OSError: pass
-                        if not claim_result:
-                            continue  # 重复消息仍 ACK，但不重复展示
-                        print(f"\n{I.chat} [{sender}] {content}  (来自 {addr[0]})")
-                        with _state_lock:
-                            info = DISCOVERED_DEVICES.setdefault(sender, {})
-                            info["source_ip"] = addr[0]
-                            info["last_chat"] = time.time()
         except Exception:
             UDP_OK = False
             time.sleep(10)

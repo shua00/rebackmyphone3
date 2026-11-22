@@ -364,43 +364,6 @@ def udp_listener():
                 if envelope is not None:
                     _handle_authenticated_v2_packet(envelope, udp_sock, addr)
                     continue
-            if msg.startswith("FIND_ME_PEER_HELLO:"):
-                parts = msg.split(":", 3)
-                if len(parts) == 4 and parts[1] == RESCUE_SECRET:
-                    record_peer(CHAT_DB, "chat.py", parts[2], "android", "android-main", addr[0], addr[1], "suspect")
-                    response = f"FIND_ME_PEER_ACK:{RESCUE_SECRET}:{parts[3]}:{PEER_NODE_ID}".encode("utf-8")
-                    try: udp_sock.sendto(response, addr)
-                    except OSError: pass
-            elif msg.startswith("FIND_ME_CHAT:"):
-                # v2-only：聊天统一使用 FIND_ME_CHAT，不再接收旧 FIND_ME_MSG
-                parts = msg.split(":", 4)
-                if len(parts) == 5 and parts[1] == RESCUE_SECRET:
-                    sender = parts[2]
-                    message_id = parts[3]
-                    content = parts[4]
-                    # 保留原有 Guest_/Web_Console 过滤及其ACK语义，防止网页自身广播回环。
-                    if sender.startswith("Guest_") or sender == "Web_Console":
-                        if message_id:
-                            ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:{PEER_NODE_ID}".encode("utf-8")
-                            try: udp_sock.sendto(ack, addr)
-                            except OSError: pass
-                        continue
-                    claim_result = _claim_chat_message(sender, message_id, content)
-                    if claim_result is not None:
-                        record_peer(CHAT_DB, "chat.py", sender, "android", "android-main", addr[0], addr[1], "active")
-                    if claim_result is None:
-                        continue  # 未持久化成功，不ACK，允许发送端重试
-                    if message_id:
-                        ack = f"FIND_ME_CHAT_ACK:{RESCUE_SECRET}:{message_id}:{PEER_NODE_ID}".encode("utf-8")
-                        try: udp_sock.sendto(ack, addr)
-                        except OSError: pass
-                    if not claim_result:
-                        continue  # 重复消息仍ACK，但不重复展示
-                    ts = datetime.datetime.now().strftime("%H:%M:%S")
-                    with print_lock:
-                        print(f"\n🗣️ [对讲机] {sender} 说: {content}")
-                        CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": content})
-                        if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
     except OSError as e:
         if e.errno == 98:
             print(f"❌ UDP {UDP_PORT} 被占用（可能 rescue2.py 已在运行）。")
