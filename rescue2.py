@@ -501,6 +501,9 @@ def start_log_receiver():
 def _handle_authenticated_v2_packet(envelope, sock, addr):
     packet_type = envelope.get("type")
     sender = str(envelope.get("sender_peer_id") or "")
+    if sender == PEER_NODE_ID:
+        return
+    display_sender = str(envelope.get("display_name") or sender)
     if packet_type == "peer.hello":
         record_peer(_CHAT_DEDUP_DB, "rescue2", sender, envelope.get("sender_peer_type", "unknown"),
                     envelope.get("service_id", ""), addr[0], 8888, "suspect")
@@ -537,7 +540,7 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
     except OSError: pass
     if not claim_result:
         return
-    print(f"\\n{I.chat} [{sender}] {body}  (来自 {addr[0]})")
+    print(f"\\n{I.chat} [{display_sender}] {body}  (来自 {addr[0]})")
     with _state_lock:
         info = DISCOVERED_DEVICES.setdefault(sender, {})
         info["source_ip"] = addr[0]
@@ -1537,7 +1540,12 @@ def main():
         elif choice == '6':
             chat = input("对讲消息内容: ").strip()
             if chat:
-                send_udp(f"FIND_ME_CHAT:{RESCUE_SECRET}:PC_Terminal:{uuid.uuid4()}:{chat}", choose_targets_multi())
+                packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
+                          "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
+                          "target_peer_id": "*", "message_id": uuid.uuid4().hex,
+                          "created_at_ms": int(time.time() * 1000),
+                          "display_name": "PC_Terminal", "body": chat}
+                send_udp(encode_packet(packet, RESCUE_SECRET).decode("utf-8"), choose_targets_multi())
         # 2026-11-20 ：1:45 精准插入以下独立特权流处理分支：
         elif choice == 'P':
             input_val = input("\n请输入远程陪伴媒体 URL / 直播源 / H5 网页地址: ").strip()

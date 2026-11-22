@@ -883,7 +883,12 @@ def _build_version_aware_commands(target_devs, action_name, payload):
     if action_name == "custom_msg":
         return [f"FIND_ME_FLOAT:{RESCUE_SECRET}:{payload}"]
     if action_name == "chat_msg":
-        return [f"FIND_ME_CHAT:{RESCUE_SECRET}:Web_Console:{uuid.uuid4()}:{payload}"]
+        packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
+                  "sender_peer_type": "server2", "service_id": PEER_NODE_ID,
+                  "target_peer_id": "*", "message_id": uuid.uuid4().hex,
+                  "created_at_ms": int(time.time() * 1000),
+                  "display_name": "Web_Console", "body": str(payload)}
+        return [encode_packet(packet, RESCUE_SECRET).decode("utf-8")]
     return []
 
 
@@ -1183,6 +1188,9 @@ def cmd_cleaner():
 def _handle_authenticated_v2_packet(envelope, sock, addr):
     packet_type = envelope.get("type")
     sender = str(envelope.get("sender_peer_id") or "")
+    if sender == PEER_NODE_ID:
+        return
+    display_sender = str(envelope.get("display_name") or sender)
     if packet_type == "peer.hello":
         record_peer(CHAT_DEDUP_DB, "server2", sender, envelope.get("sender_peer_type", "unknown"),
                     envelope.get("service_id", ""), addr[0], 8888, "suspect")
@@ -1231,10 +1239,10 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
         info["received_at"] = now_ms
         info.pop("offline_alerted", None)
         info["last_chat"] = now_ms
-        CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": body})
+        CHAT_MESSAGES.append({"time": ts, "sender": display_sender, "content": body})
         if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
     with print_lock:
-        print(f"\\n🗣️ [对讲机] {sender} (来自IP: {addr[0]}) 说: {body}")
+        print(f"\\n🗣️ [对讲机] {display_sender} (来自IP: {addr[0]}) 说: {body}")
 
 
 def udp_listener():

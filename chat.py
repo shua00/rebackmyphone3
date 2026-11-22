@@ -237,6 +237,9 @@ def broadcast_chat_message(payload_str):
 def _handle_authenticated_v2_packet(envelope, sock, addr):
     packet_type = envelope.get("type")
     sender = str(envelope.get("sender_peer_id") or "")
+    if sender == PEER_NODE_ID:
+        return
+    display_sender = str(envelope.get("display_name") or sender)
     if packet_type == "peer.hello":
         record_peer(CHAT_DB, "chat.py", sender, envelope.get("sender_peer_type", "unknown"),
                     envelope.get("service_id", ""), addr[0], 8888, "suspect")
@@ -275,8 +278,8 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
         return
     ts = datetime.datetime.now().strftime("%H:%M:%S")
     with print_lock:
-        print(f"\\n🗣️ [对讲机] {sender} 说: {body}")
-        CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": body})
+        print(f"\\n🗣️ [对讲机] {display_sender} 说: {body}")
+        CHAT_MESSAGES.append({"time": ts, "sender": display_sender, "content": body})
         if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
 
 
@@ -416,9 +419,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                         CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": content})
                         if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
 
-                    payload = f"FIND_ME_CHAT:{RESCUE_SECRET}:{sender}:{message_id}:{content}"
-                    # [F1] 子网 + 全局双发，每目标 3 次
-                    broadcast_chat_message(payload)
+                    packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
+                              "sender_peer_type": "chat.py", "service_id": PEER_NODE_ID,
+                              "target_peer_id": "*", "message_id": message_id,
+                              "created_at_ms": int(time.time() * 1000),
+                              "display_name": sender, "body": content}
+                    # [F1] 子网广播到现有服务端口；接收端按稳定 peer ID 去重。
+                    broadcast_chat_message(encode_packet(packet, RESCUE_SECRET).decode("utf-8"))
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
