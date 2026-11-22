@@ -1369,7 +1369,9 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
                 if active_route:
                     record_peer(CHAT_DEDUP_DB, "server2", sender, "android", "android-main",
                                 addr[0], addr[1], "active")
-                    _remove_chat_fallback_for_message(sender, message_id)
+                # A valid stored ACK also completes this recipient's HTTP fallback,
+                # even when it arrived through the bounded first-discovery window.
+                _remove_chat_fallback_for_message(sender, message_id)
         return
     if packet_type != "chat.message":
         return
