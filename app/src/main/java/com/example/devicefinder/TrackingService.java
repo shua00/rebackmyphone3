@@ -4537,7 +4537,12 @@ public class TrackingService extends Service implements LocationListener {
                                     }
                                 }
                             }
-                            if (latch != null && (wasExpected || discoveryAck)) latch.countDown();
+                            // Only a first ACK from the discovery-only broadcast may release its single
+                            // observation slot. Unknown discovery peers must never consume
+                            // the wait slots reserved for other fixed, reachable recipients.
+                            boolean discoveryBroadcastAck = discoveryAck && expected != null
+                                    && expected.isEmpty() && latch != null && latch.getCount() > 0;
+                            if (latch != null && (wasExpected || discoveryBroadcastAck)) latch.countDown();
                             if (store.allTargetsAcked(messageId)) {
                                 removePendingLanChat(messageId);
                                 FileLogger.log(this, "CHAT", "P2P 最终 ACK 已落账并回收兼容队列 message="

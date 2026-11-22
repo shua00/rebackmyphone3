@@ -1442,7 +1442,10 @@ class LanP2PCoreTests(unittest.TestCase):
         end = source.index('if ("chat.message".equals(type))', start)
         handler = source[start:end]
         self.assertIn("expected.remove(senderId)", handler)
-        self.assertIn("wasExpected || discoveryAck", handler)
+        self.assertIn("discoveryAck && expected != null", handler)
+        self.assertIn("expected.isEmpty() && latch != null && latch.getCount() > 0", handler)
+        self.assertIn("wasExpected || discoveryBroadcastAck", handler)
+        self.assertNotIn("wasExpected || discoveryAck)", handler)
 
 
     def test_android_p2p_send_log_distinguishes_fixed_targets_from_reachable_routes(self):
