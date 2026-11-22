@@ -446,80 +446,122 @@ public class TrackingService extends Service implements LocationListener {
     @Override
     public void onCreate() {
         super.onCreate();
-        // ★ 第一件事：立刻挂起前台通知，防止 ANR 与 5 秒秒杀
+        // Foreground promotion is the only startup operation kept synchronous:
+        // Android requires it immediately after startForegroundService().
         startForegroundNotification();
-        try { lanChatStore = new LanChatStore(this); }
-        catch (Exception e) { FileLogger.log(this, "CHAT", "LAN delivery store initialization failed: " + e.getClass().getSimpleName()); }
-
-        // ★ 补丁5：服务一旦复活，立刻重建定时防线，绝不等 handler.post 延迟执行
-        //   目的：进程刚拉起的最脆弱窗口（前 1~2 秒）内就有闹钟兜底，防系统秒杀后长时间无心跳
-        alarmManager = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
-        if (alarmManager != null) {
-            scheduleKeepAliveJob();
-            scheduleHeartbeatAlarm();
+        try {
+            lanChatStore = new LanChatStore(this);
+        } catch (Exception e) {
+            FileLogger.log(this, "CHAT",
+                    "LAN delivery store initialization failed: " + e.getClass().getSimpleName());
         }
 
         serviceCreateTimeMs = SystemClock.elapsedRealtime();
         logLifecycle("SERVICE_CREATE", "foregroundStarted=" + isForegroundStarted);
         locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
 
-        // ★ 强力补丁 1：将所有耗时初始化剥离到主线程 Looper 下一轮执行
-        handler.post(() -> {
-            FileLogger.log(this, "SERVICE", "🚀 追踪服务已启动 (或复活)");
-            logStartupSelfCheck();
+        // IMPORTANT: handler is bound to the main Looper. Posting startup work to it
+        // does not make that work asynchronous; permission-return launches previously
+        // ran provider queries, network registration, package-manager changes and
+        // scheduler IPC on the UI thread. Keep the UI responsive with one bounded,
+        // one-shot worker. No periodic startup thread or polling is introduced.
+        Thread startupThread = new Thread(() -> {
+            long startupStartedAt = SystemClock.elapsedRealtime();
+            try {
+                FileLogger.log(this, "SERVICE", "🚀 后台启动初始化开始");
+                logStartupSelfCheck();
 
-            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
-            if (pm != null) {
-                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DeviceFinder::WakeLock");
-                wakeLock.setReferenceCounted(false);
-            }
+                if (serviceDestroyed) return;
 
-            WifiManager wifiManager = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-            if (wifiManager != null) {
-                wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "DeviceFinder::WifiLock");
-                wifiLock.setReferenceCounted(false);
-                multicastLock = wifiManager.createMulticastLock("DeviceFinder::Multicast");
-                multicastLock.setReferenceCounted(false);
-            }
+                PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                if (pm != null) {
+                    wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DeviceFinder::WakeLock");
+                    wakeLock.setReferenceCounted(false);
+                }
 
-            // alarmManager 已在 onCreate 顶部赋值；若早期系统服务暂不可用，在此补取。
-            // 已成功建立的启动保活闹钟不在这里重复 cancel/re-arm，避免无意义重置计时。
-            if (alarmManager == null) {
+                WifiManager wifiManager = (WifiManager) getApplicationContext()
+                        .getSystemService(Context.WIFI_SERVICE);
+                if (wifiManager != null) {
+                    wifiLock = wifiManager.createWifiLock(
+                            WifiManager.WIFI_MODE_FULL_HIGH_PERF, "DeviceFinder::WifiLock");
+                    wifiLock.setReferenceCounted(false);
+                    multicastLock = wifiManager.createMulticastLock("DeviceFinder::Multicast");
+                    multicastLock.setReferenceCounted(false);
+                }
+
                 alarmManager = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
                 if (alarmManager != null) {
                     scheduleKeepAliveJob();
                     scheduleHeartbeatAlarm();
-                    FileLogger.log(this, "ALARM", "启动阶段补建保活与长心跳闹钟");
                 }
-            }
-            Intent reportIntent = new Intent(this, TrackingService.class);
-            reportIntent.setAction("ACTION_ALARM_TRIGGER");
-            int flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE : PendingIntent.FLAG_UPDATE_CURRENT;
-            // ★ P0级保活修复：API 26+ 使用 getForegroundService() 触发，打破后台启动限制
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                alarmPendingIntent = PendingIntent.getForegroundService(this, 1001, reportIntent, flags);
-            } else {
-                alarmPendingIntent = PendingIntent.getService(this, 1001, reportIntent, flags);
-            }
 
-            sensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
-            if (sensorManager != null) {
-                motionSensor = sensorManager.getDefaultSensor(Sensor.TYPE_SIGNIFICANT_MOTION);
+                Intent reportIntent = new Intent(this, TrackingService.class);
+                reportIntent.setAction("ACTION_ALARM_TRIGGER");
+                int flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                        ? PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                        : PendingIntent.FLAG_UPDATE_CURRENT;
+                // Keep the existing foreground-service PendingIntent behavior on API 26+.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    alarmPendingIntent = PendingIntent.getForegroundService(this, 1001, reportIntent, flags);
+                } else {
+                    alarmPendingIntent = PendingIntent.getService(this, 1001, reportIntent, flags);
+                }
+
+                sensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
+                if (sensorManager != null) {
+                    motionSensor = sensorManager.getDefaultSensor(Sensor.TYPE_SIGNIFICANT_MOTION);
+                }
+
+                if (serviceDestroyed) return;
+                handleIconVisibility(true);
+                triggerRescueListener();
+
+                // SensorManager is kept on the main Looper; these calls are quick and
+                // are posted only after the worker has created the sensor references.
+                handler.post(() -> {
+                    if (!serviceDestroyed) toggleMotionSensor(true);
+                });
+
+                // Location registration and ConnectivityManager IPC run off the UI thread.
+                // Location callbacks are explicitly delivered on the main Looper.
+                requestSingleLocationAndReport();
+                if (serviceDestroyed) return;
+                registerNetworkCallback();
+                startLocationUpdates();
+                registerBatteryMonitor();
+
+                if (alarmManager == null) {
+                    alarmManager = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+                    if (alarmManager != null) {
+                        scheduleKeepAliveJob();
+                        scheduleHeartbeatAlarm();
+                        FileLogger.log(this, "ALARM", "启动阶段补建保活与长心跳闹钟");
+                    }
+                }
+
+                // File/network queue flushing is delegated to the existing report executor.
+                handler.postDelayed(() -> {
+                    if (serviceDestroyed) return;
+                    try {
+                        reportExecutor.execute(() -> {
+                            if (!serviceDestroyed) flushPendingReports();
+                        });
+                    } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                        FileLogger.log(this, "REPORT", "启动补发任务队列繁忙，保留离线队列等待下次触发");
+                    }
+                }, 5000L);
+
+                KeepAliveJobService.scheduleJob(this);
+                startWatchdog();
+                FileLogger.log(this, "SERVICE", "后台启动初始化完成 elapsedMs="
+                        + (SystemClock.elapsedRealtime() - startupStartedAt));
+            } catch (Exception e) {
+                FileLogger.log(this, "SERVICE", "后台启动初始化异常: "
+                        + e.getClass().getSimpleName() + ": " + e.getMessage());
             }
-
-            handleIconVisibility(true);
-            triggerRescueListener();
-            toggleMotionSensor(true);
-            requestSingleLocationAndReport();
-            registerNetworkCallback();
-            startLocationUpdates();
-            // 保活与长心跳闹钟已在 onCreate 顶部立即注册；此处不重复重置它们。
-            registerBatteryMonitor();
-
-            handler.postDelayed(this::flushPendingReports, 5000);
-            KeepAliveJobService.scheduleJob(this);
-            startWatchdog();
-        });
+        }, "TrackingService-Startup");
+        startupThread.setPriority(Thread.NORM_PRIORITY - 1);
+        startupThread.start();
     }
 
     private void startWatchdog() {
@@ -2115,12 +2157,14 @@ public class TrackingService extends Service implements LocationListener {
 
             long minTime = 60000L;
             if ("fine".equals(accuracyMode) && gpsOn) {
-                try { locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, minTime, 0f, this); }
+                try { locationManager.requestLocationUpdates(
+                        LocationManager.GPS_PROVIDER, minTime, 0f, this, Looper.getMainLooper()); }
                 catch (Exception e) { FileLogger.log(this, "LOCATION", "⚠️ 请求 GPS 失败: " + e.getMessage()); }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 try {
-                    locationManager.requestLocationUpdates(LocationManager.FUSED_PROVIDER, minTime, 0f, this);
+                    locationManager.requestLocationUpdates(
+                            LocationManager.FUSED_PROVIDER, minTime, 0f, this, Looper.getMainLooper());
                     FileLogger.log(this, "LOCATION", "📡 已请求 FUSED_PROVIDER");
                 } catch (Exception e) {
                     FileLogger.log(this, "LOCATION", "⚠️ FUSED_PROVIDER 不可用（忽略）: " + e.getMessage());
@@ -2132,7 +2176,8 @@ public class TrackingService extends Service implements LocationListener {
                 hasNetworkProvider = providerList != null && providerList.contains(LocationManager.NETWORK_PROVIDER);
             } catch (Exception ignored) {}
             if (hasNetworkProvider) {
-                try { locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, minTime, 0f, this); }
+                try { locationManager.requestLocationUpdates(
+                        LocationManager.NETWORK_PROVIDER, minTime, 0f, this, Looper.getMainLooper()); }
                 catch (Exception e) { FileLogger.log(this, "LOCATION", "⚠️ 请求 NETWORK 失败: " + e.getMessage()); }
             } else {
                 FileLogger.log(this, "LOCATION", "ℹ️ NETWORK provider 不存在（Android 12+ 正常），使用 FUSED");
