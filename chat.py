@@ -28,8 +28,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 WEB_PORT = 8082
 UDP_DEVICE_PORT = 8888
 UDP_PORT = 8890  # 独立监听端口，避免与 server2/rescue2 冲突
+UDP_LISTENER_SOCKET = None
+UDP_CHAT_SEND_LOCK = threading.Lock()
 RESCUE_SECRET = "your_private_secret_key"  # ⚠️ 必须与手机端一致
-from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet
+from lan_p2p_core import load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.sqlite3"), "chat.py")
 SERVER2_URL = "http://127.0.0.1:8080"      # server2.py 的地址
 # ==========================================
@@ -233,6 +235,49 @@ def broadcast_chat_message(payload_str):
         sock.close()
 
 
+def send_chat_v2(body, display_name, message_id):
+    """Durable standalone chat sender; ACKs return to the bound 8890 listener."""
+    peers = list_known_peers(CHAT_DB, "chat.py")
+    target_ids = [peer["peer_id"] for peer in peers]
+    created = int(time.time() * 1000)
+    probe = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
+             "sender_peer_type": "chat.py", "service_id": PEER_NODE_ID,
+             "target_peer_id": "*", "message_id": message_id,
+             "created_at_ms": created, "display_name": display_name, "body": body}
+    try:
+        broadcast_bytes = encode_packet(probe, RESCUE_SECRET)
+    except ValueError:
+        return False
+    if not persist_outgoing_message(CHAT_DB, "chat.py", PEER_NODE_ID,
+                                    message_id, body, target_ids, created):
+        return False
+    sock = UDP_LISTENER_SOCKET
+    if sock is None or sock.fileno() < 0:
+        print("⚠️ chat.py UDP listener not ready; message is persisted for retry after peer discovery.")
+        return True
+    try:
+        with UDP_CHAT_SEND_LOCK:
+            if peers:
+                for peer in peers:
+                    packet = dict(probe)
+                    packet["target_peer_id"] = peer["peer_id"]
+                    target_port = int(peer["endpoint_port"] or 8888)
+                    raw = encode_packet(packet, RESCUE_SECRET)
+                    sock.sendto(raw, (peer["endpoint_ip"], target_port))
+                    mark_outgoing_attempt(CHAT_DB, message_id, peer["peer_id"],
+                                          peer["endpoint_ip"], target_port)
+            else:
+                subnet = get_subnet_broadcast()
+                targets = [subnet] if subnet == "255.255.255.255" else [subnet, "255.255.255.255"]
+                for target_ip in targets:
+                    for port in (UDP_DEVICE_PORT, 8887, 8889):
+                        sock.sendto(broadcast_bytes, (target_ip, port))
+        return True
+    except Exception as e:
+        print(f"⚠️ chat.py LAN send failed; message remains pending: {type(e).__name__}")
+        return True
+
+
 # UDP 监听线程：仅独立模式启动
 def _handle_authenticated_v2_packet(envelope, sock, addr):
     packet_type = envelope.get("type")
@@ -248,9 +293,24 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
                  "reply_nonce": envelope.get("nonce", ""), "listen_port": UDP_PORT}
         try: sock.sendto(encode_packet(reply, RESCUE_SECRET), addr)
         except OSError: pass
+        for pending in load_pending_outgoing_for_peer(CHAT_DB, "chat.py", sender, limit=10):
+            chat_packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
+                           "sender_peer_type": "chat.py", "service_id": PEER_NODE_ID,
+                           "target_peer_id": sender, "message_id": pending["message_id"],
+                           "created_at_ms": pending["created_at_ms"],
+                           "display_name": "Web_Guest", "body": pending["body"]}
+            try:
+                target_port = pending.get("endpoint_port") or addr[1]
+                sock.sendto(encode_packet(chat_packet, RESCUE_SECRET), (addr[0], target_port))
+                mark_outgoing_attempt(CHAT_DB, pending["message_id"], sender, addr[0], target_port)
+            except Exception:
+                pass
         return
     if packet_type == "chat.ack":
-        # The durable sender-side ACK ledger is added in the server outbox phase.
+        message_id = str(envelope.get("message_id") or "")
+        target = str(envelope.get("target_peer_id") or "")
+        if target == PEER_NODE_ID and envelope.get("status") == "stored":
+            acknowledge_outgoing_message(CHAT_DB, "chat.py", message_id, sender)
         return
     if packet_type != "chat.message":
         return
@@ -284,10 +344,13 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
 
 
 def udp_listener():
+    global UDP_LISTENER_SOCKET
     udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     try:
         udp_sock.bind(('0.0.0.0', UDP_PORT))
+        UDP_LISTENER_SOCKET = udp_sock
         print(f"🎧 UDP 监听已启动 (端口 {UDP_PORT})，等待对讲机消息...")
         while True:
             # [B2] 1024 → 4096，避免长消息被 UDP 层截断
@@ -344,6 +407,11 @@ def udp_listener():
             print(f"❌ UDP 端口 {UDP_PORT} 绑定失败: {e}")
     except Exception as e:
         print(f"❌ UDP 监听异常: {e}")
+    finally:
+        if UDP_LISTENER_SOCKET is udp_sock:
+            UDP_LISTENER_SOCKET = None
+        try: udp_sock.close()
+        except Exception: pass
 
 
 class RequestHandler(BaseHTTPRequestHandler):
@@ -430,8 +498,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                         print(f"\n💻 [网页] {sender} 说: {content}")
                         CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": content})
                         if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
-                    # [F1] 子网广播到现有服务端口；接收端按稳定 peer ID 去重。
-                    broadcast_chat_message(encoded_packet.decode("utf-8"))
+                    # 逐设备单播优先；无已知成员时才使用子网广播。
+                    if not send_chat_v2(content, sender, message_id):
+                        self.send_response(503)
+                        self.send_header('Content-Type', 'application/json')
+                        self.end_headers()
+                        self.wfile.write(b'{"status":"outbox_persistence_failed"}')
+                        return
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
