@@ -463,6 +463,14 @@ public class TrackingService extends Service implements LocationListener {
         // Foreground promotion is the only startup operation kept synchronous:
         // Android requires it immediately after startForegroundService().
         startForegroundNotification();
+        try {
+            // SQLiteOpenHelper construction is lightweight; doing this before any
+            // onStartCommand action avoids a race where an immediate chat action sees null.
+            lanChatStore = new LanChatStore(this);
+        } catch (Exception e) {
+            FileLogger.log(this, "CHAT",
+                    "LAN delivery store initialization failed: " + e.getClass().getSimpleName());
+        }
         serviceCreateTimeMs = SystemClock.elapsedRealtime();
         logLifecycle("SERVICE_CREATE", "foregroundStarted=" + isForegroundStarted);
         locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
@@ -479,12 +487,6 @@ public class TrackingService extends Service implements LocationListener {
                 logStartupSelfCheck();
 
                 if (serviceDestroyed) return;
-                try {
-                    lanChatStore = new LanChatStore(this);
-                } catch (Exception e) {
-                    FileLogger.log(this, "CHAT", "LAN delivery store initialization failed: "
-                            + e.getClass().getSimpleName());
-                }
 
                 PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
                 if (pm != null) {
