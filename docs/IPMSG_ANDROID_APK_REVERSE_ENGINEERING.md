@@ -78,7 +78,7 @@ APK 内的 `ipmsg/resources.properties` 明确写有 `ports=2425`、`receiveMax=
 - FIFO 发送线程只负责有序持久化和 UDP dispatch，不同步等待 ACK；ACK 由独立 IO executor 落账。
 - ACK 计数按 peer 去重，重复 ACK 不能消耗其他 peer 的等待槽位。
 - 短 ACK 观察窗口异步收尾；迟到 ACK 仍通过持久化目标 endpoint 验证。
-- 异步收尾通过发送时的 endpoint 对象快照比对，只清理本次发送所使用且期间未被重新验证替换的旧 peer route；新验证路由不会被旧 ACK grace 任务误删。
+- 异步收尾通过发送时的 peer route generation 快照比对；同一 endpoint 即使被重新验证也会获得新版本，旧 ACK grace 任务只能清理版本未变化的旧 route。
 - 自动重试有限；耗尽后保留 SQLite 记录，只有真实网络/peer 恢复事件才重新开启有限预算。
 - 实机仍需验证：重复包只显示一次、重复包重 ACK、部分 ACK 只补未 ACK 目标、网络切换后重新发现、分阶段发送延迟。
 
