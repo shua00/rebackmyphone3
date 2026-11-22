@@ -270,6 +270,8 @@ public class TrackingService extends Service implements LocationListener {
     private volatile LanChatStore lanChatStore;
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRetryInFlight =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final java.util.concurrent.atomic.AtomicBoolean lanChatRetryWakeScheduled =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
     private final java.util.Set<String> activeLanChatTransmissions =
             java.util.Collections.newSetFromMap(
                     new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
@@ -3603,18 +3605,16 @@ public class TrackingService extends Service implements LocationListener {
                     }
                     final int batchSize = 3;
                     final int maxBatchesPerWake = 3;
+                    // Take one stable snapshot for this wake. An unacknowledged first batch
+                    // must not prevent later queued messages from receiving their first attempt.
+                    List<LanChatStore.PendingMessage> pending = store.loadPending(50);
+                    int queuedBefore = pending.size();
                     for (int batchNo = 0; batchNo < maxBatchesPerWake && !serviceDestroyed; batchNo++) {
-                        // SQLite outbox is the durable source of truth. The SharedPreferences
-                        // queue is only a migration/compatibility mirror and may be missing after
-                        // a crash or a failed mirror commit; recovery must therefore enumerate
-                        // pending SQLite rows rather than relying on the legacy mirror.
-                        List<LanChatStore.PendingMessage> pending = store.loadPending(50);
-                        int queuedBefore = pending.size();
-                        int count = Math.min(batchSize, queuedBefore);
-                        if (count == 0) break;
+                        int startIndex = batchNo * batchSize;
+                        if (startIndex >= pending.size()) break;
+                        int endIndex = Math.min(startIndex + batchSize, pending.size());
 
-                        // 在同一串行执行器中同步等待每条发送/ACK事务完成，再判断 SQLite 账本是否真实收敛。
-                        for (int i = 0; i < count && !serviceDestroyed; i++) {
+                        for (int i = startIndex; i < endIndex && !serviceDestroyed; i++) {
                             LanChatStore.PendingMessage item = pending.get(i);
                             String id = item.messageId;
                             String content = item.body;
@@ -3632,12 +3632,11 @@ public class TrackingService extends Service implements LocationListener {
                         }
 
                         int queuedAfter = store.loadPending(50).size();
-                        int progressed = queuedBefore - queuedAfter;
                         FileLogger.log(this, "CHAT", "LAN SQLite Outbox 补发批次 " + (batchNo + 1)
-                                + "，处理 " + count + " 条，待确认账本变化 "
+                                + "，处理 " + (endIndex - startIndex) + " 条，待确认账本变化 "
                                 + queuedBefore + "->" + queuedAfter);
-                        if (progressed <= 0) break;
                     }
+                    scheduleLanChatRetryFromOutbox();
                 } catch (Exception e) {
                     FileLogger.log(this, "CHAT", "⚠️ LAN 聊天补发失败: " + e.getMessage());
                 } finally {
@@ -3668,12 +3667,46 @@ public class TrackingService extends Service implements LocationListener {
         } finally {
             activeLanChatTransmissions.remove(messageId);
         }
+        scheduleLanChatRetryFromOutbox();
+    }
+
+    /**
+     * Persisted bounded retry wakeups: three send transactions at increasing delays.
+     * A network/service restart can still resume pending rows after this automatic budget.
+     */
+    private void scheduleLanChatRetryFromOutbox() {
+        if (serviceDestroyed || lanChatRetryWakeScheduled.get()) return;
+        DatagramSocket socket = rescueSocketRef;
+        LanChatStore store = lanChatStore;
+        if (socket == null || socket.isClosed() || store == null) return;
+        try {
+            List<LanChatStore.PendingMessage> pending = store.loadPending(50);
+            int minimumAttempts = Integer.MAX_VALUE;
+            for (LanChatStore.PendingMessage item : pending) {
+                if (item.retryAttempts < 3) minimumAttempts = Math.min(minimumAttempts, item.retryAttempts);
+            }
+            if (minimumAttempts == Integer.MAX_VALUE || minimumAttempts <= 0) return;
+            final long delayMs = minimumAttempts == 1 ? 1_500L : 4_000L;
+            if (!lanChatRetryWakeScheduled.compareAndSet(false, true)) return;
+            boolean posted = handler.postDelayed(() -> {
+                lanChatRetryWakeScheduled.set(false);
+                retryPendingLanChatMessages();
+            }, delayMs);
+            if (!posted) lanChatRetryWakeScheduled.set(false);
+        } catch (Exception e) {
+            FileLogger.log(this, "CHAT", "⚠️ 无法安排 LAN 持久化补发: " + e.getClass().getSimpleName());
+        }
     }
 
     private void transmitLocalUdpMessageInternal(final String message, final String messageId) {
         DatagramSocket socket = rescueSocketRef;
         if (socket == null || socket.isClosed()) {
             FileLogger.log(this, "CHAT", "⚠️ P2P UDP 监听尚未就绪，消息保留在本地待确认队列");
+            return;
+        }
+        LanChatStore store = lanChatStore;
+        if (store == null || store.recordOutboxAttempt(messageId) < 0) {
+            FileLogger.log(this, "CHAT", "⚠️ LAN SQLite 发送尝试记账失败，保留消息并停止本轮网络发送");
             return;
         }
         String myId = getUniqueDeviceId();
@@ -3741,7 +3774,6 @@ public class TrackingService extends Service implements LocationListener {
             FileLogger.log(this, "CHAT", "⚠️ LAN v2 消息编码失败，消息保留待确认: " + e.getClass().getSimpleName());
             return;
         }
-        LanChatStore store = lanChatStore;
         // Recipient membership was snapshotted at enqueue time. Only an empty initial
         // snapshot may collect newly verified peers through addDiscoveryPeerToOpenMessages().
         List<LanChatStore.Target> savedTargets = store != null
