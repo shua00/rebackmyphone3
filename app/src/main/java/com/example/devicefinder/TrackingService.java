@@ -4081,6 +4081,7 @@ public class TrackingService extends Service implements LocationListener {
                 + "，当前可达路由 " + reachablePeerCount + "，消息 " + messageId);
         long ackLoopStartedAt = android.os.SystemClock.elapsedRealtime();
         int ackRounds = 0;
+        boolean ackCleanupDeferred = false;
         try {
             if (totalPeerCount == 0 && !socket.isClosed()) {
                 // 没有经过 challenge 的 peer 时仅广播一次；首个匹配 messageId 的认证 ACK
@@ -4098,8 +4099,6 @@ public class TrackingService extends Service implements LocationListener {
                     }
                 }
                 ackRounds = 1;
-                try { ack.await(250, TimeUnit.MILLISECONDS); }
-                catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             } else if (reachablePeerCount > 0) {
                 for (int attempt = 1; attempt <= 1 && ack.getCount() > 0; attempt++) {
                     ackRounds = attempt;
@@ -4124,50 +4123,41 @@ public class TrackingService extends Service implements LocationListener {
                             FileLogger.log(this, "CHAT", "⚠️ P2P 单播失败: " + e.getMessage());
                         }
                     }
-                    try { ack.await(250, TimeUnit.MILLISECONDS); }
-                    catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+
                 }
             } else {
                 FileLogger.log(this, "CHAT", "ℹ️ 固定目标当前均离线，保留逐设备待送达记录: " + messageId);
             }
-            long ackLoopElapsed = android.os.SystemClock.elapsedRealtime() - ackLoopStartedAt;
-            if (ackLoopElapsed >= 400L) {
-                FileLogger.logD("CHAT", "P2P ACK loop elapsedMs=" + ackLoopElapsed
-                        + " rounds=" + ackRounds + " remaining=" + ack.getCount()
-                        + "/" + totalPeerCount + " message=" + messageId);
-            }
-            int deliveredPeers = reachablePeerCount - (int) ack.getCount();
-            if (totalPeerCount == 0) {
-                if (ack.getCount() == 0) {
-                    lastPeerDiscoveryAt = 0L;
-                    FileLogger.log(this, "CHAT", "ℹ️ P2P 广播至少一个接收端已确认，但成员名单未建立；"
-                            + "保留消息并等待逐设备目标建立: " + messageId);
-                } else {
-                    FileLogger.log(this, "CHAT", "⚠️ P2P 广播暂未收到 ACK，消息保留待确认队列: " + messageId);
+            final java.util.Set<String> completionAwaitingPeerIds = awaitingPeerIds;
+            final java.util.concurrent.CountDownLatch completionAck = ack;
+            final int completionTotalPeerCount = totalPeerCount;
+            final int completionReachablePeerCount = reachablePeerCount;
+            final LanChatStore completionStore = store;
+            final long completionStartedAt = ackLoopStartedAt;
+            boolean completionScheduled = scheduleLanChatTask("chat-ack-grace-" + messageId, () -> {
+                Runnable completion = () -> completeLanChatAckWindow(messageId,
+                        completionAwaitingPeerIds, completionAck,
+                        completionTotalPeerCount, completionReachablePeerCount,
+                        completionStore, completionStartedAt);
+                try {
+                    lanChatIoExecutor.execute(completion);
+                } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                    completion.run();
                 }
-            } else if (store != null && store.allTargetsAcked(messageId)) {
-                removePendingLanChat(messageId);
-                FileLogger.log(this, "CHAT", "✅ P2P 固定目标全部持久化 ACK: "
-                        + deliveredPeers + "/" + totalPeerCount + "，消息 " + messageId);
+            }, 250L);
+            if (!completionScheduled) {
+                completeLanChatAckWindow(messageId, completionAwaitingPeerIds, completionAck,
+                        completionTotalPeerCount, completionReachablePeerCount,
+                        completionStore, completionStartedAt);
             } else {
-                // ACK 多轮仍未到达，撤销未确认成员的旧 endpoint；
-                // 下一条消息会重新 challenge，避免 Python 节点重启/网络切换后长期沿用失效路由。
-                // awaitingPeerIds 与 pendingChatAckPeers 共用同一集合；
-                // 已 ACK 的成员已被移除，只淘汰本轮真正未确认的 endpoint。
-                // A partial ACK means the next retry must rediscover missing peers immediately.
-                // Otherwise the still-verified ACKed peers suppress discovery for 30 seconds.
-                lastPeerDiscoveryAt = 0L;
-                for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
-                    verifiedChatPeers.remove(peerId);
-                    verifiedChatPeerSeen.remove(peerId);
-                }
-                FileLogger.log(this, "CHAT", "⚠️ P2P 消息仍待确认并保留本地队列: "
-                        + deliveredPeers + "/" + totalPeerCount + "，失联成员已清理，消息 " + messageId);
+                ackCleanupDeferred = true;
             }
         } finally {
-            pendingChatAcks.remove(messageId);
-            pendingChatAckPeers.remove(messageId);
-            pendingChatAckStartedAt.remove(messageId);
+            if (!ackCleanupDeferred) {
+                pendingChatAcks.remove(messageId);
+                pendingChatAckPeers.remove(messageId);
+                pendingChatAckStartedAt.remove(messageId);
+            }
         }
     }
 
@@ -4175,7 +4165,50 @@ public class TrackingService extends Service implements LocationListener {
      * 统一串行化 UDP send，并仅在锁等待或系统 send 明显偏慢时输出诊断。
      * 不记录数据包内容、认证字段或聊天正文。
      */
-    private void sendLanUdpPacket(DatagramSocket socket, DatagramPacket packet, String kind)
+        /**
+     * Complete the short ACK observation window away from the FIFO sender.
+     * UDP dispatch remains ordered, while ACK persistence continues on LanChat-IO.
+     */
+    private void completeLanChatAckWindow(String messageId,
+            java.util.Set<String> awaitingPeerIds,
+            java.util.concurrent.CountDownLatch ack,
+            int totalPeerCount, int reachablePeerCount,
+            LanChatStore store, long ackStartedAt) {
+        long elapsed = android.os.SystemClock.elapsedRealtime() - ackStartedAt;
+        int deliveredPeers = reachablePeerCount - (int) ack.getCount();
+        if (totalPeerCount == 0) {
+            if (ack.getCount() == 0) {
+                lastPeerDiscoveryAt = 0L;
+                FileLogger.log(this, "CHAT", "ℹ️ P2P 广播至少一个接收端已确认，但成员名单未建立；"
+                        + "保留消息并等待逐设备目标建立: " + messageId);
+            } else {
+                FileLogger.log(this, "CHAT", "⚠️ P2P 广播暂未收到 ACK，消息保留待确认队列: " + messageId);
+            }
+        } else if (store != null && store.allTargetsAcked(messageId)) {
+            removePendingLanChat(messageId);
+            FileLogger.log(this, "CHAT", "✅ P2P 固定目标全部持久化 ACK: "
+                    + deliveredPeers + "/" + totalPeerCount + "，消息 " + messageId);
+        } else {
+            // ACK may arrive after this grace window; its durable endpoint remains authoritative.
+            lastPeerDiscoveryAt = 0L;
+            for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
+                verifiedChatPeers.remove(peerId);
+                verifiedChatPeerSeen.remove(peerId);
+            }
+            FileLogger.log(this, "CHAT", "⚠️ P2P 消息仍待确认并保留本地队列: "
+                    + deliveredPeers + "/" + totalPeerCount + "，失联成员已清理，消息 " + messageId);
+        }
+        if (elapsed >= 400L) {
+            FileLogger.logD("CHAT", "P2P ACK grace elapsedMs=" + elapsed
+                    + " remaining=" + ack.getCount() + "/" + totalPeerCount
+                    + " message=" + messageId);
+        }
+        pendingChatAcks.remove(messageId);
+        pendingChatAckPeers.remove(messageId);
+        pendingChatAckStartedAt.remove(messageId);
+    }
+
+private void sendLanUdpPacket(DatagramSocket socket, DatagramPacket packet, String kind)
             throws java.io.IOException {
         long lockWaitStarted = android.os.SystemClock.elapsedRealtime();
         long lockWaitMs;
