@@ -3709,13 +3709,26 @@ public class TrackingService extends Service implements LocationListener {
                         FileLogger.logD("CHAT", "忽略本机/空 sender 的 LAN 回环消息: " + messageId);
                         return true;
                     }
-                    if (persistIncomingLanChat(senderId, messageId, content)) {
-                        receivedChatMessageIds.put(senderId + ":" + messageId, System.currentTimeMillis());
-                        if (receivedChatMessageIds.size() > 500) {
-                            long cutoff = System.currentTimeMillis() - 10 * 60 * 1000L;
-                            receivedChatMessageIds.entrySet().removeIf(e -> e.getValue() < cutoff);
-                        }
-                        sendChatAck(socket, packet.getAddress(), packet.getPort(), messageId);
+                    // 磁盘持久化放入现有有界后台执行器，避免 UDP 接收循环被 commit 阻塞。
+                    // 仍然严格在持久化成功/确认重复后才 ACK；队列拒绝时不 ACK，发送端可重试。
+                    final String ackMessageId = messageId;
+                    final java.net.InetAddress ackAddress = packet.getAddress();
+                    final int ackPort = packet.getPort();
+                    try {
+                        reportExecutor.execute(() -> {
+                            if (persistIncomingLanChat(senderId, ackMessageId, content)) {
+                                receivedChatMessageIds.put(senderId + ":" + ackMessageId,
+                                        System.currentTimeMillis());
+                                if (receivedChatMessageIds.size() > 500) {
+                                    long cutoff = System.currentTimeMillis() - 10 * 60 * 1000L;
+                                    receivedChatMessageIds.entrySet().removeIf(e -> e.getValue() < cutoff);
+                                }
+                                sendChatAck(socket, ackAddress, ackPort, ackMessageId);
+                            }
+                        });
+                    } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                        FileLogger.log(this, "CHAT",
+                                "⚠️ LAN 对讲持久化任务队列已满/关闭，本条不 ACK，等待发送端重试");
                     }
                 }
                 return true;
