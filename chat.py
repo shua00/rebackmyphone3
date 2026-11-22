@@ -266,8 +266,8 @@ def udp_listener():
                             except OSError: pass
                         continue
                     claim_result = _claim_chat_message(sender, message_id, content)
-                        if claim_result is not None:
-                            record_peer(CHAT_DB, "chat.py", sender, "android", "android-main", addr[0], 8888, "active")
+                    if claim_result is not None:
+                        record_peer(CHAT_DB, "chat.py", sender, "android", "android-main", addr[0], 8888, "active")
                     if claim_result is None:
                         continue  # 未持久化成功，不ACK，允许发送端重试
                     if message_id:
