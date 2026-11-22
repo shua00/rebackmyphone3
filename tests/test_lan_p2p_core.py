@@ -851,7 +851,14 @@ class LanP2PCoreTests(unittest.TestCase):
             start = store.index(method_name)
             end = store.index("\n    /**", start + len(method_name)) if next_method is None else store.index(next_method, start)
             method = store[start:end]
-            self.assertNotIn("catch (Exception ignored)", method)
+            if method_name.startswith("public List<Target> loadKnownPeers"):
+                self.assertNotIn("catch (Exception", method)
+            else:
+                # The only permitted local catch is IP:port parsing; SQL query failures
+                # must escape instead of being converted into an empty target list.
+                self.assertEqual(method.count("catch (Exception ignored)"), 1)
+                self.assertLess(method.index("Integer.parseInt"), method.index("catch (Exception ignored)"))
+                self.assertNotIn("catch (Exception e)", method)
             self.assertIn("finally", method)
 
         tx_start = tracking.index("final List<LanChatStore.Target> savedTargets")
