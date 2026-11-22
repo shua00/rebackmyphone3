@@ -3501,8 +3501,14 @@ public class TrackingService extends Service implements LocationListener {
                 }
                 // Close the first-discovery window after its fixed deadline without forcing
                 // another network send. All ACKed targets are reclaimed; partial targets stay pending.
-                handler.postDelayed(() -> removePendingLanChat(messageId),
-                        LAN_CHAT_DISCOVERY_WINDOW_MS + 250L);
+                handler.postDelayed(() -> {
+                    if (serviceDestroyed) return;
+                    try {
+                        lanChatSendExecutor.execute(() -> removePendingLanChat(messageId));
+                    } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                        // The durable queue remains intact; the next service/network wake recovers it.
+                    }
+                }, LAN_CHAT_DISCOVERY_WINDOW_MS + 250L);
                 return true;
             } catch (Exception e) {
                 FileLogger.log(this, "CHAT", "⚠️ LAN 聊天队列持久化异常: " + e.getMessage());
