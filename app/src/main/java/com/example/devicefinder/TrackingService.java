@@ -270,6 +270,7 @@ public class TrackingService extends Service implements LocationListener {
     private static final String PREF_LAN_CHAT_QUEUE = "lan_p2p_pending_messages";
     private static final int LAN_CHAT_QUEUE_MAX = 50;
     private final Object lanChatQueueLock = new Object();
+    private volatile LanChatStore lanChatStore;
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRetryInFlight =
             new java.util.concurrent.atomic.AtomicBoolean(false);
     private final java.util.Set<String> activeLanChatTransmissions =
@@ -438,6 +439,8 @@ public class TrackingService extends Service implements LocationListener {
         super.onCreate();
         // ★ 第一件事：立刻挂起前台通知，防止 ANR 与 5 秒秒杀
         startForegroundNotification();
+        try { lanChatStore = new LanChatStore(this); }
+        catch (Exception e) { FileLogger.log(this, "CHAT", "LAN delivery store initialization failed: " + e.getClass().getSimpleName()); }
 
         // ★ 补丁5：服务一旦复活，立刻重建定时防线，绝不等 handler.post 延迟执行
         //   目的：进程刚拉起的最脆弱窗口（前 1~2 秒）内就有闹钟兜底，防系统秒杀后长时间无心跳
@@ -3472,7 +3475,14 @@ public class TrackingService extends Service implements LocationListener {
                 queue.put(item);
                 boolean saved = prefs.edit().putString(PREF_LAN_CHAT_QUEUE, queue.toString()).commit();
                 if (!saved) FileLogger.log(this, "CHAT", "⚠️ LAN 聊天队列 commit 失败");
-                return saved;
+                if (!saved) return false;
+                LanChatStore store = lanChatStore;
+                if (store == null || !store.enqueue(messageId, getUniqueDeviceId(), content,
+                        System.currentTimeMillis())) {
+                    FileLogger.log(this, "CHAT", "⚠️ LAN SQLite outbox 写入失败；SharedPreferences 原队列保留，等待补偿迁移");
+                    return false;
+                }
+                return true;
             } catch (Exception e) {
                 FileLogger.log(this, "CHAT", "⚠️ LAN 聊天队列持久化异常: " + e.getMessage());
                 return false;
@@ -3489,6 +3499,11 @@ public class TrackingService extends Service implements LocationListener {
                 for (int i = 0; i < old.length(); i++) {
                     JSONObject item = old.optJSONObject(i);
                     if (item != null && !messageId.equals(item.optString("message_id"))) kept.put(item);
+                }
+                LanChatStore store = lanChatStore;
+                if (store == null || !store.allTargetsAcked(messageId)) {
+                    FileLogger.log(this, "CHAT", "⚠️ 未满足逐设备 ACK 条件，不回收 LAN 消息: " + messageId);
+                    return;
                 }
                 prefs.edit().putString(PREF_LAN_CHAT_QUEUE, kept.toString()).commit();
             } catch (Exception e) {
@@ -3507,6 +3522,23 @@ public class TrackingService extends Service implements LocationListener {
         try {
             lanChatSendExecutor.execute(() -> {
                 try {
+                    LanChatStore store = lanChatStore;
+                    if (store == null) return;
+                    synchronized (lanChatQueueLock) {
+                        JSONArray legacy = new JSONArray(getSharedPreferences("device_finder_prefs", MODE_PRIVATE)
+                                .getString(PREF_LAN_CHAT_QUEUE, "[]"));
+                        for (int i = 0; i < legacy.length(); i++) {
+                            JSONObject item = legacy.optJSONObject(i);
+                            if (item == null) continue;
+                            String id = item.optString("message_id", "");
+                            String body = item.optString("content", "");
+                            if (!id.isEmpty() && !store.enqueue(id, getUniqueDeviceId(), body,
+                                    item.optLong("created_at", System.currentTimeMillis()))) {
+                                FileLogger.log(this, "CHAT", "⚠️ SQLite outbox 补偿迁移失败，保留旧队列");
+                                return;
+                            }
+                        }
+                    }
                     final int batchSize = 3;
                     final int maxBatchesPerWake = 3;
                     for (int batchNo = 0; batchNo < maxBatchesPerWake && !serviceDestroyed; batchNo++) {
@@ -3641,14 +3673,34 @@ public class TrackingService extends Service implements LocationListener {
         byte[] data;
         try { data = payload.getBytes("UTF-8"); }
         catch (Exception e) { return; }
-        java.util.Set<String> awaitingPeerIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
-        for (java.util.Map.Entry<String, java.net.InetSocketAddress> entry : verifiedChatPeers.entrySet()) {
-            awaitingPeerIds.add(entry.getKey());
+        LanChatStore store = lanChatStore;
+        if (store != null && !store.hasTargets(messageId) && !verifiedChatPeers.isEmpty()) {
+            List<LanChatStore.Target> snapshot = new ArrayList<>();
+            for (java.util.Map.Entry<String, java.net.InetSocketAddress> entry : verifiedChatPeers.entrySet()) {
+                java.net.InetSocketAddress endpoint = entry.getValue();
+                snapshot.add(new LanChatStore.Target(entry.getKey(), "pending", 0,
+                        endpoint.getAddress().getHostAddress(), endpoint.getPort()));
+            }
+            store.setTargets(messageId, snapshot);
         }
-        final int totalPeerCount = awaitingPeerIds.size();
-        // 无已验证成员时没有可合法计数的 ACK；避免人为塞入 1 导致 deliveredPeers 为 -1。
-        java.util.concurrent.CountDownLatch ack =
-                new java.util.concurrent.CountDownLatch(totalPeerCount == 0 ? 1 : totalPeerCount);
+        List<LanChatStore.Target> savedTargets = store != null
+                ? store.loadTargets(messageId) : new ArrayList<>();
+        java.util.Set<String> pendingTargetIds = new java.util.HashSet<>();
+        for (LanChatStore.Target target : savedTargets) {
+            if (!"acked".equals(target.status)) pendingTargetIds.add(target.peerId);
+        }
+        java.util.Set<String> awaitingPeerIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        if (store == null) {
+            awaitingPeerIds.addAll(verifiedChatPeers.keySet());
+        } else {
+            for (String peerId : pendingTargetIds) {
+                if (verifiedChatPeers.containsKey(peerId)) awaitingPeerIds.add(peerId);
+            }
+        }
+        final int totalPeerCount = store == null ? awaitingPeerIds.size() : pendingTargetIds.size();
+        final int reachablePeerCount = awaitingPeerIds.size();
+        java.util.concurrent.CountDownLatch ack = new java.util.concurrent.CountDownLatch(
+                reachablePeerCount > 0 ? reachablePeerCount : (totalPeerCount == 0 ? 1 : 0));
         if (totalPeerCount == 0) pendingBroadcastChatAckIds.add(messageId);
         pendingChatAckPeers.put(messageId, awaitingPeerIds);
         pendingChatAckStartedAt.put(messageId, android.os.SystemClock.elapsedRealtime());
@@ -3675,27 +3727,29 @@ public class TrackingService extends Service implements LocationListener {
                 ackRounds = 1;
                 try { ack.await(250, TimeUnit.MILLISECONDS); }
                 catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-            } else {
+            } else if (reachablePeerCount > 0) {
                 for (int attempt = 1; attempt <= 3 && ack.getCount() > 0; attempt++) {
                     ackRounds = attempt;
                     if (socket.isClosed()) break;
                     for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
                         java.net.InetSocketAddress peer = verifiedChatPeers.get(peerId);
-                        if (peer == null) {
-                            FileLogger.log(this, "CHAT", "⚠️ P2P peer 路由已失效，未计为送达: " + peerId);
-                            continue;
-                        }
+                        if (peer == null) continue;
                         try {
+                            if (store != null) store.markAttempt(messageId, peerId,
+                                    peer.getAddress().getHostAddress() + ":" + peer.getPort(), "");
                             DatagramPacket p = new DatagramPacket(data, data.length,
                                     peer.getAddress(), peer.getPort());
                             sendLanUdpPacket(socket, p, "CHAT_UNICAST");
                         } catch (Exception e) {
+                            if (store != null) store.markAttempt(messageId, peerId, "", e.getClass().getSimpleName());
                             FileLogger.log(this, "CHAT", "⚠️ P2P 单播失败: " + e.getMessage());
                         }
                     }
                     try { ack.await(250, TimeUnit.MILLISECONDS); }
                     catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
                 }
+            } else {
+                FileLogger.log(this, "CHAT", "ℹ️ 固定目标当前均离线，保留逐设备待送达记录: " + messageId);
             }
             long ackLoopElapsed = android.os.SystemClock.elapsedRealtime() - ackLoopStartedAt;
             if (ackLoopElapsed >= 400L) {
@@ -3703,22 +3757,18 @@ public class TrackingService extends Service implements LocationListener {
                         + " rounds=" + ackRounds + " remaining=" + ack.getCount()
                         + "/" + totalPeerCount + " message=" + messageId);
             }
-            int deliveredPeers = totalPeerCount - (int) ack.getCount();
+            int deliveredPeers = reachablePeerCount - (int) ack.getCount();
             if (totalPeerCount == 0) {
                 if (ack.getCount() == 0) {
-                    // 广播首个 ACK 只证明至少一个节点收到，不能证明当前 LAN 的全部目标节点收到。
-                    // 因此不能回收持久化队列；下一次网络恢复/重试时重新 challenge，
-                    // 获得明确成员名单后再按每个 peer 的 ACK 完成回收。
                     lastPeerDiscoveryAt = 0L;
                     FileLogger.log(this, "CHAT", "ℹ️ P2P 广播至少一个接收端已确认，但成员名单未建立；"
-                            + "保留消息并等待逐节点确认: " + messageId);
+                            + "保留消息并等待逐设备目标建立: " + messageId);
                 } else {
-                    FileLogger.log(this, "CHAT", "⚠️ P2P 广播暂未收到 ACK，消息保留待确认队列: "
-                            + messageId);
+                    FileLogger.log(this, "CHAT", "⚠️ P2P 广播暂未收到 ACK，消息保留待确认队列: " + messageId);
                 }
-            } else if (deliveredPeers == totalPeerCount) {
+            } else if (store != null && store.allTargetsAcked(messageId)) {
                 removePendingLanChat(messageId);
-                FileLogger.log(this, "CHAT", "✅ P2P 所有已发现成员 ACK: "
+                FileLogger.log(this, "CHAT", "✅ P2P 固定目标全部持久化 ACK: "
                         + deliveredPeers + "/" + totalPeerCount + "，消息 " + messageId);
             } else {
                 // ACK 多轮仍未到达，撤销未确认成员的旧 endpoint；
@@ -3794,7 +3844,12 @@ public class TrackingService extends Service implements LocationListener {
                     if (latch != null && !peerId.isEmpty() && !peerId.equals(getUniqueDeviceId())) {
                         verifiedChatPeers.put(peerId,
                                 new java.net.InetSocketAddress(packet.getAddress(), packet.getPort()));
-                        verifiedChatPeerSeen.put(peerId, System.currentTimeMillis());
+                        long peerSeenAt = System.currentTimeMillis();
+                        verifiedChatPeerSeen.put(peerId, peerSeenAt);
+                        LanChatStore store = lanChatStore;
+                        if (store != null) store.upsertPeer(peerId, "unknown", peerId, "",
+                                packet.getAddress().getHostAddress(), packet.getPort(),
+                                peerSeenAt, peerSeenAt + 120_000L);
                         FileLogger.logD("CHAT", "P2P peer challenge accepted peer=" + peerId
                                 + " from=" + packet.getAddress().getHostAddress());
                         latch.countDown();
@@ -3815,6 +3870,12 @@ public class TrackingService extends Service implements LocationListener {
                             && verified.getAddress().equals(packet.getAddress())
                             && verified.getPort() == packet.getPort()
                             && expectedPeers.remove(peerId)) {
+                        LanChatStore store = lanChatStore;
+                        if (store != null && !store.acknowledge(messageId, peerId)) {
+                            expectedPeers.add(peerId);
+                            FileLogger.log(this, "CHAT", "⚠️ ACK 逐设备账本写入失败，继续等待重试: " + peerId);
+                            return true;
+                        }
                         verifiedChatPeerSeen.put(peerId, System.currentTimeMillis());
                         Long startedAt = pendingChatAckStartedAt.get(messageId);
                         if (startedAt != null) {
@@ -4020,6 +4081,15 @@ public class TrackingService extends Service implements LocationListener {
         if (shortName.contains("_")) shortName = shortName.substring(0, shortName.lastIndexOf("_"));
         synchronized (lanChatReceiveLock) {
             try {
+                LanChatStore store = lanChatStore;
+                long inboxNow = System.currentTimeMillis();
+                String displayTime = new java.text.SimpleDateFormat(
+                        "HH:mm", java.util.Locale.getDefault()).format(new java.util.Date(inboxNow));
+                if (store == null || !store.storeIncoming("android:" + getUniqueDeviceId(),
+                        senderId, messageId, msgContent, inboxNow, displayTime)) {
+                    FileLogger.log(this, "CHAT", "⚠️ LAN SQLite inbox 持久化失败，不发送 ACK");
+                    return false;
+                }
                 SharedPreferences sp = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
                 String stableId = senderId + ":" + messageId;
                 org.json.JSONArray ids = new org.json.JSONArray(
@@ -4986,6 +5056,7 @@ public class TrackingService extends Service implements LocationListener {
 
         if (reportExecutor != null) reportExecutor.shutdown();
         if (lanChatSendExecutor != null) lanChatSendExecutor.shutdown();
+        if (lanChatStore != null) { try { lanChatStore.closeStore(); } catch (Exception ignored) {} lanChatStore = null; }
         if (rescueSocketRef != null) {
             try { rescueSocketRef.close(); } catch (Exception e) { FileLogger.log(this, "SERVICE", "⚠️ close rescueSocket 失败: " + e.getMessage()); }
             rescueSocketRef = null;
