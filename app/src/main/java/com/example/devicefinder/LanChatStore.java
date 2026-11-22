@@ -20,8 +20,12 @@ public final class LanChatStore extends SQLiteOpenHelper {
     /** Bounded first-recipient collection window, started on the first actual discovery send. */
     public static final long FIRST_DISCOVERY_WINDOW_MS = 10_000L;
     private static final String DB_NAME = "lan_p2p_delivery.db";
-    private static final int DB_VERSION = 4;
+    private static final int DB_VERSION = 5;
     public static final int MAX_PENDING_MESSAGES = 50;
+    /** Maximum automatic sends in one retry epoch, including the original send. */
+    public static final int MAX_AUTOMATIC_RETRY_ATTEMPTS = 8;
+    /** A real network/peer recovery event may reopen an exhausted retry epoch once per minute. */
+    public static final long RETRY_RECOVERY_EVENT_COOLDOWN_MS = 60_000L;
 
     public static final class PendingMessage {
         public final String messageId;
@@ -89,7 +93,8 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 "state TEXT NOT NULL DEFAULT 'discovery_pending'," +
                 "delivery_deadline_ms INTEGER NOT NULL DEFAULT 0," +
                 "retry_attempt_count INTEGER NOT NULL DEFAULT 0," +
-                "last_retry_at_ms INTEGER NOT NULL DEFAULT 0)");
+                "last_retry_at_ms INTEGER NOT NULL DEFAULT 0," +
+                "last_event_retry_at_ms INTEGER NOT NULL DEFAULT 0)");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_lan_outbox_state ON lan_outbox(state, created_at_ms)");
 
         db.execSQL("CREATE TABLE IF NOT EXISTS lan_outbox_targets (" +
@@ -167,6 +172,9 @@ public final class LanChatStore extends SQLiteOpenHelper {
             if (!hasColumn(db, "lan_outbox", "last_retry_at_ms")) {
                 db.execSQL("ALTER TABLE lan_outbox ADD COLUMN last_retry_at_ms INTEGER NOT NULL DEFAULT 0");
             }
+        }
+        if (oldVersion < 5 && !hasColumn(db, "lan_outbox", "last_event_retry_at_ms")) {
+            db.execSQL("ALTER TABLE lan_outbox ADD COLUMN last_event_retry_at_ms INTEGER NOT NULL DEFAULT 0");
         }
     }
 
@@ -371,14 +379,48 @@ public final class LanChatStore extends SQLiteOpenHelper {
         try {
             c = getReadableDatabase().rawQuery(
                     "SELECT message_id,sender_peer_id,body,created_at_ms,state,retry_attempt_count FROM lan_outbox " +
-                    "WHERE state NOT IN ('delivered','expired','waiting_peers') ORDER BY retry_attempt_count,created_at_ms LIMIT ?",
-                    new String[]{String.valueOf(Math.max(1, Math.min(50, limit)))});
+                    "WHERE state NOT IN ('delivered','expired','waiting_peers') " +
+                    "AND retry_attempt_count<? ORDER BY retry_attempt_count,created_at_ms LIMIT ?",
+                    new String[]{String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS),
+                            String.valueOf(Math.max(1, Math.min(50, limit)))});
             while (c.moveToNext()) result.add(new PendingMessage(
                     c.getString(0), c.getString(1), c.getString(2), c.getLong(3),
                     c.getString(4), c.getInt(5)));
             return result;
         } finally {
             if (c != null) c.close();
+        }
+    }
+
+    /**
+     * Reopen an exhausted retry epoch only after a real network/listener/peer recovery event.
+     * The durable cooldown prevents repeated callbacks from resetting the finite retry budget.
+     * ACKed targets remain ACKed; only messages with at least one unacked fixed target qualify.
+     */
+    public int resumeExhaustedRetriesForRecoveryEvent(long now) {
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            android.database.sqlite.SQLiteStatement update = db.compileStatement(
+                    "UPDATE lan_outbox SET retry_attempt_count=0,last_event_retry_at_ms=? " +
+                    "WHERE retry_attempt_count>=? " +
+                    "AND state NOT IN ('delivered','expired','waiting_peers') " +
+                    "AND last_event_retry_at_ms<=? " +
+                    "AND EXISTS (SELECT 1 FROM lan_outbox_targets t " +
+                    "WHERE t.message_id=lan_outbox.message_id AND t.status!='acked')");
+            int changed;
+            try {
+                update.bindLong(1, now);
+                update.bindLong(2, MAX_AUTOMATIC_RETRY_ATTEMPTS);
+                update.bindLong(3, now - RETRY_RECOVERY_EVENT_COOLDOWN_MS);
+                changed = update.executeUpdateDelete();
+            } finally { update.close(); }
+            db.setTransactionSuccessful();
+            return changed;
+        } catch (Exception e) {
+            return 0;
+        } finally {
+            db.endTransaction();
         }
     }
 
@@ -392,11 +434,13 @@ public final class LanChatStore extends SQLiteOpenHelper {
             long now = System.currentTimeMillis();
             android.database.sqlite.SQLiteStatement update = db.compileStatement(
                     "UPDATE lan_outbox SET retry_attempt_count=retry_attempt_count+1,last_retry_at_ms=? " +
-                    "WHERE message_id=? AND state NOT IN ('delivered','expired')");
+                    "WHERE message_id=? AND state NOT IN ('delivered','expired','waiting_peers') " +
+                    "AND retry_attempt_count<?");
             int changed;
             try {
                 update.bindLong(1, now);
                 update.bindString(2, messageId);
+                update.bindLong(3, MAX_AUTOMATIC_RETRY_ATTEMPTS);
                 changed = update.executeUpdateDelete();
             } finally {
                 update.close();
