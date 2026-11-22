@@ -262,12 +262,16 @@ IP 地址永远不能作为设备身份。网络变化时应使旧端点路由�
 - Android 当前仍同时写入旧 SharedPreferences 发送队列和 SQLite 发送箱。旧队列继续作为兼容/恢复镜像，直到迁移和重启恢复行为得到完整验证；不能静默丢弃旧队列。
 - Android 已支持在有界发现刷新窗口之间复用已验证的局域网路由，避免每发一条消息都等待 500 毫秒。
 - CI 已编译 Python 服务，并运行稳定身份和 peer 作用域持久化相关单元测试。
-- 最新已核实的 GitHub Actions 构建通过：16 项 Python 单元测试、Android Java 编译、Debug APK 构建及 artifact 上传均成功；提交 `49163306e4206d1ca52a933bbbe93f459dd8d969`，[Actions run 44984007653](https://github.com/shua00/rebackmyphone3/actions/runs/44984007653)。这只证明该提交通过自动检查与云构建，不代表真实设备通信已验收。
+- 最新已核实的 GitHub Actions 构建通过：17 项 Python 单元测试、Android Java 编译、Debug APK 构建及 artifact 上传均成功；提交 `b9af01eb2bf517864aa802eec9515d79beb8f967`，[Actions run 44984288925](https://github.com/shua00/rebackmyphone3/actions/runs/44984288925)。这只证明该提交通过自动检查与云构建，不代表真实设备通信已验收。
 
 
 - LAN v2 与网页 HTTP 兜底现共用同一 message_id 和发送者身份；Android 两路均进入同一持久化 Inbox，避免同一网页消息经 UDP/HTTP 到达时重复显示；已加入 HTTP accepted 与 P2P stored ACK 的逐设备 Outbox 收敛逻辑。
 - Python 已知离线成员现进入服务端发起消息的固定接收目标快照；立即发送仍只使用有效租约端点，设备重新上线后按原 message_id 补发。
 - v2 接收面已移除旧字符串式 FIND_ME_CHAT/FIND_ME_PEER 分支；悬浮留言 FIND_ME_FLOAT_MSG/custom_msg 与非聊天救援命令保留。
+
+
+- Python 三个 UDP 服务在监听 socket 成功绑定后各发起一次经过 HMAC 认证的 v2 peer.hello，目标覆盖 Android 与其他服务端口；只在启动/重新绑定时触发，不增加周期性扫描或常驻线程。server2 的网页 HTTP 设备队列只把 `peer_type=android` 的历史成员作为 Android 接收目标，避免服务进程节点混入手机命令队列。
+- 新增启动广播模拟测试，校验目标地址/端口数量、v2 HMAC 解码、peer 身份、listen_port 和 nonce 一致性；最新 CI 17 项 Python 单元测试全部通过。
 
 ### 仍需完成或验证
 
@@ -278,7 +282,7 @@ IP 地址永远不能作为设备身份。网络变化时应使旧端点路由�
 - 必须补齐发送端重启、接收端重启、部分 ACK、ACK 丢失、网络切换、数据库失败和悬浮留言隔离等端到端测试。
 - 真实多设备验收尚未完成；不能以 CI 构建结果替代实机验收。
 
-本功能只有在剩余协议/服务端工作完成，并通过真实设备验收矩阵后，才能宣布完成。
+本轮已完成一次集中代码修复与静态/自动化/CI 检查；仍未取得真实设备通信证据。只有补齐未完成的 A/S/M/F/G 项目并通过真实设备验收矩阵后，才能宣布功能整体验收完成。
 
 ## 14. 完整验收矩阵（冻结基线）
 

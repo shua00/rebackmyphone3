@@ -157,7 +157,8 @@
 | Python 离线成员目标快照 | server2/rescue2/chat.py 把历史已知成员纳入固定目标集合；即时 UDP 仅使用当前有效租约路由，不向过期 IP 盲目单播 | commits `8e10325aa3c66a895332e55e1e4f9be5c0486e62`、`6dcddb5cd67346fb8757e07c75408c892a3af58a` |
 | 网页 HTTP 与 LAN v2 统一身份 | 同一网页消息的 UDP v2 与 HTTP 兜底使用同一 message_id/sender；Android 两路进入同一 SQLite Inbox；先到的一路显示一次，后到一路只确认；stored ACK 撤销另一条队列；HTTP accepted 只有在 Inbox 持久化后才确认 Outbox | commits `fcafe8cb37c544e5345a17beb4ab89d62a677d43`、`49163306e4206d1ca52a933bbbe93f459dd8d969` |
 | HTTP 聊天中断恢复 | chat_msg 遇到 executing/uncertain/failed 后可用同一 message_id 幂等重试；其他有副作用命令保留原来的不自动重放规则；Python ACK 重复到达保持幂等 | commit `49163306e4206d1ca52a933bbbe93f459dd8d969` |
-| 当前累计 CI | 本轮多次增量提交均通过；最新提交执行 16 项 Python 单元测试、Android Java 编译、Debug APK 构建和 artifact 上传 | [Actions run 44984007653](https://github.com/shua00/rebackmyphone3/actions/runs/44984007653)，对应 commit `49163306e4206d1ca52a933bbbe93f459dd8d969` |
+| Python 服务启动发现 | server2/rescue2/chat.py 的 UDP 监听成功绑定后各发一次认证 HELLO，覆盖 Android 与其他服务端口；无周期扫描；server2 网页设备目标只纳入 Android peer | commit `b9af01eb2bf517864aa802eec9515d79beb8f967`；17 项单测中的启动广播模拟测试通过 |
+| 当前累计 CI | 最新代码提交执行 17 项 Python 单元测试、Android Java 编译、Debug APK 构建和 artifact 上传，全部成功 | [Actions run 44984288925](https://github.com/shua00/rebackmyphone3/actions/runs/44984288925)，对应 commit `b9af01eb2bf517864aa802eec9515d79beb8f967` |
 | 最新 CI | Python 检查、12 项单元测试、Android Java 编译、Debug APK 构建和 artifact 上传均通过 | [Actions run 44983112090](https://github.com/shua00/rebackmyphone3/actions/runs/44983112090)，对应 commit `623cd7bfa67f4933c719a7e7e61ab125c14bfa70` |
 
-**未完成/未宣称通过**：A01–A10 中要求真实设备的 LAN 双向、多设备、网络切换、三服务全关闭验收；M-A/M-B/M-C 实机运行；F02/F03/F04/F09/F10/F12 完整故障注入；G01–G06 完整回归。Android SQLite 故障注入及真实 APK 在真实设备上的运行仍缺证据。不得以以上 CI 结果替代这些项目。
+**未完成/未宣称通过**：A01–A10 中要求真实设备的 LAN 双向、多设备、网络切换、三服务全关闭验收；M-A/M-B/M-C 实机运行；F02/F03/F04/F09/F10/F12 完整故障注入；G01–G06 完整回归。Android SQLite 故障注入、Python 三服务真实进程互通、真实 APK 在真实设备上的运行仍缺证据。不得以以上 CI 结果替代这些项目。
