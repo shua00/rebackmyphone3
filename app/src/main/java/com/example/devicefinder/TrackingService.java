@@ -4108,14 +4108,19 @@ public class TrackingService extends Service implements LocationListener {
                         java.net.InetSocketAddress peer = verifiedChatPeers.get(peerId);
                         if (peer == null) continue;
                         try {
-                            if (store != null) store.markAttempt(messageId, peerId,
-                                    peer.getAddress().getHostAddress() + ":" + peer.getPort(), "");
+                            if (store != null) store.markAttempt(messageId, peerId, "");
                             byte[] peerData = buildAuthenticatedLanChatPacket(myId, peerId, messageId, message);
                             DatagramPacket p = new DatagramPacket(peerData, peerData.length,
                                     peer.getAddress(), peer.getPort());
                             sendLanUdpPacket(socket, p, "CHAT_UNICAST");
+                            if (store != null && !store.recordSuccessfulSendEndpoint(messageId, peerId,
+                                    peer.getAddress().getHostAddress() + ":" + peer.getPort())) {
+                                FileLogger.log(this, "CHAT", "⚠️ UDP 已发送但目标 endpoint 未能落账 message="
+                                        + messageId + " peer=" + peerId);
+                            }
                         } catch (Exception e) {
-                            if (store != null) store.markAttempt(messageId, peerId, "", e.getClass().getSimpleName());
+                            if (store != null) store.recordTargetSendError(
+                                    messageId, peerId, e.getClass().getSimpleName());
                             FileLogger.log(this, "CHAT", "⚠️ P2P 单播失败: " + e.getMessage());
                         }
                     }
