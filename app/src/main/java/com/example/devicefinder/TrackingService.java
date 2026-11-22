@@ -278,6 +278,10 @@ public class TrackingService extends Service implements LocationListener {
     private final java.util.Set<String> activeLanChatTransmissions =
             java.util.Collections.newSetFromMap(
                     new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+    // Keep a message active until its asynchronous ACK observation window is reconciled.
+    private final java.util.Set<String> lanChatAckGraceInFlight =
+            java.util.Collections.newSetFromMap(
+                    new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
     // Preserve FIFO send order while discovery/ACK state is shared across messages.
     private final Object lanChatTransmitLock = new Object();
     // 仅缓存经本机 challenge/response 验证的 LAN peer；网络变化时必须清空。
@@ -3851,7 +3855,9 @@ public class TrackingService extends Service implements LocationListener {
         } catch (Exception e) {
             FileLogger.log(this, "CHAT", "⚠️ LAN 对讲发送/恢复异常: " + e.getClass().getSimpleName());
         } finally {
-            activeLanChatTransmissions.remove(messageId);
+            if (!lanChatAckGraceInFlight.contains(messageId)) {
+                activeLanChatTransmissions.remove(messageId);
+            }
         }
         if (attemptRecorded) {
             if (attemptNumber >= LanChatStore.MAX_AUTOMATIC_RETRY_ATTEMPTS
@@ -4147,6 +4153,7 @@ public class TrackingService extends Service implements LocationListener {
                         completionTotalPeerCount, completionReachablePeerCount,
                         completionStore, completionStartedAt);
             } else {
+                lanChatAckGraceInFlight.add(messageId);
                 ackCleanupDeferred = true;
             }
         } finally {
@@ -4205,6 +4212,8 @@ public class TrackingService extends Service implements LocationListener {
         pendingChatAcks.remove(messageId);
         pendingChatAckPeers.remove(messageId);
         pendingChatAckStartedAt.remove(messageId);
+        lanChatAckGraceInFlight.remove(messageId);
+        activeLanChatTransmissions.remove(messageId);
     }
 
 private void sendLanUdpPacket(DatagramSocket socket, DatagramPacket packet, String kind)
