@@ -3702,6 +3702,9 @@ public class TrackingService extends Service implements LocationListener {
                 // 下一条消息会重新 challenge，避免 Python 节点重启/网络切换后长期沿用失效路由。
                 // awaitingPeerIds 与 pendingChatAckPeers 共用同一集合；
                 // 已 ACK 的成员已被移除，只淘汰本轮真正未确认的 endpoint。
+                // A partial ACK means the next retry must rediscover missing peers immediately.
+                // Otherwise the still-verified ACKed peers suppress discovery for 30 seconds.
+                lastPeerDiscoveryAt = 0L;
                 for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
                     verifiedChatPeers.remove(peerId);
                     verifiedChatPeerSeen.remove(peerId);
