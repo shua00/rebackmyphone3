@@ -59,7 +59,6 @@ from urllib.parse import urlparse, parse_qs
 # ★ 新增ThreadPoolExecutor 补丁： 2026-11-05 13:50
 from concurrent.futures import ThreadPoolExecutor
 
-UDP_LISTEN_PORT = 8887  # server2 独立监听端口；发往 Android 的指令仍使用 8888
 def _load_stable_peer_id(db_path, service_name):
     """Return a durable logical service identity; never use a process-session UUID."""
     conn = sqlite3.connect(db_path, timeout=10)
