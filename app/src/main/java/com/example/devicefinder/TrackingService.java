@@ -266,6 +266,8 @@ public class TrackingService extends Service implements LocationListener {
     private static final String PREF_LAN_CHAT_QUEUE = "lan_p2p_pending_messages";
     private static final int LAN_CHAT_QUEUE_MAX = 50;
     private static final long LAN_CHAT_DISCOVERY_WINDOW_MS = 5_000L;
+    // Keep discovery nonces valid long enough for bounded persistence/ACK work to finish.
+    private static final long LAN_PEER_CHALLENGE_TIMEOUT_MS = 2_500L;
     private final Object lanChatQueueLock = new Object();
     private volatile LanChatStore lanChatStore;
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRetryInFlight =
@@ -429,6 +431,19 @@ public class TrackingService extends Service implements LocationListener {
             new ThreadPoolExecutor(
                     1, 1, 0L, TimeUnit.MILLISECONDS,
                     new LinkedBlockingQueue<>(100),
+                    new ThreadPoolExecutor.AbortPolicy()
+            );
+
+    // Keep LAN control, durable inbox and ACK work independent from location/HTTP reporting.
+    private final java.util.concurrent.ExecutorService lanChatIoExecutor =
+            new ThreadPoolExecutor(
+                    2, 2, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(128),
+                    runnable -> {
+                        Thread thread = new Thread(runnable, "LanChat-IO");
+                        thread.setPriority(Thread.NORM_PRIORITY);
+                        return thread;
+                    },
                     new ThreadPoolExecutor.AbortPolicy()
             );
 
@@ -3552,16 +3567,19 @@ public class TrackingService extends Service implements LocationListener {
                     + tooLargeOrInvalid.getClass().getSimpleName());
             return;
         }
+        final long enqueueAt = android.os.SystemClock.elapsedRealtime();
         try {
             lanChatSendExecutor.execute(() -> {
                 if (serviceDestroyed) return;
+                long queueWaitMs = android.os.SystemClock.elapsedRealtime() - enqueueAt;
                 long persistStarted = android.os.SystemClock.elapsedRealtime();
                 if (!persistPendingLanChat(messageId, message)) {
                     FileLogger.log(this, "CHAT", "⚠️ LAN 消息未能持久化，已阻止发送以免断网丢失");
                     return;
                 }
-                FileLogger.log(this, "CHAT", "⏱️ P2P 持久化耗时 "
-                        + (android.os.SystemClock.elapsedRealtime() - persistStarted) + "ms，开始发送 " + messageId);
+                long persistMs = android.os.SystemClock.elapsedRealtime() - persistStarted;
+                FileLogger.log(this, "CHAT", "⏱️ P2P 排队耗时 " + queueWaitMs
+                        + "ms，持久化耗时 " + persistMs + "ms，开始发送 " + messageId);
                 sendLocalUdpMessage(message, messageId);
             });
         } catch (java.util.concurrent.RejectedExecutionException e) {
@@ -3771,7 +3789,13 @@ public class TrackingService extends Service implements LocationListener {
             }
             attemptRecorded = true;
             // The discovery snapshot and ACK bookkeeping are shared per service; serialize send transactions.
+            long lockRequestedAt = android.os.SystemClock.elapsedRealtime();
             synchronized (lanChatTransmitLock) {
+                long lockWaitMs = android.os.SystemClock.elapsedRealtime() - lockRequestedAt;
+                if (lockWaitMs >= 150L) {
+                    FileLogger.log(this, "CHAT", "P2P 发送串行锁等待 message="
+                            + messageId + " waitMs=" + lockWaitMs);
+                }
                 if (!serviceDestroyed) transmitLocalUdpMessageInternal(message, messageId);
             }
         } catch (Exception e) {
@@ -3828,6 +3852,21 @@ public class TrackingService extends Service implements LocationListener {
         // 当前子网广播足以覆盖同一 LAN；同时发 255.255.255.255 会让同一包重复到达。
         String[] broadcasts = new String[]{subnetBcast};
 
+        // Recipient membership was snapshotted at enqueue time. Only an empty initial
+        // snapshot may collect newly verified peers through addDiscoveryPeerToOpenMessages().
+        final List<LanChatStore.Target> savedTargets;
+        try {
+            savedTargets = store.loadTargets(messageId);
+        } catch (Exception e) {
+            FileLogger.log(this, "CHAT", "⚠️ LAN 目标账本读取失败，本轮拒绝发送以免误投: "
+                    + e.getClass().getSimpleName());
+            return;
+        }
+        java.util.Set<String> pendingTargetIds = new java.util.HashSet<>();
+        for (LanChatStore.Target target : savedTargets) {
+            if (!"acked".equals(target.status)) pendingTargetIds.add(target.peerId);
+        }
+
         // 先清理过期租约；同一网络内仍有已验证成员时直接复用单播路由，
         // 不再让每条聊天消息都额外等待一次 500ms 广播发现窗口。
         long now = System.currentTimeMillis();
@@ -3836,6 +3875,36 @@ public class TrackingService extends Service implements LocationListener {
                 verifiedChatPeerSeen.remove(e.getKey(), e.getValue());
                 verifiedChatPeers.remove(e.getKey());
             }
+        }
+
+        // Revalidate persisted endpoints directly before treating a known target as offline.
+        // Stable peer ID and exact endpoint must both match the authenticated challenge response.
+        int directedChallenges = 0;
+        for (LanChatStore.Target target : savedTargets) {
+            if (target == null || target.peerId == null || "acked".equals(target.status)
+                    || verifiedChatPeers.containsKey(target.peerId)
+                    || target.endpointIp == null || target.endpointIp.isEmpty()
+                    || !(target.endpointPort == 8888 || target.endpointPort == 8887
+                         || target.endpointPort == 8889 || target.endpointPort == 8890)) {
+                continue;
+            }
+            try {
+                java.net.InetAddress savedAddress = java.net.InetAddress.getByName(target.endpointIp);
+                if (savedAddress instanceof java.net.Inet4Address
+                        && savedAddress.isSiteLocalAddress()
+                        && !savedAddress.isLoopbackAddress()
+                        && !savedAddress.isAnyLocalAddress()) {
+                    sendDirectedPeerChallenge(socket, target.peerId, savedAddress, target.endpointPort);
+                    directedChallenges++;
+                }
+            } catch (Exception staleEndpoint) {
+                FileLogger.logD("CHAT", "persisted peer endpoint challenge skipped peer="
+                        + target.peerId + " reason=" + staleEndpoint.getClass().getSimpleName());
+            }
+        }
+        if (directedChallenges > 0) {
+            FileLogger.log(this, "CHAT", "P2P 正在验证已保存的目标路由 count="
+                    + directedChallenges + " message=" + messageId);
         }
         // Reuse verified routes for up to 30 seconds; rediscover on first send, route expiry,
         // network change, or partial delivery. Avoid adding a 500 ms discovery wait to every message.
@@ -3848,6 +3917,11 @@ public class TrackingService extends Service implements LocationListener {
             String nonce = java.util.UUID.randomUUID().toString();
             java.util.concurrent.CountDownLatch peerLatch = new java.util.concurrent.CountDownLatch(1);
             pendingPeerChallenges.put(nonce, peerLatch);
+            handler.postDelayed(() -> {
+                if (pendingPeerChallenges.get(nonce) == peerLatch) {
+                    clearPendingPeerChallenge(nonce);
+                }
+            }, LAN_PEER_CHALLENGE_TIMEOUT_MS);
             try {
                 JSONObject helloPacket = LanP2pProtocol.create("peer.hello", myId, "android", "android-main");
                 helloPacket.put("nonce", nonce);
@@ -3878,7 +3952,8 @@ public class TrackingService extends Service implements LocationListener {
             } catch (Exception e) {
                 FileLogger.log(this, "CHAT", "⚠️ P2P 发现失败: " + e.getMessage());
             } finally {
-                clearPendingPeerChallenge(nonce);
+                // Keep the nonce alive after the 500 ms collection wait so late authenticated ACKs
+                // can still restore the route and trigger an immediate outbox retry.
                 peerDiscoveryInFlight.set(false);
             }
         }
@@ -3887,20 +3962,6 @@ public class TrackingService extends Service implements LocationListener {
         catch (Exception e) {
             FileLogger.log(this, "CHAT", "⚠️ LAN v2 消息编码失败，消息保留待确认: " + e.getClass().getSimpleName());
             return;
-        }
-        // Recipient membership was snapshotted at enqueue time. Only an empty initial
-        // snapshot may collect newly verified peers through addDiscoveryPeerToOpenMessages().
-        final List<LanChatStore.Target> savedTargets;
-        try {
-            savedTargets = store.loadTargets(messageId);
-        } catch (Exception e) {
-            FileLogger.log(this, "CHAT", "⚠️ LAN 目标账本读取失败，本轮拒绝发送以免误投: "
-                    + e.getClass().getSimpleName());
-            return;
-        }
-        java.util.Set<String> pendingTargetIds = new java.util.HashSet<>();
-        for (LanChatStore.Target target : savedTargets) {
-            if (!"acked".equals(target.status)) pendingTargetIds.add(target.peerId);
         }
         java.util.Set<String> awaitingPeerIds = java.util.Collections.newSetFromMap(
                 new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
@@ -4050,6 +4111,7 @@ public class TrackingService extends Service implements LocationListener {
         if (serviceDestroyed || socket == null || socket.isClosed() || address == null
                 || expectedPeerId == null || expectedPeerId.isEmpty()
                 || !(port == 8888 || port == 8887 || port == 8889 || port == 8890)) return;
+        if (pendingPeerChallengeExpectedIds.containsValue(expectedPeerId)) return;
         sendPeerHello(socket, address.getHostAddress(), new int[]{port}, true,
                 expectedPeerId, new java.net.InetSocketAddress(address, port));
     }
@@ -4103,7 +4165,7 @@ public class TrackingService extends Service implements LocationListener {
             if (pendingPeerChallenges.get(nonce) == challengeLatch) {
                 clearPendingPeerChallenge(nonce);
             }
-        }, 2500L);
+        }, LAN_PEER_CHALLENGE_TIMEOUT_MS);
     }
 
     /**
@@ -4121,7 +4183,7 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private boolean handleAuthenticatedLanPacket(DatagramSocket socket, DatagramPacket packet,
-                                                  JSONObject envelope) {
+                                                   JSONObject envelope, long packetReceivedAtElapsedMs) {
         try {
             String type = envelope.optString("type", "");
             String senderId = envelope.optString("sender_peer_id", "");
@@ -4152,7 +4214,7 @@ public class TrackingService extends Service implements LocationListener {
                 final String peerIp = peerAddress.getHostAddress();
                 final boolean challengeOnly = envelope.optBoolean("challenge_only", false);
                 try {
-                    reportExecutor.execute(() -> {
+                    lanChatIoExecutor.execute(() -> {
                         try {
                             if (!store.observePeer(senderId, peerType, serviceId, peerNetwork,
                                     peerIp, sourcePort, now, now + 120_000L)) {
@@ -4209,7 +4271,7 @@ public class TrackingService extends Service implements LocationListener {
                     final String peerType = envelope.optString("sender_peer_type", "unknown");
                     final String peerNetwork = envelope.optString("network_scope", "");
                     try {
-                        reportExecutor.execute(() -> {
+                        lanChatIoExecutor.execute(() -> {
                             boolean persisted = store.upsertPeer(senderId, peerType, serviceId,
                                     peerNetwork, peerAddress.getHostAddress(), port, now, now + 120_000L);
                             if (!persisted) {
@@ -4255,13 +4317,26 @@ public class TrackingService extends Service implements LocationListener {
                 if (routeMatches || discoveryAck) {
                     boolean wasExpected = expected != null && expected.remove(senderId);
                     try {
-                        reportExecutor.execute(() -> {
-                            if (store != null && store.acknowledge(messageId, senderId)) {
+                        lanChatIoExecutor.execute(() -> {
+                            long ackQueueMs = android.os.SystemClock.elapsedRealtime()
+                                    - packetReceivedAtElapsedMs;
+                            long ackPersistStarted = android.os.SystemClock.elapsedRealtime();
+                            boolean persistedAck = store != null && store.acknowledge(messageId, senderId);
+                            if (persistedAck) {
                                 if (routeMatches) verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
                                 if (latch != null) latch.countDown();
                             } else if (wasExpected && expected != null) {
                                 expected.add(senderId);
                                 FileLogger.log(this, "CHAT", "⚠️ v2 ACK 账本写入失败，等待重试: " + senderId);
+                            }
+                            long ackTotalMs = android.os.SystemClock.elapsedRealtime()
+                                    - packetReceivedAtElapsedMs;
+                            if (ackQueueMs >= 100L || ackTotalMs >= 200L) {
+                                FileLogger.log(this, "CHAT", "P2P ACK 处理耗时 message=" + messageId
+                                        + " queueMs=" + ackQueueMs
+                                        + " dbMs=" + (android.os.SystemClock.elapsedRealtime() - ackPersistStarted)
+                                        + " totalMs=" + ackTotalMs
+                                        + " persisted=" + persistedAck);
                             }
                         });
                     } catch (java.util.concurrent.RejectedExecutionException rejected) {
@@ -4282,10 +4357,21 @@ public class TrackingService extends Service implements LocationListener {
                 final java.net.InetAddress ackAddress = packet.getAddress();
                 final int ackPort = packet.getPort();
                 try {
-                    reportExecutor.execute(() -> {
+                    lanChatIoExecutor.execute(() -> {
+                        long dispatchQueueMs = android.os.SystemClock.elapsedRealtime()
+                                - packetReceivedAtElapsedMs;
                         try {
-                            if (persistIncomingLanChat(senderId, messageId, body,
-                                    envelope.optString("display_name", senderId))) {
+                            boolean stored = persistIncomingLanChat(senderId, messageId, body,
+                                    envelope.optString("display_name", senderId));
+                            long receiveTotalMs = android.os.SystemClock.elapsedRealtime()
+                                    - packetReceivedAtElapsedMs;
+                            if (dispatchQueueMs >= 150L || receiveTotalMs >= 300L) {
+                                FileLogger.log(this, "CHAT", "P2P 接收耗时 message=" + messageId
+                                        + " queueMs=" + dispatchQueueMs
+                                        + " durableTotalMs=" + receiveTotalMs
+                                        + " stored=" + stored);
+                            }
+                            if (stored) {
                                 receivedChatMessageIds.put(receiveKey, System.currentTimeMillis());
                                 sendAuthenticatedChatAck(socket, ackAddress, ackPort, senderId, messageId);
                             }
@@ -4320,12 +4406,12 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private boolean handleLanRealtimePacket(DatagramSocket socket, DatagramPacket packet,
-                                             String message) {
+                                              String message, long packetReceivedAtElapsedMs) {
         try {
             if (message.startsWith("{")) {
                 try {
                     JSONObject envelope = LanP2pProtocol.decode(message.getBytes("UTF-8"), RESCUE_SECRET);
-                    return handleAuthenticatedLanPacket(socket, packet, envelope);
+                    return handleAuthenticatedLanPacket(socket, packet, envelope, packetReceivedAtElapsedMs);
                 } catch (Exception invalid) {
                     FileLogger.logD("UDP", "invalid authenticated LAN JSON frame: "
                             + invalid.getClass().getSimpleName());
@@ -4612,7 +4698,7 @@ public class TrackingService extends Service implements LocationListener {
                     long udpReceiveElapsedMs = android.os.SystemClock.elapsedRealtime();
                     String message = new String(packet.getData(), 0, packet.getLength());
                     // ACK/握手优先快路径：不经过普通命令分发和完整包日志，尽快释放发送端等待。
-                    if (handleLanRealtimePacket(rescueSocket, packet, message)) {
+                    if (handleLanRealtimePacket(rescueSocket, packet, message, udpReceiveElapsedMs)) {
                         continue;
                     }
                     // 只记录命令前缀与来源，不记录认证字段、聊天正文或完整协议包。
@@ -5446,6 +5532,7 @@ public class TrackingService extends Service implements LocationListener {
 
         if (reportExecutor != null) reportExecutor.shutdown();
         if (lanChatSendExecutor != null) lanChatSendExecutor.shutdown();
+        if (lanChatIoExecutor != null) lanChatIoExecutor.shutdown();
         if (maintenanceExecutor != null) maintenanceExecutor.shutdownNow();
         if (lanChatStore != null) { try { lanChatStore.closeStore(); } catch (Exception ignored) {} lanChatStore = null; }
         if (rescueSocketRef != null) {
