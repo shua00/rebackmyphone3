@@ -1126,5 +1126,32 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn('scheduleLanChatTask("peer-challenge-timeout"', source)
 
 
+
+    def test_android_first_discovery_window_starts_when_network_send_begins(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        service = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+
+        enqueue_start = store.index("public boolean enqueue(")
+        enqueue_end = store.index("\\n    public ", enqueue_start + 12)
+        enqueue = store[enqueue_start:enqueue_end]
+        self.assertIn('v.put("delivery_deadline_ms", 0L)', enqueue)
+        self.assertNotIn("+ FIRST_DISCOVERY_WINDOW_MS", enqueue)
+
+        begin_start = store.index("public boolean beginDiscoveryWindow(")
+        begin_end = store.index("public boolean isDiscoveryPending(", begin_start)
+        begin = store[begin_start:begin_end]
+        self.assertIn("FIRST_DISCOVERY_WINDOW_MS", begin)
+        self.assertIn('if (deadline > 0L)', begin)
+
+        self.assertIn("FIRST_DISCOVERY_WINDOW_MS = 10_000L", store)
+        self.assertIn("store.beginDiscoveryWindow(messageId)", service)
+        self.assertIn("首次发现窗口开始", service)
+
+
 if __name__ == "__main__":
     unittest.main()
