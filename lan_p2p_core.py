@@ -753,13 +753,16 @@ def send_outbox_to_active_peers(sock, db_path, sender_scope, message_id,
             destination = (target["endpoint_ip"], int(target["endpoint_port"]))
             try:
                 raw = encode_packet(packet, secret)
+                # Commit the retry attempt before network I/O. A ledger failure
+                # must fail closed; a crash after send must not erase the attempt.
+                if not mark_outgoing_attempt(db_path, message_id, target["peer_id"],
+                                             destination[0], destination[1]):
+                    continue
                 if send_lock is None:
                     sock.sendto(raw, destination)
                 else:
                     with send_lock:
                         sock.sendto(raw, destination)
-                mark_outgoing_attempt(db_path, message_id, target["peer_id"],
-                                      destination[0], destination[1])
                 sent_total += 1
             except Exception:
                 continue

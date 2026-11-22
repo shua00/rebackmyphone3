@@ -539,6 +539,12 @@ class LanP2PCoreTests(unittest.TestCase):
                 "test-secret", attempts=3, retry_delay_seconds=0.25)
         self.assertEqual(sent, 3)
         self.assertEqual(len(socket.sent), 3)
+        with sqlite3.connect(self.db_path) as conn:
+            attempt_count = conn.execute(
+                "SELECT attempt_count FROM lan_outbox_targets WHERE message_id=? AND peer_id=?",
+                ("retry-m1", "android-a")
+            ).fetchone()[0]
+        self.assertEqual(attempt_count, 3)
         self.assertTrue(all(addr == ("192.168.1.10", 8888) for _, addr in socket.sent))
 
         self.assertTrue(persist_outgoing_message(
@@ -553,6 +559,34 @@ class LanP2PCoreTests(unittest.TestCase):
                 ack_socket, self.db_path, "rescue2", "retry-m2", packet,
                 "test-secret", attempts=3, retry_delay_seconds=0.25)
         self.assertEqual(acked_sends, 1)
+
+
+    def test_active_target_sender_fails_closed_when_attempt_ledger_fails(self):
+        from lan_p2p_core import record_peer, persist_outgoing_message, send_outbox_to_active_peers
+
+        class FakeSocket:
+            def __init__(self):
+                self.sent = []
+            def sendto(self, payload, destination):
+                self.sent.append((payload, destination))
+
+        record_peer(self.db_path, "rescue2", "android-a", "android", "android-main",
+                    "192.168.1.10", 8888, "active")
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "rescue2", "rescue2-id", "ledger-fail", "hello", ["android-a"]))
+        packet = {
+            "type": "chat.message", "sender_peer_id": "rescue2-id",
+            "sender_peer_type": "rescue2", "service_id": "rescue2-id",
+            "target_peer_id": "*", "message_id": "ledger-fail",
+            "created_at_ms": 123, "body": "hello",
+        }
+        socket = FakeSocket()
+        with patch("lan_p2p_core.mark_outgoing_attempt", return_value=False):
+            sent = send_outbox_to_active_peers(
+                socket, self.db_path, "rescue2", "ledger-fail", packet,
+                "test-secret", attempts=3, retry_delay_seconds=0)
+        self.assertEqual(sent, 0)
+        self.assertEqual(socket.sent, [])
 
 
     def test_partial_ack_retries_only_the_remaining_fixed_peer(self):
