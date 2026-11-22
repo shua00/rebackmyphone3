@@ -289,6 +289,10 @@ public class TrackingService extends Service implements LocationListener {
             new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, Long> verifiedChatPeerSeen =
             new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.atomic.AtomicLong verifiedChatPeerRouteVersionCounter =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> verifiedChatPeerRouteVersions =
+            new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CountDownLatch> pendingPeerChallenges =
             new java.util.concurrent.ConcurrentHashMap<>();
     // Directed challenges are bound to the peer identity and exact source endpoint.
@@ -325,9 +329,10 @@ public class TrackingService extends Service implements LocationListener {
 
     /** 网络路径变化立即撤销旧 LAN endpoint，避免跨子网沿用旧 IP。 */
     private void invalidateVerifiedChatPeers(String reason) {
-        synchronized (verifiedChatPeers) {
+        synchronized (verifiedChatPeerRouteVersions) {
             verifiedChatPeers.clear();
             verifiedChatPeerSeen.clear();
+            verifiedChatPeerRouteVersions.clear();
         }
         pendingPeerChallenges.clear();
         pendingPeerChallengeExpectedIds.clear();
@@ -3973,7 +3978,7 @@ public class TrackingService extends Service implements LocationListener {
         long now = System.currentTimeMillis();
         for (java.util.Map.Entry<String, Long> e : verifiedChatPeerSeen.entrySet()) {
             if (now - e.getValue() > 120_000L) {
-                synchronized (verifiedChatPeers) {
+                synchronized (verifiedChatPeerRouteVersions) {
                     if (verifiedChatPeerSeen.remove(e.getKey(), e.getValue())) {
                         verifiedChatPeers.remove(e.getKey());
                         verifiedChatPeerRouteVersions.remove(e.getKey());
@@ -4459,7 +4464,9 @@ public class TrackingService extends Service implements LocationListener {
                                 FileLogger.log(this, "CHAT", "⚠️ 新 peer 加入待发现目标集失败，稍后重新发现");
                                 return;
                             }
-                            synchronized (verifiedChatPeers) {
+                            synchronized (verifiedChatPeerRouteVersions) {
+                                verifiedChatPeerRouteVersions.put(senderId,
+                                        verifiedChatPeerRouteVersionCounter.incrementAndGet());
                                 verifiedChatPeers.put(senderId,
                                         new java.net.InetSocketAddress(peerAddress, port));
                                 verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
@@ -4512,8 +4519,10 @@ public class TrackingService extends Service implements LocationListener {
                         boolean persistedAck = store != null && store.acknowledge(messageId, senderId);
                         if (persistedAck) {
                             if (routeMatches) {
-                                synchronized (verifiedChatPeers) {
+                                synchronized (verifiedChatPeerRouteVersions) {
                                     if (verifiedChatPeers.get(senderId) == verified) {
+                                        verifiedChatPeerRouteVersions.put(senderId,
+                                                verifiedChatPeerRouteVersionCounter.incrementAndGet());
                                         verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
                                     }
                                 }
