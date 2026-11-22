@@ -221,17 +221,40 @@ def acknowledge_outgoing_message(db_path, sender_scope, message_id, peer_id):
         if row is None:
             conn.rollback()
             return False
+        now_ms = int(time.time() * 1000)
         cur = conn.execute("""UPDATE lan_outbox_targets
             SET status='acked',last_ack_at=?
             WHERE message_id=? AND peer_id=? AND status!='acked'""",
-            (int(time.time() * 1000), message_id, peer_id))
+            (now_ms, message_id, peer_id))
         if cur.rowcount == 0:
-            conn.rollback()
-            return False
+            # With no known members at send time, authenticated ACKs populate the first bounded
+            # discovery snapshot. Once the window closes, non-target ACKs are rejected.
+            row = conn.execute("SELECT state,delivery_deadline_ms FROM lan_outbox WHERE sender_scope=? AND message_id=?",
+                               (sender_scope, message_id)).fetchone()
+            if row is None or row[0] != "discovery_pending":
+                conn.rollback()
+                return False
+            deadline = int(row[1] or 0)
+            if deadline and now_ms > deadline:
+                conn.rollback()
+                return False
+            if not deadline:
+                deadline = now_ms + 5000
+                conn.execute("UPDATE lan_outbox SET delivery_deadline_ms=? WHERE message_id=?",
+                             (deadline, message_id))
+            conn.execute("""INSERT OR IGNORE INTO lan_outbox_targets
+                (message_id,peer_id,status,last_ack_at) VALUES(?,?,'acked',?)""",
+                (message_id, peer_id, now_ms))
         total, acked = conn.execute("""SELECT COUNT(*),
             SUM(CASE WHEN status='acked' THEN 1 ELSE 0 END)
             FROM lan_outbox_targets WHERE message_id=?""", (message_id,)).fetchone()
-        if total > 0 and total == (acked or 0):
+        row = conn.execute("SELECT state,delivery_deadline_ms FROM lan_outbox WHERE sender_scope=? AND message_id=?",
+                           (sender_scope, message_id)).fetchone()
+        discovery_open = bool(row and row[0] == "discovery_pending"
+                              and row[1] and now_ms <= int(row[1]))
+        if discovery_open:
+            pass
+        elif total > 0 and total == (acked or 0):
             conn.execute("UPDATE lan_outbox SET state='delivered' WHERE message_id=?", (message_id,))
         else:
             conn.execute("UPDATE lan_outbox SET state='partial' WHERE message_id=?", (message_id,))
@@ -250,6 +273,23 @@ def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10):
     try:
         conn.execute("PRAGMA busy_timeout=10000")
         now = time.time()
+        now_ms = int(now * 1000)
+        # Close expired discovery snapshots: pending targets remain retryable; fully ACKed sets finish.
+        conn.execute("""UPDATE lan_outbox SET state='delivered'
+            WHERE sender_scope=? AND state='discovery_pending' AND delivery_deadline_ms>0
+              AND delivery_deadline_ms<=?
+              AND EXISTS (SELECT 1 FROM lan_outbox_targets t WHERE t.message_id=lan_outbox.message_id)
+              AND NOT EXISTS (SELECT 1 FROM lan_outbox_targets t
+                              WHERE t.message_id=lan_outbox.message_id AND t.status!='acked')""",
+            (sender_scope, now_ms))
+        conn.execute("""UPDATE lan_outbox SET state='pending'
+            WHERE sender_scope=? AND state='discovery_pending' AND delivery_deadline_ms>0
+              AND delivery_deadline_ms<=?
+              AND EXISTS (SELECT 1 FROM lan_outbox_targets t WHERE t.message_id=lan_outbox.message_id)
+              AND EXISTS (SELECT 1 FROM lan_outbox_targets t
+                          WHERE t.message_id=lan_outbox.message_id AND t.status!='acked')""",
+            (sender_scope, now_ms))
+        conn.commit()
         rows = conn.execute("""SELECT o.message_id,o.sender_peer_id,o.body,o.created_at_ms,
                     p.endpoint_ip,p.endpoint_port
             FROM lan_outbox o
@@ -303,5 +343,69 @@ def list_known_peers(db_path, receiver_scope, limit=100):
                 for r in rows]
     except Exception:
         return []
+    finally:
+        conn.close()
+
+
+def add_discovery_target(db_path, sender_scope, message_id, peer_id):
+    """Add a peer only during the first bounded discovery window of an unknown-recipient message."""
+    if not sender_scope or not message_id or not peer_id:
+        return False
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT state,delivery_deadline_ms FROM lan_outbox "
+                           "WHERE sender_scope=? AND message_id=?",
+                           (sender_scope, message_id)).fetchone()
+        if row is None or row[0] != "discovery_pending":
+            conn.rollback()
+            return False
+        now_ms = int(time.time() * 1000)
+        deadline = int(row[1] or 0)
+        if deadline and now_ms > deadline:
+            conn.rollback()
+            return False
+        if not deadline:
+            deadline = now_ms + 5000
+            conn.execute("UPDATE lan_outbox SET delivery_deadline_ms=? WHERE message_id=?",
+                         (deadline, message_id))
+        conn.execute("""INSERT OR IGNORE INTO lan_outbox_targets
+            (message_id,peer_id,status) VALUES(?,?,'pending')""", (message_id, peer_id))
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
+def add_discovery_targets_for_peer(db_path, sender_scope, peer_id):
+    """Attach a newly discovered peer to every still-open unknown-recipient message."""
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("BEGIN IMMEDIATE")
+        now_ms = int(time.time() * 1000)
+        rows = conn.execute("""SELECT message_id,delivery_deadline_ms FROM lan_outbox
+            WHERE sender_scope=? AND state='discovery_pending'""", (sender_scope,)).fetchall()
+        added = 0
+        for message_id, deadline_value in rows:
+            deadline = int(deadline_value or 0)
+            if deadline and now_ms > deadline:
+                continue
+            if not deadline:
+                deadline = now_ms + 5000
+                conn.execute("UPDATE lan_outbox SET delivery_deadline_ms=? WHERE message_id=?",
+                             (deadline, message_id))
+            cur = conn.execute("""INSERT OR IGNORE INTO lan_outbox_targets
+                (message_id,peer_id,status) VALUES(?,?,'pending')""", (message_id, peer_id))
+            added += max(0, cur.rowcount)
+        conn.commit()
+        return added
+    except Exception:
+        conn.rollback()
+        return 0
     finally:
         conn.close()
