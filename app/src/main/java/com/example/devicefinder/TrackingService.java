@@ -4397,52 +4397,60 @@ public class TrackingService extends Service implements LocationListener {
                              || sourcePort == 8889 || sourcePort == 8890)) {
                     return true;
                 }
-                java.util.concurrent.CountDownLatch latch = pendingChatAcks.get(messageId);
-                java.net.InetSocketAddress verified = verifiedChatPeers.get(senderId);
-                java.util.Set<String> expected = pendingChatAckPeers.get(messageId);
-                LanChatStore store = lanChatStore;
-                boolean routeMatches = verified != null
-                        && verified.getAddress().equals(packet.getAddress())
+                final java.net.InetAddress sourceAddress = packet.getAddress();
+                final java.util.concurrent.CountDownLatch latch = pendingChatAcks.get(messageId);
+                final java.net.InetSocketAddress verified = verifiedChatPeers.get(senderId);
+                final boolean routeMatches = verified != null
+                        && verified.getAddress().equals(sourceAddress)
                         && verified.getPort() == sourcePort;
-                // Unknown peers may ACK only while this message's bounded first-discovery
-                // snapshot is open. Such an ACK adds a target but never grants route trust.
-                boolean discoveryAck = store != null && store.isDiscoveryPending(messageId);
-                if (routeMatches || discoveryAck) {
-                    boolean wasExpected = expected != null && expected.remove(senderId);
-                    try {
-                        lanChatIoExecutor.execute(() -> {
-                            long ackQueueMs = android.os.SystemClock.elapsedRealtime()
-                                    - packetReceivedAtElapsedMs;
-                            long ackPersistStarted = android.os.SystemClock.elapsedRealtime();
-                            boolean persistedAck = store != null && store.acknowledge(messageId, senderId);
-                            if (persistedAck) {
-                                if (routeMatches) verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
-                                if (latch != null) latch.countDown();
-                                // The final ACK can commit after the sender's short latch wait has
-                                // already returned. Reconcile the legacy queue mirror here as well,
-                                // otherwise completed rows can occupy the 50-item compatibility queue.
-                                if (store.allTargetsAcked(messageId)) {
-                                    removePendingLanChat(messageId);
-                                    FileLogger.log(this, "CHAT", "P2P 最终 ACK 已落账并回收兼容队列 message="
-                                            + messageId + " peer=" + senderId);
-                                }
-                            } else if (wasExpected && expected != null) {
-                                expected.add(senderId);
-                                FileLogger.log(this, "CHAT", "⚠️ v2 ACK 账本写入失败，等待重试: " + senderId);
+                final java.util.Set<String> expected = pendingChatAckPeers.get(messageId);
+                final LanChatStore store = lanChatStore;
+                // Keep the UDP receive path free of SQLite reads. A delayed ACK may still be
+                // accepted from the exact endpoint durably recorded for this fixed recipient,
+                // even after its short-lived in-memory route has been evicted.
+                try {
+                    lanChatIoExecutor.execute(() -> {
+                        long ackQueueMs = android.os.SystemClock.elapsedRealtime()
+                                - packetReceivedAtElapsedMs;
+                        long ackPersistStarted = android.os.SystemClock.elapsedRealtime();
+                        boolean persistedEndpointMatch = store != null
+                                && store.matchesExpectedAckEndpoint(messageId, senderId,
+                                        sourceAddress.getHostAddress(), sourcePort);
+                        boolean discoveryAck = store != null && store.isDiscoveryPending(messageId);
+                        if (!routeMatches && !persistedEndpointMatch && !discoveryAck) {
+                            FileLogger.log(this, "CHAT", "P2P ACK rejected message=" + messageId
+                                    + " peer=" + senderId + " reason=unverified_endpoint");
+                            return;
+                        }
+                        boolean wasExpected = expected != null && expected.remove(senderId);
+                        boolean persistedAck = store != null && store.acknowledge(messageId, senderId);
+                        if (persistedAck) {
+                            if (routeMatches) verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
+                            if (latch != null) latch.countDown();
+                            if (store.allTargetsAcked(messageId)) {
+                                removePendingLanChat(messageId);
+                                FileLogger.log(this, "CHAT", "P2P 最终 ACK 已落账并回收兼容队列 message="
+                                        + messageId + " peer=" + senderId);
                             }
-                            long ackTotalMs = android.os.SystemClock.elapsedRealtime()
-                                    - packetReceivedAtElapsedMs;
-                            if (ackQueueMs >= 100L || ackTotalMs >= 200L) {
-                                FileLogger.log(this, "CHAT", "P2P ACK 处理耗时 message=" + messageId
-                                        + " queueMs=" + ackQueueMs
-                                        + " dbMs=" + (android.os.SystemClock.elapsedRealtime() - ackPersistStarted)
-                                        + " totalMs=" + ackTotalMs
-                                        + " persisted=" + persistedAck);
-                            }
-                        });
-                    } catch (java.util.concurrent.RejectedExecutionException rejected) {
-                        if (wasExpected && expected != null) expected.add(senderId);
-                    }
+                        } else {
+                            if (wasExpected && expected != null) expected.add(senderId);
+                            FileLogger.log(this, "CHAT", "⚠️ v2 ACK 账本写入失败，等待重试: "
+                                    + messageId + " peer=" + senderId);
+                        }
+                        long ackTotalMs = android.os.SystemClock.elapsedRealtime()
+                                - packetReceivedAtElapsedMs;
+                        if (ackQueueMs >= 100L || ackTotalMs >= 200L) {
+                            FileLogger.log(this, "CHAT", "P2P ACK 处理耗时 message=" + messageId
+                                    + " queueMs=" + ackQueueMs
+                                    + " dbMs=" + (android.os.SystemClock.elapsedRealtime() - ackPersistStarted)
+                                    + " totalMs=" + ackTotalMs
+                                    + " persisted=" + persistedAck
+                                    + " endpointMatch=" + persistedEndpointMatch);
+                        }
+                    });
+                } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                    FileLogger.log(this, "CHAT", "⚠️ LAN ACK IO 队列已满，保留发送端待确认状态 message="
+                            + messageId + " peer=" + senderId);
                 }
                 return true;
             }
