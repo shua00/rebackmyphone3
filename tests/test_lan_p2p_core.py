@@ -810,8 +810,8 @@ class LanP2PCoreTests(unittest.TestCase):
         end = source.index("\n        } catch (Exception e)", start)
         handler = source[start:end]
 
-        claim = handler.index("pendingLanChatReceives.add(receiveKey)")
-        duplicate_guard = handler.index("if (!pendingLanChatReceives.add(receiveKey))", claim)
+        duplicate_guard = handler.index("if (!pendingLanChatReceives.add(receiveKey))")
+        claim = handler.index("pendingLanChatReceives.add(receiveKey)", duplicate_guard)
         dispatch = handler.index("lanChatIoExecutor.execute", duplicate_guard)
         persist = handler.index("persistIncomingLanChat(", dispatch)
         ack = handler.index("sendAuthenticatedChatAck(", persist)
