@@ -1106,5 +1106,25 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertNotIn('"，已验证成员 " + totalPeerCount', source)
 
 
+
+    def test_android_p2p_retry_and_peer_deadlines_do_not_depend_on_main_handler(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn('new Thread(runnable, "LanChat-Scheduler")', source)
+
+        retry_start = source.index("private void scheduleLanChatRetryFromOutbox()")
+        retry_end = source.index("private void transmitLocalUdpMessageInternal(", retry_start)
+        retry_method = source[retry_start:retry_end]
+        self.assertIn('scheduleLanChatTask("outbox-retry"', retry_method)
+        self.assertNotIn("handler.postDelayed(", retry_method)
+
+        self.assertIn('scheduleLanChatTask("peer-verified-retry"', source)
+        self.assertIn('scheduleLanChatTask("listener-outbox-recovery"', source)
+        self.assertIn('scheduleLanChatTask("peer-discovery-timeout"', source)
+        self.assertIn('scheduleLanChatTask("peer-challenge-timeout"', source)
+
+
 if __name__ == "__main__":
     unittest.main()
