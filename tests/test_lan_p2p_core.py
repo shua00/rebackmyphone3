@@ -957,6 +957,8 @@ class LanP2PCoreTests(unittest.TestCase):
         attempt = store[attempt_start:attempt_end]
         self.assertIn("retry_attempt_count<?", attempt)
         self.assertIn("MAX_AUTOMATIC_RETRY_ATTEMPTS", attempt)
+        self.assertIn("state!='discovery_pending'", attempt)
+        self.assertIn("ELSE state END", attempt)
         self.assertNotIn("DELETE FROM lan_outbox", resume)
         self.assertIn("'retry_paused'", load)
         ack_start = store.index("public boolean acknowledge(String messageId, String peerId)")
