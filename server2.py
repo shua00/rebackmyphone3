@@ -322,7 +322,6 @@ UDP_ROUNDS_BROADCAST = 2      # 广播/子网广播 每目标重发轮次（原 
 UDP_ROUNDS_UNICAST   = 1      # 单播 每目标重发轮次（原 2）
 UDP_TOTAL_PACKET_BUDGET = 4   # 单次 smart_send 总包数上限，超过则退化为一次广播
 CMD_MAX_PER_DEVICE = 50
-CMD_SEQ = 0
 _cmd_lock = threading.Lock()
 
 HTTP_SUPPORTED_ACTIONS = {
@@ -1002,7 +1001,6 @@ def _load_pending_commands():
 
 
 def enqueue_command(dev_id, action, payload, require_device=False):
-    global CMD_SEQ
     if not dev_id: return False
     now = time.time()
     payload_str = payload if payload is not None else ""
@@ -1042,8 +1040,8 @@ def enqueue_command(dev_id, action, payload, require_device=False):
             queue.pop(evictable)
             dropped = 1
 
-        CMD_SEQ += 1
-        cmd_id = f"c_{int(now)}_{CMD_SEQ}"
+        # UUIDs remain collision-resistant across process restarts and devices.
+        cmd_id = f"c_{uuid.uuid4().hex}"
         queue.append({"id": cmd_id, "type": action, "payload": payload_str, "ts": now})
         try:
             _persist_command_queue_locked(dev_id)
@@ -2661,6 +2659,8 @@ def handle_client(client_conn, client_addr):
                 target_ip = cmd_data.get("target_ip", "255.255.255.255")
                 success = False
                 extra_msg = ""
+                queued_count = 0
+                queue_rejected_count = 0
 
                 target_devs = []
                 if action in HTTP_SUPPORTED_ACTIONS:
@@ -2679,7 +2679,10 @@ def handle_client(client_conn, client_addr):
                         target_devs = sorted(set(target_devs) | set(historical_ids))
                     for dev_id in target_devs:
                         if action != "chat_msg":
-                            enqueue_command(dev_id, action, payload)
+                            if enqueue_command(dev_id, action, payload):
+                                queued_count += 1
+                            else:
+                                queue_rejected_count += 1
 
                 def smart_send(cmd_prefix):
                     nonlocal extra_msg          # ★ 2026-11-18：必须声明，否则下面赋值只改到局部变量
@@ -2764,13 +2767,15 @@ def handle_client(client_conn, client_addr):
                     chat_packets = _build_version_aware_commands(
                         target_devs, "chat_msg", payload, message_id=chat_message_id)
 
-                    fallback_queued = False
+                    fallback_queued_count = 0
                     for dev_id in target_devs:
                         if enqueue_command(dev_id, "chat_msg", fallback_payload):
-                            fallback_queued = True
+                            fallback_queued_count += 1
                         else:
+                            queue_rejected_count += 1
                             with print_lock:
                                 print(f"⚠️ Web chat HTTP fallback queue rejected for {dev_id}")
+                    queued_count = fallback_queued_count
 
                     # Queue fallback before UDP send so a fast stored ACK can cancel that exact row.
                     # Do not route chat through generic smart_send(): its broadcast fallback
@@ -2779,8 +2784,19 @@ def handle_client(client_conn, client_addr):
                         sent = send_server2_v2_chat_from_outbox(cmd_prefix, target_devs)
                         if sent > 0:
                             success = True
-                    if fallback_queued:
+                    # A returned packet means the shared-ID LAN Outbox was durably
+                    # persisted, even when no currently active peer could be reached.
+                    if chat_packets:
                         success = True
+                    if queue_rejected_count:
+                        if chat_packets:
+                            extra_msg = (f"LAN消息已持久化；{queue_rejected_count}台设备的HTTP兜底未入队，"
+                                         f"当前HTTP兜底覆盖 {fallback_queued_count}/{len(target_devs)} 台")
+                        elif fallback_queued_count:
+                            extra_msg = (f"仅{fallback_queued_count}/{len(target_devs)}台设备的HTTP兜底入队成功，"
+                                         "其余设备未建立持久化投递路径")
+                        else:
+                            extra_msg = "HTTP兜底入队失败，且LAN Outbox未能持久化"
 
                     if success:
                         ts = datetime.datetime.now().strftime("%H:%M:%S")
@@ -2877,7 +2893,9 @@ def handle_client(client_conn, client_addr):
                     success = ok
                     extra_msg = f"已撤回指令 {c_id}" if ok else "未找到对应的待发指令（可能已执行或已过期）"
 
-                queued_count = len(target_devs) if action in HTTP_SUPPORTED_ACTIONS else 0
+                if queue_rejected_count and action != "chat_msg" and not extra_msg:
+                    extra_msg = (f"UDP已尝试发送，但{queue_rejected_count}/{len(target_devs)}台设备"
+                                 "的HTTP兜底未能持久化；离线补发不完整")
                 # ★ FIX-7 2026-11-18：UDP 无送达确认，"包发出去了" != "设备执行了"。
                 #   旧版只要 smart_send 返回真就报"指令发送成功"，且 queued_count>0 的
                 #   排队提示因 success 恒真而永不显示。现在如实回传链路状态。

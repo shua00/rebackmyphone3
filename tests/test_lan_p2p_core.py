@@ -1950,5 +1950,39 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn('row[2] == "chat_msg" and row[0] not in reconciled_chat_command_ids', handler)
 
 
+    def test_server2_command_ids_are_unique_across_process_restarts(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "server2.py").read_text(encoding="utf-8")
+        start = source.index("def enqueue_command(")
+        end = source.index("def process_executed_commands(", start)
+        enqueue = source[start:end]
+        self.assertIn('cmd_id = f"c_{uuid.uuid4().hex}"', enqueue)
+        self.assertNotIn("CMD_SEQ", enqueue)
+
+
+    def test_server2_http_queue_rejection_is_counted_not_reported_as_queued(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "server2.py").read_text(encoding="utf-8")
+        start = source.index('elif "POST /api/control" in header_text:')
+        end = source.index('# ===== GET /api/history =====', start)
+        handler = source[start:end]
+        self.assertIn("queue_rejected_count += 1", handler)
+        self.assertIn("queued_count += 1", handler)
+        self.assertIn("{queue_rejected_count}/{len(target_devs)}台设备", handler)
+        self.assertNotIn("queued_count = len(target_devs) if action in HTTP_SUPPORTED_ACTIONS", handler)
+
+
+    def test_server2_chat_outbox_is_successful_when_durable_but_peers_are_offline(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "server2.py").read_text(encoding="utf-8")
+        start = source.index('elif action == "chat_msg":')
+        end = source.index('elif action == "change_server":', start)
+        handler = source[start:end]
+        self.assertIn("if chat_packets:", handler)
+        self.assertIn("success = True", handler)
+        self.assertIn("LAN消息已持久化", handler)
+        self.assertIn("未建立持久化投递路径", handler)
+
+
 if __name__ == "__main__":
     unittest.main()
