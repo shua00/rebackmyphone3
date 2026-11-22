@@ -1,247 +1,275 @@
-# LAN P2P Reliable Delivery Architecture (v2-only)
+# 局域网 P2P 可靠消息投递架构（仅 v2）
 
-Status: approved implementation baseline
-Branch: `feature/lan-p2p-v2-only`
-Scope: reliable text chat between Android peers and the existing Python services. This document does not authorize changing the remote floating-message channel or removing any existing feature.
+状态：已批准的实施基线  
+分支：`feature/lan-p2p-v2-only`  
+范围：Android 设备之间，以及 Android 与现有 Python 服务之间的可靠文本对讲/聊天。本设计不授权修改远程悬浮留言通道，也不允许删除任何现有功能。
 
-## 1. Goals and non-goals
+## 1. 目标与非目标
 
-### Goals
-- Android devices communicate directly on the same LAN when `server2.py`, `rescue2.py`, and `chat.py` are all stopped.
-- A sender can account for delivery independently for every known recipient.
-- A recipient ACKs only after durable inbox storage succeeds.
-- Retries reuse the original message ID; duplicate delivery is ACKed but never displayed twice.
-- Member identity survives process restarts and IP/network changes.
-- Pending messages and ACK state survive process restart and temporary network loss.
-- Existing Python services remain independently usable and retain their current responsibilities.
-- The remote floating-message path stays strictly separate from peer chat.
+### 目标
 
-### Non-goals for this implementation
-- No virtual network interface, VPN, NAT hole punching, or mandatory relay.
-- No WebSocket cluster or new cloud messaging service.
-- No binary/image/file/voice transfer over UDP. Those payloads are a later transport extension.
-- No new Android third-party dependency, Room, or mandatory background daemon.
-- No hidden tracking or bypass of user-controlled stop behavior.
+- 即使 `server2.py`、`rescue2.py`、`chat.py` 全部停止运行，同一局域网内的 Android 设备仍可直接通信。
+- 发送方能够分别跟踪每一个已知接收设备的投递状态。
+- 接收方只有在消息成功持久化到本地收件箱后，才发送 ACK。
+- 重试必须沿用原始消息 ID；重复消息仍需重新 ACK，但不得重复显示。
+- 设备成员身份在进程重启、IP 地址变化和网络切换后保持稳定。
+- 待发送消息和逐设备 ACK 状态能够跨进程重启及临时断网保存、恢复。
+- 现有 Python 服务继续独立运行，并保留各自原有职责。
+- 远程悬浮留言通道与设备间对讲严格隔离。
 
-## 2. Architectural model
+### 本阶段明确不做
 
-Separate four concerns:
-1. **Identity**: stable logical peer/service identity.
-2. **Membership/control plane**: authenticated discovery, leases, capabilities, and current endpoints.
-3. **Message/data plane**: outbox, per-recipient delivery state, inbox, ACK, retry.
-4. **Application presentation**: existing chat history/UI; no transport-specific UI rewrite.
+- 不实现虚拟网卡、VPN、NAT 打洞或强制中继。
+- 不搭建 WebSocket 集群，也不新增云端消息服务。
+- 不通过 UDP 传输二进制、图片、文件或语音；这些载荷留待后续扩展传输层。
+- 不增加 Android 第三方依赖，不引入 Room，也不要求新增常驻守护进程。
+- 不增加隐蔽追踪能力，不绕过用户可控的停止行为。
 
-Transport selection:
-- Same-LAN discovery: UDP broadcast to the existing service ports.
-- Known same-LAN recipient: UDP unicast to the last verified endpoint.
-- Delivery confirmation: authenticated UDP ACK.
-- Remote/web messages: existing HTTP/server queue path, upgraded to durable message/recipient state without replacing existing command/report paths.
-- Future large payloads: separately negotiated TCP/HTTP transfer; never place large payloads into UDP datagrams.
+## 2. 架构模型
 
-Current ports remain: Android 8888, server2 8887, rescue2 8889, chat.py 8890. Preserve existing listener behavior and service-specific filters unless a coordinated protocol migration explicitly changes them.
+将系统分为四个相互独立的部分：
 
-## 3. Stable identity
+1. **身份层（Identity）**：稳定的设备/服务逻辑身份。
+2. **成员与控制面（Membership / Control Plane）**：经过认证的发现、租约、能力和当前网络端点。
+3. **消息数据面（Message / Data Plane）**：发送箱、逐接收方投递状态、收件箱、ACK 和重试。
+4. **应用呈现层（Presentation）**：沿用现有聊天历史和 UI，不因传输层升级而重写聊天界面。
 
-Every logical endpoint has a stable ID:
-- Android: retain the existing persisted `saved_device_id`.
-- server2: persist one service ID in its existing durable state/database.
-- rescue2: persist a separate service ID.
-- chat.py: persist a separate service ID.
+传输方式：
 
-A process/session UUID is not a peer identity. Runtime boot/session IDs may be included for diagnostics, but never used as a durable identity or delivery target.
+- 同一局域网发现：向现有服务端口发送 UDP 广播。
+- 已知的局域网接收方：向最近一次验证过的端点发送 UDP 单播。
+- 投递确认：使用经过认证的 UDP ACK。
+- 远程/网页消息：继续使用现有 HTTP/服务端队列路径，在不替换既有命令、上报路径的前提下，升级为持久化消息及逐接收方状态。
+- 后续大载荷：通过单独协商的 TCP/HTTP 传输，不把大载荷塞入 UDP 数据报。
 
-A member record contains:
-- `peer_id` (stable primary identity)
-- `peer_type` (`android`, `server2`, `rescue2`, `chat`)
-- `service_id` (stable logical service endpoint)
-- `protocol_version`, `capabilities`
-- `network_scope` (best-effort interface/subnet/gateway fingerprint; not an authentication factor)
-- `endpoint_ip`, `endpoint_port` (temporary route only)
-- `last_seen_at`, `last_verified_at`, `lease_expires_at`
-- `status`: `active`, `suspect`, `offline`, `expired`
+现有端口保持不变：Android 8888、server2 8887、rescue2 8889、chat.py 8890。除非通过协调一致的协议迁移明确变更，否则必须保留现有监听行为和各服务过滤规则。
 
-IP address is never identity. Network changes invalidate endpoint routes and trigger rediscovery, but do not delete the stable peer or its delivery history. Lease expiry marks a member offline; it does not delete it.
+## 3. 稳定身份
 
-## 4. Versioned control and message envelope
+每一个逻辑端点都必须拥有稳定 ID：
 
-Use a bounded UTF-8 JSON envelope for the coordinated v2 protocol. All receivers enforce a datagram size ceiling (initial target: 1200 bytes including envelope); oversized messages are rejected before parsing/processing. Text bodies are validated by UTF-8 byte length, not Java character count.
+- Android：沿用现有持久化的 `saved_device_id`。
+- server2：在其现有持久化状态/数据库中保存独立服务 ID。
+- rescue2：保存独立于 server2 的服务 ID。
+- chat.py：保存独立于其他服务的服务 ID。
 
-Common fields:
-- `v`: integer protocol version (2)
-- `type`: message type
-- `sender_peer_id`: stable sender identity
-- `sender_peer_type`: sender type
-- `service_id`: sender logical service
-- `nonce`: challenge nonce where applicable
-- `network_scope`: advisory network fingerprint
-- `capabilities`: supported feature names
+进程/会话 UUID 不能充当设备身份。运行时启动 ID 或会话 ID 可以用于诊断，但绝不能作为持久化身份或消息投递目标。
 
-Control messages:
-- `peer.hello`: sender identity, service, nonce, version, capabilities.
-- `peer.ack`: responder identity and exact `reply_nonce`; source endpoint is recorded only after authentication and nonce validation.
-- `peer.goodbye` is optional and advisory; lease expiry remains authoritative.
+成员记录至少包含：
 
-Message:
-- `chat.message`: `message_id` (UUID), `sender_peer_id`, `target_peer_id`, `created_at_ms`, `body`, optional `body_digest`.
-- `chat.ack`: `message_id`, `sender_peer_id` (original sender), `receiver_peer_id` (actual recipient), `status=stored`, optional digest.
-- `chat.read` is reserved for a future explicit read receipt; `stored` must never be presented as read.
+- `peer_id`：稳定主身份。
+- `peer_type`：`android`、`server2`、`rescue2`、`chat`。
+- `service_id`：稳定的逻辑服务端点身份。
+- `protocol_version`、`capabilities`：协议版本和能力。
+- `network_scope`：尽可能根据网卡、子网、网关等信息形成的网络指纹；它只是辅助信息，不是认证依据。
+- `endpoint_ip`、`endpoint_port`：临时路由地址。
+- `last_seen_at`、`last_verified_at`、`lease_expires_at`：发现、验证和租约时间。
+- `status`：`active`、`suspect`、`offline`、`expired`。
 
-Authentication:
-- Retain the current shared-secret trust model for the initial migration, but authenticate protocol envelopes with HMAC-SHA256 using a derived key and constant-time comparison where platform APIs allow.
-- The HMAC covers the canonical serialized fields and message body/digest. Reject missing/invalid authentication.
-- Nonces prevent stale discovery responses from refreshing routes. Message IDs and recipient identity prevent ACK cross-talk.
-- The APK-embedded shared secret is not equivalent to per-device cryptographic identity; future pairing/per-device keys can strengthen this without changing message semantics.
+IP 地址永远不能作为设备身份。网络变化时应使旧端点路由失效并重新发现，但不能删除稳定 peer 或其投递历史。租约到期只代表成员离线，不代表删除成员记录。
 
-The existing colon-delimited `FIND_ME_*` protocol is replaced only through a coordinated four-endpoint rollout on this v2-only branch. Do not deploy a mixed protocol where one endpoint expects JSON and another still expects the old envelope. Floating-message protocol identifiers and payload handling are excluded from this migration.
+## 4. 版本化控制与消息信封
 
-## 5. Membership and route state
+统一使用有边界的 UTF-8 JSON 信封承载协调后的 v2 协议。所有接收端都必须执行数据报长度上限检查，初始目标为包含信封在内不超过 1200 字节；超长消息必须在解析和处理前拒绝。文本正文长度按 UTF-8 字节数校验，不能只按 Java 字符数计算。
 
-Discovery is event-driven and bounded:
-- Discover at first send when no valid membership exists, after network change, after route failure, or when the lease refresh policy says it is due.
-- Do not force a 500 ms discovery wait before every message when valid routes exist.
-- Broadcast to existing ports and collect responses for a bounded discovery window (initial 500 ms).
-- Validate version, HMAC, nonce, peer ID, peer type, service ID, and source endpoint before updating membership.
-- Keep separate logical peers for separate services even if they share a host IP.
-- Repeated valid hello/ack refreshes lease. A route is only a current endpoint, not durable identity.
-- Use a conservative lease (initial proposal 120 seconds) with active/suspect/offline states. Exact refresh timing must avoid high-frequency background scans.
+公共字段：
 
-A network fingerprint is advisory and should combine available interface/subnet/gateway details. Do not infer LAN membership from matching private IP prefixes alone. The cryptographic handshake and response source endpoint establish the usable route.
+- `v`：协议版本整数，当前为 2。
+- `type`：消息类型。
+- `sender_peer_id`：发送方稳定身份。
+- `sender_peer_type`：发送方类型。
+- `service_id`：发送方逻辑服务身份。
+- `nonce`：适用时使用的挑战随机数。
+- `network_scope`：辅助网络指纹。
+- `capabilities`：支持的功能列表。
 
-## 6. Durable message delivery
+控制消息：
 
-### Sender outbox
-Each outgoing message has:
-- `message_id`, `sender_peer_id`, `message_type=chat`, `body`, `created_at_ms`, `protocol_version`
-- overall state: `discovery_pending`, `pending`, `partial`, `delivered`, `expired`
-- `delivery_deadline` and diagnostic timestamps.
+- `peer.hello`：发送方身份、服务身份、nonce、协议版本和能力。
+- `peer.ack`：响应方身份及原样返回的 `reply_nonce`。只有认证成功且 nonce 匹配后，才允许记录响应来源端点。
+- `peer.goodbye`：可选提示消息；成员是否过期仍以租约为准，不能依赖 goodbye。
 
-Each recipient has a separate target row:
-- `message_id`, `peer_id`
-- `status`: `pending`, `sent`, `acked`, `expired`
-- `attempt_count`, `last_attempt_at`, `last_ack_at`
-- `last_endpoint`, `last_error`
+消息：
 
-Rules:
-1. Persist the message before attempting network transmission.
-2. For a known member set, snapshot all known members at message creation as fixed targets, including temporarily offline members.
-3. If no members are known, set `discovery_pending`; the first bounded discovery cycle adds every peer found in that cycle as the fixed target set. If none is found, retain the message as `waiting_peers`.
-4. Do not continually add newly joining peers to an old message. A later peer receives messages created after it became a known member, unless the user explicitly selects it as a target.
-5. ACK from a target marks only that target as acked. An ACK from a non-target is ignored.
-6. Acked targets are never resent. Pending targets alone are retried.
-7. The message becomes delivered only when all fixed targets are acked. An empty target set is never considered delivered.
-8. Retries reuse the exact message ID and body. ACK loss is safe because inbox deduplication is durable.
-9. Queue capacity is bounded (initially preserve current 50-message Android cap). When full, reject the new message explicitly; never overwrite an older pending message.
-10. Expiration is a visible state, not silent deletion. Retain diagnostic metadata and require an explicit retention/cleanup policy before removing bodies.
+- `chat.message`：包含 `message_id`（UUID）、`sender_peer_id`、`target_peer_id`、`created_at_ms`、`body`，以及可选的 `body_digest`。
+- `chat.ack`：包含 `message_id`、原始发送方 `sender_peer_id`、实际接收方 `receiver_peer_id`、`status=stored`，以及可选摘要。
+- `chat.read`：为未来明确的已读回执预留。`stored` 绝不能显示或解释成“已读”。
 
-Initial retry schedule: short bounded retries (for example 300 ms, 1 s, 3 s, 10 s), then exponential backoff with a ceiling; network restoration triggers an immediate bounded retry. These are tunable parameters, not guaranteed delivery-time promises. Apply per-peer retry limits and avoid synchronized broadcast storms.
+认证：
 
-### Recipient inbox
-- Unique key: `(receiver_scope, sender_peer_id, message_id)`.
-- Store message ID, body, sender, creation time and receive time in one transaction.
-- Send `chat.ack(status=stored)` only after transaction commit succeeds.
-- If the unique key already exists, send ACK again but do not create a second history/UI event.
-- If storage fails, do not ACK.
-- Keep inbox history and dedup retention long enough to cover sender retry/retention windows. Never prune dedup IDs while the corresponding message could still be retried.
+- 初始迁移阶段沿用当前共享密钥信任模型，但协议信封必须使用派生密钥进行 HMAC-SHA256 认证；平台支持时使用恒定时间比较。
+- HMAC 必须覆盖规范化序列化后的字段及消息正文/摘要。缺少认证或认证不正确的数据包一律拒绝。
+- nonce 用于防止过期发现响应刷新路由；消息 ID 和接收方身份用于防止 ACK 串线。
+- APK 内置共享密钥不等同于每台设备独立的密码学身份。未来可增加逐设备配对密钥，但不能改变现有消息语义。
 
-## 7. Persistence implementation
+现有以冒号分隔的 `FIND_ME_*` 协议，只能在本 v2-only 分支上由四类端点协调完成迁移后整体替换。严禁出现一个端点期待 JSON、另一个端点仍发送旧信封的混合部署。悬浮留言的协议标识和载荷处理不属于本次迁移范围。
 
-Android:
-- Use platform SQLiteOpenHelper (no Room or third-party dependency) for transactional peers/outbox/targets/inbox.
-- Keep existing chat UI/history integration intact; the database becomes the durable transport ledger, not a replacement UI.
-- Migrate `PREF_LAN_CHAT_QUEUE` rows preserving message ID, body, and creation time. Legacy rows start in `discovery_pending`; do not discard them because target information is absent.
-- Migrate existing received message IDs/history before retiring old preferences. Migration is versioned, idempotent, and transactional.
-- Database failure blocks ACK and leaves sender outbox intact.
+## 5. 成员发现与路由状态
 
-Python:
-- Reuse existing SQLite infrastructure and transaction patterns; do not add a database framework.
-- server2 and rescue2 may share a database file but must retain distinct `receiver_scope` values.
-- chat.py retains its independent service scope and existing independent history behavior.
-- Persist each service's stable peer ID in durable local state.
-- Preserve existing tables and data; use additive schema migrations.
+发现过程必须由事件触发，并且有明确边界：
 
-Concurrency:
-- One serialized owner/worker per outbox transaction path.
-- SQLite transactions protect message + target changes.
-- Network receive threads must not block on UI work. Bound worker queues and define overload behavior.
-- Never ACK before durable inbox commit.
+- 首次发送且没有有效成员信息时、网络变化后、路由失败后，或成员租约策略要求刷新时，才启动发现。
+- 已有有效路由时，不得每发送一条消息都强制等待 500 毫秒发现窗口。
+- 向现有端口广播，并在有限发现窗口内收集响应；初始设计窗口为 500 毫秒。
+- 更新成员信息前，必须验证协议版本、HMAC、nonce、peer ID、peer 类型、service ID 和数据包来源端点。
+- 即使多个逻辑服务位于同一台主机，也必须保留为不同 peer。
+- 有效 hello/ack 可以刷新租约。路由只是当前端点，不是持久身份。
+- 使用保守租约，初始建议 120 秒，并区分 active/suspect/offline 状态。具体刷新频率必须避免高频后台扫描。
 
-## 8. Strict separation from floating messages
+网络指纹属于辅助信息，尽量结合可用网卡、子网和网关信息。不能仅凭私有 IP 前缀相同就断定处于同一局域网。可用路由必须建立在经过认证的握手及响应来源端点之上。
 
-This work changes peer chat only:
-- Peer chat: existing `FIND_ME_CHAT` semantic path / new `chat.message` envelope, `chat.ack`, `handleIncomingChat()`, chat history and chat UI.
-- Remote floating message: `FIND_ME_FLOAT_MSG` / `custom_msg` and `showFloatingMessage(content)`.
+## 6. 可靠消息投递
 
-The floating-message protocol, display, close behavior, history, read/clear behavior, server queue and routing must remain unchanged. Do not share chat dedup namespaces, inbox rows, queue cleanup, or UI notification paths with floating messages. Do not modify `ChatActivity.java` as part of transport implementation.
+### 发送箱（Sender Outbox）
 
-## 9. Existing Python services and web path
+每条待发送消息至少记录：
 
-- server2, rescue2 and chat.py keep their existing service features, listener roles, filters, and management/control functionality.
-- They each participate as distinct stable logical peers.
-- The web/HTTP path remains available for off-LAN communication. It must report server acceptance separately from recipient device storage ACK.
-- Web-originated chat messages should enter a durable server outbox with explicit recipient targets and use the same message ID semantics when delivered to a device.
-- Existing remote floating-message delivery remains a separate pipeline and is not converted into chat messages.
-- Do not introduce WebSocket, NAT traversal, relay, or file transfer in this phase.
+- `message_id`、`sender_peer_id`、`message_type=chat`、`body`、`created_at_ms`、`protocol_version`。
+- 总体状态：`discovery_pending`、`pending`、`partial`、`delivered`、`expired`。
+- `delivery_deadline` 和诊断时间戳。
 
-## 10. Migration and rollout order
+每个接收设备单独建立目标记录：
 
-Because all four endpoints must understand the new envelope, protocol rollout is coordinated:
-1. Add durable schema and stable IDs additively; verify legacy data is untouched.
-2. Add a shared protocol codec and authentication implementation in Python and Android.
-3. Add discovery/member lease handling.
-4. Add sender outbox target ledger and recipient inbox transaction/ACK.
-5. Integrate existing chat presentation callbacks without changing UI behavior.
-6. Integrate web-originated chat after direct LAN path is stable.
-7. Remove legacy peer-chat parsing only after all four v2 endpoints are updated together. Keep floating-message parser untouched.
+- `message_id`、`peer_id`。
+- `status`：`pending`、`sent`、`acked`、`expired`。
+- `attempt_count`、`last_attempt_at`、`last_ack_at`。
+- `last_endpoint`、`last_error`。
 
-Do not merge to main. Keep changes on `feature/lan-p2p-v2-only`.
+必须遵守以下规则：
 
-## 11. Acceptance matrix
+1. 先持久化消息，再尝试网络发送。
+2. 发送时已有成员集合的，必须在消息创建时将所有已知成员固定为目标，包括暂时离线的成员。
+3. 如果没有任何已知成员，消息进入 `discovery_pending`；首次有界发现周期内发现的所有 peer 都加入固定目标集合。如果没有发现任何成员，则保留为 `waiting_peers`，不能误报已送达。
+4. 不得把后来加入网络的新设备无限追加到旧消息。新设备默认只接收其成为已知成员之后创建的消息，除非用户明确选择它作为目标。
+5. 只有目标设备的 ACK 才能确认该设备；非目标设备的 ACK 必须忽略。
+6. 已 ACK 的目标永远不再重发；只重试仍未 ACK 的目标。
+7. 只有全部固定目标都 ACK 后，消息才能标记为 delivered。空目标集合绝不能被视为已送达。
+8. 重试必须沿用完全相同的消息 ID 和正文。即使 ACK 丢失，接收端持久化去重也必须保证安全。
+9. 队列容量必须有上限，初始应保留 Android 现有 50 条消息上限。队列满时明确拒绝新消息，绝不能覆盖更早的待发送消息。
+10. 过期必须是可识别的状态，不能静默删除。应保留诊断元数据；只有明确制定保留/清理策略后，才能删除正文。
 
-Required before calling the feature complete:
-- Two Android devices chat bidirectionally with all three Python services stopped.
-- Three or more Android devices discover and chat.
-- Python services are individually discoverable and retain stable identity after restart.
-- Same host running server2 and rescue2 appears as two distinct logical endpoints.
-- Partial ACK: only missing recipients are retried.
-- ACK loss: duplicate packet is ACKed again but displayed once.
-- Receiver database failure: no ACK.
-- Sender process restart: pending message and per-recipient ACK state recover.
-- Receiver process restart: inbox dedup survives and prevents duplicate display.
-- Wi-Fi loss/change/recovery: routes refresh and pending messages resume.
-- Unknown members do not cause a broadcast ACK to be mistaken for all-recipient delivery.
-- Queue full rejects new messages without overwriting pending messages.
-- Web-originated chat reports actual device ACK separately from server acceptance.
-- Floating-message display/history/read/clear behavior is unchanged.
-- Existing rescue, location, management, and chat-window behavior remains intact.
-- GitHub Actions build passes; this is necessary but not sufficient. Real multi-device tests are still required.
+初始重试节奏可采用短间隔有界重试（例如 300 毫秒、1 秒、3 秒、10 秒），之后采用带上限的指数退避；网络恢复时触发一次有界的立即重试。这些是可调参数，不是保证送达时间的承诺。必须设置逐 peer 重试限制，避免多个设备同步产生广播风暴。
 
-## 12. Implementation guardrails
+### 接收箱（Recipient Inbox）
 
-- Preserve every existing feature; reliability improvements must not be achieved by deleting old functionality.
-- Do not modify `ChatActivity.java`.
-- Do not change the floating-message channel.
-- No new third-party Android dependencies.
-- No high-frequency permanent LAN scanning.
-- Do not claim end-to-end delivery from UDP send success or server HTTP 200.
-- Do not claim real-device acceptance based on compilation or static inspection.
-- Any unsupported network type (for example, LANs without usable IPv4 broadcast) must be documented rather than silently claimed to work.
+- 唯一键：`(receiver_scope, sender_peer_id, message_id)`。
+- 必须在同一事务中保存消息 ID、正文、发送者、创建时间和接收时间。
+- 只有数据库事务提交成功后，才能发送 `chat.ack(status=stored)`。
+- 如果唯一键已经存在，应再次 ACK，但不得再次创建历史记录或 UI 事件。
+- 如果存储失败，不得 ACK。
+- 收件箱历史和去重记录的保留时间必须覆盖发送方重试/保留窗口。只要对应消息仍可能被重试，就不能提前清理其去重 ID。
 
+## 7. 持久化实现
 
-## 13. Implementation status (2026-11-22)
+### Android
 
-Completed foundations on `feature/lan-p2p-v2-only`:
-- The design is committed as the approved implementation baseline.
-- Python service IDs are persisted in SQLite and are stable across process restarts. server2 and rescue2 use separate service identities even though they share the dedup database; chat.py uses its own database.
-- A shared `lan_p2p_core.py` persists Python-side peer observations with service-specific receiver scopes. A HELLO observation is recorded as `suspect`; a message that is durably accepted refreshes the peer as `active`.
-- Android has a native SQLite `LanChatStore` with peer, outbox, per-recipient target, inbox, and metadata tables. It is wired to outgoing chat persistence, target snapshots, per-peer ACK persistence, and inbox-before-ACK storage.
-- Android currently dual-writes the legacy SharedPreferences outbox and SQLite outbox. The old queue remains the compatibility/recovery mirror until migration and restart-recovery behavior are fully validated; it is not silently discarded.
-- Android reuses verified LAN routes between bounded discovery refresh windows instead of waiting 500 ms before every message.
-- CI now compiles the Python services and runs unit tests for stable identity and peer-scope persistence.
+- 使用系统自带的 `SQLiteOpenHelper`，以事务方式管理 peers、outbox、targets 和 inbox；不引入 Room 或第三方依赖。
+- 保持现有聊天 UI/历史集成不变；数据库是可靠传输账本，不是替换聊天界面的新系统。
+- 迁移 `PREF_LAN_CHAT_QUEUE` 时，必须保留原消息 ID、正文和创建时间。旧消息因缺少目标信息而进入 `discovery_pending`，不能因此丢弃。
+- 在废弃旧偏好设置前，迁移已有接收消息 ID/历史。迁移必须版本化、幂等并具有事务保护。
+- 数据库失败时禁止 ACK，并保留发送箱中的待发送消息。
 
-Not yet complete:
-- The coordinated authenticated JSON v2 envelope and its Android/Python codec.
-- Python-side per-recipient outbox/ACK tracking and durable web-originated chat delivery.
-- Full migration of legacy Android receive IDs/history and retirement of the SharedPreferences compatibility mirror.
-- End-to-end multi-device tests, including process restart, partial ACK, and floating-message isolation.
+### Python
 
-A successful APK build is only a compile check. The communication feature must not be declared complete until the remaining protocol/server work and real-device acceptance matrix pass.
+- 复用现有 SQLite 基础设施和事务模式，不新增数据库框架。
+- server2 与 rescue2 可以共享数据库文件，但必须使用不同的 `receiver_scope`。
+- chat.py 保持独立服务作用域及现有独立历史行为。
+- 每个服务的稳定 peer ID 必须保存在持久化状态中。
+- 保留现有表和数据，只允许采用增量式 schema 迁移。
+
+### 并发
+
+- 每条发送箱事务路径应由一个串行化的所有者/工作单元管理。
+- 使用 SQLite 事务保护消息与目标记录的联合变更。
+- 网络接收线程不得阻塞等待 UI 工作。工作队列必须有界，并明确队列过载时的行为。
+- 绝不能在收件箱持久化提交之前发送 ACK。
+
+## 8. 与悬浮留言严格隔离
+
+本次工作只改造设备间对讲/聊天：
+
+- 设备间对讲：现有 `FIND_ME_CHAT` 语义路径 / 新的 `chat.message` 信封、`chat.ack`、`handleIncomingChat()`、对讲历史和对讲 UI。
+- 远程悬浮留言：`FIND_ME_FLOAT_MSG` / `custom_msg` 和 `showFloatingMessage(content)`。
+
+悬浮留言的协议、显示、关闭行为、历史、已读/清理行为、服务端队列和路由必须保持不变。对讲和悬浮留言不得共享去重命名空间、收件箱记录、队列清理逻辑或 UI 通知路径。传输层实施期间不得修改 `ChatActivity.java`。
+
+## 9. 现有 Python 服务与网页通道
+
+- server2、rescue2 和 chat.py 必须保留各自现有功能、监听职责、过滤规则以及管理/控制能力。
+- 三个服务分别作为不同的稳定逻辑 peer 参与通信。
+- 跨局域网网页/HTTP 通道继续可用。必须区分“服务端已接收”与“目标设备已持久化接收 ACK”。
+- 网页发起的对讲消息应进入持久化服务端发送箱，固定明确的接收目标，并在投递到设备时沿用相同消息 ID 语义。
+- 现有远程悬浮留言继续使用独立管线，不能转换为对讲消息。
+- 本阶段不引入 WebSocket、NAT 穿透、中继或文件传输。
+
+## 10. 迁移与发布顺序
+
+由于所有四类端点都必须理解新信封，协议升级必须协调推进：
+
+1. 增量增加持久化 schema 和稳定 ID，并确认旧数据未受影响。
+2. 在 Python 和 Android 两侧加入一致的协议编解码与认证实现。
+3. 加入发现及成员租约管理。
+4. 加入发送方逐目标发送箱账本，以及接收方事务化收件箱/ACK。
+5. 接入现有对讲展示回调，不改变 UI 行为。
+6. 直连局域网链路稳定后，再接入网页发起的对讲消息。
+7. 只有四类 v2 端点全部同步更新后，才允许移除旧的设备间对讲解析逻辑。悬浮留言解析器保持原样。
+
+不要合并到 main。所有改动继续留在 `feature/lan-p2p-v2-only` 分支。
+
+## 11. 验收矩阵
+
+在以下项目完成前，不得宣布功能完成：
+
+- 两台 Android 设备在三个 Python 服务全部关闭时仍能双向对讲。
+- 三台或更多 Android 设备能够发现彼此并对讲。
+- Python 服务可以分别被发现，重启后仍保持稳定身份。
+- server2 与 rescue2 在同一主机运行时，设备列表中显示为两个不同逻辑端点。
+- 部分 ACK：只重试尚未确认的接收设备。
+- ACK 丢失：重复数据包会再次得到 ACK，但消息只显示一次。
+- 接收方数据库写入失败：不发送 ACK。
+- 发送方进程重启：待发送消息和逐设备 ACK 状态可以恢复。
+- 接收方进程重启：收件箱去重状态仍然有效，不产生重复显示。
+- Wi-Fi 断开、网络切换及恢复后：路由重新发现，待发送消息恢复投递。
+- 未知成员场景下，不能把某一台设备的广播 ACK 错误认定为所有设备都已送达。
+- 队列满时拒绝新消息，不覆盖旧的待发送消息。
+- 网页发起的对讲能够分别报告服务端接收状态和实际设备 ACK。
+- 悬浮留言显示、历史、已读、清理行为保持不变。
+- 现有找回、定位、设备管理和聊天窗口行为保持不变。
+- GitHub Actions 构建通过。构建通过是必要条件，但不是充分条件；仍须完成真实多设备测试。
+
+## 12. 实施护栏
+
+- 保留每一项既有功能；不能通过删除旧功能来换取可靠性。
+- 不修改 `ChatActivity.java`。
+- 不改变悬浮留言通道。
+- 不增加 Android 第三方依赖。
+- 不进行高频、永久性的局域网扫描。
+- 不能把 UDP send 成功或 HTTP 200 当成端到端送达。
+- 不能把编译通过或静态代码检查说成真实设备验收通过。
+- 对不支持的网络类型（例如没有可用 IPv4 广播能力的局域网）必须如实记录，不能默认为已经支持。
+
+## 13. 实施状态（2026-11-22）
+
+### 已完成或已落地的基础
+
+- 本设计已作为批准的实施基线提交到 `feature/lan-p2p-v2-only`。
+- Python 服务 ID 已持久化到 SQLite，进程重启后保持稳定。server2 和 rescue2 即使共享去重数据库，也使用不同服务身份；chat.py 使用独立数据库。
+- 共享模块 `lan_p2p_core.py` 已提供 Python 侧 peer 观察记录，并按服务使用不同的接收作用域。收到 HELLO 时记录为 `suspect`；消息被可靠持久化接收后才刷新为 `active`。
+- Python 侧已加入持久化发送箱、逐接收方目标记录、ACK 状态更新、首次发现目标补充、待确认消息查询及发送尝试记录等基础函数，并已接入相关服务的 v2 对讲路径。
+- Python 侧已有受限长度的 JSON v2 信封编解码和 HMAC-SHA256 校验实现。
+- Android 已有原生 SQLite `LanChatStore`，包含 peer、outbox、逐接收方 target、inbox 和 metadata 表；已接入发送消息持久化、目标快照、逐 peer ACK 持久化，以及先写收件箱再 ACK 的接收路径。
+- Android 当前仍同时写入旧 SharedPreferences 发送队列和 SQLite 发送箱。旧队列继续作为兼容/恢复镜像，直到迁移和重启恢复行为得到完整验证；不能静默丢弃旧队列。
+- Android 已支持在有界发现刷新窗口之间复用已验证的局域网路由，避免每发一条消息都等待 500 毫秒。
+- CI 已编译 Python 服务，并运行稳定身份和 peer 作用域持久化相关单元测试。
+- 最新已核实的 GitHub Actions 构建通过，提交为 `0bc9abf5a4471eecf19d61b4e528acedc0a0d237`。这只证明该提交通过自动构建，不代表真实设备通信已验收。
+
+### 仍需完成或验证
+
+- Android 与 Python 的 v2 信封字段、规范化 JSON、HMAC、nonce/响应端点验证必须进行逐字段互通核对，不能只凭两侧分别能编译就认定兼容。
+- Python 逐设备发送箱和 ACK 虽已加入基础实现，仍需核实三种服务的端口选择、目标快照、重发现补充、重启恢复及 ACK 来源校验是否完全一致。
+- 无已知成员时的首次发现窗口必须有统一、可验证的开始和结束语义；窗口关闭后不得继续接纳新目标，也不得把空目标集合误标为 delivered。
+- Android 旧接收 ID/历史迁移，以及 SharedPreferences 兼容镜像的安全退役仍未完成。
+- 必须补齐发送端重启、接收端重启、部分 ACK、ACK 丢失、网络切换、数据库失败和悬浮留言隔离等端到端测试。
+- 真实多设备验收尚未完成；不能以 CI 构建结果替代实机验收。
+
+本功能只有在剩余协议/服务端工作完成，并通过真实设备验收矩阵后，才能宣布完成。
