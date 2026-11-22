@@ -888,9 +888,10 @@ public final class LanChatStore extends SQLiteOpenHelper {
             String oldIp = null;
             int oldPort = -1;
             long oldVerifiedAt = 0L;
+            long oldLeaseExpiresAt = 0L;
             String oldStatus = "suspect";
             Cursor c = db.rawQuery(
-                    "SELECT endpoint_ip,endpoint_port,last_verified_at,status FROM lan_peers WHERE peer_id=?",
+                    "SELECT endpoint_ip,endpoint_port,last_verified_at,status,lease_expires_at FROM lan_peers WHERE peer_id=?",
                     new String[]{peerId});
             try {
                 if (c.moveToFirst()) {
@@ -898,6 +899,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     oldPort = c.getInt(1);
                     oldVerifiedAt = c.getLong(2);
                     oldStatus = c.getString(3);
+                    oldLeaseExpiresAt = c.getLong(4);
                 }
             } finally { c.close(); }
 
@@ -911,7 +913,9 @@ public final class LanChatStore extends SQLiteOpenHelper {
             v.put("endpoint_port", port);
             v.put("last_seen_at", now);
             v.put("last_verified_at", sameRoute ? oldVerifiedAt : 0L);
-            v.put("lease_expires_at", leaseExpiresAt);
+            // HELLO is discovery evidence, not a route challenge. It must never
+            // renew a verified lease; only upsertPeer after nonce-bound validation may do so.
+            v.put("lease_expires_at", oldLeaseExpiresAt);
             v.put("status", sameRoute && "active".equals(oldStatus) ? "active" : "suspect");
             if (oldIp == null) {
                 v.put("peer_id", peerId);

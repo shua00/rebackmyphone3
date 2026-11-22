@@ -2004,5 +2004,46 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("未建立持久化投递路径", handler)
 
 
+    def test_android_unverified_peer_hello_cannot_extend_verified_route_lease(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        start = source.index("public boolean observePeer(")
+        end = source.index("public boolean isIncomingDisplayed(", start)
+        observe = source[start:end]
+        self.assertIn("last_verified_at,status,lease_expires_at", observe)
+        self.assertIn("oldLeaseExpiresAt = c.getLong(4)", observe)
+        self.assertIn("v.put(\"lease_expires_at\", oldLeaseExpiresAt)", observe)
+        self.assertNotIn("v.put(\"lease_expires_at\", leaseExpiresAt)", observe)
+        verified = source[source.index("public boolean upsertPeer("):source.index("public void closeStore(")]
+        self.assertIn("v.put(\"lease_expires_at\", leaseExpiresAt)", verified)
+
+
+    def test_android_recovery_event_is_not_lost_during_inflight_retry_batch(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        start = source.index("private void retryPendingLanChatMessages(boolean recoveryEvent)")
+        end = source.index("// 仅由 lanChatSendExecutor 调用", start)
+        retry = source[start:end]
+        self.assertIn("if (recoveryEvent) lanChatRecoveryEventPending.set(true)", retry)
+        self.assertIn("lanChatRecoveryEventPending.getAndSet(false)", retry)
+        self.assertIn("if (lanChatRecoveryEventPending.get())", retry)
+        self.assertIn("retryPendingLanChatMessages(true)", retry)
+        self.assertIn("store.resumeExhaustedRetriesForRecoveryEvent", retry)
+
+
+    def test_android_ordinary_retry_timer_does_not_reopen_exhausted_retry_epoch(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        start = source.index("private void retryPendingLanChatMessages()")
+        end = source.index("private void retryPendingLanChatMessages(boolean recoveryEvent)", start)
+        wrapper = source[start:end]
+        self.assertIn("retryPendingLanChatMessages(false)", wrapper)
+        retry_start = end
+        retry_end = source.index("// 仅由 lanChatSendExecutor 调用", retry_start)
+        retry = source[retry_start:retry_end]
+        self.assertIn("if (lanChatRecoveryEventPending.getAndSet(false))", retry)
+        self.assertNotIn("resumeExhaustedRetriesForRecoveryEvent", wrapper)
+
+
 if __name__ == "__main__":
     unittest.main()
