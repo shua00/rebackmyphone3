@@ -846,10 +846,10 @@ class LanP2PCoreTests(unittest.TestCase):
 
         for method_name, next_method in (
             ("public List<Target> loadKnownPeers()", "public List<PendingMessage> loadPending"),
-            ("public List<Target> loadTargets(String messageId)", None),
+            ("public List<Target> loadTargets(String messageId)", "public boolean markAttempt"),
         ):
             start = store.index(method_name)
-            end = store.index("\n    /**", start + len(method_name)) if next_method is None else store.index(next_method, start)
+            end = store.index(next_method, start)
             method = store[start:end]
             if method_name.startswith("public List<Target> loadKnownPeers"):
                 self.assertNotIn("catch (Exception", method)
