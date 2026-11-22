@@ -85,5 +85,26 @@ class LanP2PCoreTests(unittest.TestCase):
 
 
 
+
+    def test_python_outbox_requires_every_fixed_recipient_ack(self):
+        from lan_p2p_core import persist_outgoing_message, acknowledge_outgoing_message
+        self.assertTrue(persist_outgoing_message(self.db_path, "server2", "server2-id",
+                                                 "m-1", "hello", ["android-a", "android-b"]))
+        self.assertFalse(acknowledge_outgoing_message(self.db_path, "server2", "m-1", "unknown"))
+        self.assertTrue(acknowledge_outgoing_message(self.db_path, "server2", "m-1", "android-a"))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            state = conn.execute("SELECT state FROM lan_outbox WHERE message_id='m-1'").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(state, "partial")
+        self.assertTrue(acknowledge_outgoing_message(self.db_path, "server2", "m-1", "android-b"))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            state = conn.execute("SELECT state FROM lan_outbox WHERE message_id='m-1'").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(state, "delivered")
+
 if __name__ == "__main__":
     unittest.main()

@@ -152,3 +152,93 @@ def decode_packet(data, secret, max_bytes=1200):
     if not hmac.compare_digest(supplied, expected):
         raise ValueError("invalid packet authentication")
     return packet
+
+
+def persist_outgoing_message(db_path, sender_scope, sender_peer_id, message_id,
+                             body, target_peer_ids, created_at_ms=None):
+    """Atomically persist a Python-originated chat message and its fixed recipient snapshot."""
+    if not sender_scope or not sender_peer_id or not message_id or body is None:
+        return False
+    now_ms = int(created_at_ms if created_at_ms is not None else time.time() * 1000)
+    targets = sorted(set(str(peer) for peer in (target_peer_ids or []) if peer))
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("""CREATE TABLE IF NOT EXISTS lan_outbox (
+            message_id TEXT PRIMARY KEY NOT NULL,
+            sender_scope TEXT NOT NULL,
+            sender_peer_id TEXT NOT NULL,
+            message_type TEXT NOT NULL DEFAULT 'chat',
+            body TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            protocol_version INTEGER NOT NULL DEFAULT 2,
+            state TEXT NOT NULL DEFAULT 'discovery_pending',
+            delivery_deadline_ms INTEGER NOT NULL DEFAULT 0
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS lan_outbox_targets (
+            message_id TEXT NOT NULL,
+            peer_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            last_attempt_at INTEGER NOT NULL DEFAULT 0,
+            last_ack_at INTEGER NOT NULL DEFAULT 0,
+            last_endpoint TEXT NOT NULL DEFAULT '',
+            last_error TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(message_id, peer_id)
+        )""")
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("""INSERT OR IGNORE INTO lan_outbox
+            (message_id,sender_scope,sender_peer_id,message_type,body,created_at_ms,
+             protocol_version,state,delivery_deadline_ms)
+            VALUES(?,?,?,'chat',?,?,2,?,0)""",
+            (message_id, sender_scope, sender_peer_id, str(body), now_ms,
+             "pending" if targets else "discovery_pending"))
+        for peer_id in targets:
+            conn.execute("""INSERT OR IGNORE INTO lan_outbox_targets
+                (message_id,peer_id,status) VALUES(?,?,'pending')""", (message_id, peer_id))
+        if targets:
+            conn.execute("UPDATE lan_outbox SET state='pending' WHERE message_id=? AND state='discovery_pending'",
+                         (message_id,))
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
+def acknowledge_outgoing_message(db_path, sender_scope, message_id, peer_id):
+    """Persist exactly one recipient ACK; unknown/non-target ACKs never complete an outbox row."""
+    if not sender_scope or not message_id or not peer_id:
+        return False
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT 1 FROM lan_outbox WHERE sender_scope=? AND message_id=?",
+                           (sender_scope, message_id)).fetchone()
+        if row is None:
+            conn.rollback()
+            return False
+        cur = conn.execute("""UPDATE lan_outbox_targets
+            SET status='acked',last_ack_at=?
+            WHERE message_id=? AND peer_id=? AND status!='acked'""",
+            (int(time.time() * 1000), message_id, peer_id))
+        if cur.rowcount == 0:
+            conn.rollback()
+            return False
+        total, acked = conn.execute("""SELECT COUNT(*),
+            SUM(CASE WHEN status='acked' THEN 1 ELSE 0 END)
+            FROM lan_outbox_targets WHERE message_id=?""", (message_id,)).fetchone()
+        if total > 0 and total == (acked or 0):
+            conn.execute("UPDATE lan_outbox SET state='delivered' WHERE message_id=?", (message_id,))
+        else:
+            conn.execute("UPDATE lan_outbox SET state='partial' WHERE message_id=?", (message_id,))
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
