@@ -962,19 +962,36 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn('"retry_paused".equals(state) ? "retry_paused" : "pending"', ack)
 
 
-    def test_android_failed_send_preserves_last_valid_ack_endpoint(self):
+    def test_android_udp_endpoint_is_persisted_only_after_successful_send(self):
         repo_root = Path(__file__).resolve().parents[1]
         store = (
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         ).read_text(encoding="utf-8")
+        tracking = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
         start = store.index("public boolean markAttempt(")
-        end = store.index("public boolean matchesExpectedAckEndpoint(", start)
-        method = store[start:end]
-        self.assertIn("last_endpoint=CASE WHEN ?!='' THEN ? ELSE last_endpoint END", method)
-        self.assertIn('endpoint == null ? "" : endpoint', method)
-        self.assertIn("last_error=?", method)
-        self.assertIn("status!='acked'", method)
-        self.assertNotIn("last_endpoint=?", method)
+        end = store.index("public void recordTargetSendError(", start)
+        attempt_method = store[start:end]
+        self.assertIn("attempt_count=attempt_count+1", attempt_method)
+        self.assertIn("last_error=?", attempt_method)
+        self.assertNotIn("last_endpoint", attempt_method)
+
+        endpoint_start = store.index("public boolean recordSuccessfulSendEndpoint(")
+        endpoint_method = store[endpoint_start:endpoint_start + 1100]
+        self.assertIn('values.put("last_endpoint", endpoint)', endpoint_method)
+        self.assertIn("status!='acked'", endpoint_method)
+
+        send_start = tracking.index("private void transmitLocalUdpMessageInternal(")
+        send_end = tracking.index("private boolean sendAuthenticatedChatAck(", send_start)
+        send_method = tracking[send_start:send_end]
+        attempt_pos = send_method.index("store.markAttempt(messageId, peerId, \"\")")
+        udp_pos = send_method.index('sendLanUdpPacket(socket, p, "CHAT_UNICAST")')
+        endpoint_pos = send_method.index("store.recordSuccessfulSendEndpoint(messageId, peerId")
+        self.assertLess(attempt_pos, udp_pos)
+        self.assertLess(udp_pos, endpoint_pos)
+        self.assertIn("recordTargetSendError(", send_method)
+
 
 
     def test_android_peer_and_target_reads_do_not_collapse_database_errors_to_empty(self):
