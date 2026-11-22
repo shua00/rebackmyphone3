@@ -959,6 +959,11 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("MAX_AUTOMATIC_RETRY_ATTEMPTS", attempt)
         self.assertIn("state!='discovery_pending'", attempt)
         self.assertIn("ELSE state END", attempt)
+        migration_start = store.index("if (oldVersion < 5)")
+        migration_end = store.index("public boolean enqueue(", migration_start)
+        migration = store[migration_start:migration_end]
+        self.assertIn("'discovery_pending'", migration)
+        self.assertIn("'waiting_peers'", migration)
         self.assertNotIn("DELETE FROM lan_outbox", resume)
         self.assertIn("'retry_paused'", load)
         ack_start = store.index("public boolean acknowledge(String messageId, String peerId)")
