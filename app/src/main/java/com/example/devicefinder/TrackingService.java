@@ -4509,6 +4509,9 @@ public class TrackingService extends Service implements LocationListener {
                         boolean persistedEndpointMatch = store != null
                                 && store.matchesExpectedAckEndpoint(messageId, senderId,
                                         sourceAddress.getHostAddress(), sourcePort);
+                        // Discovery status is retained only for delivery-latch accounting;
+                        // it never bypasses the verified-route / persisted-endpoint identity gate.
+                        boolean discoveryAck = store != null && store.isDiscoveryPending(messageId);
                         // Discovery is a recipient-collection window, not an identity bypass.
                         // A newly discovered peer must first complete peer.ack route verification;
                         // delayed ACKs may alternatively use the exact endpoint persisted for this target.

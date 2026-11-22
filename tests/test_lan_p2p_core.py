@@ -706,8 +706,9 @@ class LanP2PCoreTests(unittest.TestCase):
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         ).read_text(encoding="utf-8")
         self.assertIn("boolean routeMatches", ack_handler)
-        self.assertNotIn("boolean discoveryAck", ack_handler)
+        self.assertIn("boolean discoveryAck", ack_handler)
         self.assertIn("if (!routeMatches && !persistedEndpointMatch)", ack_handler)
+        self.assertNotIn("&& !discoveryAck)", ack_handler)
         self.assertIn("Discovery is a recipient-collection window, not an identity bypass", ack_handler)
         self.assertIn("if (routeMatches) {", ack_handler)
         self.assertIn("verifiedChatPeerRouteVersions.put(senderId", ack_handler)
