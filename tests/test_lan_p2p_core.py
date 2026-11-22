@@ -435,7 +435,8 @@ class LanP2PCoreTests(unittest.TestCase):
             ).fetchone()[0]
         finally:
             conn.close()
-        self.assertEqual(row[0], "discovery_pending")
+        # The expired empty snapshot is terminal and must not remain retryable.
+        self.assertEqual(row[0], "waiting_peers")
         self.assertEqual(count, 0)
 
     def test_replaying_same_message_id_cannot_expand_targets_or_change_body(self):
