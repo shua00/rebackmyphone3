@@ -741,6 +741,15 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("if (alreadyInLegacyIds)", receive_method)
         self.assertIn("if (store.isIncomingDisplayed(receiverScope, senderId, messageId))", receive_method)
         self.assertGreaterEqual(receive_method.count("scheduleLanChatUiRefresh();"), 3)
+        self.assertNotIn("receivedChatMessageIds", tracking_source)
+        self.assertIn("P2P RX durable message=", tracking_source)
+        self.assertIn("persisted=true ackSent=", tracking_source)
+        self.assertIn("persisted=false ackSent=false", tracking_source)
+        ack_start = tracking_source.index("private boolean sendAuthenticatedChatAck(")
+        ack_end = tracking_source.index("private boolean handleLanRealtimePacket(", ack_start)
+        ack_method = tracking_source[ack_start:ack_end]
+        self.assertIn("return !socket.isClosed()", ack_method)
+        self.assertIn("return false", ack_method)
 
     def test_record_peer_fails_closed_when_database_cannot_be_opened(self):
         from lan_p2p_core import record_peer
