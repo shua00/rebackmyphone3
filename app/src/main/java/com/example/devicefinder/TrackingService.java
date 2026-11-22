@@ -4289,6 +4289,16 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     /**
+     * Refresh an already-persisted chat history without adding a duplicate record.
+     * Used when a retransmission recovers a crash between history commit and UI notification.
+     */
+    private void scheduleLanChatUiRefresh() {
+        handler.post(() -> {
+            if (!serviceDestroyed) notifyChatUi();
+        });
+    }
+
+    /**
      * LAN 对讲可靠接收：聊天历史与 messageId 去重记录在同一次 SharedPreferences commit 中落盘。
      * 返回 true 表示消息已保存或已确认是重复包，可以安全 ACK；落盘失败返回 false，不 ACK 让发送端重试。
      */
@@ -4334,9 +4344,16 @@ public class TrackingService extends Service implements LocationListener {
                         FileLogger.log(this, "CHAT", "⚠️ LAN inbox presentation marker failed; withhold ACK");
                         return false;
                     }
+                    // History/ID may have committed just before process death, but the
+                    // previous process may not have notified an already-open ChatActivity.
+                    scheduleLanChatUiRefresh();
                     return true;
                 }
-                if (store.isIncomingDisplayed(receiverScope, senderId, messageId)) return true;
+                if (store.isIncomingDisplayed(receiverScope, senderId, messageId)) {
+                    // Safe idempotent refresh: history is not appended again.
+                    scheduleLanChatUiRefresh();
+                    return true;
+                }
 
                 long now = System.currentTimeMillis();
                 String history = sp.getString("chat_history", "");
@@ -4388,9 +4405,7 @@ public class TrackingService extends Service implements LocationListener {
         }
         if (historyChanged) {
             FileLogger.log(this, "CHAT", "收到来自 " + shortName + " 的 LAN 聊天消息（正文不写入日志）");
-            handler.post(() -> {
-                if (!serviceDestroyed) notifyChatUi();
-            });
+            scheduleLanChatUiRefresh();
         }
         return true;
     }
