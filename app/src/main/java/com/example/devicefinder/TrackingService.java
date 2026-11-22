@@ -4182,7 +4182,9 @@ public class TrackingService extends Service implements LocationListener {
         long sendMs;
         synchronized (socket) {
             lockWaitMs = android.os.SystemClock.elapsedRealtime() - lockWaitStarted;
-            if (socket.isClosed()) return;
+            if (socket.isClosed()) {
+                throw new java.net.SocketException("UDP socket closed before send");
+            }
             long sendStarted = android.os.SystemClock.elapsedRealtime();
             socket.send(packet);
             sendMs = android.os.SystemClock.elapsedRealtime() - sendStarted;
