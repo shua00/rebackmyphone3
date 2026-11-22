@@ -98,9 +98,24 @@ IPMsg 的主要语义：
 
 ### 3.1 用户提供的 Clone APK
 
-DEX 结构显示它把后台服务、服务控制/绑定、接收广播、协议核心、收发界面和用户列表拆成多个职责模块。这种职责分层值得参考。
+这次进一步解析了 DEX 的 `class_data`、`code_item` 和方法调用索引，已不只是列出类名，而是还原了核心方法调用关系（仍不是完整 Java 源码反编译）：
 
-但仅凭 DEX 符号无法证明其具体线程调度和重试语义；在完成方法体反编译前不复制其实现细节。
+- `Controller` 实际创建的是 `jp.co.cyberbeing.ipclone.core.IPMessenger`。
+- `IPMessenger.initiate()` 创建 `DatagramSocket(in_port)`；核心对象保存 socket、端口、成员 HashMap 和身份字段。
+- `IPMessenger.run()` 是 UDP 接收循环：创建接收 `DatagramPacket`、调用 `DatagramSocket.receive()`，随后为收到的包创建 `IPMessenger$ChildThread` 并启动。
+- `IPMessenger$ChildThread.run()` 读取包数据、来源 IP 和端口，解析报文，再调用成员增删、消息接收/打开和发送等处理入口。
+- `IPMessenger.send()` 构造目标 `DatagramPacket`，再创建并启动 `IPMessenger$1`；该子线程的 `run()` 最终调用 `DatagramSocket.send()`。
+- `broadcastMsg()` 使用 `255.255.255.255`；login/logout/absence 走广播，sendMsg/readMsg 走指定目标发送。
+- `IpMessengerService` 持有 userList；`onCreate()` 注册接收广播，`onBind()` 返回 Binder，`onStart()` 创建 `ServiceController` 并处理 `BindException`（端口占用），成员列表变化通过 Intent 广播通知界面，`onDestroy()` 执行 logout。
+- `ServiceController` 使用 `Handler.post()` 将成员和消息回调投递给服务/界面层。
+
+**真正值得借鉴：**接收通道、协议引擎、Android Service、Binder 和 UI 通知有明确边界；成员列表变化通过事件通知，而不是让 UI 直接管理 UDP socket。
+
+**不应照搬的地方：**这个 APK 的核心收包路径对每个 UDP 包启动一个 ChildThread，发送路径也为每个 UDP 包启动一个 Thread。它是轻量旧实现，不是现代高并发/高可靠模型；突发包可能造成线程数量膨胀。当前 V2 保留单线程有界 FIFO 发送队列和独立 IO ACK 处理，不复制 thread-per-packet。当前 DEX 方法调用图也没有显示与 V2 相当的 SQLite 持久化 Outbox/Inbox 或逐设备持久化重试账本；不能把传统 IPMsg 的 packet number ACK 等同于 V2 的持久化 ACK。
+
+DEX 中虽然存在 `ExecutorService` 字符串/类型引用，但核心 `IPMessenger` 的调用图实际使用 Thread/ChildThread；不能仅凭全局符号认定它用于协议收发。
+
+**证据边界：**以上是 DEX 方法调用关系和分支/循环结构分析，不是逐行 Java 还原；具体每个命令分支的完整条件仍需 JADX/Smali 级反编译后再确认。
 
 ### 3.2 独立开源 Android 飞秋实现
 
@@ -137,10 +152,11 @@ DEX 结构显示它把后台服务、服务控制/绑定、接收广播、协议
 4. 增加恢复事件合并标记，避免事件恰好在重试批次执行中到达而被丢掉。
 5. 部分 ACK 后保留已 ACK 目标状态，后续只补发未 ACK 目标；耗尽状态不会因单个部分 ACK 被错误清成普通 pending。
 6. SQLite schema 从 v4 升至 v5，采用增量迁移，不重建或清空原消息账本。
+7. 最终 ACK 可能晚于 250ms latch 等待完成；在 ACK 落账线程再次检查全部目标并回收 SharedPreferences 兼容队列，防止已送达记录长期占用 50 条入队容量。
 
 ## 6. 后续审计与验收顺序
 
-- [ ] 确认当前分支 Actions 的 Python 验证与 Android 编译均通过。
+- [x] 确认当前分支 Actions 的 Python 验证与 Android 编译均通过（#285、#286、#287、#288、#289）。
 - [ ] 审查所有 ACK 入口：必须匹配 message ID、发送者 peer ID、认证来源和有效 endpoint/发现窗口。
 - [ ] 审查接收端顺序：先持久化 Inbox，再 ACK；重复消息不重复展示；存储失败不得 ACK。
 - [ ] 验证部分 ACK、8 次耗尽、`retry_paused` 持久化、60 秒冷却、恢复事件重新开启、进程重启后的恢复。
