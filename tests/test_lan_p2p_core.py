@@ -1037,5 +1037,63 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertNotIn("refreshWifiLanTransport(", wifi_callback)
 
 
+
+    def test_android_lan_chat_receive_and_ack_use_dedicated_io_executor(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        start = source.index("private boolean handleAuthenticatedLanPacket(")
+        end = source.index("private void sendAuthenticatedChatAck(", start)
+        handler = source[start:end]
+        self.assertEqual(handler.count("lanChatIoExecutor.execute(() -> {"), 4)
+        self.assertNotIn("reportExecutor.execute(", handler)
+        self.assertIn('new Thread(runnable, "LanChat-IO")', source)
+
+    def test_android_peer_challenge_nonce_outlives_initial_discovery_wait(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn("LAN_PEER_CHALLENGE_TIMEOUT_MS = 2_500L", source)
+        start = source.index("private void transmitLocalUdpMessageInternal(")
+        end = source.index("private void sendLanUdpPacket(", start)
+        method = source[start:end]
+        self.assertIn("LAN_PEER_CHALLENGE_TIMEOUT_MS", method)
+        self.assertIn("Thread.sleep(500L)", method)
+        self.assertNotIn("clearPendingPeerChallenge(nonce);", method.split("finally {", 1)[-1])
+
+    def test_android_known_offline_targets_are_rechallenged_at_saved_endpoint(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        start = source.index("private void transmitLocalUdpMessageInternal(")
+        end = source.index("private void sendLanUdpPacket(", start)
+        method = source[start:end]
+        self.assertIn("store.loadTargets(messageId)", method)
+        self.assertIn("target.endpointIp", method)
+        self.assertIn("target.endpointPort", method)
+        self.assertIn("sendDirectedPeerChallenge(socket, target.peerId", method)
+
+    def test_android_receive_latency_is_measured_from_udp_arrival(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn("handleLanRealtimePacket(rescueSocket, packet, message, udpReceiveElapsedMs)", source)
+        self.assertIn("P2P 接收耗时 message=", source)
+        self.assertIn("queueMs=", source)
+        self.assertIn("durableTotalMs=", source)
+
+    def test_android_fresh_chat_send_queue_wait_is_measured(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn("P2P 排队耗时 ", source)
+        self.assertIn("P2P 发送串行锁等待 message=", source)
+
+
 if __name__ == "__main__":
     unittest.main()
