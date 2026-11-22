@@ -932,6 +932,11 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("retry_attempt_count<?", attempt)
         self.assertIn("MAX_AUTOMATIC_RETRY_ATTEMPTS", attempt)
         self.assertNotIn("DELETE FROM lan_outbox", resume)
+        self.assertIn("'retry_paused'", load)
+        ack_start = store.index("public boolean acknowledge(String messageId, String peerId)")
+        ack_end = store.index("public boolean beginDiscoveryWindow(String messageId)", ack_start)
+        ack = store[ack_start:ack_end]
+        self.assertIn('"retry_paused".equals(state) ? "retry_paused" : "pending"', ack)
 
 
     def test_android_peer_and_target_reads_do_not_collapse_database_errors_to_empty(self):
