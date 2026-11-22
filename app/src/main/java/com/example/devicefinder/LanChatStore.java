@@ -351,11 +351,10 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     null);
             while (c.moveToNext()) result.add(new Target(c.getString(0), "pending", 0,
                     c.getString(1), c.getInt(2)));
-        } catch (Exception ignored) {
+            return result;
         } finally {
             if (c != null) c.close();
         }
-        return result;
     }
 
     /**
@@ -434,11 +433,10 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 }
                 result.add(new Target(c.getString(0), c.getString(1), c.getInt(2), ip, port));
             }
-        } catch (Exception ignored) {
+            return result;
         } finally {
             if (c != null) c.close();
         }
-        return result;
     }
 
     public boolean markAttempt(String messageId, String peerId, String endpoint, String error) {
