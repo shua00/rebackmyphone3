@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from lan_p2p_core import (LanP2PStorageError, load_stable_peer_id, record_peer,
                           load_pending_outgoing_for_peer, add_discovery_targets_for_peer,
-                          load_active_pending_targets)
+                          load_active_pending_targets, mark_outgoing_attempt)
 
 
 import re
@@ -2091,6 +2091,22 @@ class LanP2PCoreTests(unittest.TestCase):
                            side_effect=sqlite3.OperationalError("database is locked")):
                     with self.assertRaises(LanP2PStorageError):
                         operation()
+
+    def test_mark_outgoing_attempt_storage_failure_is_not_reported_as_a_normal_skip(self):
+        with patch("lan_p2p_core.sqlite3.connect",
+                   side_effect=sqlite3.OperationalError("database is locked")):
+            with self.assertRaises(LanP2PStorageError):
+                mark_outgoing_attempt(self.db_path, "message-a", "peer-a",
+                                      "192.168.1.20", 8888)
+
+    def test_android_wifi_socket_binding_failure_does_not_fall_back_to_default_route(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        method = extract_java_method(source, "private void bindSocketToWifi(")
+        self.assertIn("throws java.io.IOException", method)
+        self.assertIn("throw new java.io.IOException", method)
+        self.assertNotIn("将使用系统默认出口", method)
+        self.assertIn("n.bindSocket(socket)", method)
 
     def test_outbox_queries_still_return_empty_for_a_valid_empty_ledger(self):
         conn = sqlite3.connect(self.db_path)

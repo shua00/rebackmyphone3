@@ -2859,7 +2859,7 @@ public class TrackingService extends Service implements LocationListener {
         return "255.255.255.255";
     }
 
-    private void bindSocketToWifi(java.net.DatagramSocket socket) {
+    private void bindSocketToWifi(java.net.DatagramSocket socket) throws java.io.IOException {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
@@ -2867,12 +2867,22 @@ public class TrackingService extends Service implements LocationListener {
             for (Network n : cm.getAllNetworks()) {
                 NetworkCapabilities nc = cm.getNetworkCapabilities(n);
                 if (nc != null && nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-                    n.bindSocket(socket);
-                    return;
+                    try {
+                        // Once a Wi-Fi LAN is present, never silently leave this socket
+                        // on the default (possibly cellular) network if explicit binding fails.
+                        n.bindSocket(socket);
+                        FileLogger.logD("CHAT", "UDP listener socket bound to Wi-Fi LAN network");
+                        return;
+                    } catch (Exception bindError) {
+                        throw new java.io.IOException("Wi-Fi LAN socket binding failed", bindError);
+                    }
                 }
             }
+            // No Wi-Fi transport is currently visible; retain the platform default route.
+        } catch (java.io.IOException e) {
+            throw e;
         } catch (Exception e) {
-            FileLogger.log(this, "UDP", "⚠️ bindSocketToWifi 失败（将使用系统默认出口）: " + e.getMessage());
+            throw new java.io.IOException("Unable to inspect Wi-Fi LAN networks", e);
         }
     }
 

@@ -419,8 +419,9 @@ def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10):
 
 
 def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_port):
-    conn = sqlite3.connect(db_path, timeout=10)
+    conn = None
     try:
+        conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("PRAGMA busy_timeout=10000")
         cur = conn.execute("""UPDATE lan_outbox_targets SET status='sent',
             attempt_count=attempt_count+1,last_attempt_at=?,last_endpoint=?,last_error=''
@@ -429,11 +430,13 @@ def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_po
              message_id, peer_id))
         conn.commit()
         return cur.rowcount > 0
-    except Exception:
-        conn.rollback()
-        return False
+    except Exception as exc:
+        if conn is not None:
+            conn.rollback()
+        raise LanP2PStorageError("failed to persist LAN outbox send attempt") from exc
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def list_known_peers(db_path, receiver_scope, limit=100):
@@ -819,6 +822,8 @@ def send_outbox_to_active_peers(sock, db_path, sender_scope, message_id,
                     with send_lock:
                         sock.sendto(raw, destination)
                 sent_total += 1
+            except LanP2PStorageError:
+                raise
             except Exception:
                 continue
         if attempt + 1 < max_attempts and delay > 0:
