@@ -388,11 +388,11 @@ public final class LanChatStore extends SQLiteOpenHelper {
         Cursor c = null;
         try {
             long now = System.currentTimeMillis();
-            android.content.ContentValues values = new android.content.ContentValues();
-            values.put("last_retry_at_ms", now);
-            int changed = db.execSQL("UPDATE lan_outbox SET retry_attempt_count=retry_attempt_count+1," +
-                    "last_retry_at_ms=? WHERE message_id=? AND state NOT IN ('delivered','expired')",
-                    new Object[]{now, messageId}) == null ? 1 : 1;
+            int changed = db.compileStatement(
+                    "UPDATE lan_outbox SET retry_attempt_count=retry_attempt_count+1,last_retry_at_ms=? " +
+                    "WHERE message_id=? AND state NOT IN ('delivered','expired')")
+                    .executeUpdateDelete();
+            if (changed != 1) return -1;
             c = db.rawQuery("SELECT retry_attempt_count FROM lan_outbox WHERE message_id=?",
                     new String[]{messageId});
             if (!c.moveToFirst()) return -1;
