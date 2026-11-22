@@ -937,29 +937,35 @@ def _remove_chat_fallback_for_message(dev_id, message_id):
     """Remove only the HTTP fallback for a LAN chat already confirmed over v2 P2P."""
     if not dev_id or not message_id:
         return False
-    removed = 0
     with _cmd_lock:
-        queue = PENDING_COMMANDS.get(dev_id, [])
+        old_queue = list(PENDING_COMMANDS.get(dev_id, []))
         kept = []
-        for command in queue:
+        removed = 0
+        for command in old_queue:
             if command.get("type") == "chat_msg":
                 envelope = decode_chat_http_fallback_payload(command.get("payload"))
                 if envelope and envelope["message_id"] == message_id:
                     removed += 1
                     continue
             kept.append(command)
-        if removed:
-            if kept:
-                PENDING_COMMANDS[dev_id] = kept
+        if not removed:
+            return False
+        if kept:
+            PENDING_COMMANDS[dev_id] = kept
+        else:
+            PENDING_COMMANDS.pop(dev_id, None)
+        try:
+            _persist_command_queue_locked(dev_id)
+        except Exception as exc:
+            if old_queue:
+                PENDING_COMMANDS[dev_id] = old_queue
             else:
                 PENDING_COMMANDS.pop(dev_id, None)
-            try:
-                _persist_command_queue_locked(dev_id)
-            except Exception as exc:
-                # A stale persisted entry remains harmless because the same message_id is deduplicated.
-                with print_lock:
-                    print(f"⚠️ server2 chat fallback cleanup deferred for {dev_id}: {type(exc).__name__}")
-    return removed > 0
+            with print_lock:
+                print(f"⚠️ server2 chat fallback cleanup rolled back for {dev_id}: {type(exc).__name__}")
+            return False
+    return True
+
 
 
 def _load_pending_commands():
@@ -997,7 +1003,7 @@ def _load_pending_commands():
 
 def enqueue_command(dev_id, action, payload, require_device=False):
     global CMD_SEQ
-    if not dev_id: return
+    if not dev_id: return False
     now = time.time()
     payload_str = payload if payload is not None else ""
     with _cmd_lock:
@@ -1007,26 +1013,53 @@ def enqueue_command(dev_id, action, payload, require_device=False):
                 if dev_id not in ALL_DEVICES_STATUS:
                     return False
         queue = PENDING_COMMANDS.setdefault(dev_id, [])
-        for i, c in enumerate(queue):
-            if c["type"] == action and c["payload"] == payload_str:
-                queue[i] = {"id": c["id"], "type": action, "payload": payload_str, "ts": now}
-                _persist_command_queue_locked(dev_id)
+        old_queue = list(queue)
+        for i, command in enumerate(queue):
+            if command["type"] == action and command["payload"] == payload_str:
+                queue[i] = {"id": command["id"], "type": action, "payload": payload_str, "ts": now}
+                try:
+                    _persist_command_queue_locked(dev_id)
+                except Exception as exc:
+                    PENDING_COMMANDS[dev_id] = old_queue
+                    with print_lock:
+                        print(f"⚠️ HTTP queue update rolled back for {dev_id}: {type(exc).__name__}")
+                    return False
                 with print_lock:
-                    print(f"📋 [HTTP队列] {dev_id} ~{action}({c['id']}) 去重（延后过期）")
+                    print(f"📋 [HTTP队列] {dev_id} ~{action}({command['id']}) 去重（延后过期）")
                 return True
+
+        # Reliable chat fallbacks are never evicted by ordinary commands.
+        dropped = 0
+        if len(queue) >= CMD_MAX_PER_DEVICE:
+            evictable = next((index for index, item in enumerate(queue)
+                              if item.get("type") != "chat_msg"), None)
+            if evictable is None:
+                with print_lock:
+                    print(f"⚠️ HTTP queue full of reliable chat fallbacks; reject new {action}: {dev_id}")
+                if not old_queue:
+                    PENDING_COMMANDS.pop(dev_id, None)
+                return False
+            queue.pop(evictable)
+            dropped = 1
+
         CMD_SEQ += 1
         cmd_id = f"c_{int(now)}_{CMD_SEQ}"
-        dropped = 0
-        while len(queue) >= CMD_MAX_PER_DEVICE:
-            queue.pop(0); dropped += 1
         queue.append({"id": cmd_id, "type": action, "payload": payload_str, "ts": now})
-        _persist_command_queue_locked(dev_id)
+        try:
+            _persist_command_queue_locked(dev_id)
+        except Exception as exc:
+            PENDING_COMMANDS[dev_id] = old_queue
+            with print_lock:
+                print(f"⚠️ HTTP queue enqueue rolled back for {dev_id}: {type(exc).__name__}")
+            return False
+
     with print_lock:
         if dropped:
-            print(f"📋 [HTTP队列] {dev_id} +{action}({cmd_id}) 队列满丢弃 {dropped} 条旧指令")
+            print(f"📋 [HTTP队列] {dev_id} +{action}({cmd_id}) 队列满，淘汰 1 条最旧的非聊天指令")
         else:
             print(f"📋 [HTTP队列] {dev_id} +{action}({cmd_id})")
     return True
+
 
 
 def process_executed_commands(dev_id, executed_ids):
@@ -1174,7 +1207,6 @@ def process_command_feedback(dev_id, feedback_items):
         if acknowledge_outgoing_message(
                 CHAT_DEDUP_DB, "server2", envelope["message_id"], dev_id):
             reconciled_chat_command_ids.add(command_id)
-            _remove_chat_fallback_for_message(dev_id, envelope["message_id"])
         else:
             with print_lock:
                 print(f"⚠️ HTTP chat accepted but outbox ACK reconcile deferred; fallback retained: {dev_id}")
@@ -1192,9 +1224,16 @@ def process_command_feedback(dev_id, feedback_items):
             queue = PENDING_COMMANDS.get(dev_id, [])
             new_queue = [c for c in queue if c.get("id") not in terminal_ids]
             if len(new_queue) != len(queue):
+                old_queue = list(queue)
                 if new_queue: PENDING_COMMANDS[dev_id] = new_queue
                 else: PENDING_COMMANDS.pop(dev_id, None)
-                _persist_command_queue_locked(dev_id)
+                try:
+                    _persist_command_queue_locked(dev_id)
+                except Exception as exc:
+                    if old_queue: PENDING_COMMANDS[dev_id] = old_queue
+                    else: PENDING_COMMANDS.pop(dev_id, None)
+                    with print_lock:
+                        print(f"⚠️ terminal command cleanup rolled back for {dev_id}: {type(exc).__name__}")
     return len(valid)
 
 

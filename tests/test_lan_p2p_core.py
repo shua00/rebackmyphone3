@@ -1893,5 +1893,46 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("fallback retained", handler)
 
 
+    def test_server2_command_queue_never_evicts_unacked_chat_fallbacks(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "server2.py").read_text(encoding="utf-8")
+        start = source.index("def enqueue_command(")
+        end = source.index("def process_executed_commands(", start)
+        handler = source[start:end]
+        self.assertIn('item.get("type") != "chat_msg"', handler)
+        self.assertIn("if evictable is None:", handler)
+        self.assertIn("reject new", handler)
+        self.assertNotIn("queue.pop(0)", handler)
+        self.assertIn("HTTP queue enqueue rolled back", handler)
+
+
+    def test_server2_chat_fallback_cleanup_rolls_back_memory_on_database_failure(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "server2.py").read_text(encoding="utf-8")
+        start = source.index("def _remove_chat_fallback_for_message(")
+        end = source.index("def _load_pending_commands(", start)
+        handler = source[start:end]
+        persist = handler.index("_persist_command_queue_locked(dev_id)")
+        except_block = handler.index("except Exception as exc:", persist)
+        restore = handler.index("PENDING_COMMANDS[dev_id] = old_queue", except_block)
+        failed = handler.index("return False", restore)
+        self.assertLess(persist, except_block)
+        self.assertLess(except_block, restore)
+        self.assertLess(restore, failed)
+
+
+    def test_server2_terminal_feedback_cleanup_rolls_back_queue_on_persistence_failure(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "server2.py").read_text(encoding="utf-8")
+        start = source.index("def process_command_feedback(")
+        end = source.index("def get_recent_command_feedback(", start)
+        handler = source[start:end]
+        persist = handler.index("_persist_command_queue_locked(dev_id)")
+        restore = handler.index("PENDING_COMMANDS[dev_id] = old_queue", persist)
+        self.assertLess(persist, restore)
+        self.assertIn("terminal command cleanup rolled back", handler)
+        self.assertNotIn('_remove_chat_fallback_for_message(dev_id, envelope["message_id"])', handler)
+
+
 if __name__ == "__main__":
     unittest.main()
