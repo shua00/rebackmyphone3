@@ -789,7 +789,8 @@ class LanP2PCoreTests(unittest.TestCase):
         ack_call = packet_handler.index("sendAuthenticatedChatAck(")
         self.assertLess(persist_call, ack_call)
         self.assertIn("if (stored)", packet_handler)
-        self.assertIn("if (!stored)", packet_handler)
+        self.assertIn('persisted=false ackSent=false', packet_handler)
+        self.assertIn("else {", packet_handler)
 
         ack = extract_java_method(source, "private boolean sendAuthenticatedChatAck(")
         actual_send = ack.index("sendLanUdpPacket(socket, response, \"CHAT_ACK_V2\")")
