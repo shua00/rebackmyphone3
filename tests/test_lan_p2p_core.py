@@ -1157,7 +1157,24 @@ class LanP2PCoreTests(unittest.TestCase):
             repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
         ).read_text(encoding="utf-8")
         self.assertIn("P2P 排队耗时 ", source)
-        self.assertIn("P2P 发送串行锁等待 message=", source)
+        self.assertIn('new Thread(runnable, "LanChat-Send")', source)
+
+    def test_android_chat_messages_do_not_wait_behind_another_messages_ack(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        start = source.index("private void transmitLocalUdpMessage(final String message, final String messageId)")
+        end = source.index("private void scheduleLanChatRetryFromOutbox()", start)
+        sender = source[start:end]
+        self.assertIn("activeLanChatTransmissions.add(messageId)", sender)
+        self.assertIn("transmitLocalUdpMessageInternal(message, messageId)", sender)
+        self.assertNotIn("synchronized (lanChatTransmitLock)", sender)
+        executor_start = source.index("private final java.util.concurrent.ExecutorService lanChatSendExecutor")
+        executor_end = source.index("// Keep LAN control", executor_start)
+        executor = source[executor_start:executor_end]
+        self.assertIn("new ThreadPoolExecutor(\\n                    3, 3", executor)
+        self.assertIn("peerDiscoveryInFlight.compareAndSet(false, true)", source)
 
 
 
