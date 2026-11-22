@@ -714,8 +714,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("lanChatIoExecutor.execute(() -> {", ack_handler)
         self.assertIn("reason=unverified_endpoint", ack_handler)
         endpoint_start = store_source.index("public boolean matchesExpectedAckEndpoint(")
-        endpoint_end = store_source.index("\\n    public ", endpoint_start + 12)
-        endpoint_method = store_source[endpoint_start:endpoint_end]
+        endpoint_method = store_source[endpoint_start:endpoint_start + 1200]
         self.assertIn("last_endpoint=?", endpoint_method)
         self.assertIn("endpointIp + \":\" + endpointPort", endpoint_method)
 
