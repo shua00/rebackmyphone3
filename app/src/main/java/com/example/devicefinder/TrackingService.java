@@ -175,6 +175,8 @@ public class TrackingService extends Service implements LocationListener {
     // Observe Wi-Fi LAN separately: the default route may remain on cellular.
     private ConnectivityManager.NetworkCallback wifiLanNetworkCallback;
     private volatile String wifiLanFingerprint;
+    // Exact Network that owns the currently published UDP listener socket.
+    private volatile Network lanChatBoundWifiNetwork;
     private AlarmManager alarmManager;
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
@@ -2313,6 +2315,7 @@ public class TrackingService extends Service implements LocationListener {
                 wifiLanFingerprint = current;
                 if (previous == null || previous.equals(current)) return;
                 socketGeneration = lanSocketGeneration.incrementAndGet();
+                lanChatBoundWifiNetwork = null;
                 oldSocket = rescueSocketRef;
             }
             FileLogger.log(this, "NETWORK", "Wi-Fi LAN socket generation advanced generation="
@@ -3133,7 +3136,10 @@ public class TrackingService extends Service implements LocationListener {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-                Network selected = selectWifiLanNetwork(cm);
+                // Prefer the exact Network already bound to the listener socket; this
+                // prevents a default-route callback racing broadcast selection onto another NIC.
+                Network selected = lanChatBoundWifiNetwork;
+                if (selected == null) selected = selectWifiLanNetwork(cm);
                 if (selected == null) return "255.255.255.255";
                 LinkProperties links = cm.getLinkProperties(selected);
                 if (links == null || links.getInterfaceName() == null) {
@@ -3178,12 +3184,21 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private void bindSocketToWifi(java.net.DatagramSocket socket) throws java.io.IOException {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            lanChatBoundWifiNetwork = null;
+            return;
+        }
         ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (cm == null) {
+            // Preserve the pre-existing default-route listener behavior for non-chat UDP.
+            lanChatBoundWifiNetwork = null;
+            return;
+        }
         Network selected = selectWifiLanNetwork(cm);
         if (selected == null) {
             // No Wi-Fi transport is currently visible; retain the platform default route
             // for existing non-chat UDP business paths. LAN chat itself fails closed.
+            lanChatBoundWifiNetwork = null;
             return;
         }
         LinkProperties links = cm.getLinkProperties(selected);
@@ -3194,6 +3209,7 @@ public class TrackingService extends Service implements LocationListener {
         }
         try {
             selected.bindSocket(socket);
+            lanChatBoundWifiNetwork = selected;
             FileLogger.logD("CHAT", "UDP listener socket bound to selected Wi-Fi LAN network="
                     + links.getInterfaceName());
         } catch (Exception bindError) {

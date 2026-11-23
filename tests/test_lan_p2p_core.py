@@ -2556,9 +2556,15 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("selected.toString() + '|'", fingerprint)
         self.assertNotIn("for (Network network : cm.getAllNetworks())", fingerprint)
         broadcast = extract_java_method(source, "private String getWifiBroadcastAddress(")
+        self.assertIn("Network lanChatBoundWifiNetwork", source)
+        self.assertIn("Network selected = lanChatBoundWifiNetwork", broadcast)
         self.assertIn("selectWifiLanNetwork(cm)", broadcast)
         self.assertIn("NetworkInterface.getByName(links.getInterfaceName())", broadcast)
         self.assertNotIn("name.startsWith(\"wlan\")", broadcast[:broadcast.index("// Pre-M fallback")])
+        bind = extract_java_method(source, "private void bindSocketToWifi(")
+        self.assertIn("lanChatBoundWifiNetwork = selected", bind)
+        refresh = extract_java_method(source, "private void refreshWifiLanTransport(")
+        self.assertIn("lanChatBoundWifiNetwork = null", refresh)
 
     def test_outbox_database_read_failures_raise_instead_of_looking_empty(self):
         operations = (
