@@ -3579,6 +3579,8 @@ class AndroidLanFixedTargetFastPathTests(unittest.TestCase):
         async_lookup = internal.index("new String[]{getWifiBroadcastAddress()}", probe_queue)
         self.assertGreater(async_lookup, probe_queue)
         self.assertIn("for (String target : broadcasts)", internal)
+        self.assertIn("preLockBroadcastLookupMs=", internal)
+        self.assertIn("preparationMs - routeProbeMs", internal)
 
     def test_fixed_target_unicast_skips_discovery_window_sqlite_read(self):
         repo_root = Path(__file__).resolve().parents[1]
