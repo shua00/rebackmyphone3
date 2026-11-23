@@ -445,7 +445,21 @@ public class TrackingService extends Service implements LocationListener {
                     new ThreadPoolExecutor.AbortPolicy()
             );
 
-    // 单线程有界发送队列保持同一会话的消息发送顺序；ACK 等待由持久化补发预算承担。
+    // Fresh user messages use a separate bounded lane so a backlog of durable retries
+    // cannot delay interactive sends. The shared transmit lock still serializes UDP writes.
+    private final java.util.concurrent.ExecutorService lanChatImmediateExecutor =
+            new ThreadPoolExecutor(
+                    1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(100),
+                    runnable -> {
+                        Thread thread = new Thread(runnable, "LanChat-Immediate");
+                        thread.setPriority(Thread.NORM_PRIORITY);
+                        return thread;
+                    },
+                    new ThreadPoolExecutor.AbortPolicy()
+            );
+
+    // Single bounded FIFO lane for durable retry batches; it never owns interactive sends.
     private final java.util.concurrent.ExecutorService lanChatSendExecutor =
             new ThreadPoolExecutor(
                     1, 1, 0L, TimeUnit.MILLISECONDS,
@@ -3782,7 +3796,7 @@ public class TrackingService extends Service implements LocationListener {
         startRescueListener();
     }
 
-    /** 新消息在有界发送队列中按顺序完成持久化和发送，UI 入口保持原样。 */
+    /** 新消息在独立有界即时队列中按顺序完成持久化和发送，UI 入口保持原样。 */
     private void sendLocalUdpMessage(final String message) {
         final String messageId = java.util.UUID.randomUUID().toString();
         try {
@@ -3795,7 +3809,7 @@ public class TrackingService extends Service implements LocationListener {
         }
         final long enqueueAt = android.os.SystemClock.elapsedRealtime();
         try {
-            lanChatSendExecutor.execute(() -> {
+            lanChatImmediateExecutor.execute(() -> {
                 if (serviceDestroyed) return;
                 long queueWaitMs = android.os.SystemClock.elapsedRealtime() - enqueueAt;
                 long persistStarted = android.os.SystemClock.elapsedRealtime();
@@ -4015,7 +4029,8 @@ public class TrackingService extends Service implements LocationListener {
         }
     }
 
-    // 仅由 lanChatSendExecutor 调用；同步执行确保补发批次能观察真实 ACK/队列进展。
+    // Both the immediate and retry lanes enter the same guarded transmission path;
+    // the active-message set and shared transmit lock prevent duplicate concurrent sends.
     private void sendLocalUdpMessage(final String message, final String messageId) {
         transmitLocalUdpMessage(message, messageId);
     }
@@ -4415,9 +4430,11 @@ public class TrackingService extends Service implements LocationListener {
             LanChatStore store, long ackStartedAt) {
         try {
             long elapsed = android.os.SystemClock.elapsedRealtime() - ackStartedAt;
-            int deliveredPeers = totalPeerCount == 0
-                    ? (ack.getCount() == 0 ? 1 : 0)
-                    : reachablePeerCount - (int) ack.getCount();
+            LanChatStore.AckProgress durableProgress = store == null
+                    ? null : store.getTargetAckProgress(messageId);
+            String durableAckProgress = durableProgress == null ? "unavailable"
+                    : durableProgress.ackedTargets + "/" + durableProgress.totalTargets;
+            boolean persistedAllTargetsAcked = store != null && store.allTargetsAcked(messageId);
             if (totalPeerCount == 0) {
                 if (ack.getCount() == 0) {
                     lastPeerDiscoveryAt = 0L;
@@ -4426,10 +4443,10 @@ public class TrackingService extends Service implements LocationListener {
                 } else {
                     FileLogger.log(this, "CHAT", "⚠️ P2P 广播暂未收到 ACK，消息保留待确认队列: " + messageId);
                 }
-            } else if (store != null && store.allTargetsAcked(messageId)) {
+            } else if (persistedAllTargetsAcked) {
                 removePendingLanChat(messageId);
                 FileLogger.log(this, "CHAT", "✅ P2P 固定目标全部持久化 ACK: "
-                        + deliveredPeers + "/" + totalPeerCount + "，消息 " + messageId);
+                        + durableAckProgress + "，消息 " + messageId);
             } else {
                 lastPeerDiscoveryAt = 0L;
                 for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
@@ -4446,7 +4463,7 @@ public class TrackingService extends Service implements LocationListener {
                     }
                 }
                 FileLogger.log(this, "CHAT", "⚠️ P2P 消息仍待确认并保留本地队列: "
-                        + deliveredPeers + "/" + totalPeerCount + "，失联成员已清理，消息 " + messageId);
+                        + durableAckProgress + "，失联成员已清理，消息 " + messageId);
             }
             if (elapsed >= 400L) {
                 FileLogger.logD("CHAT", "P2P ACK grace elapsedMs=" + elapsed
@@ -5992,6 +6009,7 @@ public class TrackingService extends Service implements LocationListener {
         cancelFastPoll();
 
         if (reportExecutor != null) reportExecutor.shutdown();
+        if (lanChatImmediateExecutor != null) lanChatImmediateExecutor.shutdown();
         if (lanChatSendExecutor != null) lanChatSendExecutor.shutdown();
         if (lanChatIoExecutor != null) lanChatIoExecutor.shutdown();
         if (lanChatScheduler != null) lanChatScheduler.shutdownNow();
