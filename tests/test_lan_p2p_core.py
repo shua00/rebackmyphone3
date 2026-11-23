@@ -515,6 +515,66 @@ class LanP2PCoreTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(deadline, 1005000)
 
+
+    def test_discovery_deadline_is_closed_at_exact_boundary_on_python_and_android(self):
+        from lan_p2p_core import (
+            persist_outgoing_message, begin_outgoing_discovery_window,
+            add_discovery_target, is_outgoing_discovery_pending,
+            acknowledge_outgoing_message,
+        )
+        cases = (
+            ("m-boundary-bulk", "scope-bulk"),
+            ("m-boundary-single", "scope-single"),
+            ("m-boundary-begin", "scope-begin"),
+            ("m-boundary-ack", "scope-ack"),
+            ("m-boundary-query", "scope-query"),
+        )
+        for message_id, scope in cases:
+            with patch("lan_p2p_core.time.time", return_value=1000.0):
+                self.assertTrue(persist_outgoing_message(
+                    self.db_path, scope, "sender", message_id, "hello", []))
+                self.assertTrue(begin_outgoing_discovery_window(
+                    self.db_path, scope, message_id))
+
+        # Each operation is isolated by sender scope so one expiry sweep cannot mask another.
+        with patch("lan_p2p_core.time.time", return_value=1005.0):
+            self.assertFalse(add_discovery_target(
+                self.db_path, "scope-single", "m-boundary-single", "android-late"))
+            self.assertFalse(begin_outgoing_discovery_window(
+                self.db_path, "scope-begin", "m-boundary-begin"))
+            self.assertFalse(acknowledge_outgoing_message(
+                self.db_path, "scope-ack", "m-boundary-ack", "android-late"))
+            self.assertFalse(is_outgoing_discovery_pending(
+                self.db_path, "scope-query", "m-boundary-query"))
+            self.assertEqual(add_discovery_targets_for_peer(
+                self.db_path, "scope-bulk", "android-late"), 0)
+
+        with sqlite3.connect(self.db_path) as conn:
+            states = dict(conn.execute(
+                "SELECT message_id,state FROM lan_outbox WHERE message_id LIKE 'm-boundary-%'"
+            ).fetchall())
+            targets = conn.execute(
+                "SELECT COUNT(*) FROM lan_outbox_targets WHERE message_id LIKE 'm-boundary-%'"
+            ).fetchone()[0]
+        self.assertEqual(states["m-boundary-begin"], "waiting_peers")
+        self.assertEqual(states["m-boundary-query"], "waiting_peers")
+        self.assertEqual(states["m-boundary-bulk"], "waiting_peers")
+        self.assertEqual(targets, 0)
+
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        ack = extract_java_method(store, "public boolean acknowledge(")
+        begin = extract_java_method(store, "public boolean beginDiscoveryWindow(")
+        pending = extract_java_method(store, "public boolean isDiscoveryPending(")
+        add_peer = extract_java_method(store, "public boolean addDiscoveryPeerToOpenMessages(")
+        self.assertIn("now >= deadline", ack)
+        self.assertIn("now < deadline", ack)
+        self.assertIn("now >= deadline", begin)
+        self.assertIn("delivery_deadline_ms>?", pending)
+        self.assertIn("now >= deadline", add_peer)
+
     def test_first_peer_discovered_after_initial_window_is_not_added(self):
         from lan_p2p_core import (
             persist_outgoing_message, add_discovery_targets_for_peer,

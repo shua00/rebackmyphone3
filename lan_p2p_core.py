@@ -355,7 +355,7 @@ def acknowledge_outgoing_message(db_path, sender_scope, message_id, peer_id):
                     _safe_rollback(conn)
                     return False
                 deadline = int(row[1] or 0)
-                if deadline and now_ms > deadline:
+                if deadline and now_ms >= deadline:
                     _safe_rollback(conn)
                     return False
                 if not deadline:
@@ -371,7 +371,7 @@ def acknowledge_outgoing_message(db_path, sender_scope, message_id, peer_id):
         row = conn.execute("SELECT state,delivery_deadline_ms FROM lan_outbox WHERE sender_scope=? AND message_id=?",
                            (sender_scope, message_id)).fetchone()
         discovery_open = bool(row and row[0] == "discovery_pending"
-                              and row[1] and now_ms <= int(row[1]))
+                              and row[1] and now_ms < int(row[1]))
         if discovery_open:
             pass
         elif total > 0 and total == (acked or 0):
@@ -526,7 +526,7 @@ def add_discovery_target(db_path, sender_scope, message_id, peer_id):
             return False
         now_ms = int(time.time() * 1000)
         deadline = int(row[1] or 0)
-        if deadline and now_ms > deadline:
+        if deadline and now_ms >= deadline:
             _safe_rollback(conn)
             return False
         if not deadline:
@@ -558,7 +558,7 @@ def add_discovery_targets_for_peer(db_path, sender_scope, peer_id):
         added = 0
         for message_id, deadline_value in rows:
             deadline = int(deadline_value or 0)
-            if deadline and now_ms > deadline:
+            if deadline and now_ms >= deadline:
                 continue
             if not deadline:
                 deadline = now_ms + 5000
@@ -793,7 +793,7 @@ def begin_outgoing_discovery_window(db_path, sender_scope, message_id,
         now_ms = int(time.time() * 1000)
         deadline = int(row[1] or 0)
         if deadline > 0:
-            if now_ms > deadline:
+            if now_ms >= deadline:
                 _finalize_expired_discovery_windows(conn, sender_scope, now_ms)
                 conn.commit()
                 return False
@@ -833,7 +833,7 @@ def is_outgoing_discovery_pending(db_path, sender_scope, message_id):
         if row is None or row[0] != "discovery_pending":
             return False
         deadline = int(row[1] or 0)
-        return deadline <= 0 or deadline >= int(time.time() * 1000)
+        return deadline <= 0 or deadline > int(time.time() * 1000)
     except Exception:
         return False
     finally:

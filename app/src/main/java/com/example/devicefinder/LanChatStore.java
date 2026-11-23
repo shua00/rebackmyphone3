@@ -599,7 +599,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     // A repeated ACK is idempotent; continue to reconcile the message state.
                 } else {
                     if (existingStatus != null || !"discovery_pending".equals(state)
-                            || (deadline > 0 && now > deadline)) return false;
+                            || (deadline > 0 && now >= deadline)) return false;
                     if (deadline == 0L) {
                         deadline = now + FIRST_DISCOVERY_WINDOW_MS;
                         ContentValues window = new ContentValues();
@@ -639,7 +639,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
             } finally { totals.close(); }
 
             boolean discoveryOpen = "discovery_pending".equals(state)
-                    && deadline > 0 && now <= deadline;
+                    && deadline > 0 && now < deadline;
             if (!discoveryOpen) {
                 ContentValues next = new ContentValues();
                 next.put("state", total > 0 && total == acked ? "delivered"
@@ -681,7 +681,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
             }
             long now = System.currentTimeMillis();
             if (deadline > 0L) {
-                if (now > deadline) {
+                if (now >= deadline) {
                     // Preserve an empty expired snapshot for diagnostics without retrying forever.
                     finalizeDiscoveryMessage(db, messageId);
                     db.setTransactionSuccessful();
@@ -757,7 +757,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
         try {
             c = getReadableDatabase().rawQuery(
                     "SELECT 1 FROM lan_outbox WHERE message_id=? AND state='discovery_pending' " +
-                    "AND (delivery_deadline_ms<=0 OR delivery_deadline_ms>=?)",
+                    "AND (delivery_deadline_ms<=0 OR delivery_deadline_ms>?)",
                     new String[]{messageId, String.valueOf(System.currentTimeMillis())});
             return c.moveToFirst();
         } catch (Exception e) {
@@ -781,7 +781,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 while (c.moveToNext()) {
                     String messageId = c.getString(0);
                     long deadline = c.getLong(1);
-                    if (deadline > 0 && now > deadline) {
+                    if (deadline > 0 && now >= deadline) {
                         if (!finalizeDiscoveryMessage(db, messageId)) return false;
                         continue;
                     }
