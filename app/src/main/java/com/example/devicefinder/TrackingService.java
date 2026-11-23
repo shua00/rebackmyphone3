@@ -4642,24 +4642,45 @@ public class TrackingService extends Service implements LocationListener {
                             sendLanUdpPacket(socket, p, verifiedRoutePeerIds.contains(peerId)
                                     ? "CHAT_UNICAST_VERIFIED" : "CHAT_UNICAST_CACHED_ENDPOINT");
                             long endpointPersistStartedAt = android.os.SystemClock.elapsedRealtime();
-                            boolean endpointPersisted;
+                            final String successfulEndpoint = peer.getAddress().getHostAddress() + ":" + peer.getPort();
+                            final LanChatStore endpointStore = store;
                             try {
-                                endpointPersisted = store != null && store.recordSuccessfulSendEndpoint(messageId, peerId,
-                                        peer.getAddress().getHostAddress() + ":" + peer.getPort());
-                            } finally {
-                                long endpointPersistMs = android.os.SystemClock.elapsedRealtime() - endpointPersistStartedAt;
-                                if (endpointPersistMs >= 50L) {
-                                    FileLogger.log(this, "CHAT", "P2P SQLite send-endpoint message="
-                                            + messageId + " peer=" + peerId + " dbMs=" + endpointPersistMs);
-                                }
-                            }
-                            if (!endpointPersisted) {
-                                FileLogger.log(this, "CHAT", "⚠️ UDP 已发送但目标 endpoint 未能落账 message="
-                                        + messageId + " peer=" + peerId);
+                                // markAttempt() already durably recorded this exact endpoint before
+                                // UDP dispatch, so ACK validation is safe immediately. Updating the
+                                // reusable last-successful endpoint is secondary bookkeeping and must
+                                // not hold the FIFO sender lock after the packet has left.
+                                lanChatControlExecutor.execute(() -> {
+                                    long endpointPersistStartedAt = android.os.SystemClock.elapsedRealtime();
+                                    boolean endpointPersisted = endpointStore != null
+                                            && endpointStore.recordSuccessfulSendEndpoint(
+                                                    messageId, peerId, successfulEndpoint);
+                                    long endpointPersistMs = android.os.SystemClock.elapsedRealtime()
+                                            - endpointPersistStartedAt;
+                                    if (!endpointPersisted || endpointPersistMs >= 50L) {
+                                        FileLogger.log(this, "CHAT", "P2P async SQLite send-endpoint message="
+                                                + messageId + " peer=" + peerId
+                                                + " persisted=" + endpointPersisted
+                                                + " dbMs=" + endpointPersistMs);
+                                    }
+                                });
+                            } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                                // last_attempt_endpoint remains durable and is sufficient for this
+                                // message's authenticated ACK; the next route discovery can refresh
+                                // the reusable endpoint if this secondary update is dropped.
+                                FileLogger.logD("CHAT", "send endpoint bookkeeping deferred message=" + messageId);
                             }
                         } catch (Exception e) {
-                            if (store != null) store.recordTargetSendError(
-                                    messageId, peerId, e.getClass().getSimpleName());
+                            final String sendError = e.getClass().getSimpleName();
+                            final LanChatStore errorStore = store;
+                            try {
+                                lanChatControlExecutor.execute(() -> {
+                                    if (errorStore != null) {
+                                        errorStore.recordTargetSendError(messageId, peerId, sendError);
+                                    }
+                                });
+                            } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                                // Attempt count and exact endpoint were already committed pre-send.
+                            }
                             FileLogger.log(this, "CHAT", "⚠️ P2P 单播失败: " + e.getMessage());
                         }
                     }
@@ -5106,11 +5127,16 @@ public class TrackingService extends Service implements LocationListener {
                 && store.matchesExpectedAckEndpoint(messageId, senderId,
                         sourceAddress.getHostAddress(), sourcePort);
         boolean discoveryAck = false;
-        try {
-            discoveryAck = store.isDiscoveryPending(messageId);
-        } catch (Exception storageFailure) {
-            FileLogger.log(this, "CHAT", "⚠️ LAN ACK 发现窗口读取失败，拒绝释放发现观察槽: "
-                    + storageFailure.getClass().getSimpleName());
+        // A verified live route or the message's exact attempted/successful endpoint is
+        // already sufficient proof. Only the unverified first-discovery grace needs this
+        // additional SQLite state read.
+        if (!routeMatches && !persistedEndpointMatch) {
+            try {
+                discoveryAck = store.isDiscoveryPending(messageId);
+            } catch (Exception storageFailure) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN ACK 发现窗口读取失败，拒绝释放发现观察槽: "
+                        + storageFailure.getClass().getSimpleName());
+            }
         }
         if (!routeMatches && !persistedEndpointMatch) {
             if (allowDiscoveryGrace && discoveryAck) {

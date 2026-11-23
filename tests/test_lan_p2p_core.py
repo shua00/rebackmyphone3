@@ -1598,10 +1598,12 @@ class LanP2PCoreTests(unittest.TestCase):
         attempt_pos = send_method.index("targetAttemptAllowed = store != null")
         skip_pos = send_method.index("continue;", attempt_pos)
         udp_pos = send_method.index("sendLanUdpPacket(socket, p, verifiedRoutePeerIds.contains(peerId)")
-        endpoint_pos = send_method.index("store.recordSuccessfulSendEndpoint(messageId, peerId")
+        endpoint_pos = send_method.index("lanChatControlExecutor.execute(", udp_pos)
         self.assertLess(attempt_pos, skip_pos)
         self.assertLess(skip_pos, udp_pos)
         self.assertLess(udp_pos, endpoint_pos)
+        self.assertNotIn("store.recordSuccessfulSendEndpoint(", send_method)
+        self.assertIn("last_attempt_endpoint", send_method)
         self.assertIn("recordTargetSendError(", send_method)
         udp_helper_start = tracking.index("private void sendLanUdpPacket(")
         udp_helper = tracking[udp_helper_start:udp_helper_start + 1500]
@@ -3343,6 +3345,27 @@ class AndroidLanInstantRouteRecoveryTests(unittest.TestCase):
         self.assertIn("lanChatRouteRefreshPending.get()", source)
         self.assertIn("lanChatRouteRefreshPending.getAndSet(false)", source)
         self.assertIn('scheduleLanChatTask("peer-verified-retry", () -> retryPendingLanChatMessages(true), 350L)', source)
+
+
+    def test_android_ack_fast_path_skips_discovery_sqlite_read_for_verified_endpoints(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        ack = extract_java_method(source, "private void processAuthenticatedLanChatAck(")
+        query_guard = ack.index("if (!routeMatches && !persistedEndpointMatch) {")
+        discovery_query = ack.index("store.isDiscoveryPending(messageId)")
+        self.assertGreater(discovery_query, query_guard)
+        self.assertIn("if (!routeMatches && !persistedEndpointMatch) {", ack[discovery_query:])
+        self.assertIn("store.matchesExpectedAckEndpoint(messageId, senderId", ack)
+
+    def test_android_successful_endpoint_bookkeeping_is_off_the_fifo_send_lock(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        send = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
+        udp = send.index("sendLanUdpPacket(socket, p, verifiedRoutePeerIds.contains(peerId)")
+        persist = send.index("lanChatControlExecutor.execute(", udp)
+        self.assertLess(udp, persist)
+        self.assertNotIn("store.recordSuccessfulSendEndpoint(", send)
+        self.assertIn("markAttempt() already durably recorded this exact endpoint", send)
 
 
 class AndroidLanProbeIsolationTests(unittest.TestCase):
