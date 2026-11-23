@@ -4646,6 +4646,12 @@ public class TrackingService extends Service implements LocationListener {
                 final boolean challengeOnly = envelope.optBoolean("challenge_only", false);
                 try {
                     lanChatControlExecutor.execute(() -> {
+                        long controlQueueMs = android.os.SystemClock.elapsedRealtime()
+                                - packetReceivedAtElapsedMs;
+                        if (controlQueueMs >= 150L) {
+                            FileLogger.log(this, "CHAT", "P2P peer.hello control queueMs="
+                                    + controlQueueMs + " peer=" + senderId);
+                        }
                         try {
                             if (!store.observePeer(senderId, peerType, serviceId, peerNetwork,
                                     peerIp, sourcePort, now, now + 120_000L)) {
@@ -4703,6 +4709,12 @@ public class TrackingService extends Service implements LocationListener {
                     final String peerNetwork = envelope.optString("network_scope", "");
                     try {
                         lanChatControlExecutor.execute(() -> {
+                            long controlQueueMs = android.os.SystemClock.elapsedRealtime()
+                                    - packetReceivedAtElapsedMs;
+                            if (controlQueueMs >= 150L) {
+                                FileLogger.log(this, "CHAT", "P2P peer.ack control queueMs="
+                                        + controlQueueMs + " peer=" + senderId);
+                            }
                             boolean persisted = store.upsertPeer(senderId, peerType, serviceId,
                                     peerNetwork, peerAddress.getHostAddress(), port, now, now + 120_000L);
                             if (!persisted) {
@@ -4849,17 +4861,20 @@ public class TrackingService extends Service implements LocationListener {
                 }, 200L);
                 if (scheduled) {
                     FileLogger.logD("CHAT", "P2P ACK 暂缓复核握手路由 message="
-                            + messageId + " peer=" + senderId + " graceMs=200");
+                            + messageId + " peer=" + senderId + " graceMs=200 queueMs=" + ackQueueMs);
                     return;
                 }
                 pendingChatAckRouteRechecks.remove(recheckKey);
             }
+            long ackDecisionMs = android.os.SystemClock.elapsedRealtime() - packetReceivedAtElapsedMs;
             FileLogger.log(this, "CHAT", "P2P ACK rejected message=" + messageId
                     + " peer=" + senderId
                     + " source=" + sourceAddress.getHostAddress() + ":" + sourcePort
                     + " routeMatch=" + routeMatches
                     + " persistedSendEndpointMatch=" + persistedEndpointMatch
                     + " discoveryPending=" + discoveryAck
+                    + " queueMs=" + ackQueueMs
+                    + " totalMs=" + ackDecisionMs
                     + " reason=unverified_endpoint");
             return;
         }
