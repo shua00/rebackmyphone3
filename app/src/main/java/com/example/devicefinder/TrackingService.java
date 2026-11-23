@@ -4227,6 +4227,7 @@ public class TrackingService extends Service implements LocationListener {
             // ACK races are still closed by markAttempt() immediately before each UDP send.
             // Keeping SQLite target enumeration outside the shared sender lock prevents a slow
             // database read from delaying a fresh interactive message behind a retry batch.
+            final long targetLoadStartedAt = android.os.SystemClock.elapsedRealtime();
             final List<LanChatStore.Target> preparedTargets;
             try {
                 preparedTargets = store.loadTargets(messageId);
@@ -4235,6 +4236,7 @@ public class TrackingService extends Service implements LocationListener {
                         + targetReadFailure.getClass().getSimpleName());
                 return;
             }
+            final long targetLoadMs = android.os.SystemClock.elapsedRealtime() - targetLoadStartedAt;
             // Wait for the FIFO transmit turn before charging this message's retry epoch.
             // Time spent queued behind another sender is not a delivery attempt.
             long lockRequestedAt = android.os.SystemClock.elapsedRealtime();
@@ -4271,7 +4273,7 @@ public class TrackingService extends Service implements LocationListener {
                 }
                 attemptRecorded = true;
                 if (!serviceDestroyed) {
-                    transmitLocalUdpMessageInternal(message, messageId, socket, socketGeneration, preparedTargets);
+                    transmitLocalUdpMessageInternal(message, messageId, socket, socketGeneration, preparedTargets, targetLoadMs);
                 }
             } finally {
                 long lockHoldMs = android.os.SystemClock.elapsedRealtime() - lockAcquiredAt;
@@ -4372,7 +4374,7 @@ public class TrackingService extends Service implements LocationListener {
 
     private void transmitLocalUdpMessageInternal(final String message, final String messageId,
             DatagramSocket socket, long socketGeneration,
-            final List<LanChatStore.Target> savedTargets) {
+            final List<LanChatStore.Target> savedTargets, long targetLoadMs) {
         final long preparationStartedAt = android.os.SystemClock.elapsedRealtime();
         if (!isCurrentLanChatSocket(socket, socketGeneration)) {
             FileLogger.log(this, "CHAT", "ℹ️ P2P send rejected for stale UDP socket generation message=" + messageId);
@@ -4397,7 +4399,6 @@ public class TrackingService extends Service implements LocationListener {
         // The durable recipient snapshot was loaded before FIFO admission. It is read-only;
         // every actual recipient send is still revalidated transactionally by markAttempt().
         // This keeps SQLite target enumeration out of the shared transmission critical section.
-        final long targetLoadMs = 0L;
         java.util.Set<String> pendingTargetIds = new java.util.HashSet<>();
         for (LanChatStore.Target target : savedTargets) {
             if (!"acked".equals(target.status)) pendingTargetIds.add(target.peerId);
