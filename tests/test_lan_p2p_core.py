@@ -2598,6 +2598,42 @@ class LanP2PCoreTests(unittest.TestCase):
                     with self.assertRaises(LanP2PStorageError):
                         operation()
 
+    def test_python_peer_endpoint_change_bypasses_stale_retry_backoff(self):
+        from lan_p2p_core import (
+            persist_outgoing_message, record_peer, mark_outgoing_attempt,
+            load_pending_outgoing_for_peer, list_due_outgoing_peers,
+        )
+        record_peer(self.db_path, "server2", "android-route-change", "android",
+                    "android-main", "192.168.1.10", 8888, "active")
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-route-change",
+            "hello", ["android-route-change"]))
+        self.assertTrue(mark_outgoing_attempt(
+            self.db_path, "m-route-change", "android-route-change",
+            "192.168.1.10", 8888))
+        # A verified peer can move to a new IP/port before the old retry timer expires.
+        record_peer(self.db_path, "server2", "android-route-change", "android",
+                    "android-main", "192.168.1.44", 8899, "active")
+        pending = load_pending_outgoing_for_peer(
+            self.db_path, "server2", "android-route-change", force=False)
+        self.assertEqual(1, len(pending))
+        self.assertEqual(("192.168.1.44", 8899),
+                         (pending[0]["endpoint_ip"], pending[0]["endpoint_port"]))
+        self.assertEqual(["android-route-change"],
+                         list_due_outgoing_peers(self.db_path, "server2"))
+        # The send-time SQL guard must independently admit the new endpoint even if
+        # another worker's due-scan snapshot was taken before the route update.
+        self.assertTrue(mark_outgoing_attempt(
+            self.db_path, "m-route-change", "android-route-change",
+            "192.168.1.44", 8899, allow_fast_retry=False))
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT attempt_count,last_endpoint FROM lan_outbox_targets "
+                "WHERE message_id='m-route-change' AND peer_id='android-route-change'"
+            ).fetchone()
+        self.assertEqual((2, "192.168.1.44:8899"), row)
+
+
     def test_mark_outgoing_attempt_storage_failure_is_not_reported_as_a_normal_skip(self):
         with patch("lan_p2p_core.sqlite3.connect",
                    side_effect=sqlite3.OperationalError("database is locked")):
