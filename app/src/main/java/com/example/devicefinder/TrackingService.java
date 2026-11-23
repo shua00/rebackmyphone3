@@ -4723,14 +4723,14 @@ public class TrackingService extends Service implements LocationListener {
         pendingChatAcks.put(messageId, ack);
         long preparationMs = android.os.SystemClock.elapsedRealtime() - preparationStartedAt;
         if (preparationMs >= 100L) {
-            FileLogger.log(this, "CHAT", "P2P 发送准备耗时 message=" + messageId
-                    + " totalMs=" + preparationMs
+            FileLogger.log(this, "CHAT", "P2P 发送锁内准备耗时 message=" + messageId
+                    + " lockMs=" + preparationMs
                     + " broadcastLookupMs=" + broadcastLookupMs
-                    + " targetDbMs=" + targetLoadMs
+                    + " preLockTargetDbMs=" + targetLoadMs
                     + " routeProbeMs=" + routeProbeMs
-                    + " packetBuildMs=" + packetBuildMs
-                    + " otherMs=" + Math.max(0L, preparationMs - broadcastLookupMs
-                            - targetLoadMs - routeProbeMs - packetBuildMs));
+                    + " preLockPacketBuildMs=" + packetBuildMs
+                    + " otherLockMs=" + Math.max(0L, preparationMs - broadcastLookupMs
+                            - routeProbeMs));
         }
         FileLogger.log(this, "CHAT", "⏱️ P2P UDP 开始发送，固定目标 " + totalPeerCount
                 + "，已验证路由 " + verifiedRouteCount + "，历史端点直投 " + cachedEndpointCount
