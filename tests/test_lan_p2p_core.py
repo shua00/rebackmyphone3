@@ -1603,9 +1603,9 @@ class LanP2PCoreTests(unittest.TestCase):
         retry_epoch_pos = transmit_method.index("store.recordOutboxAttempt(messageId)")
         self.assertLess(lock_pos, retry_epoch_pos)
 
-        send_start = tracking.index("private void transmitLocalUdpMessageInternal(")
-        send_end = tracking.index("private boolean sendAuthenticatedChatAck(", send_start)
-        send_method = tracking[send_start:send_end]
+        send_method = extract_java_method(
+            tracking, "private void transmitLocalUdpMessageInternal("
+        )
         attempt_pos = send_method.index("targetAttemptAllowed = store != null")
         skip_pos = send_method.index("continue;", attempt_pos)
         udp_pos = send_method.index("sendLanUdpPacket(socket, p, verifiedRoutePeerIds.contains(peerId)")
