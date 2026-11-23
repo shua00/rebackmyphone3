@@ -287,7 +287,7 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 |---|---|---|---|
 | S26 | 发现报文 scope 字段有界 | Android 保留完整 Wi-Fi 路径指纹仅供本地网络变化检测；发往 UDP 的 network_scope 必须使用固定长度 SHA-256 摘要，不得直接序列化 LinkProperties/Route 列表；1200 字节协议上限保持不变；该摘要仅为提示字段，不是身份或认证依据 | 代码/自动化/CI/Android 多设备实机 |
 | F20 | 超长网络路径信息导致发现包超限 | 构造包含大量接口地址/路由信息的网络快照，验证启动 Beacon、普通发现和定向 challenge 均能编码为不超过 1200 字节的认证 v2 数据报；接收端正常解码；UNAVAILABLE/ERROR/NO_WIFI 不得阻断发现流程 | 自动化/CI/Android 实机 |
-| G14 | Android 发现 scope 编码一致性 | 所有 Android peer.hello 出口统一使用同一 SHA-256 scope helper；不得有原始 wifiLanFingerprint 直传；本地完整 fingerprint 比较与网络切换 endpoint 失效逻辑保持不变 | 源码回归/CI/实机 |
+| G14 | Android 发现 scope 编码一致性 | 所有 Android peer.hello 出口统一使用同一 SHA-256 scope helper；不得有原始 wifiLanFingerprint 直传；本地完整 fingerprint 比较与网络切换 endpoint 失效逻辑保持不变；ACK 拒绝日志包含真实来源 IP/端口及 route/持久化端点/discovery 状态 | 源码回归/CI/实机 |
 
 ### v2.8.23 验证边界
 
