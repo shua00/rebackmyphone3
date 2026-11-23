@@ -3820,6 +3820,19 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         self.assertIn("sendMs=", udp)
         self.assertNotIn("lockWaitMs=", udp)
 
+    def test_android_authenticated_packets_are_prebuilt_before_transmit_lock(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        send = extract_java_method(source, "private void transmitLocalUdpMessage(")
+        internal = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
+        self.assertLess(send.index("buildAuthenticatedLanChatPacket("), send.index("lanChatTransmitLock.lock()"))
+        self.assertIn("preparedPeerPackets.put(target.peerId", send)
+        self.assertIn("preparedBroadcastData = buildAuthenticatedLanChatPacket(", send)
+        self.assertIn("preparedPeerPackets.get(peerId)", internal)
+        self.assertIn("new DatagramPacket(preparedBroadcastData, preparedBroadcastData.length,", internal)
+        self.assertNotIn("buildAuthenticatedLanChatPacket(", internal)
+        self.assertIn("store.markAttempt(messageId, peerId, attemptedEndpoint, \"\");", internal)
+
     def test_android_internal_sender_uses_preloaded_target_snapshot_timing(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
