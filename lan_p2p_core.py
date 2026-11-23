@@ -316,6 +316,11 @@ def ensure_outbox_retry_schema(db_path):
         for column, declaration in migrations.items():
             if column not in columns:
                 conn.execute("ALTER TABLE lan_outbox_targets ADD COLUMN " + column + " " + declaration)
+        # The retry worker scans by recipient and due time once per second; keep it indexed.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_lan_outbox_targets_retry "
+                     "ON lan_outbox_targets(peer_id,status,attempt_count,last_attempt_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_lan_outbox_sender_state "
+                     "ON lan_outbox(sender_scope,state)")
         conn.commit()
         return True
     except Exception as exc:

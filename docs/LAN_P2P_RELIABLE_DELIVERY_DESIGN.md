@@ -329,3 +329,5 @@ IP 地址永远不能作为设备身份。网络变化时应使旧端点路由�
 - 每个目标独立计数，某个离线成员不会消耗其他成员的预算。达到 8 次后停止定时发送，消息和目标仍持久保留；只有经过 nonce challenge 验证的 peer 恢复事件才可能重开预算，且同一目标至少间隔 60 秒，防止重复 HELLO/ACK 事件反复重置。
 - 新增 last_recovery_at_ms 增量迁移；旧数据库在 UDP 恢复 worker 启动前自动补列。发送尝试仍必须先成功写入 SQLite，再进行 UDP I/O。
 - 本策略只约束 Python 三服务的逐目标 LAN 补发，不改变 Android 原有 8 次消息级预算、悬浮留言独立通道或 HTTP 兜底语义；端到端跨端时序仍需按验收矩阵实测。
+
+- 为每秒重试扫描增加 peer/status/attempt_count/last_attempt_at 复合索引及 sender_scope/state 索引，避免 Outbox 增长后周期性扫描退化为全表遍历。

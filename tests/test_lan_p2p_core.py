@@ -2834,6 +2834,9 @@ class LanP2PCoreTests(unittest.TestCase):
         with sqlite3.connect(self.db_path) as conn:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(lan_outbox_targets)")}
         self.assertIn("last_recovery_at_ms", columns)
+        with sqlite3.connect(self.db_path) as conn:
+            indexes = {row[1] for row in conn.execute("PRAGMA index_list(lan_outbox_targets)")}
+        self.assertIn("idx_lan_outbox_targets_retry", indexes)
 
     def test_all_python_services_retry_ack_timeouts_with_finite_backoff(self):
         repo_root = Path(__file__).resolve().parents[1]
