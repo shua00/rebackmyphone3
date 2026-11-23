@@ -577,7 +577,7 @@ class LanP2PCoreTests(unittest.TestCase):
         pending = extract_java_method(store, "public boolean isDiscoveryPending(")
         add_peer = extract_java_method(store, "public boolean addDiscoveryPeerToOpenMessages(")
         set_targets = extract_java_method(store, "public boolean setTargets(")
-        self.assertIn("now >= deadline", set_targets)
+        self.assertIn("now >= discoveryDeadline", set_targets)
         self.assertIn("now >= deadline", ack)
         self.assertIn("now < deadline", ack)
         self.assertIn("now >= deadline", begin)
