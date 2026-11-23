@@ -1968,7 +1968,8 @@ class LanP2PCoreTests(unittest.TestCase):
             repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
         ).read_text(encoding="utf-8")
         send = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
-        self.assertIn("boolean discoveryDue = lastPeerDiscoveryAt == 0L", send)
+        self.assertIn("boolean discoveryNeeded = pendingTargetIds.isEmpty()", send)
+        self.assertIn("LAN_PEER_DISCOVERY_COOLDOWN_MS", send)
         self.assertNotIn("verifiedChatPeers.isEmpty() || lastPeerDiscoveryAt", send)
         self.assertIn("expiredPeerRouteRemoved && verifiedChatPeers.isEmpty()", send)
 
@@ -3268,6 +3269,42 @@ class AndroidFixedTargetImmediateDispatchTests(unittest.TestCase):
         self.assertIn("update.bindString(1, endpoint)", attempt)
         self.assertIn("last_attempt_endpoint=? OR last_sent_endpoint=?", match)
         self.assertNotIn("last_endpoint=?", match)
+
+
+
+class AndroidLanInstantRouteRecoveryTests(unittest.TestCase):
+    def test_verified_peer_route_refreshes_pending_target_candidates_without_rewriting_ack_evidence(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        upsert = extract_java_method(source, "public boolean upsertPeer(")
+        self.assertIn("db.beginTransaction()", upsert)
+        self.assertIn('targetRoute.put("last_endpoint", ip + ":" + port)', upsert)
+        self.assertIn("UPDATE", upsert.upper())
+        self.assertIn("status!='acked'", upsert)
+        self.assertIn("last_attempt_endpoint", upsert)  # documented as deliberately untouched
+        self.assertNotIn('targetRoute.put("last_attempt_endpoint"', upsert)
+        self.assertNotIn('targetRoute.put("last_sent_endpoint"', upsert)
+
+    def test_changed_verified_endpoint_bypasses_only_same_endpoint_retry_backoff(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        attempt = extract_java_method(source, "public boolean markAttempt(")
+        self.assertIn("last_attempt_endpoint<>?", attempt)
+        self.assertIn("last_attempt_endpoint + CASE", attempt) if "last_attempt_endpoint + CASE" in attempt else self.assertIn("last_attempt_at + CASE", attempt)
+        self.assertIn("update.bindString(7, endpoint)", attempt)
+        self.assertIn("update.bindLong(8, now)", attempt)
+
+    def test_missing_ack_rearms_bounded_discovery_and_verified_retry_waits_for_ack_grace(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        send = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
+        complete = extract_java_method(source, "private void completeLanChatAckWindow(")
+        self.assertIn("LAN_PEER_DISCOVERY_COOLDOWN_MS = 1_500L", source)
+        self.assertIn("target.attemptCount > 0", send)
+        self.assertIn("hadUdpDispatchAttempt.set(true)", send)
+        self.assertIn("lastPeerDiscoveryAt = 0L", complete)
+        self.assertIn("retryPendingLanChatMessages(false)", complete)
+        self.assertIn('scheduleLanChatTask("peer-verified-retry", () -> retryPendingLanChatMessages(true), 350L)', source)
 
 
 class AndroidLanProbeIsolationTests(unittest.TestCase):

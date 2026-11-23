@@ -267,6 +267,8 @@ public class TrackingService extends Service implements LocationListener {
     private static final String PREF_LAN_CHAT_QUEUE = "lan_p2p_pending_messages";
     private static final int LAN_CHAT_QUEUE_MAX = 50;
     private static final long LAN_CHAT_DISCOVERY_WINDOW_MS = LanChatStore.FIRST_DISCOVERY_WINDOW_MS;
+    // Keep route refresh responsive without broadcasting once per keystroke/message.
+    private static final long LAN_PEER_DISCOVERY_COOLDOWN_MS = 1_500L;
     // Keep discovery nonces valid long enough for bounded persistence/ACK work to finish.
     private static final long LAN_PEER_CHALLENGE_TIMEOUT_MS = 2_500L;
     private final Object lanChatQueueLock = new Object();
@@ -4437,8 +4439,20 @@ public class TrackingService extends Service implements LocationListener {
         // sender and peer-admission lane. The chat packet below remains ordered on the
         // transmit lane; authenticated discovery ACK grace and durable recipient snapshots
         // continue to govern any newly learned peer.
-        boolean discoveryDue = lastPeerDiscoveryAt == 0L
-                || now - lastPeerDiscoveryAt >= 30_000L;
+        boolean discoveryNeeded = pendingTargetIds.isEmpty();
+        if (!discoveryNeeded) {
+            for (LanChatStore.Target target : savedTargets) {
+                if (target == null || target.peerId == null || "acked".equals(target.status)) continue;
+                // A missing route needs discovery immediately; an unacknowledged prior
+                // attempt also needs a route refresh in case the peer changed IP silently.
+                if (!verifiedChatPeers.containsKey(target.peerId) || target.attemptCount > 0) {
+                    discoveryNeeded = true;
+                    break;
+                }
+            }
+        }
+        boolean discoveryDue = discoveryNeeded && (lastPeerDiscoveryAt == 0L
+                || now - lastPeerDiscoveryAt >= LAN_PEER_DISCOVERY_COOLDOWN_MS);
         boolean shouldDiscoverPeers = discoveryDue
                 && peerDiscoveryInFlight.compareAndSet(false, true);
         if (shouldDiscoverPeers) {
@@ -4580,6 +4594,8 @@ public class TrackingService extends Service implements LocationListener {
                 + "，已验证路由 " + verifiedRouteCount + "，历史端点直投 " + cachedEndpointCount
                 + "，消息 " + messageId);
         long ackLoopStartedAt = android.os.SystemClock.elapsedRealtime();
+        java.util.concurrent.atomic.AtomicBoolean hadUdpDispatchAttempt =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
         boolean ackCleanupDeferred = false;
         try {
             if (totalPeerCount == 0 && !socket.isClosed()) {
@@ -4592,6 +4608,7 @@ public class TrackingService extends Service implements LocationListener {
                         try {
                             DatagramPacket p = new DatagramPacket(broadcastData, broadcastData.length,
                                     java.net.InetAddress.getByName(target), peerPort);
+                            hadUdpDispatchAttempt.set(true);
                             sendLanUdpPacket(socket, p, "CHAT_BROADCAST_" + peerPort);
                         } catch (Exception e) {
                             FileLogger.log(this, "CHAT", "⚠️ P2P 广播失败 port="
@@ -4629,6 +4646,7 @@ public class TrackingService extends Service implements LocationListener {
                             byte[] peerData = buildAuthenticatedLanChatPacket(myId, peerId, messageId, message);
                             DatagramPacket p = new DatagramPacket(peerData, peerData.length,
                                     peer.getAddress(), peer.getPort());
+                            hadUdpDispatchAttempt.set(true);
                             sendLanUdpPacket(socket, p, verifiedRoutePeerIds.contains(peerId)
                                     ? "CHAT_UNICAST_VERIFIED" : "CHAT_UNICAST_CACHED_ENDPOINT");
                             long endpointPersistStartedAt = android.os.SystemClock.elapsedRealtime();
@@ -4672,7 +4690,7 @@ public class TrackingService extends Service implements LocationListener {
                 Runnable completion = () -> completeLanChatAckWindow(messageId,
                         completionAwaitingPeerIds, completionAck,
                         completionTotalPeerCount, completionReachablePeerCount,
-                        completionStore, completionStartedAt);
+                        completionStore, completionStartedAt, hadUdpDispatchAttempt.get());
                 try {
                     lanChatIoExecutor.execute(completion);
                 } catch (java.util.concurrent.RejectedExecutionException rejected) {
@@ -4684,7 +4702,8 @@ public class TrackingService extends Service implements LocationListener {
                 ackCleanupDeferred = false;
                 completeLanChatAckWindow(messageId, completionAwaitingPeerIds,
                         completionAck, completionTotalPeerCount,
-                        completionReachablePeerCount, completionStore, completionStartedAt);
+                        completionReachablePeerCount, completionStore, completionStartedAt,
+                        hadUdpDispatchAttempt.get());
             }
         } finally {
             if (!ackCleanupDeferred) {
@@ -4703,7 +4722,8 @@ public class TrackingService extends Service implements LocationListener {
             java.util.Set<String> awaitingPeerIds,
             java.util.concurrent.CountDownLatch ack,
             int totalPeerCount, int reachablePeerCount,
-            LanChatStore store, long ackStartedAt) {
+            LanChatStore store, long ackStartedAt, boolean hadUdpDispatchAttempt) {
+        boolean requestRouteRefresh = false;
         try {
             long elapsed = android.os.SystemClock.elapsedRealtime() - ackStartedAt;
             LanChatStore.AckProgress durableProgress = store == null
@@ -4724,12 +4744,16 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.log(this, "CHAT", "✅ P2P 固定目标全部持久化 ACK: "
                         + durableAckProgress + "，消息 " + messageId);
             } else {
-                // A missing message ACK is not proof that the peer endpoint is invalid.
-                // Keep the independently challenge-verified route until its lease expires,
-                // a real network-path change invalidates it, or a later challenge fails.
-                // The message itself remains durable and follows its normal retry budget.
+                // A missing message ACK does not revoke a verified route, but it does
+                // justify one bounded subnet discovery. This catches silent peer-IP changes.
+                // Re-arm only if a packet was actually attempted (or no endpoint existed);
+                // a retry rejected by attempt backoff must not create a tight wake loop.
+                if (hadUdpDispatchAttempt || reachablePeerCount == 0) {
+                    lastPeerDiscoveryAt = 0L;
+                    requestRouteRefresh = true;
+                }
                 FileLogger.log(this, "CHAT", "⚠️ P2P 消息仍待确认并保留本地队列: "
-                        + durableAckProgress + "，保留已验证路由等待重试/租约到期，消息 " + messageId);
+                        + durableAckProgress + "，保留已验证路由并触发有界路由刷新，消息 " + messageId);
             }
             if (elapsed >= 400L) {
                 FileLogger.logD("CHAT", "P2P ACK grace elapsedMs=" + elapsed
@@ -4745,6 +4769,9 @@ public class TrackingService extends Service implements LocationListener {
             pendingChatAckStartedAt.remove(messageId);
             lanChatAckGraceInFlight.remove(messageId);
             activeLanChatTransmissions.remove(messageId);
+        }
+        if (requestRouteRefresh && !serviceDestroyed) {
+            retryPendingLanChatMessages(false);
         }
     }
 
@@ -4979,7 +5006,7 @@ public class TrackingService extends Service implements LocationListener {
                                 verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
                             }
                             latch.countDown();
-                            scheduleLanChatTask("peer-verified-retry", () -> retryPendingLanChatMessages(true), 150L);
+                            scheduleLanChatTask("peer-verified-retry", () -> retryPendingLanChatMessages(true), 350L);
                         });
                     } catch (java.util.concurrent.RejectedExecutionException rejected) {
                         FileLogger.log(this, "CHAT", "⚠️ peer.ack 持久化队列已满，暂不启用单播");

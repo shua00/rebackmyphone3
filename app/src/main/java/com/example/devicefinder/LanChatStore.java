@@ -697,9 +697,9 @@ public final class LanChatStore extends SQLiteOpenHelper {
             android.database.sqlite.SQLiteStatement update = db.compileStatement(
                     "UPDATE lan_outbox_targets SET status='sent',attempt_count=attempt_count+1," +
                     "last_attempt_endpoint=?,last_attempt_at=?,last_error=? WHERE message_id=? AND peer_id=? AND status!='acked' " +
-                    "AND attempt_count<? AND (attempt_count=0 OR last_attempt_at + " +
-                    "CASE attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000 WHEN 3 THEN 10000 " +
-                    "WHEN 4 THEN 20000 WHEN 5 THEN 40000 ELSE 60000 END <= ?) " +
+                    "AND attempt_count<? AND (attempt_count=0 OR last_attempt_endpoint<>? " +
+                    "OR last_attempt_at + CASE attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000 " +
+                    "WHEN 3 THEN 10000 WHEN 4 THEN 20000 WHEN 5 THEN 40000 ELSE 60000 END <= ?) " +
                     "AND EXISTS (SELECT 1 FROM lan_outbox o WHERE o.message_id=lan_outbox_targets.message_id " +
                     "AND o.state NOT IN ('delivered','expired','waiting_peers'))");
             int changed;
@@ -710,7 +710,8 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 update.bindString(4, messageId);
                 update.bindString(5, peerId);
                 update.bindLong(6, MAX_AUTOMATIC_RETRY_ATTEMPTS);
-                update.bindLong(7, now);
+                update.bindString(7, endpoint);
+                update.bindLong(8, now);
                 changed = update.executeUpdateDelete();
             } finally { update.close(); }
             if (changed != 1) return false;
@@ -1198,29 +1199,48 @@ public final class LanChatStore extends SQLiteOpenHelper {
                               String ip, int port, long now, long leaseExpiresAt) {
         if (peerId == null || peerId.length() == 0 || ip == null || ip.length() == 0
                 || port <= 0 || port > 65535) return false;
-        ContentValues v = new ContentValues();
-        v.put("peer_id", peerId);
-        v.put("peer_type", peerType == null ? "unknown" : peerType);
-        v.put("service_id", serviceId == null ? "" : serviceId);
-        v.put("protocol_version", 2);
-        v.put("network_scope", networkScope == null ? "" : networkScope);
-        v.put("endpoint_ip", ip);
-        v.put("endpoint_port", port);
-        v.put("last_seen_at", now);
-        v.put("last_verified_at", now);
-        v.put("lease_expires_at", leaseExpiresAt);
-        v.put("status", "active");
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
         try {
-            SQLiteDatabase db = getWritableDatabase();
+            ContentValues v = new ContentValues();
+            v.put("peer_id", peerId);
+            v.put("peer_type", peerType == null ? "unknown" : peerType);
+            v.put("service_id", serviceId == null ? "" : serviceId);
+            v.put("protocol_version", 2);
+            v.put("network_scope", networkScope == null ? "" : networkScope);
+            v.put("endpoint_ip", ip);
+            v.put("endpoint_port", port);
+            v.put("last_seen_at", now);
+            v.put("last_verified_at", now);
+            v.put("lease_expires_at", leaseExpiresAt);
+            v.put("status", "active");
             long rowId = db.insertWithOnConflict("lan_peers", null, v, SQLiteDatabase.CONFLICT_REPLACE);
-            if (rowId >= 0) return true;
-            Cursor c = db.rawQuery(
-                    "SELECT 1 FROM lan_peers WHERE peer_id=? AND endpoint_ip=? AND endpoint_port=? " +
-                    "AND status='active' AND last_verified_at=?",
-                    new String[]{peerId, ip, String.valueOf(port), String.valueOf(now)});
-            try { return c.moveToFirst(); } finally { c.close(); }
+            if (rowId < 0) {
+                Cursor c = db.rawQuery(
+                        "SELECT 1 FROM lan_peers WHERE peer_id=? AND endpoint_ip=? AND endpoint_port=? " +
+                        "AND status='active' AND last_verified_at=?",
+                        new String[]{peerId, ip, String.valueOf(port), String.valueOf(now)});
+                boolean persisted;
+                try { persisted = c.moveToFirst(); } finally { c.close(); }
+                if (!persisted) return false;
+            }
+
+            // Refresh only the route candidate for outstanding messages addressed to this
+            // stable peer identity. Never rewrite last_attempt_endpoint/last_sent_endpoint:
+            // those fields remain message-specific ACK evidence, not reusable route state.
+            ContentValues targetRoute = new ContentValues();
+            targetRoute.put("last_endpoint", ip + ":" + port);
+            db.update("lan_outbox_targets", targetRoute,
+                    "peer_id=? AND status!='acked' AND EXISTS (" +
+                    "SELECT 1 FROM lan_outbox o WHERE o.message_id=lan_outbox_targets.message_id " +
+                    "AND o.state NOT IN ('delivered','expired','waiting_peers'))",
+                    new String[]{peerId});
+            db.setTransactionSuccessful();
+            return true;
         } catch (Exception e) {
             return false;
+        } finally {
+            db.endTransaction();
         }
     }
 
