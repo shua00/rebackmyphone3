@@ -451,6 +451,23 @@ public final class LanChatStore extends SQLiteOpenHelper {
      * A service restart cancels scheduled close tasks, so relying on those callbacks alone
      * can strand an exhausted empty-recipient row in discovery_pending forever.
      */
+    /** True when a fixed recipient has never had an actual UDP send attempt. */
+    public boolean hasUnattemptedTargets(String messageId) {
+        if (messageId == null || messageId.length() == 0) return false;
+        Cursor c = null;
+        try {
+            c = getReadableDatabase().rawQuery(
+                    "SELECT 1 FROM lan_outbox_targets t INNER JOIN lan_outbox o " +
+                    "ON o.message_id=t.message_id WHERE t.message_id=? AND t.status!='acked' " +
+                    "AND t.attempt_count=0 AND o.state NOT IN " +
+                    "('delivered','expired','waiting_peers','retry_paused') LIMIT 1",
+                    new String[]{messageId});
+            return c.moveToFirst();
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
     public int finalizeExpiredDiscoveryWindows(long now) {
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
