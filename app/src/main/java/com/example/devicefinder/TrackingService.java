@@ -4366,7 +4366,7 @@ public class TrackingService extends Service implements LocationListener {
         pendingChatAckStartedAt.put(messageId, android.os.SystemClock.elapsedRealtime());
         pendingChatAcks.put(messageId, ack);
         long preparationMs = android.os.SystemClock.elapsedRealtime() - preparationStartedAt;
-        if (preparationMs >= 250L) {
+        if (preparationMs >= 100L) {
             FileLogger.log(this, "CHAT", "P2P 发送准备耗时 message=" + messageId
                     + " totalMs=" + preparationMs
                     + " broadcastLookupMs=" + broadcastLookupMs
