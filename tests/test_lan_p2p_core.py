@@ -3812,5 +3812,20 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         self.assertIn("sendMs=", udp)
         self.assertNotIn("lockWaitMs=", udp)
 
+    def test_android_recipient_snapshot_read_is_outside_transmit_lock(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        send = extract_java_method(source, "private void transmitLocalUdpMessage(")
+        internal = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
+        snapshot_pos = send.index("preparedTargets = store.loadTargets(messageId)")
+        lock_pos = send.index("lanChatTransmitLock.lock()")
+        self.assertLess(snapshot_pos, lock_pos)
+        self.assertIn("preparedTargets, targetLoadMs", send)
+        self.assertIn("final List<LanChatStore.Target> savedTargets", internal)
+        self.assertNotIn("store.loadTargets(messageId)", internal)
+        # A stale read is safe only because the durable target status is checked again
+        # transactionally immediately before every actual unicast dispatch.
+        self.assertIn("store.markAttempt(messageId, peerId, attemptedEndpoint, \"\"))", internal)
+
 if __name__ == "__main__":
     unittest.main()
