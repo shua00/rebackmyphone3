@@ -1163,11 +1163,10 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("body.equals(existing.getString(0))", inbox_method)
         self.assertIn("if (!identical) return false", inbox_method)
 
-        receive_start = tracking_source.index(
+        receive_method = extract_java_method(
+            tracking_source,
             "private boolean persistIncomingLanChat(String senderId, String messageId, String msgContent,"
         )
-        receive_end = tracking_source.index("\n    private void startRescueListener", receive_start)
-        receive_method = tracking_source[receive_start:receive_end]
         self.assertIn("store.storeIncoming(", receive_method)
         self.assertNotIn("editor.commit()", receive_method)
         self.assertNotIn("markIncomingDisplayed(", receive_method)
