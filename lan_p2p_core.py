@@ -455,7 +455,10 @@ def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_po
         conn.execute("PRAGMA busy_timeout=10000")
         cur = conn.execute("""UPDATE lan_outbox_targets SET status='sent',
             attempt_count=attempt_count+1,last_attempt_at=?,last_endpoint=?,last_error=''
-            WHERE message_id=? AND peer_id=? AND status!='acked'""",
+            WHERE message_id=? AND peer_id=? AND status!='acked'
+              AND EXISTS (SELECT 1 FROM lan_outbox o
+                          WHERE o.message_id=lan_outbox_targets.message_id
+                            AND o.state NOT IN ('delivered','expired','waiting_peers'))""",
             (int(time.time() * 1000), str(endpoint_ip) + ":" + str(endpoint_port),
              message_id, peer_id))
         conn.commit()
