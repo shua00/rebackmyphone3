@@ -2598,6 +2598,28 @@ class LanP2PCoreTests(unittest.TestCase):
                     with self.assertRaises(LanP2PStorageError):
                         operation()
 
+    def test_python_peer_recovery_event_is_not_erased_by_inflight_retry(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        for filename in ("chat.py", "rescue2.py", "server2.py"):
+            source = (repo_root / filename).read_text(encoding="utf-8")
+            start = source.index("def _resume_pending_v2_for_peer(")
+            end = source.index("\\ndef _retry_deferred_v2_peer_recoveries(", start)
+            worker = source[start:end]
+            queued = worker.index("queued_recovery_event = peer_id in _V2_RECOVERY_RETRY_PEERS")
+            consume = worker.index("_V2_RECOVERY_RETRY_PEERS.discard(peer_id)", queued)
+            inflight = worker.index("if peer_id in _V2_RECOVERY_INFLIGHT:", consume)
+            requeue = worker.index("_V2_RECOVERY_RETRY_PEERS.add(peer_id)", inflight)
+            promote = worker.index("recovery_event = recovery_event or queued_recovery_event", requeue)
+            self.assertLess(queued, consume)
+            self.assertLess(consume, inflight)
+            self.assertLess(inflight, requeue)
+            self.assertLess(requeue, promote)
+            finally_start = worker.index("finally:")
+            cleanup = worker[finally_start:]
+            self.assertIn("_V2_RECOVERY_INFLIGHT.discard(peer_id)", cleanup)
+            self.assertNotIn("_V2_RECOVERY_RETRY_PEERS.discard(peer_id)", cleanup)
+
+
     def test_python_peer_endpoint_change_bypasses_stale_retry_backoff(self):
         from lan_p2p_core import (
             persist_outgoing_message, record_peer, mark_outgoing_attempt,
