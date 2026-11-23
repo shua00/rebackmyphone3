@@ -2079,9 +2079,20 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private void registerNetworkCallback() {
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (cm == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return;
+        // Registration is a pair: default-route and all-Wi-Fi observers must both exist.
+        if (networkCallback != null && wifiLanNetworkCallback != null) return;
         try {
-            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-            if (cm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            if (networkCallback != null) {
+                try { cm.unregisterNetworkCallback(networkCallback); } catch (Exception ignored) {}
+                networkCallback = null;
+            }
+            if (wifiLanNetworkCallback != null) {
+                try { cm.unregisterNetworkCallback(wifiLanNetworkCallback); } catch (Exception ignored) {}
+                wifiLanNetworkCallback = null;
+            }
+            {
                 lastPeerRouteGeneration = buildNetworkSnapshot().optLong("network_generation", -1L);
                 wifiLanFingerprint = buildWifiLanFingerprint(cm);
                 networkCallback = new ConnectivityManager.NetworkCallback() {
@@ -2146,7 +2157,16 @@ public class TrackingService extends Service implements LocationListener {
                 cm.registerNetworkCallback(wifiRequest, wifiLanNetworkCallback);
             }
         } catch (Exception e) {
-            FileLogger.log(this, "NETWORK", "❌ 注册网络回调失败: " + e.getMessage());
+            // Roll back the other observer too if either half of the pair failed.
+            if (networkCallback != null) {
+                try { cm.unregisterNetworkCallback(networkCallback); } catch (Exception ignored) {}
+            }
+            if (wifiLanNetworkCallback != null) {
+                try { cm.unregisterNetworkCallback(wifiLanNetworkCallback); } catch (Exception ignored) {}
+            }
+            networkCallback = null;
+            wifiLanNetworkCallback = null;
+            FileLogger.log(this, "NETWORK", "❌ 网络回调成对注册失败，已回滚并等待自愈重试: " + e.getMessage());
         }
     }
 

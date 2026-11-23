@@ -69,6 +69,27 @@ def extract_java_method(source, signature):
         i += 1
     raise AssertionError("Unbalanced Java method body: " + signature)
 
+    def test_known_peer_queries_raise_storage_error_instead_of_appearing_empty(self):
+        from lan_p2p_core import list_known_peers, list_known_peer_snapshot, LanP2PStorageError
+        directory_path = os.path.join(self.temp_dir.name, "not-a-peer-database")
+        os.mkdir(directory_path)
+        with self.assertRaises(LanP2PStorageError):
+            list_known_peers(directory_path, "server2")
+        with self.assertRaises(LanP2PStorageError):
+            list_known_peer_snapshot(directory_path, "server2")
+
+    def test_network_callback_registration_is_atomic_and_idempotent(self):
+        source = Path(__file__).resolve().parents[1] / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        java = source.read_text(encoding="utf-8")
+        method = extract_java_method(java, "private void registerNetworkCallback()")
+        self.assertIn("if (networkCallback != null && wifiLanNetworkCallback != null) return;", method)
+        self.assertIn("cm.unregisterNetworkCallback(networkCallback)", method)
+        self.assertIn("cm.unregisterNetworkCallback(wifiLanNetworkCallback)", method)
+        self.assertIn("networkCallback = null;", method)
+        self.assertIn("wifiLanNetworkCallback = null;", method)
+        self.assertLess(method.index("cm.registerDefaultNetworkCallback(networkCallback)"),
+                        method.index("cm.registerNetworkCallback(wifiRequest, wifiLanNetworkCallback)"))
+
 
 class LanP2PCoreTests(unittest.TestCase):
     def setUp(self):

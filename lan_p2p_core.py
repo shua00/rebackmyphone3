@@ -466,9 +466,10 @@ def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_po
 
 
 def list_known_peers(db_path, receiver_scope, limit=100):
-    """Return currently leased peers; endpoint is a temporary route."""
-    conn = sqlite3.connect(db_path, timeout=10)
+    """Return currently leased peers; storage failures must not masquerade as no peers."""
+    conn = None
     try:
+        conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("PRAGMA busy_timeout=10000")
         rows = conn.execute("""SELECT peer_id,peer_type,service_id,endpoint_ip,endpoint_port,
                     last_seen_at,lease_expires_at,status
@@ -480,20 +481,17 @@ def list_known_peers(db_path, receiver_scope, limit=100):
                  "endpoint_ip": r[3], "endpoint_port": r[4],
                  "last_seen_at": r[5], "lease_expires_at": r[6], "status": r[7]}
                 for r in rows]
-    except Exception:
-        return []
+    except Exception as exc:
+        raise LanP2PStorageError("failed to load known LAN peers") from exc
     finally:
-        _safe_close(conn)
-
+        if conn is not None:
+            _safe_close(conn)
 
 def list_known_peer_snapshot(db_path, receiver_scope, limit=500):
-    """Return all historically known peer identities, including expired/offline leases.
-
-    This list is for the immutable recipient snapshot only. Call list_known_peers()
-    separately when a currently leased UDP route is needed for an immediate send.
-    """
-    conn = sqlite3.connect(db_path, timeout=10)
+    """Return historical peer identities for immutable recipient snapshots."""
+    conn = None
     try:
+        conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("PRAGMA busy_timeout=10000")
         rows = conn.execute("""SELECT peer_id,peer_type,service_id,endpoint_ip,endpoint_port,
                     last_seen_at,lease_expires_at,status
@@ -504,10 +502,12 @@ def list_known_peer_snapshot(db_path, receiver_scope, limit=500):
                  "endpoint_ip": r[3], "endpoint_port": r[4],
                  "last_seen_at": r[5], "lease_expires_at": r[6], "status": r[7]}
                 for r in rows]
-    except Exception:
-        return []
+    except Exception as exc:
+        raise LanP2PStorageError("failed to load LAN peer recipient snapshot") from exc
     finally:
-        _safe_close(conn)
+        if conn is not None:
+            _safe_close(conn)
+
 def add_discovery_target(db_path, sender_scope, message_id, peer_id):
     """Add a peer only during the first bounded discovery window of an unknown-recipient message."""
     if not sender_scope or not message_id or not peer_id:
