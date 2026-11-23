@@ -2012,8 +2012,9 @@ class LanP2PCoreTests(unittest.TestCase):
             repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
         ).read_text(encoding="utf-8")
         send = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
-        self.assertIn("P2P 发送准备耗时", send)
-        for stage in ("broadcastLookupMs", "targetDbMs", "routeProbeMs", "packetBuildMs", "otherMs"):
+        self.assertIn("P2P 发送锁内准备耗时", send)
+        for stage in ("broadcastLookupMs", "preLockTargetDbMs", "routeProbeMs",
+                      "preLockPacketBuildMs", "otherLockMs"):
             self.assertIn(stage, send)
 
 
@@ -3863,7 +3864,7 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         internal = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
         self.assertIn("final List<LanChatStore.Target> savedTargets, long targetLoadMs", internal)
         self.assertNotRegex(internal, r"\\blong\\s+targetLoadMs\\s*=")
-        self.assertIn("+ \" targetDbMs=\" + targetLoadMs", internal)
+        self.assertIn("+ \" preLockTargetDbMs=\" + targetLoadMs", internal)
 
     def test_android_recipient_snapshot_read_is_outside_transmit_lock(self):
         repo_root = Path(__file__).resolve().parents[1]
