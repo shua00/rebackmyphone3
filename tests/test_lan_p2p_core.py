@@ -1878,12 +1878,14 @@ class LanP2PCoreTests(unittest.TestCase):
         handler = source[start:end]
         self.assertEqual(handler.count("lanChatControlExecutor.execute(() -> {"), 1)
         self.assertEqual(handler.count("lanChatIoExecutor.execute(() -> {"), 1)
-        self.assertIn("lanChatControlExecutor.execute(() -> processAuthenticatedLanChatAck(", handler)
+        self.assertIn("lanChatAckExecutor.execute(() -> processAuthenticatedLanChatAck(", handler)
+        self.assertNotIn("lanChatControlExecutor.execute(() -> processAuthenticatedLanChatAck(", handler)
         self.assertNotIn("reportExecutor.execute(", handler)
         self.assertIn('new Thread(runnable, "LanChat-Control")', source)
+        self.assertIn('new Thread(runnable, "LanChat-Ack")', source)
         self.assertIn('new Thread(runnable, "LanChat-IO")', source)
         ack = extract_java_method(source, "private void processAuthenticatedLanChatAck(")
-        self.assertIn("lanChatControlExecutor.execute(() -> processAuthenticatedLanChatAck(", ack)
+        self.assertIn("lanChatAckExecutor.execute(() -> processAuthenticatedLanChatAck(", ack)
 
     def test_android_peer_challenge_nonce_outlives_initial_discovery_wait(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -3570,8 +3572,30 @@ class AndroidLanControlQueueDiagnosticsTests(unittest.TestCase):
         chat_ack_start = source.index('if ("chat.ack".equals(type))')
         chat_ack_end = source.index('if ("peer.hello".equals(type))', chat_ack_start) if 'if ("peer.hello".equals(type))' in source[chat_ack_start:] else len(source)
         chat_ack = source[chat_ack_start:chat_ack_end]
-        self.assertIn("lanChatControlExecutor.execute(", chat_ack)
+        self.assertIn("lanChatAckExecutor.execute(", chat_ack)
+        self.assertNotIn("lanChatControlExecutor.execute(", chat_ack)
         self.assertIn("lanChatControlExecutor.execute(", peer_ack)
+        self.assertNotIn("lanChatAckExecutor.execute(", peer_ack)
+
+
+
+class AndroidLanAckLaneIsolationTests(unittest.TestCase):
+    def test_message_ack_is_not_queued_behind_peer_route_commits(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        handler = extract_java_method(source, "private boolean handleAuthenticatedLanPacket(")
+        chat_ack_start = handler.index('if ("chat.ack".equals(type))')
+        chat_ack_end = handler.index('if ("chat.message".equals(type))', chat_ack_start)
+        chat_ack = handler[chat_ack_start:chat_ack_end]
+        peer_ack_start = handler.index('if ("peer.ack".equals(type))')
+        peer_ack_end = handler.index('if ("chat.ack".equals(type))', peer_ack_start)
+        peer_ack = handler[peer_ack_start:peer_ack_end]
+        self.assertIn("lanChatAckExecutor.execute(", chat_ack)
+        self.assertNotIn("lanChatControlExecutor.execute(", chat_ack)
+        self.assertIn("lanChatControlExecutor.execute(", peer_ack)
+        ack = extract_java_method(source, "private void processAuthenticatedLanChatAck(")
+        self.assertIn("lanChatAckExecutor.execute(() -> processAuthenticatedLanChatAck(", ack)
+        self.assertIn("lanChatAckExecutor.shutdown()", extract_java_method(source, "public void onDestroy()"))
 
 
 class AndroidLanStoreLifecycleTests(unittest.TestCase):
@@ -3582,6 +3606,7 @@ class AndroidLanStoreLifecycleTests(unittest.TestCase):
         self.assertIn("lanChatImmediateExecutor.shutdown()", destroy)
         self.assertIn("lanChatSendExecutor.shutdown()", destroy)
         self.assertIn("lanChatControlExecutor.shutdown()", destroy)
+        self.assertIn("lanChatAckExecutor.shutdown()", destroy)
         self.assertIn("lanChatPeerExecutor.shutdown()", destroy)
         self.assertIn("lanChatProbeExecutor.shutdown()", destroy)
         self.assertIn("lanChatIoExecutor.shutdown()", destroy)
@@ -3591,7 +3616,7 @@ class AndroidLanStoreLifecycleTests(unittest.TestCase):
 
         closer = extract_java_method(source, "private void closeLanChatStoreAfterExecutors(")
         for executor in ("lanChatScheduler", "lanChatImmediateExecutor", "lanChatSendExecutor",
-                         "lanChatControlExecutor", "lanChatPeerExecutor", "lanChatProbeExecutor", "lanChatIoExecutor",
+                         "lanChatControlExecutor", "lanChatAckExecutor", "lanChatPeerExecutor", "lanChatProbeExecutor", "lanChatIoExecutor",
                          "maintenanceExecutor"):
             self.assertIn("awaitLanExecutorTermination(" + executor + ")", closer)
         self.assertIn("storeToClose.closeStore()", closer)
