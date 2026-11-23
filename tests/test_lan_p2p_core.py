@@ -287,11 +287,13 @@ class LanP2PCoreTests(unittest.TestCase):
     def test_unknown_recipient_ack_is_only_allowed_inside_open_discovery_window(self):
         from lan_p2p_core import (
             persist_outgoing_message, is_outgoing_discovery_pending,
-            acknowledge_outgoing_message,
+            acknowledge_outgoing_message, begin_outgoing_discovery_window,
         )
         with patch("lan_p2p_core.time.time", return_value=1000.0):
             self.assertTrue(persist_outgoing_message(
                 self.db_path, "server2", "server2-id", "m-open-discovery", "hello", []))
+            self.assertTrue(begin_outgoing_discovery_window(
+                self.db_path, "server2", "m-open-discovery"))
             self.assertTrue(is_outgoing_discovery_pending(
                 self.db_path, "server2", "m-open-discovery"))
         with patch("lan_p2p_core.time.time", return_value=1006.0):
@@ -509,16 +511,18 @@ class LanP2PCoreTests(unittest.TestCase):
             deadline = conn.execute(
                 "SELECT delivery_deadline_ms FROM lan_outbox WHERE message_id='m-window-idempotent'"
             ).fetchone()[0]
-        self.assertEqual(deadline, 6000)
+        self.assertEqual(deadline, 1005000)
 
     def test_first_peer_discovered_after_initial_window_is_not_added(self):
         from lan_p2p_core import (
             persist_outgoing_message, add_discovery_targets_for_peer,
-            acknowledge_outgoing_message,
+            acknowledge_outgoing_message, begin_outgoing_discovery_window,
         )
         with patch("lan_p2p_core.time.time", return_value=1000.0):
             self.assertTrue(persist_outgoing_message(
                 self.db_path, "server2", "server2-id", "m-too-late", "hello", []))
+            self.assertTrue(begin_outgoing_discovery_window(
+                self.db_path, "server2", "m-too-late"))
         with patch("lan_p2p_core.time.time", return_value=1006.0):
             self.assertEqual(add_discovery_targets_for_peer(
                 self.db_path, "server2", "android-late"), 0)
@@ -1459,7 +1463,7 @@ class LanP2PCoreTests(unittest.TestCase):
         rescue_sender = rescue[rescue_start:rescue_end]
         self.assertIn("elif target_ids:", rescue_sender)
         self.assertIn("保留原消息等待 peer 重新上线", rescue_sender)
-        self.assertIn("broadcast_all and is_outgoing_discovery_pending", rescue_sender)
+        self.assertIn("broadcast_all and begin_outgoing_discovery_window", rescue_sender)
 
         chat = (repo_root / "chat.py").read_text(encoding="utf-8")
         chat_start = chat.index("def send_chat_v2(")
@@ -1467,7 +1471,7 @@ class LanP2PCoreTests(unittest.TestCase):
         chat_sender = chat[chat_start:chat_end]
         self.assertIn("elif target_ids:", chat_sender)
         self.assertIn("message remains pending", chat_sender)
-        self.assertIn("elif is_outgoing_discovery_pending", chat_sender)
+        self.assertIn("elif begin_outgoing_discovery_window", chat_sender)
 
         server = (repo_root / "server2.py").read_text(encoding="utf-8")
         server_start = server.index("def send_server2_v2_chat_from_outbox(")
@@ -1475,7 +1479,7 @@ class LanP2PCoreTests(unittest.TestCase):
         server_sender = server[server_start:server_end]
         self.assertIn("if fixed_target_ids:", server_sender)
         self.assertIn("send_outbox_to_active_peers(", server_sender)
-        self.assertIn("if not is_outgoing_discovery_pending(", server_sender)
+        self.assertIn("if not begin_outgoing_discovery_window(", server_sender)
         self.assertIn("send_broadcast_packet_with_retries(", server_sender)
         self.assertIn("[(ip, 8888)", server_sender)
 
