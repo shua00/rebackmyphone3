@@ -4041,7 +4041,7 @@ public class TrackingService extends Service implements LocationListener {
         if (recoveryEvent) lanChatRecoveryEventPending.set(true);
         if (serviceDestroyed || !lanChatRetryInFlight.compareAndSet(false, true)) return;
         // Consume only the ordinary route-refresh wake captured before this batch starts.
-        lanChatRouteRefreshPending.set(false);
+        lanChatRouteRefreshPending.getAndSet(false);
         try {
             lanChatSendExecutor.execute(() -> {
                 try {

@@ -3096,7 +3096,7 @@ class LanP2PCoreTests(unittest.TestCase):
             self.assertIn("recovery_event=peer_id in recovery_event_peers", source, filename)
             self.assertIn("prepare_outgoing_peer_recovery(", source, filename)
             self.assertIn("ensure_outbox_retry_schema(", source, filename)
-            self.assertIn("time.sleep(1)", source, filename)
+            self.assertIn("_V2_RECOVERY_WAKE_EVENT.wait(1.0)", source, filename)
         core = (repo_root / "lan_p2p_core.py").read_text(encoding="utf-8")
         self.assertIn("MAX_OUTBOX_TARGET_ATTEMPTS = 8", core)
         self.assertIn("OUTBOX_RETRY_RECOVERY_COOLDOWN_MS = 60_000", core)
@@ -3322,6 +3322,7 @@ class AndroidLanInstantRouteRecoveryTests(unittest.TestCase):
         self.assertIn("retryPendingLanChatMessages(false)", complete)
         self.assertIn("lanChatRouteRefreshPending.set(true)", complete)
         self.assertIn("lanChatRouteRefreshPending.get()", source)
+        self.assertIn("lanChatRouteRefreshPending.getAndSet(false)", source)
         self.assertIn('scheduleLanChatTask("peer-verified-retry", () -> retryPendingLanChatMessages(true), 350L)', source)
 
 
