@@ -5668,9 +5668,10 @@ public class TrackingService extends Service implements LocationListener {
                     if (serviceDestroyed || listenerGeneration != lanSocketGeneration.get()) {
                         throw new java.net.SocketException("Wi-Fi LAN generation changed during UDP bind");
                     }
-                    rescueSocketRef = rescueSocket;
-                    // Publish the socket's exact bound Network in the same generation-checked critical section.
+                    // Publish the route before the volatile socket reference; readers that
+                    // observe this socket must also observe its exact bound Network.
                     lanChatBoundWifiNetwork = boundWifiNetwork;
+                    rescueSocketRef = rescueSocket;
                 }
                 udpBindFailCount = 0;
                 FileLogger.log(this, "UDP", "✅ 监听已绑定 8888");
