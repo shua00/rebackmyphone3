@@ -4106,7 +4106,15 @@ public class TrackingService extends Service implements LocationListener {
             // Call the ledger even when its deadline has elapsed so legacy empty-target
             // rows from earlier builds are migrated to waiting_peers and leave retry queues.
             boolean firstDispatch = store.beginDiscoveryWindow(messageId);
-            if (!store.isDiscoveryPending(messageId)) {
+            final boolean discoveryWindowOpen;
+            try {
+                discoveryWindowOpen = store.isDiscoveryPending(messageId);
+            } catch (Exception storageFailure) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN 发现窗口账本读取失败，停止本轮发送以防扩大收件人范围: "
+                        + storageFailure.getClass().getSimpleName());
+                return;
+            }
+            if (!discoveryWindowOpen) {
                 if (store.isWaitingForPeers(messageId)) {
                     FileLogger.log(this, "CHAT", "P2P 空目标消息已结算为 waiting_peers，不向晚加入设备广播: "
                             + messageId);
@@ -4253,7 +4261,14 @@ public class TrackingService extends Service implements LocationListener {
         }
         final int totalPeerCount = pendingTargetIds.size();
         final int reachablePeerCount = awaitingPeerIds.size();
-        final boolean firstDiscoveryWindowOpen = store.isDiscoveryPending(messageId);
+        final boolean firstDiscoveryWindowOpen;
+        try {
+            firstDiscoveryWindowOpen = store.isDiscoveryPending(messageId);
+        } catch (Exception storageFailure) {
+            FileLogger.log(this, "CHAT", "⚠️ LAN 发现窗口状态复核失败，停止广播以防误投: "
+                    + storageFailure.getClass().getSimpleName());
+            return;
+        }
         if (totalPeerCount == 0 && !firstDiscoveryWindowOpen) {
             FileLogger.log(this, "CHAT", "ℹ️ 消息首次发现窗口已关闭且没有固定目标；禁止向晚加入设备广播旧消息，保留待诊断状态: "
                     + messageId);
@@ -4676,7 +4691,15 @@ public class TrackingService extends Service implements LocationListener {
                                         sourceAddress.getHostAddress(), sourcePort);
                         // Discovery status is retained only for delivery-latch accounting;
                         // it never bypasses the verified-route / persisted-endpoint identity gate.
-                        boolean discoveryAck = store != null && store.isDiscoveryPending(messageId);
+                        boolean discoveryAck = false;
+                        try {
+                            discoveryAck = store != null && store.isDiscoveryPending(messageId);
+                        } catch (Exception storageFailure) {
+                            // Fixed-target ACK persistence remains independently authoritative;
+                            // without a readable discovery state, never release the broadcast slot.
+                            FileLogger.log(this, "CHAT", "⚠️ LAN ACK 发现窗口读取失败，拒绝释放发现观察槽: "
+                                    + storageFailure.getClass().getSimpleName());
+                        }
                         // Discovery is a recipient-collection window, not an identity bypass.
                         // A newly discovered peer must first complete peer.ack route verification;
                         // delayed ACKs may alternatively use the exact endpoint persisted for this target.
