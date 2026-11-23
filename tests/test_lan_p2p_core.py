@@ -1671,12 +1671,19 @@ class LanP2PCoreTests(unittest.TestCase):
                 self.assertNotIn("catch (Exception e)", method)
             self.assertIn("finally", method)
 
-        tx_start = tracking.index("final List<LanChatStore.Target> savedTargets")
-        tx_end = tracking.index("java.util.Set<String> pendingTargetIds", tx_start)
-        tx = tracking[tx_start:tx_end]
-        self.assertIn("store.loadTargets(messageId)", tx)
-        self.assertIn("拒绝发送以免误投", tx)
-        self.assertIn("return;", tx)
+        send_start = tracking.index("private void transmitLocalUdpMessage(")
+        send_end = tracking.index("private void transmitLocalUdpMessageInternal(", send_start)
+        send = tracking[send_start:send_end]
+        self.assertIn("preparedTargets = store.loadTargets(messageId)", send)
+        self.assertIn("catch (Exception targetReadFailure)", send)
+        self.assertIn("消息保留待重试", send)
+        self.assertLess(send.index("preparedTargets = store.loadTargets(messageId)"),
+                        send.index("lanChatTransmitLock.lock()"))
+        internal_start = tracking.index("private void transmitLocalUdpMessageInternal(")
+        internal_end = tracking.index("private void sendLanUdpPacket(", internal_start)
+        internal = tracking[internal_start:internal_end]
+        self.assertIn("final List<LanChatStore.Target> savedTargets", internal)
+        self.assertNotIn("store.loadTargets(messageId)", internal)
 
 
     def test_android_expired_empty_discovery_window_never_broadcasts_old_message_to_late_peers(self):
@@ -1928,7 +1935,10 @@ class LanP2PCoreTests(unittest.TestCase):
         start = source.index("private void transmitLocalUdpMessageInternal(")
         end = source.index("private void sendLanUdpPacket(", start)
         method = source[start:end]
-        self.assertIn("store.loadTargets(messageId)", method)
+        self.assertIn("final List<LanChatStore.Target> savedTargets", method)
+        self.assertIn("for (LanChatStore.Target target : savedTargets)", method)
+        self.assertIn("preparedTargets = store.loadTargets(messageId)", extract_java_method(
+            source, "private void transmitLocalUdpMessage("))
         self.assertIn("target.endpointIp", method)
         self.assertIn("target.endpointPort", method)
         self.assertIn("sendDirectedPeerChallenge(socket, challengePeerId", method)
@@ -2580,7 +2590,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("selectWifiLanNetwork(cm)", broadcast)
         self.assertIn("NetworkInterface.getByName(links.getInterfaceName())", broadcast)
         self.assertNotIn("name.startsWith(\"wlan\")", broadcast[:broadcast.index("// Pre-M fallback")])
-        bind = extract_java_method(source, "private void bindSocketToWifi(")
+        bind = extract_java_method(source, "private Network bindSocketToWifi(")
         self.assertIn("lanChatBoundWifiNetwork = selected", bind)
         refresh = extract_java_method(source, "private void refreshWifiLanTransport(")
         self.assertIn("lanChatBoundWifiNetwork = null", refresh)
@@ -2666,7 +2676,7 @@ class LanP2PCoreTests(unittest.TestCase):
     def test_android_wifi_socket_binding_failure_does_not_fall_back_to_default_route(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
-        method = extract_java_method(source, "private void bindSocketToWifi(")
+        method = extract_java_method(source, "private Network bindSocketToWifi(")
         selector = extract_java_method(source, "private Network selectWifiLanNetwork(")
         self.assertIn("throws java.io.IOException", method)
         self.assertIn("selectWifiLanNetwork(cm)", method)
@@ -2803,8 +2813,16 @@ class LanP2PCoreTests(unittest.TestCase):
             recovery = source[start:end]
             self.assertIn("_V2_RECOVERY_RETRY_PEERS.add(peer_id)", recovery)
             self.assertIn("_V2_RECOVERY_INFLIGHT", recovery)
-            self.assertIn("_V2_RECOVERY_RETRY_PEERS.discard(peer_id)", recovery)
-            self.assertIn("if completed:", recovery)
+            queued = recovery.index("queued_recovery_event = peer_id in _V2_RECOVERY_RETRY_PEERS")
+            consume = recovery.index("_V2_RECOVERY_RETRY_PEERS.discard(peer_id)", queued)
+            inflight = recovery.index("if peer_id in _V2_RECOVERY_INFLIGHT:", consume)
+            self.assertLess(queued, consume)
+            self.assertLess(consume, inflight)
+            self.assertIn("_V2_RECOVERY_RETRY_PEERS.add(peer_id)", recovery[inflight:])
+            self.assertIn("recovery_event = recovery_event or queued_recovery_event", recovery)
+            finally_block = recovery[recovery.index("finally:"):]
+            self.assertIn("_V2_RECOVERY_INFLIGHT.discard(peer_id)", finally_block)
+            self.assertNotIn("_V2_RECOVERY_RETRY_PEERS.discard(peer_id)", finally_block)
 
 
 
@@ -3783,7 +3801,9 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         listener = extract_java_method(source, "private void startRescueListener()")
         self.assertIn("listenerGeneration != lanSocketGeneration.get()", listener)
         self.assertIn("synchronized (rescueLock)", listener)
-        self.assertIn("if (rescueSocketRef == rescueSocket) rescueSocketRef = null;", listener)
+        self.assertIn("if (rescueSocketRef == rescueSocket) {", listener)
+        self.assertIn("rescueSocketRef = null;", listener)
+        self.assertIn("lanChatBoundWifiNetwork = null;", listener)
         self.assertIn("networkGenerationChanged = listenerGeneration != lanSocketGeneration.get();", listener)
         finally_block = listener[listener.index("} finally {"):]
         self.assertIn("if (!serviceDestroyed && networkGenerationChanged)", finally_block)
