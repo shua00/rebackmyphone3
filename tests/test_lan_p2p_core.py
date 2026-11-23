@@ -3083,5 +3083,39 @@ class AndroidLanAckDiagnosticsTests(unittest.TestCase):
         self.assertIn('" reason=" + e.getMessage()', beacon)
 
 
+
+
+class AndroidLanSchedulingAndAckProgressTests(unittest.TestCase):
+    def test_new_user_messages_bypass_the_durable_retry_backlog(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        self.assertIn("lanChatImmediateExecutor", source)
+        start = source.index("private void sendLocalUdpMessage(final String message)")
+        end = source.index("private boolean persistPendingLanChat(", start)
+        entry = source[start:end]
+        self.assertIn("lanChatImmediateExecutor.execute(", entry)
+        self.assertNotIn("lanChatSendExecutor.execute(", entry)
+        retry_start = source.index("private void retryPendingLanChatMessages(boolean recoveryEvent)")
+        retry_end = source.index("// Both the immediate and retry lanes", retry_start)
+        retry = source[retry_start:retry_end]
+        self.assertIn("lanChatSendExecutor.execute(", retry)
+        self.assertIn("synchronized (lanChatTransmitLock)", source)
+        self.assertIn("if (!activeLanChatTransmissions.add(messageId))", source)
+        self.assertIn("lanChatImmediateExecutor.shutdown()", source)
+
+    def test_ack_completion_reports_sqlite_target_counts_not_window_latch_counts(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        tracking = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        method = extract_java_method(tracking, "private void completeLanChatAckWindow(")
+        self.assertIn("store.getTargetAckProgress(messageId)", method)
+        self.assertIn("durableProgress.ackedTargets + \"/\" + durableProgress.totalTargets", method)
+        self.assertIn("persistedAllTargetsAcked", method)
+        self.assertNotIn("deliveredPeers + \"/\" + totalPeerCount", method)
+        progress = extract_java_method(store, "public AckProgress getTargetAckProgress(")
+        self.assertIn("COUNT(*)", progress)
+        self.assertIn("status='acked'", progress)
+        self.assertIn("new AckProgress(total, acked)", progress)
+
 if __name__ == "__main__":
     unittest.main()
