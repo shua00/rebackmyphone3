@@ -703,7 +703,7 @@ class LanP2PCoreTests(unittest.TestCase):
         ack = extract_java_method(store, "public boolean acknowledge(")
         begin = extract_java_method(store, "public boolean beginDiscoveryWindow(")
         pending = extract_java_method(store, "public boolean isDiscoveryPending(")
-        add_peer = extract_java_method(store, "public boolean addDiscoveryPeerToOpenMessages(")
+        add_peer = extract_java_method(store, "private boolean addDiscoveryPeerToOpenMessages(SQLiteDatabase db,")
         set_targets = extract_java_method(store, "public boolean setTargets(")
         self.assertIn("now >= discoveryDeadline", set_targets)
         self.assertIn("now >= deadline", ack)
@@ -2210,15 +2210,17 @@ class LanP2PCoreTests(unittest.TestCase):
         # A peer must be durably recorded and added to every still-open first-discovery
         # snapshot before it becomes an active unicast route or releases discovery waiters.
         persist = handler.index("store.upsertPeer(")
-        snapshot = handler.index("store.addDiscoveryPeerToOpenMessages(senderId)")
         route = handler.index("verifiedChatPeers.put(senderId")
         release = handler.index("latch.countDown()")
-        self.assertLess(persist, snapshot)
-        self.assertLess(snapshot, route)
+        self.assertLess(persist, route)
         self.assertLess(route, release)
         self.assertIn("if (!persisted)", handler)
-        self.assertIn("if (!store.addDiscoveryPeerToOpenMessages(senderId))", handler)
-        self.assertIn("return;", handler[persist:route])
+        self.assertNotIn("store.addDiscoveryPeerToOpenMessages(senderId)", handler)
+        store_source = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        upsert = extract_java_method(store_source, "public boolean upsertPeer(")
+        self.assertIn("addDiscoveryPeerToOpenMessages(db, peerId, now)", upsert)
+        self.assertIn("db.beginTransaction()", upsert)
+        self.assertIn("db.setTransactionSuccessful()", upsert)
         self.assertIn("lanChatControlExecutor.execute", handler)
 
 
@@ -2860,7 +2862,7 @@ class LanP2PCoreTests(unittest.TestCase):
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         ).read_text(encoding="utf-8")
         add_peer = extract_java_method(
-            store_source, "public boolean addDiscoveryPeerToOpenMessages("
+            store_source, "private boolean addDiscoveryPeerToOpenMessages(SQLiteDatabase db,"
         )
         self.assertIn("if (deadline <= 0L)", add_peer)
         self.assertIn("continue;", add_peer)

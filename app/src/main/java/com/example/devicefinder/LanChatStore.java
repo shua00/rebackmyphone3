@@ -1146,38 +1146,52 @@ public final class LanChatStore extends SQLiteOpenHelper {
     }
 
     /** Add a newly discovered peer to all open first-discovery snapshots. */
+    /**
+     * Add a newly verified peer to every still-open first-discovery snapshot.
+     * The caller may supply an existing transaction so route activation and target
+     * admission become one atomic commit instead of two competing SQLite writer turns.
+     */
+    private boolean addDiscoveryPeerToOpenMessages(SQLiteDatabase db, String peerId, long now) {
+        Cursor c = null;
+        try {
+            c = db.rawQuery(
+                    "SELECT message_id,delivery_deadline_ms FROM lan_outbox WHERE state='discovery_pending'",
+                    null);
+            while (c.moveToNext()) {
+                String messageId = c.getString(0);
+                long deadline = c.getLong(1);
+                if (deadline <= 0L) {
+                    // A verified peer may appear while the message is still queued.
+                    // Discovery membership starts only after the first actual UDP dispatch.
+                    continue;
+                }
+                if (now >= deadline) {
+                    if (!finalizeDiscoveryMessage(db, messageId)) return false;
+                    continue;
+                }
+                ContentValues target = new ContentValues();
+                target.put("message_id", messageId);
+                target.put("peer_id", peerId);
+                target.put("status", "pending");
+                long rowId = db.insertWithOnConflict(
+                        "lan_outbox_targets", null, target, SQLiteDatabase.CONFLICT_IGNORE);
+                if (rowId < 0 && !rowExists(db, "lan_outbox_targets",
+                        "message_id=? AND peer_id=?", new String[]{messageId, peerId})) return false;
+            }
+            return true;
+        } catch (Exception e) {
+            return false;
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
     public boolean addDiscoveryPeerToOpenMessages(String peerId) {
         if (peerId == null || peerId.length() == 0) return false;
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
-            long now = System.currentTimeMillis();
-            Cursor c = db.rawQuery(
-                    "SELECT message_id,delivery_deadline_ms FROM lan_outbox WHERE state='discovery_pending'",
-                    null);
-            try {
-                while (c.moveToNext()) {
-                    String messageId = c.getString(0);
-                    long deadline = c.getLong(1);
-                    if (deadline <= 0L) {
-                        // A verified peer may appear while the message is still queued.
-                        // Discovery membership starts only after the first actual UDP dispatch.
-                        continue;
-                    }
-                    if (now >= deadline) {
-                        if (!finalizeDiscoveryMessage(db, messageId)) return false;
-                        continue;
-                    }
-                    ContentValues target = new ContentValues();
-                    target.put("message_id", messageId);
-                    target.put("peer_id", peerId);
-                    target.put("status", "pending");
-                    long rowId = db.insertWithOnConflict(
-                            "lan_outbox_targets", null, target, SQLiteDatabase.CONFLICT_IGNORE);
-                    if (rowId < 0 && !rowExists(db, "lan_outbox_targets",
-                            "message_id=? AND peer_id=?", new String[]{messageId, peerId})) return false;
-                }
-            } finally { c.close(); }
+            if (!addDiscoveryPeerToOpenMessages(db, peerId, System.currentTimeMillis())) return false;
             db.setTransactionSuccessful();
             return true;
         } catch (Exception e) {
@@ -1411,6 +1425,10 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     "SELECT 1 FROM lan_outbox o WHERE o.message_id=lan_outbox_targets.message_id " +
                     "AND o.state NOT IN ('delivered','expired','waiting_peers'))",
                     new String[]{peerId});
+            // Persist the verified route and admit it to open discovery snapshots in the
+            // same SQLite writer transaction. This removes a second writer-lock round trip
+            // from the peer.ack critical path and prevents an intermediate half-committed state.
+            if (!addDiscoveryPeerToOpenMessages(db, peerId, now)) return false;
             db.setTransactionSuccessful();
             return true;
         } catch (Exception e) {

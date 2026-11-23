@@ -5114,10 +5114,8 @@ public class TrackingService extends Service implements LocationListener {
                                 FileLogger.log(this, "CHAT", "⚠️ peer.ack 路由持久化失败，暂不启用单播");
                                 return;
                             }
-                            if (!store.addDiscoveryPeerToOpenMessages(senderId)) {
-                                FileLogger.log(this, "CHAT", "⚠️ 新 peer 加入待发现目标集失败，稍后重新发现");
-                                return;
-                            }
+                            // upsertPeer() atomically commits this verified route and joins all
+                            // still-open first-discovery target snapshots in the same transaction.
                             synchronized (verifiedChatPeerRouteVersions) {
                                 verifiedChatPeerRouteVersions.put(senderId,
                                         verifiedChatPeerRouteVersionCounter.incrementAndGet());
