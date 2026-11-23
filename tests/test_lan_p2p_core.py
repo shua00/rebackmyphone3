@@ -1256,6 +1256,19 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("if (stored)", handler[persist:cleanup])
 
 
+    def test_android_discovery_ack_store_rejects_empty_peer_identity(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        start = store.index("public boolean acknowledge(String messageId, String peerId)")
+        end = store.index("public boolean beginDiscoveryWindow(", start)
+        acknowledge = store[start:end]
+        self.assertIn("peerId == null || peerId.length() == 0", acknowledge)
+        self.assertLess(acknowledge.index("peerId.length() == 0"),
+                        acknowledge.index('db.update("lan_outbox_targets", ackValues'))
+        self.assertIn("!\\"discovery_pending\\".equals(state)", acknowledge)
+
     def test_android_expired_outbox_rejects_late_ack_without_mutating_targets(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (
