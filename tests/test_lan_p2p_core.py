@@ -3820,6 +3820,14 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         self.assertIn("sendMs=", udp)
         self.assertNotIn("lockWaitMs=", udp)
 
+    def test_android_internal_sender_uses_preloaded_target_snapshot_timing(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        internal = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
+        self.assertIn("final List<LanChatStore.Target> savedTargets, long targetLoadMs", internal)
+        self.assertNotRegex(internal, r"\\blong\\s+targetLoadMs\\s*=")
+        self.assertIn("+ \" targetDbMs=\" + targetLoadMs", internal)
+
     def test_android_recipient_snapshot_read_is_outside_transmit_lock(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
