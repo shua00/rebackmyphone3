@@ -3848,6 +3848,9 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         internal = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
         self.assertLess(send.index("buildAuthenticatedLanChatPacket("), send.index("lanChatTransmitLock.lock()"))
         self.assertIn("preparedPeerPackets.put(target.peerId", send)
+        self.assertLess(send.index("buildAuthenticatedLanChatPacket("),
+                        send.index("store.recordOutboxAttempt(messageId)"))
+        self.assertIn("P2P authenticated packet prebuild", send)
         self.assertIn("preparedBroadcastData = buildAuthenticatedLanChatPacket(", send)
         self.assertIn("preparedPeerPackets.get(peerId)", internal)
         self.assertIn("new DatagramPacket(preparedBroadcastData, preparedBroadcastData.length,", internal)
