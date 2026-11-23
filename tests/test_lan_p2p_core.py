@@ -1940,6 +1940,21 @@ class LanP2PCoreTests(unittest.TestCase):
         )
         self.assertIn("store.isWaitingForPeers(messageId)", send)
 
+        store_source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        finalize = extract_java_method(store_source, "public int finalizeExpiredDiscoveryWindows(")
+        self.assertIn("delivery_deadline_ms<=?", finalize)
+        self.assertIn("finalizeDiscoveryMessage(db, messageId)", finalize)
+
+        retry = extract_java_method(service, "private void retryPendingLanChatMessages(boolean recoveryEvent)")
+        self.assertLess(
+            retry.index("store.finalizeExpiredDiscoveryWindows("),
+            retry.index("store.loadPending(50)"),
+        )
+        self.assertIn("if (store.isWaitingForPeers(id))", retry)
+        self.assertIn("removePendingLanChat(id);", retry)
+
 
     def test_android_peer_ack_is_durable_before_route_activation_and_discovery_snapshot(self):
         repo_root = Path(__file__).resolve().parents[1]

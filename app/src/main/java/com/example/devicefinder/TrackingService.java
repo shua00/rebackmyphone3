@@ -3893,6 +3893,10 @@ public class TrackingService extends Service implements LocationListener {
                 try {
                     LanChatStore store = lanChatStore;
                     if (store == null) return;
+                    int finalizedDiscovery = store.finalizeExpiredDiscoveryWindows(System.currentTimeMillis());
+                    if (finalizedDiscovery > 0) {
+                        FileLogger.log(this, "CHAT", "LAN 恢复时结算已过期发现窗口 messages=" + finalizedDiscovery);
+                    }
                     if (lanChatRecoveryEventPending.getAndSet(false)) {
                         int resumed = store.resumeExhaustedRetriesForRecoveryEvent(System.currentTimeMillis());
                         if (resumed > 0) {
@@ -3916,6 +3920,11 @@ public class TrackingService extends Service implements LocationListener {
                                 if (!initializeLanChatRecipientSnapshot(store, id)) {
                                     FileLogger.log(this, "CHAT", "⚠️ SQLite 旧队列收件人快照补偿失败，保留旧队列");
                                     return;
+                                }
+                                if (store.isWaitingForPeers(id)) {
+                                    // A previous process may have been stopped before its close callback
+                                    // reclaimed the compatibility mirror for this terminal empty snapshot.
+                                    removePendingLanChat(id);
                                 }
                             }
                         }

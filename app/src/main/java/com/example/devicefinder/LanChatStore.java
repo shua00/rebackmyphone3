@@ -379,6 +379,41 @@ public final class LanChatStore extends SQLiteOpenHelper {
      * recovery owner; returning an empty list would falsely turn a storage failure
      * into "no pending messages" and could silently strand the outbox.
      */
+
+    /**
+     * Settle expired discovery windows during listener recovery as well as normal sends.
+     * A service restart cancels scheduled close tasks, so relying on those callbacks alone
+     * can strand an exhausted empty-recipient row in discovery_pending forever.
+     */
+    public int finalizeExpiredDiscoveryWindows(long now) {
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        Cursor c = null;
+        try {
+            c = db.rawQuery(
+                    "SELECT message_id FROM lan_outbox WHERE state='discovery_pending' " +
+                    "AND delivery_deadline_ms>0 AND delivery_deadline_ms<=?",
+                    new String[]{String.valueOf(now)});
+            ArrayList<String> expired = new ArrayList<>();
+            while (c.moveToNext()) expired.add(c.getString(0));
+            c.close();
+            c = null;
+            int finalized = 0;
+            for (String messageId : expired) {
+                if (!finalizeDiscoveryMessage(db, messageId)) {
+                    throw new IllegalStateException("Unable to settle expired discovery row");
+                }
+                finalized++;
+            }
+            db.setTransactionSuccessful();
+            return finalized;
+        } finally {
+            if (c != null) c.close();
+            db.endTransaction();
+        }
+    }
+
+
     public List<PendingMessage> loadPending(int limit) {
         ArrayList<PendingMessage> result = new ArrayList<>();
         Cursor c = null;
