@@ -2225,15 +2225,21 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.logD("CHAT", "Wi-Fi LAN fingerprint unavailable; retaining verified peer routes");
                 return;
             }
-            String previous = wifiLanFingerprint;
-            wifiLanFingerprint = current;
-            if (previous == null || previous.equals(current)) return;
-            long socketGeneration = lanSocketGeneration.incrementAndGet();
+            final long socketGeneration;
+            final DatagramSocket oldSocket;
+            // Publish the new epoch and snapshot its socket under the same monitor used
+            // when a listener publishes/clears its socket reference.
+            synchronized (rescueLock) {
+                String previous = wifiLanFingerprint;
+                wifiLanFingerprint = current;
+                if (previous == null || previous.equals(current)) return;
+                socketGeneration = lanSocketGeneration.incrementAndGet();
+                oldSocket = rescueSocketRef;
+            }
             FileLogger.log(this, "NETWORK", "Wi-Fi LAN socket generation advanced generation="
                     + socketGeneration + " reason=" + reason);
             invalidateVerifiedChatPeers("Wi-Fi LAN path changed: " + reason);
             lastPeerDiscoveryAt = 0L;
-            DatagramSocket oldSocket = rescueSocketRef;
             if (oldSocket != null && !oldSocket.isClosed()) {
                 FileLogger.log(this, "NETWORK", "Wi-Fi LAN changed; closing old UDP socket for rebind generation="
                         + socketGeneration);
@@ -5315,11 +5321,12 @@ public class TrackingService extends Service implements LocationListener {
                 bindSocketToWifi(rescueSocket);
                 rescueSocket.bind(new InetSocketAddress(8888));
                 rescueSocket.setSoTimeout(3000);
-                if (serviceDestroyed || listenerGeneration != lanSocketGeneration.get()) {
-                    throw new java.net.SocketException("Wi-Fi LAN generation changed during UDP bind");
+                synchronized (rescueLock) {
+                    if (serviceDestroyed || listenerGeneration != lanSocketGeneration.get()) {
+                        throw new java.net.SocketException("Wi-Fi LAN generation changed during UDP bind");
+                    }
+                    rescueSocketRef = rescueSocket;
                 }
-
-                rescueSocketRef = rescueSocket;
                 udpBindFailCount = 0;
                 FileLogger.log(this, "UDP", "✅ 监听已绑定 8888");
                 // 启动/重绑定后主动通告一次本机 LAN peer，唤醒其他节点的离线消息补发。
@@ -5578,8 +5585,8 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.log(this, "UDP", "❌ 监听异常: " + e.getMessage());
             } finally {
                 if (rescueSocket != null && !rescueSocket.isClosed()) rescueSocket.close();
-                if (rescueSocketRef == rescueSocket) rescueSocketRef = null;
                 synchronized (rescueLock) {
+                    if (rescueSocketRef == rescueSocket) rescueSocketRef = null;
                     isListeningForRescue = false;
                 }
 
