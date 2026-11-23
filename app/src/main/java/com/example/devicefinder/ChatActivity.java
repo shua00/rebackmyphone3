@@ -221,6 +221,9 @@ public class ChatActivity extends Activity {
         super.onResume();
         isForeground = true;
         refreshHistory(false);
+        // Reclaim the editor after Activity/IME focus transitions so an already-visible
+        // keyboard is immediately ready for typing without an extra tap on the field.
+        restoreChatInputFocus();
     }
 
     // 删掉 onPause 里的 finishAndRemoveTask，保留正常的生命周期
