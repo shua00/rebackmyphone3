@@ -1564,6 +1564,21 @@ class LanP2PCoreTests(unittest.TestCase):
 
 
 
+    def test_android_network_refresh_tasks_coalesce_callback_bursts_without_losing_final_state(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn("coalescedMaintenanceStates", source)
+        self.assertIn("state.compareAndSet(1, 2)", source)
+        self.assertIn("completedState == 2 && !serviceDestroyed", source)
+        dispatch = source[source.index("private void executeMaintenance("):
+                          source.index("private void logLifecycle(")]
+        for task_name in ("peer-route-refresh", "wifi-lan-refresh", "network-refresh"):
+            self.assertIn('"'+task_name+'".equals(taskName)', dispatch)
+            self.assertIn("executeCoalescedMaintenance(taskName, task)", dispatch)
+
+
     def test_android_lan_chat_receive_and_ack_use_dedicated_io_executor(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (

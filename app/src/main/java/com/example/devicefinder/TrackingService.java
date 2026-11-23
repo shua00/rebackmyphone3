@@ -1090,8 +1090,55 @@ public class TrackingService extends Service implements LocationListener {
         FileLogger.log(this, "WAKE_SOURCE", "🚩 当前服务启动源: " + source);
     }
 
+    // Network callbacks can fire several times for one transition (availability,
+    // capabilities and link-properties). Keep only one queued refresh per category;
+    // if another event arrives while it runs, perform one more fresh-snapshot pass.
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>
+            coalescedMaintenanceStates = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private void executeCoalescedMaintenance(String taskName, Runnable task) {
+        java.util.concurrent.atomic.AtomicInteger state =
+                coalescedMaintenanceStates.computeIfAbsent(taskName,
+                        key -> new java.util.concurrent.atomic.AtomicInteger(0));
+        if (!state.compareAndSet(0, 1)) {
+            state.compareAndSet(1, 2); // mark one rerun; further events collapse into it
+            return;
+        }
+        Runnable worker = () -> {
+            boolean rerun;
+            do {
+                if (!serviceDestroyed) {
+                    try {
+                        task.run();
+                    } catch (Exception e) {
+                        FileLogger.log(this, "SERVICE", "⚠️ 合并网络维护任务失败 task="
+                                + taskName + " error=" + e.getClass().getSimpleName());
+                    }
+                }
+                int completedState = state.getAndSet(0);
+                rerun = completedState == 2 && !serviceDestroyed;
+                if (rerun && !state.compareAndSet(0, 1)) rerun = false;
+            } while (rerun);
+        };
+        try {
+            maintenanceExecutor.execute(worker);
+        } catch (java.util.concurrent.RejectedExecutionException rejected) {
+            state.set(0);
+            if (!serviceDestroyed) {
+                FileLogger.log(this, "SERVICE", "⚠️ 网络维护队列繁忙，保留后续回调重试: " + taskName);
+            }
+        }
+    }
+
     private void executeMaintenance(String taskName, Runnable task) {
         if (serviceDestroyed || task == null) return;
+        // These tasks read current system state, so callback bursts are safely coalesced.
+        if ("peer-route-refresh".equals(taskName)
+                || "wifi-lan-refresh".equals(taskName)
+                || "network-refresh".equals(taskName)) {
+            executeCoalescedMaintenance(taskName, task);
+            return;
+        }
         try {
             maintenanceExecutor.execute(() -> {
                 if (serviceDestroyed) return;
