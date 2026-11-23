@@ -981,7 +981,10 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     new String[]{receiverScope, senderPeerId, messageId});
             return c.moveToFirst() && c.getInt(0) != 0;
         } catch (Exception e) {
-            return false;
+            // A failed marker read is not evidence that the message has never been displayed.
+            // Propagate the storage failure so the receive path withholds ACK instead of
+            // appending the same message to legacy history a second time.
+            throw new IllegalStateException("Failed to read LAN inbox presentation state", e);
         } finally {
             if (c != null) c.close();
         }
