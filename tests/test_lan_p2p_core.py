@@ -3508,7 +3508,8 @@ class AndroidLanFastRetryBurstTests(unittest.TestCase):
         self.assertIn("requestLanChatRetryPlan()", transmit)
         complete = extract_java_method(service, "private void completeLanChatAckWindow(")
         self.assertIn("requestLanChatRetryPlan();", complete)
-        self.assertIn("short ACK/fast-retry decision has completed", complete)
+        self.assertIn("short ACK/fast-retry decision", complete)
+        self.assertIn("durable backoff only after", complete)
 
 
 class AndroidLanProbeIsolationTests(unittest.TestCase):

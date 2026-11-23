@@ -828,6 +828,8 @@ public final class LanChatStore extends SQLiteOpenHelper {
         db.beginTransaction();
         try {
             long now = System.currentTimeMillis();
+            // The first three LAN dispatches form a short reliability burst:
+            // attempts 2 and 3 may follow after 250ms; later attempts use durable backoff.
             android.database.sqlite.SQLiteStatement update = db.compileStatement(
                     "UPDATE lan_outbox_targets SET status='sent',attempt_count=attempt_count+1," +
                     "last_attempt_endpoint=?,last_attempt_at=?,last_error=? WHERE message_id=? AND peer_id=? AND status!='acked' " +
