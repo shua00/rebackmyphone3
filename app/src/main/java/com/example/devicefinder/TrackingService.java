@@ -278,6 +278,9 @@ public class TrackingService extends Service implements LocationListener {
     // Coalesce a recovery event that arrives while a retry batch is already in flight.
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRecoveryEventPending =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+    // A route refresh is an ordinary retry wake, not permission to reopen an exhausted epoch.
+    private final java.util.concurrent.atomic.AtomicBoolean lanChatRouteRefreshPending =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRetryWakeScheduled =
             new java.util.concurrent.atomic.AtomicBoolean(false);
     private final java.util.Set<String> activeLanChatTransmissions =
@@ -4037,6 +4040,8 @@ public class TrackingService extends Service implements LocationListener {
     private void retryPendingLanChatMessages(boolean recoveryEvent) {
         if (recoveryEvent) lanChatRecoveryEventPending.set(true);
         if (serviceDestroyed || !lanChatRetryInFlight.compareAndSet(false, true)) return;
+        // Consume only the ordinary route-refresh wake captured before this batch starts.
+        lanChatRouteRefreshPending.set(false);
         try {
             lanChatSendExecutor.execute(() -> {
                 try {
@@ -4119,6 +4124,9 @@ public class TrackingService extends Service implements LocationListener {
                     // Do not lose a network/peer recovery event that arrived during this batch.
                     if (lanChatRecoveryEventPending.get()) {
                         retryPendingLanChatMessages(true);
+                    } else if (lanChatRouteRefreshPending.get()) {
+                        // An ACK-timeout route refresh must not be lost behind this batch.
+                        retryPendingLanChatMessages(false);
                     } else {
                         // Re-arm after releasing the in-flight guard. A delayed callback may
                         // have fired while this batch was still running and been coalesced.
@@ -4771,6 +4779,7 @@ public class TrackingService extends Service implements LocationListener {
             activeLanChatTransmissions.remove(messageId);
         }
         if (requestRouteRefresh && !serviceDestroyed) {
+            lanChatRouteRefreshPending.set(true);
             retryPendingLanChatMessages(false);
         }
     }

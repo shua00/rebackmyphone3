@@ -455,6 +455,12 @@ class LanP2PCoreTests(unittest.TestCase):
             self.db_path, "m-retry", "android-a", "192.168.1.10", 8888))
         self.assertTrue(acknowledge_outgoing_message(
             self.db_path, "server2", "m-retry", "android-a"))
+        # A separately queued message to the same peer remains eligible even after
+        # the peer lease is downgraded to suspect; fixed recipient identity is durable.
+        record_peer(self.db_path, "server2", "android-a", "android", "android-main",
+                    "192.168.1.10", 8888, "suspect")
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-suspect-route", "later", ["android-a"]))
         pending = load_pending_outgoing_for_peer(self.db_path, "server2", "android-a")
         self.assertEqual(["m-suspect-route"], [row["message_id"] for row in pending])
         self.assertEqual("192.168.1.10", pending[0]["endpoint_ip"])
@@ -1679,7 +1685,7 @@ class LanP2PCoreTests(unittest.TestCase):
         chat_sender = chat[chat_start:chat_end]
         self.assertIn("if target_ids:", chat_sender)
         self.assertIn("attempts=1", chat_sender)
-        self.assertNotIn("message remains pending", chat_sender)
+        self.assertIn("message is persisted for retry after peer discovery", chat_sender)
         self.assertIn("elif begin_outgoing_discovery_window", chat_sender)
 
         server = (repo_root / "server2.py").read_text(encoding="utf-8")
@@ -1947,7 +1953,9 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertNotIn("verifiedChatPeers.remove(peerId)", cleanup)
         self.assertNotIn("verifiedChatPeerSeen.remove(peerId)", cleanup)
         self.assertNotIn("lastPeerDiscoveryAt = 0L;\n                for (String peerId", cleanup)
-        self.assertIn("保留已验证路由等待重试/租约到期", cleanup)
+        self.assertIn("保留已验证路由并触发有界路由刷新", cleanup)
+        self.assertIn("if (hadUdpDispatchAttempt || reachablePeerCount == 0)", cleanup)
+        self.assertIn("retryPendingLanChatMessages(false)", cleanup)
         self.assertIn("now - e.getValue() > 120_000L", send)
         self.assertIn("verifiedChatPeerRouteVersionCounter.incrementAndGet()", source)
 
@@ -2294,7 +2302,8 @@ class LanP2PCoreTests(unittest.TestCase):
         cleanup = handler.index("_remove_chat_fallback_for_message(")
         self.assertLess(route, persist)
         self.assertLess(persist, cleanup)
-        self.assertIn("and active_route", handler)
+        self.assertIn("(active_route or attempted_route)", handler)
+        self.assertIn("if active_route:", handler)
         self.assertIn('envelope.get("status") == "stored"', handler)
 
 
@@ -2648,9 +2657,9 @@ class LanP2PCoreTests(unittest.TestCase):
             self.assertIn("_V2_RECOVERY_RETRY_PEERS = set()", source, filename)
             self.assertIn("_V2_RECOVERY_INFLIGHT = set()", source, filename)
             self.assertIn("def _retry_deferred_v2_peer_recoveries():", source, filename)
-            self.assertIn("time.sleep(1)", source, filename)
+            self.assertIn("_V2_RECOVERY_WAKE_EVENT.wait(1.0)", source, filename)
             self.assertIn("list_due_outgoing_peers(", source, filename)
-            self.assertIn("list_known_peers(", source, filename)
+            self.assertIn("list_known_peer_snapshot(", source, filename)
             self.assertIn("def _start_v2_recovery_retry_worker():", source, filename)
             self.assertIn("if _V2_RECOVERY_WORKER_STARTED:", source, filename)
             start = source.index("def _resume_pending_v2_for_peer(")
@@ -3084,7 +3093,7 @@ class LanP2PCoreTests(unittest.TestCase):
         for filename in ("rescue2.py", "chat.py", "server2.py"):
             source = (repo_root / filename).read_text(encoding="utf-8")
             self.assertIn("list_due_outgoing_peers(", source, filename)
-            self.assertIn("recovery_event=False", source, filename)
+            self.assertIn("recovery_event=peer_id in recovery_event_peers", source, filename)
             self.assertIn("prepare_outgoing_peer_recovery(", source, filename)
             self.assertIn("ensure_outbox_retry_schema(", source, filename)
             self.assertIn("time.sleep(1)", source, filename)
@@ -3213,6 +3222,13 @@ class AndroidLanAckDiscoveryRaceTests(unittest.TestCase):
 
 
 class PythonFixedTargetImmediateDispatchTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.temp_dir.name, "peers.sqlite3")
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
     def test_suspect_peer_endpoint_can_be_attempted_and_ack_is_endpoint_bound(self):
         from lan_p2p_core import (
             persist_outgoing_message, record_peer, load_pending_fixed_targets,
@@ -3304,6 +3320,8 @@ class AndroidLanInstantRouteRecoveryTests(unittest.TestCase):
         self.assertIn("hadUdpDispatchAttempt.set(true)", send)
         self.assertIn("lastPeerDiscoveryAt = 0L", complete)
         self.assertIn("retryPendingLanChatMessages(false)", complete)
+        self.assertIn("lanChatRouteRefreshPending.set(true)", complete)
+        self.assertIn("lanChatRouteRefreshPending.get()", source)
         self.assertIn('scheduleLanChatTask("peer-verified-retry", () -> retryPendingLanChatMessages(true), 350L)', source)
 
 
