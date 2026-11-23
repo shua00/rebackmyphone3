@@ -59,7 +59,7 @@ from urllib.parse import urlparse, parse_qs
 # ★ 新增ThreadPoolExecutor 补丁： 2026-11-05 13:50
 from concurrent.futures import ThreadPoolExecutor
 
-from lan_p2p_core import LanP2PStorageError, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, peer_endpoint_matches, list_known_peer_snapshot, encode_chat_http_fallback_payload, decode_chat_http_fallback_payload, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, add_discovery_targets_for_peer, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, list_due_outgoing_peers
+from lan_p2p_core import LanP2PStorageError, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, encode_chat_http_fallback_payload, decode_chat_http_fallback_payload, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, add_discovery_targets_for_peer, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, list_due_outgoing_peers
 UDP_LISTEN_PORT = 8887  # server2 独立监听端口；发往 Android 的指令仍使用 8888
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "server2")
 
@@ -280,6 +280,7 @@ UDP_LISTENER_SOCKET = None
 UDP_CHAT_SEND_LOCK = threading.Lock()
 _V2_RECOVERY_RETRY_PEERS = set()
 _V2_RECOVERY_RETRY_LOCK = threading.Lock()
+_V2_RECOVERY_WAKE_EVENT = threading.Event()
 _V2_RECOVERY_INFLIGHT = set()
 _V2_RECOVERY_WORKER_STARTED = False
 _V2_RECOVERY_SCHEMA_READY = False
@@ -1376,12 +1377,10 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=True):
     try:
         try:
             add_discovery_targets_for_peer(CHAT_DEDUP_DB, "server2", peer_id)
-            force_replay = False
             if recovery_event:
-                force_replay = prepare_outgoing_peer_recovery(
-                    CHAT_DEDUP_DB, "server2", peer_id) > 0
+                prepare_outgoing_peer_recovery(CHAT_DEDUP_DB, "server2", peer_id)
             pending_rows = load_pending_outgoing_for_peer(
-                CHAT_DEDUP_DB, "server2", peer_id, limit=10, force=force_replay)
+                CHAT_DEDUP_DB, "server2", peer_id, limit=10, force=recovery_event)
         except Exception as e:
             with print_lock:
                 print(f"⚠️ server2 LAN outbox recovery deferred; durable ledger read failed: {type(e).__name__}")
@@ -1420,7 +1419,8 @@ def _retry_deferred_v2_peer_recoveries():
     """One process-wide worker handles ACK-timeout retries and deferred storage failures."""
     global _V2_RECOVERY_SCHEMA_READY
     while True:
-        time.sleep(1)
+        _V2_RECOVERY_WAKE_EVENT.wait(1.0)
+        _V2_RECOVERY_WAKE_EVENT.clear()
         if not _V2_RECOVERY_SCHEMA_READY:
             try:
                 ensure_outbox_retry_schema(CHAT_DEDUP_DB)
@@ -1431,7 +1431,9 @@ def _retry_deferred_v2_peer_recoveries():
                 time.sleep(4)
                 continue
         with _V2_RECOVERY_RETRY_LOCK:
-            pending_peer_ids = set(_V2_RECOVERY_RETRY_PEERS)
+            recovery_event_peers = set(_V2_RECOVERY_RETRY_PEERS)
+            _V2_RECOVERY_RETRY_PEERS.clear()
+            pending_peer_ids = set(recovery_event_peers)
         sock = UDP_LISTENER_SOCKET
         if sock is None:
             continue
@@ -1441,17 +1443,17 @@ def _retry_deferred_v2_peer_recoveries():
             pending_peer_ids.update(list_due_outgoing_peers(CHAT_DEDUP_DB, "server2", limit=500))
             if not pending_peer_ids:
                 continue
-            active_peers = {row["peer_id"]: row for row in list_known_peers(CHAT_DEDUP_DB, "server2", limit=500)}
+            known_peers = {row["peer_id"]: row for row in list_known_peer_snapshot(CHAT_DEDUP_DB, "server2", limit=500)}
         except Exception as exc:
             with print_lock:
                 print(f"⚠️ server2 LAN recovery retry scan deferred: {type(exc).__name__}")
             continue
         for peer_id in pending_peer_ids:
-            peer = active_peers.get(peer_id)
-            if peer:
+            peer = known_peers.get(peer_id)
+            if peer and peer.get("endpoint_ip") and int(peer.get("endpoint_port") or 0) in (8887, 8888, 8889, 8890):
                 _resume_pending_v2_for_peer(
                     sock, peer_id, (peer["endpoint_ip"], int(peer["endpoint_port"])),
-                    recovery_event=False)
+                    recovery_event=peer_id in recovery_event_peers)
 
 
 def _start_v2_recovery_retry_worker():
@@ -1511,14 +1513,19 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
                 CHAT_DEDUP_DB, "server2", reply_nonce, sender, addr[0], addr[1],
                 envelope.get("sender_peer_type", "unknown"),
                 envelope.get("service_id", "")):
-            _resume_pending_v2_for_peer(sock, sender, addr)
+            # Keep the UDP receive loop free for incoming messages and ACKs.
+            with _V2_RECOVERY_RETRY_LOCK:
+                _V2_RECOVERY_RETRY_PEERS.add(sender)
+            _V2_RECOVERY_WAKE_EVENT.set()
         return
     if packet_type == "chat.ack":
         message_id = str(envelope.get("message_id") or "")
         target = str(envelope.get("target_peer_id") or "")
         active_route = peer_endpoint_matches(CHAT_DEDUP_DB, "server2", sender, addr[0], addr[1])
+        attempted_route = outgoing_ack_endpoint_matches(
+            CHAT_DEDUP_DB, "server2", message_id, sender, addr[0], addr[1])
         if (target == PEER_NODE_ID and envelope.get("status") == "stored"
-                and sender and active_route):
+                and sender and (active_route or attempted_route)):
             if acknowledge_outgoing_message(CHAT_DEDUP_DB, "server2", message_id, sender):
                 if active_route:
                     record_peer(CHAT_DEDUP_DB, "server2", sender, "android", "android-main",
@@ -1600,7 +1607,7 @@ def send_server2_v2_chat_from_outbox(command_str, fixed_target_ids):
         if fixed_target_ids:
             return send_outbox_to_active_peers(
                 sock, CHAT_DEDUP_DB, "server2", message_id, envelope, RESCUE_SECRET,
-                send_lock=UDP_CHAT_SEND_LOCK, attempts=3, retry_delay_seconds=0.25)
+                send_lock=UDP_CHAT_SEND_LOCK, attempts=1, retry_delay_seconds=0.25)
 
         # No known recipients at message creation: bounded broadcast is permitted
         # only while the original first-discovery window remains open.

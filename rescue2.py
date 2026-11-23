@@ -115,7 +115,7 @@ PACKAGE_NAME = "com.example.devicefinder"
 
 # ===== 配置区 =====
 RESCUE_SECRET = "your_private_secret_key"
-from lan_p2p_core import LanP2PStorageError, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, load_active_pending_targets, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, list_due_outgoing_peers
+from lan_p2p_core import LanP2PStorageError, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, load_active_pending_targets, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, list_due_outgoing_peers
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "rescue2")
 DEFAULT_SERVER_URL = "http://dingwei.bai001.de5.net/api/report"
 DEFAULT_CONFIG_URL = "https://your-config-url.com/config.txt"
@@ -126,6 +126,7 @@ UDP_LISTENER_SOCKET = None
 UDP_CHAT_SEND_LOCK = threading.Lock()
 _V2_RECOVERY_RETRY_PEERS = set()
 _V2_RECOVERY_RETRY_LOCK = threading.Lock()
+_V2_RECOVERY_WAKE_EVENT = threading.Event()
 _V2_RECOVERY_INFLIGHT = set()
 _V2_RECOVERY_WORKER_STARTED = False
 _V2_RECOVERY_SCHEMA_READY = False
@@ -517,12 +518,10 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=True):
     try:
         try:
             add_discovery_targets_for_peer(_CHAT_DEDUP_DB, "rescue2", peer_id)
-            force_replay = False
             if recovery_event:
-                force_replay = prepare_outgoing_peer_recovery(
-                    _CHAT_DEDUP_DB, "rescue2", peer_id) > 0
+                prepare_outgoing_peer_recovery(_CHAT_DEDUP_DB, "rescue2", peer_id)
             pending_rows = load_pending_outgoing_for_peer(
-                _CHAT_DEDUP_DB, "rescue2", peer_id, limit=10, force=force_replay)
+                _CHAT_DEDUP_DB, "rescue2", peer_id, limit=10, force=recovery_event)
         except Exception as e:
             with print_lock:
                 print(f"⚠️ rescue2 LAN outbox recovery deferred; durable ledger read failed: {type(e).__name__}")
@@ -561,7 +560,8 @@ def _retry_deferred_v2_peer_recoveries():
     """One process-wide worker handles ACK-timeout retries and deferred storage failures."""
     global _V2_RECOVERY_SCHEMA_READY
     while True:
-        time.sleep(1)
+        _V2_RECOVERY_WAKE_EVENT.wait(1.0)
+        _V2_RECOVERY_WAKE_EVENT.clear()
         if not _V2_RECOVERY_SCHEMA_READY:
             try:
                 ensure_outbox_retry_schema(_CHAT_DEDUP_DB)
@@ -572,7 +572,9 @@ def _retry_deferred_v2_peer_recoveries():
                 time.sleep(4)
                 continue
         with _V2_RECOVERY_RETRY_LOCK:
-            pending_peer_ids = set(_V2_RECOVERY_RETRY_PEERS)
+            recovery_event_peers = set(_V2_RECOVERY_RETRY_PEERS)
+            _V2_RECOVERY_RETRY_PEERS.clear()
+            pending_peer_ids = set(recovery_event_peers)
         sock = UDP_LISTENER_SOCKET
         if sock is None:
             continue
@@ -582,17 +584,17 @@ def _retry_deferred_v2_peer_recoveries():
             pending_peer_ids.update(list_due_outgoing_peers(_CHAT_DEDUP_DB, "rescue2", limit=500))
             if not pending_peer_ids:
                 continue
-            active_peers = {row["peer_id"]: row for row in list_known_peers(_CHAT_DEDUP_DB, "rescue2", limit=500)}
+            known_peers = {row["peer_id"]: row for row in list_known_peer_snapshot(_CHAT_DEDUP_DB, "rescue2", limit=500)}
         except Exception as exc:
             with print_lock:
                 print(f"⚠️ rescue2 LAN recovery retry scan deferred: {type(exc).__name__}")
             continue
         for peer_id in pending_peer_ids:
-            peer = active_peers.get(peer_id)
-            if peer:
+            peer = known_peers.get(peer_id)
+            if peer and peer.get("endpoint_ip") and int(peer.get("endpoint_port") or 0) in (8887, 8888, 8889, 8890):
                 _resume_pending_v2_for_peer(
                     sock, peer_id, (peer["endpoint_ip"], int(peer["endpoint_port"])),
-                    recovery_event=False)
+                    recovery_event=peer_id in recovery_event_peers)
 
 
 def _start_v2_recovery_retry_worker():
@@ -652,14 +654,19 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
                 _CHAT_DEDUP_DB, "rescue2", reply_nonce, sender, addr[0], addr[1],
                 envelope.get("sender_peer_type", "unknown"),
                 envelope.get("service_id", "")):
-            _resume_pending_v2_for_peer(sock, sender, addr)
+            # Keep the UDP receive loop free for incoming messages and ACKs.
+            with _V2_RECOVERY_RETRY_LOCK:
+                _V2_RECOVERY_RETRY_PEERS.add(sender)
+            _V2_RECOVERY_WAKE_EVENT.set()
         return
     if packet_type == "chat.ack":
         message_id = str(envelope.get("message_id") or "")
         target = str(envelope.get("target_peer_id") or "")
         active_route = peer_endpoint_matches(_CHAT_DEDUP_DB, "rescue2", sender, addr[0], addr[1])
+        attempted_route = outgoing_ack_endpoint_matches(
+            _CHAT_DEDUP_DB, "rescue2", message_id, sender, addr[0], addr[1])
         if (target == PEER_NODE_ID and envelope.get("status") == "stored"
-                and sender and active_route):
+                and sender and (active_route or attempted_route)):
             acknowledge_outgoing_message(_CHAT_DEDUP_DB, "rescue2", message_id, sender)
         return
     if packet_type != "chat.message":
@@ -695,7 +702,6 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
 def send_chat_v2(body, target_ips):
     """Persist PC-originated chat and send from bound UDP 8889 so ACKs return here."""
     message_id = uuid.uuid4().hex
-    peers = list_known_peers(_CHAT_DEDUP_DB, "rescue2")
     peer_snapshot = list_known_peer_snapshot(_CHAT_DEDUP_DB, "rescue2")
     selected_ips = set(target_ips or [])
     broadcast_all = not selected_ips or "255.255.255.255" in selected_ips
@@ -705,8 +711,6 @@ def send_chat_v2(body, target_ips):
     else:
         # Preserve known offline recipients selected by their last recorded address.
         target_ids = [p["peer_id"] for p in peer_snapshot if p["endpoint_ip"] in selected_ips]
-    selected_id_set = set(target_ids)
-    selected_peers = [p for p in peers if p["peer_id"] in selected_id_set]
     created = int(time.time() * 1000)
     probe = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
              "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
@@ -726,14 +730,11 @@ def send_chat_v2(body, target_ips):
         print("⚠️ rescue2 UDP 监听尚未就绪，消息已保存，等待设备重新发现后补发。")
         return False
     try:
-        if selected_peers:
+        if target_ids:
+            # Fixed identities remain immutable; send to their persisted endpoint immediately.
             send_outbox_to_active_peers(
                 sock, _CHAT_DEDUP_DB, "rescue2", message_id, probe, RESCUE_SECRET,
-                send_lock=UDP_CHAT_SEND_LOCK, attempts=3, retry_delay_seconds=0.25)
-        elif target_ids:
-            # The fixed recipient snapshot contains known but currently offline peers.
-            # Never broadcast their old message to devices that join after the snapshot.
-            print(f"ℹ️ 固定对讲目标当前无已验证路由，保留原消息等待 peer 重新上线: {message_id}")
+                send_lock=UDP_CHAT_SEND_LOCK, attempts=1, retry_delay_seconds=0.25)
         elif broadcast_all and begin_outgoing_discovery_window(
                 _CHAT_DEDUP_DB, "rescue2", message_id) and is_outgoing_discovery_pending(
                     _CHAT_DEDUP_DB, "rescue2", message_id):
