@@ -4386,6 +4386,7 @@ public class TrackingService extends Service implements LocationListener {
         }
 
         stageStartedAt = android.os.SystemClock.elapsedRealtime();
+        final long routeProbeStartedAt = stageStartedAt;
         // 先清理过期租约；同一网络内仍有已验证成员时直接复用单播路由，
         // 不再让每条聊天消息都额外等待一次 500ms 广播发现窗口。
         long now = System.currentTimeMillis();
@@ -4557,7 +4558,7 @@ public class TrackingService extends Service implements LocationListener {
             }
         }
         routeProbeMs = Math.max(0L, android.os.SystemClock.elapsedRealtime()
-                - stageStartedAt - broadcastLookupMs);
+                - routeProbeStartedAt - broadcastLookupMs);
         stageStartedAt = android.os.SystemClock.elapsedRealtime();
         byte[] broadcastData;
         try { broadcastData = buildAuthenticatedLanChatPacket(myId, "*", messageId, message); }

@@ -3443,6 +3443,8 @@ class AndroidLanFixedTargetFastPathTests(unittest.TestCase):
         self.assertGreater(broadcast, discover)
         self.assertIn("if (shouldDiscoverPeers || pendingTargetIds.isEmpty())", internal)
         self.assertIn("broadcasts = new String[0]", internal)
+        self.assertIn("final long routeProbeStartedAt = stageStartedAt", internal)
+        self.assertIn("- routeProbeStartedAt - broadcastLookupMs", internal)
 
     def test_fixed_target_unicast_skips_discovery_window_sqlite_read(self):
         repo_root = Path(__file__).resolve().parents[1]
