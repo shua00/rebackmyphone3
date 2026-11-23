@@ -3908,5 +3908,16 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         # transactionally immediately before every actual unicast dispatch.
         self.assertIn("store.markAttempt(messageId, peerId, attemptedEndpoint, \"\");", internal)
 
+    def test_android_missing_peer_packet_does_not_consume_delivery_attempt(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        internal = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
+        packet_pos = internal.index("byte[] peerData = preparedPeerPackets.get(peerId);")
+        missing_guard_pos = internal.index("if (peerData == null)", packet_pos)
+        attempt_pos = internal.index("store.markAttempt(messageId, peerId, attemptedEndpoint, \"\");")
+        self.assertLess(packet_pos, missing_guard_pos)
+        self.assertLess(missing_guard_pos, attempt_pos)
+        self.assertIn("保留发送预算 peer=", internal)
+
 if __name__ == "__main__":
     unittest.main()
