@@ -1267,7 +1267,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("peerId == null || peerId.length() == 0", acknowledge)
         self.assertLess(acknowledge.index("peerId.length() == 0"),
                         acknowledge.index('db.update("lan_outbox_targets", ackValues'))
-        self.assertIn("!\\"discovery_pending\\".equals(state)", acknowledge)
+        self.assertIn('if (state.isEmpty() || "expired".equals(state)) return false;', acknowledge)
 
     def test_android_expired_outbox_rejects_late_ack_without_mutating_targets(self):
         repo_root = Path(__file__).resolve().parents[1]
