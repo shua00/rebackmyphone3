@@ -2591,7 +2591,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("NetworkInterface.getByName(links.getInterfaceName())", broadcast)
         self.assertNotIn("name.startsWith(\"wlan\")", broadcast[:broadcast.index("// Pre-M fallback")])
         bind = extract_java_method(source, "private Network bindSocketToWifi(")
-        self.assertIn("lanChatBoundWifiNetwork = selected", bind)
+        self.assertNotIn("lanChatBoundWifiNetwork =", bind)
+        self.assertIn("return selected;", bind)
         refresh = extract_java_method(source, "private void refreshWifiLanTransport(")
         self.assertIn("lanChatBoundWifiNetwork = null", refresh)
 
