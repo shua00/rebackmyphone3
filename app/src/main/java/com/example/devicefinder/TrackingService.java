@@ -4223,6 +4223,18 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.log(this, "CHAT", "ℹ️ 当前没有可确认的 Wi-Fi LAN 路径，消息保留账本且不消耗发送预算");
                 return;
             }
+            // Read the durable recipient snapshot before FIFO admission. This is read-only:
+            // ACK races are still closed by markAttempt() immediately before each UDP send.
+            // Keeping SQLite target enumeration outside the shared sender lock prevents a slow
+            // database read from delaying a fresh interactive message behind a retry batch.
+            final List<LanChatStore.Target> preparedTargets;
+            try {
+                preparedTargets = store.loadTargets(messageId);
+            } catch (Exception targetReadFailure) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN 目标账本读取失败，消息保留待重试: "
+                        + targetReadFailure.getClass().getSimpleName());
+                return;
+            }
             // Wait for the FIFO transmit turn before charging this message's retry epoch.
             // Time spent queued behind another sender is not a delivery attempt.
             long lockRequestedAt = android.os.SystemClock.elapsedRealtime();
@@ -4259,7 +4271,7 @@ public class TrackingService extends Service implements LocationListener {
                 }
                 attemptRecorded = true;
                 if (!serviceDestroyed) {
-                    transmitLocalUdpMessageInternal(message, messageId, socket, socketGeneration);
+                    transmitLocalUdpMessageInternal(message, messageId, socket, socketGeneration, preparedTargets);
                 }
             } finally {
                 long lockHoldMs = android.os.SystemClock.elapsedRealtime() - lockAcquiredAt;
@@ -4359,7 +4371,8 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private void transmitLocalUdpMessageInternal(final String message, final String messageId,
-            DatagramSocket socket, long socketGeneration) {
+            DatagramSocket socket, long socketGeneration,
+            final List<LanChatStore.Target> savedTargets) {
         final long preparationStartedAt = android.os.SystemClock.elapsedRealtime();
         if (!isCurrentLanChatSocket(socket, socketGeneration)) {
             FileLogger.log(this, "CHAT", "ℹ️ P2P send rejected for stale UDP socket generation message=" + messageId);
@@ -4381,20 +4394,10 @@ public class TrackingService extends Service implements LocationListener {
         String myId = getUniqueDeviceId();
         long stageStartedAt = android.os.SystemClock.elapsedRealtime();
 
-        // Measure target lookup independently; do not enumerate network interfaces yet.
-        // Known fixed recipients use unicast and do not need a broadcast address at all.
-        stageStartedAt = android.os.SystemClock.elapsedRealtime();
-        // Recipient membership was snapshotted at enqueue time. Only an empty initial
-        // snapshot may collect newly verified peers through addDiscoveryPeerToOpenMessages().
-        final List<LanChatStore.Target> savedTargets;
-        try {
-            savedTargets = store.loadTargets(messageId);
-        } catch (Exception e) {
-            FileLogger.log(this, "CHAT", "⚠️ LAN 目标账本读取失败，本轮拒绝发送以免误投: "
-                    + e.getClass().getSimpleName());
-            return;
-        }
-        targetLoadMs = android.os.SystemClock.elapsedRealtime() - stageStartedAt;
+        // The durable recipient snapshot was loaded before FIFO admission. It is read-only;
+        // every actual recipient send is still revalidated transactionally by markAttempt().
+        // This keeps SQLite target enumeration out of the shared transmission critical section.
+        final long targetLoadMs = 0L;
         java.util.Set<String> pendingTargetIds = new java.util.HashSet<>();
         for (LanChatStore.Target target : savedTargets) {
             if (!"acked".equals(target.status)) pendingTargetIds.add(target.peerId);
