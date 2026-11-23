@@ -204,7 +204,6 @@ DEVICE_TOKEN_IS_DEFAULT = (AUTH_TOKEN == DEFAULT_DEVICE_TOKEN and RESCUE_SECRET 
 
 def _claim_chat_message(sender, message_id, content):
     """Persist body and ID atomically in a receiver-specific namespace before ACK."""
-    global CHAT_DEDUP_OPS
     key = str(message_id or content or "")
     if not key: return None
     now = time.time()
@@ -229,13 +228,6 @@ def _claim_chat_message(sender, message_id, content):
                     with print_lock:
                         print("⚠️ server2 message_id payload conflict; refusing stored ACK")
                     return None
-                CHAT_DEDUP_OPS += 1 if claim else 0
-                if claim and CHAT_DEDUP_OPS % 128 == 0:
-                    conn.execute("DELETE FROM received_chat_messages WHERE receiver_scope=? AND received_at<?",
-                                 ("server2", now - 7 * 86400))
-                    conn.execute("""DELETE FROM received_chat_messages WHERE receiver_scope=? AND rowid IN (
-                        SELECT rowid FROM received_chat_messages WHERE receiver_scope=?
-                        ORDER BY received_at DESC LIMIT -1 OFFSET 10000)""", ("server2", "server2"))
                 conn.commit()
                 return claim
             finally: conn.close()
@@ -284,7 +276,6 @@ LAST_MSG_INFO_MAX = 100
 LAST_MSG_INFO_TTL = 10.0
 CHAT_DEDUP_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3")
 CHAT_DEDUP_LOCK = threading.Lock()
-CHAT_DEDUP_OPS = 0
 UDP_LISTENER_SOCKET = None
 UDP_CHAT_SEND_LOCK = threading.Lock()
 _V2_RECOVERY_RETRY_PEERS = set()
