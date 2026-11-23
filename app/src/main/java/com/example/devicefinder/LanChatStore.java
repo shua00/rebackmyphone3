@@ -537,20 +537,26 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
-    /** Record an attempt without changing the last endpoint known to have accepted a UDP send. */
+    /** Record an attempt only while both the recipient and parent outbox remain sendable. */
     public boolean markAttempt(String messageId, String peerId, String error) {
         if (messageId == null || peerId == null) return false;
         try {
             SQLiteDatabase db = getWritableDatabase();
-            db.execSQL("UPDATE lan_outbox_targets SET status='sent',attempt_count=attempt_count+1," +
-                    "last_attempt_at=?,last_error=? WHERE message_id=? AND peer_id=? AND status!='acked'",
-                    new Object[]{System.currentTimeMillis(), error == null ? "" : error, messageId, peerId});
-            Cursor c = db.rawQuery(
-                    "SELECT status FROM lan_outbox_targets WHERE message_id=? AND peer_id=?",
-                    new String[]{messageId, peerId});
+            android.database.sqlite.SQLiteStatement update = db.compileStatement(
+                    "UPDATE lan_outbox_targets SET status='sent',attempt_count=attempt_count+1," +
+                    "last_attempt_at=?,last_error=? WHERE message_id=? AND peer_id=? AND status!='acked' " +
+                    "AND EXISTS (SELECT 1 FROM lan_outbox o " +
+                    "WHERE o.message_id=lan_outbox_targets.message_id " +
+                    "AND o.state NOT IN ('delivered','expired','waiting_peers'))");
             try {
-                return c.moveToFirst() && !"acked".equals(c.getString(0));
-            } finally { c.close(); }
+                update.bindLong(1, System.currentTimeMillis());
+                update.bindString(2, error == null ? "" : error);
+                update.bindString(3, messageId);
+                update.bindString(4, peerId);
+                return update.executeUpdateDelete() == 1;
+            } finally {
+                update.close();
+            }
         } catch (Exception e) {
             return false;
         }
