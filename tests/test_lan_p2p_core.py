@@ -2545,17 +2545,19 @@ class LanP2PCoreTests(unittest.TestCase):
         fingerprint_start = source.index("private String buildWifiLanFingerprint")
         fingerprint_end = source.index("private void refreshWifiLanTransport", fingerprint_start)
         fingerprint = source[fingerprint_start:fingerprint_end]
-        self.assertIn('if (caps == null) return "UNAVAILABLE";', fingerprint)
+        self.assertIn("boolean incompleteNetworkSnapshot = false;", fingerprint)
+        self.assertIn("if (caps == null) {", fingerprint)
         self.assertIn('if (links == null || links.getInterfaceName() == null', fingerprint)
         self.assertIn('|| links.getLinkAddresses().isEmpty())', fingerprint)
-        self.assertIn('return "UNAVAILABLE";', fingerprint)
-        # getAllNetworks() ordering is unspecified; canonical sorting prevents
-        # false topology changes when Android enumerates the same networks differently.
+        self.assertIn('return incompleteNetworkSnapshot ? "UNAVAILABLE" : "NO_WIFI";', fingerprint)
+        # Canonicalize both the outer network set and nested address/route lists.
+        self.assertIn("java.util.Collections.sort(addressEntries)", fingerprint)
+        self.assertIn("java.util.Collections.sort(routeEntries)", fingerprint)
         sort_at = fingerprint.index("java.util.Collections.sort(wifiEntries)")
         append_at = fingerprint.index("for (String entry : wifiEntries)")
         self.assertLess(sort_at, append_at)
         self.assertIn("wifiEntries.add(network.toString()", fingerprint)
-        self.assertIn('if (wifiEntries.isEmpty()) return "NO_WIFI";', fingerprint)
+        self.assertIn("incompleteNetworkSnapshot = true;", fingerprint)
 
     def test_outbox_database_read_failures_raise_instead_of_looking_empty(self):
         operations = (
@@ -2586,7 +2588,9 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertNotIn("将使用系统默认出口", method)
         self.assertIn("selected.bindSocket(socket)", method)
         self.assertIn("incompleteNetworkSnapshot", method)
-        self.assertIn("Network capabilities incomplete; defer UDP socket binding", method)
+        self.assertIn("No complete Wi-Fi candidate; defer UDP socket binding", method)
+        self.assertIn("if (wifiNetworks.isEmpty())", method)
+        self.assertIn("Ignore incomplete non-selected candidates", method)
         self.assertIn("Network active = cm.getActiveNetwork()", method)
         self.assertIn("wifiNetworks.contains(active)", method)
         self.assertIn("wifiNetworks.size() == 1", method)

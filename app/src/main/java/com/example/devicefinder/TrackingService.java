@@ -2144,31 +2144,48 @@ public class TrackingService extends Service implements LocationListener {
         // Canonicalize the complete Wi-Fi path set so enumeration reordering alone
         // cannot revoke verified peers or restart the UDP listener.
         List<String> wifiEntries = new ArrayList<>();
+        boolean incompleteNetworkSnapshot = false;
         try {
             for (Network network : cm.getAllNetworks()) {
                 NetworkCapabilities caps = cm.getNetworkCapabilities(network);
-                // A network can be enumerated before its capabilities are published.
-                // Do not turn that transient, incomplete snapshot into NO_WIFI.
-                if (caps == null) return "UNAVAILABLE";
+                // getAllNetworks() also contains cellular/VPN candidates. One transient
+                // null capability must not disable an otherwise complete Wi-Fi LAN path.
+                if (caps == null) {
+                    incompleteNetworkSnapshot = true;
+                    continue;
+                }
                 if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue;
                 LinkProperties links = cm.getLinkProperties(network);
-                // onAvailable may precede LinkProperties; an interface-less Wi-Fi
-                // snapshot is not evidence that the LAN route actually changed.
+                // An incomplete Wi-Fi candidate is ignored when another complete Wi-Fi
+                // path is available; if none is complete, preserve UNAVAILABLE semantics.
                 if (links == null || links.getInterfaceName() == null
                         || links.getInterfaceName().isEmpty()
                         || links.getLinkAddresses() == null
                         || links.getLinkAddresses().isEmpty()) {
-                    return "UNAVAILABLE";
+                    incompleteNetworkSnapshot = true;
+                    continue;
                 }
+                List<String> addressEntries = new ArrayList<>();
+                for (android.net.LinkAddress address : links.getLinkAddresses()) {
+                    addressEntries.add(address.toString());
+                }
+                java.util.Collections.sort(addressEntries);
+                List<String> routeEntries = new ArrayList<>();
+                for (android.net.RouteInfo route : links.getRoutes()) {
+                    routeEntries.add(route.toString());
+                }
+                java.util.Collections.sort(routeEntries);
                 wifiEntries.add(network.toString() + '|'
                         + links.getInterfaceName() + '|'
-                        + links.getLinkAddresses() + '|'
-                        + links.getRoutes());
+                        + addressEntries + '|'
+                        + routeEntries);
             }
         } catch (Exception e) {
             return "ERROR";
         }
-        if (wifiEntries.isEmpty()) return "NO_WIFI";
+        if (wifiEntries.isEmpty()) {
+            return incompleteNetworkSnapshot ? "UNAVAILABLE" : "NO_WIFI";
+        }
         java.util.Collections.sort(wifiEntries);
         StringBuilder signature = new StringBuilder();
         for (String entry : wifiEntries) {
@@ -3133,13 +3150,17 @@ public class TrackingService extends Service implements LocationListener {
                     wifiNetworks.add(network);
                 }
             }
-            if (incompleteNetworkSnapshot) {
-                throw new java.io.IOException("Network capabilities incomplete; defer UDP socket binding");
-            }
             if (wifiNetworks.isEmpty()) {
-                // No Wi-Fi transport is currently visible; retain the platform default route.
+                if (incompleteNetworkSnapshot) {
+                    throw new java.io.IOException("No complete Wi-Fi candidate; defer UDP socket binding");
+                }
+                // No Wi-Fi transport is currently visible; retain the platform default route
+                // for the existing non-chat UDP business paths.
                 return;
             }
+            // Ignore incomplete non-selected candidates when at least one complete Wi-Fi
+            // network is available. The active Wi-Fi path still wins; ambiguous multiple
+            // non-default Wi-Fi candidates remain fail-closed below.
 
             // Prefer the active default when it is Wi-Fi. If cellular is the default,
             // a single Wi-Fi network is still the intended local-LAN transport. With
