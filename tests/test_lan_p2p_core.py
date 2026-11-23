@@ -1462,7 +1462,7 @@ class LanP2PCoreTests(unittest.TestCase):
         store = (
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         ).read_text(encoding="utf-8")
-        self.assertIn("DB_VERSION = 8", store)
+        self.assertIn("DB_VERSION = 9", store)
         self.assertIn("retry_attempt_count INTEGER NOT NULL DEFAULT 0", store)
         self.assertIn("state='retry_paused'", store)
         self.assertIn("'retry_paused' ELSE state", store)
@@ -1531,9 +1531,9 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("SUM(CASE WHEN status!='acked'", progress)
         self.assertIn("retry_attempt_count<?", attempt)
         self.assertIn("last_recovery_at_ms INTEGER NOT NULL DEFAULT 0", store)
-        self.assertIn("DB_VERSION = 8", store)
+        self.assertIn("DB_VERSION = 9", store)
         self.assertIn("idx_lan_targets_retry", store)
-        self.assertIn("DB_VERSION = 8", store)
+        self.assertIn("DB_VERSION = 9", store)
         self.assertIn("retry_attempt_count=0,last_retry_at_ms=0", store)
         ack = extract_java_method(store, "public boolean acknowledge(")
         self.assertIn('hasRetryBudget ? "pending" : "retry_paused"', ack)
@@ -1588,7 +1588,7 @@ class LanP2PCoreTests(unittest.TestCase):
         send_method = tracking[send_start:send_end]
         attempt_pos = send_method.index("targetAttemptAllowed = store != null")
         skip_pos = send_method.index("continue;", attempt_pos)
-        udp_pos = send_method.index('sendLanUdpPacket(socket, p, "CHAT_UNICAST")')
+        udp_pos = send_method.index("sendLanUdpPacket(socket, p, verifiedRoutePeerIds.contains(peerId)")
         endpoint_pos = send_method.index("store.recordSuccessfulSendEndpoint(messageId, peerId")
         self.assertLess(attempt_pos, skip_pos)
         self.assertLess(skip_pos, udp_pos)
