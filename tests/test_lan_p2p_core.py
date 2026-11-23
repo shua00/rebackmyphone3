@@ -3559,25 +3559,26 @@ class AndroidLanInboxProjectionRecoveryTests(unittest.TestCase):
 
 
 class AndroidLanFixedTargetFastPathTests(unittest.TestCase):
-    def test_fixed_target_unicast_skips_broadcast_address_enumeration(self):
+    def test_first_discovery_broadcast_address_is_resolved_before_fifo_lock(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        send = extract_java_method(source, "private void transmitLocalUdpMessage(")
         internal = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
-        discover = internal.index("boolean shouldDiscoverPeers =")
-        broadcast = internal.index("String subnetBcast = getWifiBroadcastAddress()")
-        self.assertGreater(broadcast, discover)
-        self.assertIn("if (pendingTargetIds.isEmpty())", internal)
-        self.assertIn("broadcasts = new String[0]", internal)
-        self.assertIn("final String[] discoveryBroadcasts = broadcasts.length > 0", internal)
+        lookup = send.index("? getWifiBroadcastAddress() : null")
+        lock = send.index("lanChatTransmitLock.lock()")
+        self.assertLess(lookup, lock)
+        self.assertIn("pendingSnapshotTargets == 0", send)
+        self.assertIn("preLockBroadcastLookupMs", send)
+        self.assertIn("preparedBroadcastAddress, preLockBroadcastLookupMs", send)
+        self.assertIn("final String[] broadcasts = pendingTargetIds.isEmpty()", internal)
+        self.assertIn("new String[]{preparedBroadcastAddress}", internal)
+        self.assertNotIn("getWifiBroadcastAddress()", internal)
+        # Fixed-recipient discovery still resolves its auxiliary broadcast address asynchronously.
         self.assertIn("new String[]{getWifiBroadcastAddress()}", internal)
-        self.assertIn("for (String target : discoveryBroadcasts)", internal)
-        self.assertIn("for (String target : broadcasts)", internal)
-        self.assertIn("P2P async discovery broadcast lookup", internal)
         probe_queue = internal.index("lanChatProbeExecutor.execute(() ->")
         async_lookup = internal.index("new String[]{getWifiBroadcastAddress()}", probe_queue)
         self.assertGreater(async_lookup, probe_queue)
-        self.assertIn("final long routeProbeStartedAt = stageStartedAt", internal)
-        self.assertIn("- routeProbeStartedAt - broadcastLookupMs", internal)
+        self.assertIn("for (String target : broadcasts)", internal)
 
     def test_fixed_target_unicast_skips_discovery_window_sqlite_read(self):
         repo_root = Path(__file__).resolve().parents[1]
