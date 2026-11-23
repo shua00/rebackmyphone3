@@ -3182,5 +3182,24 @@ class AndroidLanTransmitFairnessTests(unittest.TestCase):
         self.assertIn("lanChatImmediateExecutor", source)
         self.assertIn("lanChatSendExecutor", source)
 
+
+class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
+    def test_fixed_targets_without_a_first_udp_send_keep_a_route_probe_wakeup(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        tracking = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        pending_targets = extract_java_method(store, "public boolean hasUnattemptedTargets(")
+        self.assertIn("t.attempt_count=0", pending_targets)
+        self.assertIn("t.status!='acked'", pending_targets)
+        self.assertIn("'delivered','expired','waiting_peers','retry_paused'", pending_targets)
+
+        scheduler = extract_java_method(tracking, "private void scheduleLanChatRetryFromOutbox(")
+        self.assertIn("store.hasUnattemptedTargets(item.messageId)", scheduler)
+        self.assertIn("hasUnattemptedRouteTargets", scheduler)
+        self.assertIn("Math.min(5_000L, sendRetryDelayMs)", scheduler)
+        self.assertIn("if (minimumAttempts == Integer.MAX_VALUE && !hasUnattemptedRouteTargets) return", scheduler)
+        self.assertIn("markAttempt()", scheduler)
+        self.assertIn("does not increment attempt_count", scheduler)
+
 if __name__ == "__main__":
     unittest.main()
