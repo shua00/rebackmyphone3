@@ -164,7 +164,6 @@ _LAST_UDP_MSG = {}
 _LAST_UDP_MSG_TTL = 10
 _CHAT_DEDUP_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3")
 _CHAT_DEDUP_LOCK = threading.Lock()
-_CHAT_DEDUP_OPS = 0
 print_lock = threading.Lock()  # v2.0.2 补丁：全局打印锁，防多线程输出错乱
 
 def _restore_chat_history():
@@ -190,7 +189,6 @@ def _restore_chat_history():
 
 def _claim_chat_message(sender, message_id, content):
     """Persist body and ID atomically in a receiver-specific namespace before ACK."""
-    global _CHAT_DEDUP_OPS
     key = str(message_id or content or "")
     if not key: return None
     now = time.time()
@@ -215,13 +213,6 @@ def _claim_chat_message(sender, message_id, content):
                     with print_lock:
                         print("⚠️ rescue2 message_id payload conflict; refusing stored ACK")
                     return None
-                _CHAT_DEDUP_OPS += 1 if claim else 0
-                if claim and _CHAT_DEDUP_OPS % 128 == 0:
-                    conn.execute("DELETE FROM received_chat_messages WHERE receiver_scope=? AND received_at<?",
-                                 ("rescue2", now - 7 * 86400))
-                    conn.execute("""DELETE FROM received_chat_messages WHERE receiver_scope=? AND rowid IN (
-                        SELECT rowid FROM received_chat_messages WHERE receiver_scope=?
-                        ORDER BY received_at DESC LIMIT -1 OFFSET 10000)""", ("rescue2", "rescue2"))
                 conn.commit()
                 return claim
             finally: conn.close()
