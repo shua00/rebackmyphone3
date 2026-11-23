@@ -380,10 +380,12 @@ def list_due_outgoing_peers(db_path, sender_scope, limit=500, now_ms=None):
             WHERE o.sender_scope=? AND o.state NOT IN ('delivered','expired','waiting_peers')
               AND t.status!='acked' AND t.attempt_count<?
               AND p.status='active' AND p.lease_expires_at>?
-              AND (t.attempt_count=0 OR t.last_attempt_at +
-                   CASE t.attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000
-                     WHEN 3 THEN 10000 WHEN 4 THEN 20000 WHEN 5 THEN 40000
-                     ELSE 60000 END <= ?)
+              AND (t.attempt_count=0
+                   OR t.last_endpoint != (p.endpoint_ip || ':' || p.endpoint_port)
+                   OR t.last_attempt_at +
+                      CASE t.attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000
+                        WHEN 3 THEN 10000 WHEN 4 THEN 20000 WHEN 5 THEN 40000
+                        ELSE 60000 END <= ?)
             ORDER BY t.peer_id LIMIT ?""",
             (sender_scope, sender_scope, MAX_OUTBOX_TARGET_ATTEMPTS,
              now / 1000.0, now, max(1, min(500, int(limit))))).fetchall()
@@ -555,10 +557,12 @@ def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10, for
             WHERE o.sender_scope=? AND t.peer_id=? AND t.status!='acked'
               AND o.state NOT IN ('delivered','expired','waiting_peers')
               AND t.attempt_count<?
-              AND (?=1 OR t.attempt_count=0 OR t.last_attempt_at +
-                   CASE t.attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000
-                     WHEN 3 THEN 10000 WHEN 4 THEN 20000 WHEN 5 THEN 40000
-                     ELSE 60000 END <= ?)
+              AND (?=1 OR t.attempt_count=0
+                   OR t.last_endpoint != (p.endpoint_ip || ':' || p.endpoint_port)
+                   OR t.last_attempt_at +
+                      CASE t.attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000
+                        WHEN 3 THEN 10000 WHEN 4 THEN 20000 WHEN 5 THEN 40000
+                        ELSE 60000 END <= ?)
             ORDER BY o.created_at_ms LIMIT ?""",
             (sender_scope, sender_scope, peer_id, MAX_OUTBOX_TARGET_ATTEMPTS,
              1 if force else 0, now_ms, max(1, min(50, int(limit))))).fetchall()
@@ -588,19 +592,19 @@ def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_po
     try:
         conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("PRAGMA busy_timeout=10000")
+        endpoint = str(endpoint_ip) + ":" + str(endpoint_port)
         cur = conn.execute("""UPDATE lan_outbox_targets SET status='sent',
             attempt_count=attempt_count+1,last_attempt_at=?,last_endpoint=?,last_error=''
             WHERE message_id=? AND peer_id=? AND status!='acked' AND attempt_count<?
-              AND (?=1 OR attempt_count=0 OR last_attempt_at +
+              AND (?=1 OR attempt_count=0 OR last_endpoint<>? OR last_attempt_at +
                    CASE attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000
                      WHEN 3 THEN 10000 WHEN 4 THEN 20000 WHEN 5 THEN 40000
                      ELSE 60000 END <= ?)
               AND EXISTS (SELECT 1 FROM lan_outbox o
                           WHERE o.message_id=lan_outbox_targets.message_id
                             AND o.state NOT IN ('delivered','expired','waiting_peers'))""",
-            (now_ms, str(endpoint_ip) + ":" + str(endpoint_port),
-             message_id, peer_id, MAX_OUTBOX_TARGET_ATTEMPTS,
-             1 if allow_fast_retry else 0, now_ms))
+            (now_ms, endpoint, message_id, peer_id, MAX_OUTBOX_TARGET_ATTEMPTS,
+             1 if allow_fast_retry else 0, endpoint, now_ms))
         conn.commit()
         return cur.rowcount > 0
     except Exception as exc:
