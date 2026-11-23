@@ -99,3 +99,63 @@ APK 常量中存在 `PASSWORDOPT`、`SECRETOPT`、`SECRETEXOPT` 等旧协议选�
 已完成 Manifest、协议常量、实际服务调用链、UDP 端口/缓冲区、核心信封格式、广播发现入口、发送线程和接收线程模型的静态核查。未完成的部分包括完整逐分支 DEX 控制流复核、所有消息命令分支的端到端调用确认、设备运行时抓包，以及不同目标版本/网络条件下的动态行为验证。
 
 本分析只作为设计借鉴，不改变 LAN P2P v2 的协议、验收标准或原有功能边界。
+
+
+## 10. 深入核查：接收分发、数据报解析与运行状态
+
+### 10.1 接收端到通知端的实际调用链
+
+进一步追踪 `core.IPMessenger$ChildThread.run()`、`core.IPMessenger.receiveMsg()`、`service.ServiceController.receiveMsg()` 及其 Runnable，可确认消息进入应用层后的路径：
+
+1. UDP 接收循环收到数据报后创建 `ChildThread`。
+2. `ChildThread` 解析信封并将业务消息交给 `core.IPMessenger.receiveMsg()`。
+3. `receiveMsg()` 转交给抽象控制器的 `receiveMsg()` 回调。
+4. 当前服务控制器将回调封装为 `ServiceController$3`，通过 `Handler.post()` 投递。
+5. Runnable 创建 `IPMessenger Service Receiver ACTION` 广播，携带消息、发送者用户名、主机名及 secret 标志。
+6. 动态注册的 `IpMessengerReceiver` 收到广播后执行振动和系统通知展示。
+
+这证明网络接收与通知展示之间有服务层分发边界；通知广播不是 UDP ACK，也不是持久化记录。
+
+### 10.2 数据报有效长度处理存在缺口
+
+- `ChildThread` 只调用 `DatagramPacket.getData()`，再用 GBK 构造字符串。
+- 对整个 DEX 的方法引用检查没有发现 `DatagramPacket.getLength()`。
+- 当前解析因此没有显式限制到本次数据报的有效字节长度，而是依赖接收缓冲区内容和后续 `trim()`。
+- 这会把尾部填充字节也交给字符串解码，并可能把合法尾随空白一并裁掉；它不是可靠的长度边界处理方式。
+
+这是明确的旧实现弱点。新实现应始终使用 packet offset 与有效 length 构造解码范围，并在协议解析前检查长度和编码错误。
+
+### 10.3 接收状态和成员状态没有发现持久化账本
+
+- 当前网络接收分发链最终转为内存回调、Handler 消息和系统通知；该链路未发现数据库写入或文件持久化调用。
+- DEX 方法引用中没有 `SQLiteDatabase` 或 `SQLiteOpenHelper`；没有发现与 Outbox/Inbox 等价的消息持久化表实现。
+- 成员状态使用 `HashMap`，服务层另有 `ArrayList` 用户列表；`onCreate()` 初始化列表，`refreshuserList()` 清空后重新 login。
+- APK 确实使用 `SharedPreferences`，但可见用途包括用户/群组/铃声/secret 等设置；不能据此认定消息正文或接收确认有持久化。
+- APK 中出现的文件流和广告组件不能作为消息历史持久化的证据。
+
+结论限定为：在已提取的 DEX 和已追踪的服务消息路径中，没有找到可靠消息账本或重启恢复证据；不把“未发现”扩大为对所有运行时行为的绝对否定。
+
+### 10.4 UDP 生命周期与重试边界
+
+- `core.IPMessenger.run()` 是阻塞式 `DatagramSocket.receive()` 循环；退出时关闭 socket。
+- DEX 中没有发现 `DatagramSocket.setSoTimeout()` 调用，接收循环没有基于 socket timeout 的周期性唤醒机制。
+- 发送工作线程仍只调用一次 `DatagramSocket.send()`；异常路径打印 IOException，没有 ACK 超时重试状态机。
+- `Timer` 引用属于广告组件，不能视为聊天传输重试器。
+
+### 10.5 对 LAN P2P v2 的具体借鉴与反例
+
+1. 保留接收核心与 UI/通知层解耦的边界，但 v2 的 ACK 必须由 Inbox 持久化成功后产生，不能以 Handler 投递或通知展示代替。
+2. 保留“接收确认”和“已读通知”两种业务语义；前者确认 durable storage，后者应是独立的可选事件。
+3. 不复用旧实现的整缓冲区解码方式；按 UDP datagram 的 offset/length 严格解析。
+4. 不复用内存 HashMap/ArrayList 作为可靠设备/消息账本；重启后必须由 SQLite 恢复未完成状态。
+5. 不复用单次 UDP send；维持逐 peer ACK、持久化退避、幂等去重和受控重试。
+
+## 11. 分析进度与剩余边界
+
+本轮已把静态核查从协议/线程入口推进到消息回调和系统通知路径，并确认数据报有效长度处理缺口、内存态成员列表以及缺少可见的 SQLite 消息账本。仍未完成：
+
+- 对 `ChildThread.run()` 每个命令分支逐条做完整控制流还原，尤其是 `RECVMSG`、`READMSG`、`ANSREADMSG` 的全部分支条件与调用先后。
+- 进一步确认旧协议的成员键组成、重复消息处理及删除/离线语义。
+- 动态抓包验证广播、端口、ACK 和阅读通知的实际报文。
+
+本分析仍为 APK 静态逆向，不代表运行时验证；只用于借鉴设计原则，不改变当前 LAN P2P v2 的验收矩阵和原有功能边界。
