@@ -1350,18 +1350,21 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private void saveChatToHistory(String message) {
-        SharedPreferences sp = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
-        String history = sp.getString("chat_history", "");
-        String timeStr = new java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(new java.util.Date());
-        String newRecord = timeStr + " | " + message;
-        String updatedHistory = history.isEmpty() ? newRecord : history + "\n" + newRecord;
-        String[] lines = updatedHistory.split("\n");
-        if (lines.length > 100) {
-            StringBuilder sb = new StringBuilder();
-            for (int i = lines.length - 100; i < lines.length; i++) sb.append(lines[i]).append("\n");
-            updatedHistory = sb.toString().trim();
+        // Serialize legacy/HTTP history appends with the asynchronous LAN inbox projection.
+        synchronized (lanChatReceiveLock) {
+            SharedPreferences sp = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
+            String history = sp.getString("chat_history", "");
+            String timeStr = new java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(new java.util.Date());
+            String newRecord = timeStr + " | " + message;
+            String updatedHistory = history.isEmpty() ? newRecord : history + "\n" + newRecord;
+            String[] lines = updatedHistory.split("\n");
+            if (lines.length > 100) {
+                StringBuilder sb = new StringBuilder();
+                for (int i = lines.length - 100; i < lines.length; i++) sb.append(lines[i]).append("\n");
+                updatedHistory = sb.toString().trim();
+            }
+            sp.edit().putString("chat_history", updatedHistory).apply();
         }
-        sp.edit().putString("chat_history", updatedHistory).apply();
     }
 
     private void syncMessageToServer(String message) {
@@ -5423,7 +5426,7 @@ public class TrackingService extends Service implements LocationListener {
                     lanChatInboxProjectionInFlight.set(false);
                 }
                 if (morePending && !serviceDestroyed) {
-                    scheduleLanChatTask("inbox-ui-projection", this::scheduleLanChatInboxProjection, 50L);
+                    scheduleLanChatTask("inbox-ui-projection", this::scheduleLanChatInboxProjection, 500L);
                 }
             });
         } catch (java.util.concurrent.RejectedExecutionException rejected) {
