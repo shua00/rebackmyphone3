@@ -182,11 +182,11 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("发现窗口账本读取失败，停止本轮发送", send)
         self.assertIn("发现窗口状态复核失败，停止广播", send)
 
-        ack_start = service.index("boolean discoveryAck = false;")
-        ack_end = service.index("// Discovery is a recipient-collection window", ack_start)
-        ack_gate = service[ack_start:ack_end]
-        self.assertIn("catch (Exception storageFailure)", ack_gate)
-        self.assertIn("拒绝释放发现观察槽", ack_gate)
+        ack = extract_java_method(service, "private void processAuthenticatedLanChatAck(")
+        self.assertIn("boolean discoveryAck = false;", ack)
+        self.assertIn("catch (Exception storageFailure)", ack)
+        self.assertIn("拒绝释放发现观察槽", ack)
+        self.assertIn("allowDiscoveryGrace && discoveryAck", ack)
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -1102,20 +1102,15 @@ class LanP2PCoreTests(unittest.TestCase):
 
     def test_android_discovery_ack_never_grants_future_route_trust(self):
         repo_root = Path(__file__).resolve().parents[1]
-        source = (
-            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
-        ).read_text(encoding="utf-8")
-        start = source.index('if ("chat.ack".equals(type))')
-        end = source.index('if ("chat.message".equals(type))', start)
-        ack_handler = source[start:end]
-        store_source = (
-            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
-        ).read_text(encoding="utf-8")
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        ack_handler = extract_java_method(source, "private void processAuthenticatedLanChatAck(")
+        handler_dispatch = source[source.index('if ("chat.ack".equals(type))'):source.index('if ("chat.message".equals(type))')]
+        store_source = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
         self.assertIn("boolean routeMatches", ack_handler)
         self.assertIn("boolean discoveryAck", ack_handler)
         self.assertIn("if (!routeMatches && !persistedEndpointMatch)", ack_handler)
         self.assertNotIn("&& !discoveryAck)", ack_handler)
-        self.assertIn("Discovery is a recipient-collection window, not an identity bypass", ack_handler)
+        self.assertIn("never bypasses either routeMatches or persistedEndpointMatch", ack_handler)
         self.assertIn("if (routeMatches) {", ack_handler)
         self.assertIn("verifiedChatPeerRouteVersions.put(senderId", ack_handler)
         self.assertIn("verifiedChatPeerSeen.put(senderId, System.currentTimeMillis())", ack_handler)
@@ -1126,13 +1121,13 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertNotIn("verifiedChatPeers.put(", ack_handler)
         self.assertIn("store.matchesExpectedAckEndpoint(messageId, senderId", ack_handler)
         self.assertIn("persistedEndpointMatch", ack_handler)
-        self.assertIn("lanChatIoExecutor.execute(() -> {", ack_handler)
+        self.assertIn("processAuthenticatedLanChatAck(", handler_dispatch)
         self.assertIn("reason=unverified_endpoint", ack_handler)
         endpoint_start = store_source.index("public boolean matchesExpectedAckEndpoint(")
         endpoint_method = store_source[endpoint_start:endpoint_start + 1200]
         self.assertIn("last_sent_endpoint=?", endpoint_method)
         self.assertNotIn("last_endpoint=?", endpoint_method)
-        self.assertIn("endpointIp + \":\" + endpointPort", endpoint_method)
+        self.assertIn('endpointIp + ":" + endpointPort', endpoint_method)
 
     def test_android_inbox_conflicting_payload_is_rejected_and_duplicate_refreshes_ui(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -1824,13 +1819,12 @@ class LanP2PCoreTests(unittest.TestCase):
 
     def test_android_lan_chat_receive_and_ack_use_dedicated_io_executor(self):
         repo_root = Path(__file__).resolve().parents[1]
-        source = (
-            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
-        ).read_text(encoding="utf-8")
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
         start = source.index("private boolean handleAuthenticatedLanPacket(")
-        end = source.index("private boolean sendAuthenticatedChatAck(", start)
+        end = source.index("private void processAuthenticatedLanChatAck(", start)
         handler = source[start:end]
-        self.assertEqual(handler.count("lanChatIoExecutor.execute(() -> {"), 4)
+        self.assertEqual(handler.count("lanChatIoExecutor.execute(() -> {"), 3)
+        self.assertIn("lanChatIoExecutor.execute(() -> processAuthenticatedLanChatAck(", handler)
         self.assertNotIn("reportExecutor.execute(", handler)
         self.assertIn('new Thread(runnable, "LanChat-IO")', source)
 
@@ -1923,21 +1917,15 @@ class LanP2PCoreTests(unittest.TestCase):
 
     def test_android_duplicate_ack_cannot_consume_another_peer_wait_slot(self):
         repo_root = Path(__file__).resolve().parents[1]
-        source = (
-            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
-        ).read_text(encoding="utf-8")
-        start = source.index('if ("chat.ack".equals(type))')
-        end = source.index('if ("chat.message".equals(type))', start)
-        handler = source[start:end]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        handler = extract_java_method(source, "private void processAuthenticatedLanChatAck(")
         persist_ack = handler.index("store.acknowledge(messageId, senderId)")
         remove_waiter = handler.index("expected.remove(senderId)")
         self.assertLess(persist_ack, remove_waiter)
-        self.assertIn("only release the in-memory", handler)
         self.assertIn("discoveryAck && expected != null", handler)
         self.assertIn("expected.isEmpty() && latch != null && latch.getCount() > 0", handler)
         self.assertIn("wasExpected || discoveryBroadcastAck", handler)
         self.assertNotIn("wasExpected || discoveryAck)", handler)
-
 
     def test_android_p2p_send_log_distinguishes_fixed_targets_from_reachable_routes(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -3065,12 +3053,8 @@ class AndroidLanNetworkScopeTests(unittest.TestCase):
 class AndroidLanAckDiagnosticsTests(unittest.TestCase):
     def test_android_rejected_ack_log_includes_actual_endpoint_and_all_trust_gates(self):
         repo_root = Path(__file__).resolve().parents[1]
-        source = (
-            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
-        ).read_text(encoding="utf-8")
-        start = source.index('if ("chat.ack".equals(type))')
-        end = source.index('if ("chat.message".equals(type))', start)
-        ack = source[start:end]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        ack = extract_java_method(source, "private void processAuthenticatedLanChatAck(")
         self.assertIn('source=" + sourceAddress.getHostAddress() + ":" + sourcePort', ack)
         self.assertIn('" routeMatch=" + routeMatches', ack)
         self.assertIn('" persistedSendEndpointMatch=" + persistedEndpointMatch', ack)
@@ -3081,8 +3065,6 @@ class AndroidLanAckDiagnosticsTests(unittest.TestCase):
         beacon_end = source.index("private byte[] buildAuthenticatedLanChatPacket(", beacon_start)
         beacon = source[beacon_start:beacon_end]
         self.assertIn('" reason=" + e.getMessage()', beacon)
-
-
 
 
 class AndroidLanSchedulingAndAckProgressTests(unittest.TestCase):
