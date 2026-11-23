@@ -3681,6 +3681,13 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         self.assertIn("listenerGeneration != lanSocketGeneration.get()", listener)
         self.assertIn("synchronized (rescueLock)", listener)
         self.assertIn("if (rescueSocketRef == rescueSocket) rescueSocketRef = null;", listener)
+        self.assertIn("networkGenerationChanged = listenerGeneration != lanSocketGeneration.get();", listener)
+        finally_block = listener[listener.index("} finally {"):]
+        self.assertIn("if (!serviceDestroyed && networkGenerationChanged)", finally_block)
+        self.assertIn("triggerRescueListener();", finally_block)
+        self.assertIn("else if (!serviceDestroyed)", finally_block)
+        self.assertIn("long retryDelayMs =", finally_block)
+        self.assertLess(finally_block.index("networkGenerationChanged"), finally_block.index("long retryDelayMs ="))
         send = extract_java_method(source, "private void transmitLocalUdpMessage(")
         self.assertIn("socketGeneration = lanSocketGeneration.get()", send)
         self.assertIn("isCurrentLanChatSocket(socket, socketGeneration)", send)

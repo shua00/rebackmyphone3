@@ -5917,17 +5917,26 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.log(this, "UDP", "❌ 监听异常: " + e.getMessage());
             } finally {
                 if (rescueSocket != null && !rescueSocket.isClosed()) rescueSocket.close();
+                final boolean networkGenerationChanged;
                 synchronized (rescueLock) {
                     if (rescueSocketRef == rescueSocket) rescueSocketRef = null;
                     isListeningForRescue = false;
+                    // A deliberate Wi-Fi path replacement is not a socket failure. Its old
+                    // listener must hand off immediately instead of entering the 5s+ backoff.
+                    networkGenerationChanged = listenerGeneration != lanSocketGeneration.get();
                 }
 
                 if (multicastLock != null && multicastLock.isHeld()) {
                     try { multicastLock.release(); } catch (Exception ignored) {}
                 }
 
-                // ★ 修改：指数退避无限重试 2026-11-04 14:20
-                if (!serviceDestroyed) {
+                if (!serviceDestroyed && networkGenerationChanged) {
+                    FileLogger.log(this, "NETWORK", "旧 UDP listener 代际已失效，立即重建 Wi-Fi LAN socket oldGeneration="
+                            + listenerGeneration + " newGeneration=" + lanSocketGeneration.get());
+                    triggerRescueListener();
+                } else if (!serviceDestroyed) {
+                    // Genuine bind/receive failures retain exponential backoff; intentional
+                    // network-generation handoff above never waits on this failure policy.
                     long retryDelayMs = (long) Math.min(300000, 5000 * Math.pow(3, Math.min(udpBindFailCount, 4)));
                     FileLogger.log(this, "UDP", "监听断开，将在 " + (retryDelayMs / 1000) + " 秒后尝试第 " + (udpBindFailCount + 1) + " 次重连...");
 
