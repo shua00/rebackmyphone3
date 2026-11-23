@@ -1901,7 +1901,10 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("pendingChatAcks.remove(messageId)", source)
         self.assertIn("scheduleLanChatRetryFromOutbox()", source)
         self.assertIn("activeLanChatTransmissions.add(messageId)", source)
-        self.assertIn("synchronized (lanChatTransmitLock)", source)
+        self.assertIn("new java.util.concurrent.locks.ReentrantLock(true)", source)
+        self.assertIn("lanChatTransmitLock.lock()", source)
+        self.assertIn("lanChatTransmitLock.unlock()", source)
+        self.assertNotIn("synchronized (lanChatTransmitLock)", source)
 
     def test_android_ack_grace_cleanup_cannot_remove_a_newly_verified_peer_route(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -3161,6 +3164,20 @@ class AndroidLanStoreLifecycleTests(unittest.TestCase):
         awaiter = extract_java_method(source, "private void awaitLanExecutorTermination(")
         self.assertIn("while (!executor.isTerminated())", awaiter)
         self.assertIn("executor.awaitTermination(5L, TimeUnit.SECONDS)", awaiter)
+
+
+class AndroidLanTransmitFairnessTests(unittest.TestCase):
+    def test_fresh_and_retry_sends_share_a_fair_serialization_lock(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        self.assertIn("new java.util.concurrent.locks.ReentrantLock(true)", source)
+        transmit = extract_java_method(source, "private void transmitLocalUdpMessage(")
+        self.assertIn("lanChatTransmitLock.lock()", transmit)
+        self.assertIn("lanChatTransmitLock.unlock()", transmit)
+        self.assertIn("finally", transmit)
+        self.assertNotIn("synchronized (lanChatTransmitLock)", source)
+        self.assertIn("lanChatImmediateExecutor", source)
+        self.assertIn("lanChatSendExecutor", source)
 
 if __name__ == "__main__":
     unittest.main()
