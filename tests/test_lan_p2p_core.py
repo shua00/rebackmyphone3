@@ -1912,6 +1912,16 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("triggerRescueListener()", listener)
 
 
+    def test_android_udp_listener_guard_matches_process_wide_listener_state(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn("private static volatile boolean isListeningForRescue = false;", source)
+        self.assertIn("private static final Object rescueLock = new Object();", source)
+        self.assertNotIn("private final Object rescueLock = new Object();", source)
+
+
     def test_android_exhausted_retry_epoch_has_persisted_recovery_cooldown(self):
         repo_root = Path(__file__).resolve().parents[1]
         store = (

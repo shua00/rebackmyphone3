@@ -345,7 +345,8 @@ public class TrackingService extends Service implements LocationListener {
         pendingPeerChallengeExpectedEndpoints.clear();
         FileLogger.log(this, "CHAT", "LAN P2P peer 路由已失效，等待重新发现: " + reason);
     }
-    private final Object rescueLock = new Object();
+    // The listener-running flag is process-wide; its guard must be process-wide too.
+    private static final Object rescueLock = new Object();
     // 多路唤醒若从不同线程同时进入自愈，只允许一个自愈检查在途。
     private final java.util.concurrent.atomic.AtomicBoolean selfHealInFlight =
             new java.util.concurrent.atomic.AtomicBoolean(false);
