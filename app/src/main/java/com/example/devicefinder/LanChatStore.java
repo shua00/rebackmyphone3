@@ -20,6 +20,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
     /** Bounded first-recipient collection window, started on the first actual discovery send. */
     public static final long FIRST_DISCOVERY_WINDOW_MS = 10_000L;
     private static final String DB_NAME = "lan_p2p_delivery.db";
+    // v7 adds a composite index for target-local retry eligibility and backoff scans.
     private static final int DB_VERSION = 7;
     public static final int MAX_PENDING_MESSAGES = 50;
     /** Maximum automatic sends in one retry epoch, including the original send. */
