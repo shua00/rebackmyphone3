@@ -4830,6 +4830,7 @@ public class TrackingService extends Service implements LocationListener {
                         FileLogger.log(this, "CHAT", "⚠️ LAN ACK 路由复核队列已满，继续保留待确认 message="
                                 + messageId + " peer=" + senderId);
                     }
+                // Give the parallel peer.ack IO task one short turn to persist the verified route.
                 }, 200L);
                 if (scheduled) {
                     FileLogger.logD("CHAT", "P2P ACK 暂缓复核握手路由 message="
