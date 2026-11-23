@@ -3934,38 +3934,22 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private boolean persistPendingLanChat(String messageId, String content) {
-        synchronized (lanChatQueueLock) {
-            try {
-                SharedPreferences prefs = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
-                JSONArray queue = new JSONArray(prefs.getString(PREF_LAN_CHAT_QUEUE, "[]"));
-                if (queue.length() >= LAN_CHAT_QUEUE_MAX) {
-                    FileLogger.log(this, "CHAT", "⚠️ LAN 聊天待确认队列已满（" + LAN_CHAT_QUEUE_MAX
-                            + " 条），保留已有消息并拒绝覆盖旧消息");
-                    return false;
-                }
-                JSONObject item = new JSONObject();
-                item.put("message_id", messageId);
-                item.put("content", content);
-                item.put("created_at", System.currentTimeMillis());
-                queue.put(item);
-                boolean saved = prefs.edit().putString(PREF_LAN_CHAT_QUEUE, queue.toString()).commit();
-                if (!saved) FileLogger.log(this, "CHAT", "⚠️ LAN 聊天队列 commit 失败");
-                if (!saved) return false;
-                LanChatStore store = lanChatStore;
-                if (store == null || !store.enqueue(messageId, getUniqueDeviceId(), content,
-                        System.currentTimeMillis())) {
-                    FileLogger.log(this, "CHAT", "⚠️ LAN SQLite outbox 写入失败；SharedPreferences 原队列保留，等待补偿迁移");
-                    return false;
-                }
-                if (!initializeLanChatRecipientSnapshot(store, messageId)) {
-                    FileLogger.log(this, "CHAT", "⚠️ LAN 首次收件人快照持久化失败；消息保留本地待确认队列: " + messageId);
-                    return false;
-                }
-                return true;
-            } catch (Exception e) {
-                FileLogger.log(this, "CHAT", "⚠️ LAN 聊天队列持久化异常: " + e.getMessage());
+        try {
+            LanChatStore store = lanChatStore;
+            if (store == null) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN SQLite 账本未就绪，消息未接受");
                 return false;
             }
+            long createdAt = System.currentTimeMillis();
+            boolean persisted = store.enqueueWithRecipientSnapshot(messageId, getUniqueDeviceId(),
+                    content, createdAt, verifiedChatPeers);
+            if (!persisted) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN SQLite 原子写入消息及固定收件人快照失败");
+            }
+            return persisted;
+        } catch (Exception e) {
+            FileLogger.log(this, "CHAT", "⚠️ LAN 聊天原子持久化异常: " + e.getClass().getSimpleName());
+            return false;
         }
     }
 

@@ -3167,6 +3167,25 @@ class AndroidLanAckDiagnosticsTests(unittest.TestCase):
         self.assertIn('" reason=" + e.getMessage()', beacon)
 
 
+    def test_android_new_message_persists_outbox_and_recipient_snapshot_atomically(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        tracking = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        persist = extract_java_method(tracking, "private boolean persistPendingLanChat(")
+        atomic = extract_java_method(store, "public boolean enqueueWithRecipientSnapshot(")
+        self.assertIn("store.enqueueWithRecipientSnapshot(", persist)
+        self.assertNotIn("PREF_LAN_CHAT_QUEUE", persist)
+        self.assertNotIn("commit()", persist)
+        self.assertIn("db.beginTransaction()", atomic)
+        self.assertIn('db.insertWithOnConflict("lan_outbox"', atomic)
+        self.assertIn('db.rawQuery("SELECT peer_id,endpoint_ip,endpoint_port FROM lan_peers ', atomic)
+        self.assertIn('db.insertWithOnConflict("lan_outbox_targets"', atomic)
+        self.assertIn('next.put("state", "pending")', atomic)
+        self.assertIn("db.setTransactionSuccessful()", atomic)
+        self.assertIn('state = "discovery_pending"', atomic)
+        self.assertIn("initializeLanChatRecipientSnapshot(store, id)", tracking)  # legacy mirror migration remains
+
+
 class AndroidLanSchedulingAndAckProgressTests(unittest.TestCase):
     def test_new_user_messages_bypass_the_durable_retry_backlog(self):
         repo_root = Path(__file__).resolve().parents[1]

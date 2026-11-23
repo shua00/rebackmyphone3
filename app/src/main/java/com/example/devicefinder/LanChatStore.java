@@ -233,6 +233,123 @@ public final class LanChatStore extends SQLiteOpenHelper {
     }
 
     /** Persist an outgoing message before any network send. */
+    /**
+     * Atomically persist a new message and freeze its known recipient snapshot.
+     *
+     * The outbox row and fixed target rows share one SQLite transaction. This replaces
+     * the old SharedPreferences mirror + outbox transaction + target-snapshot transaction
+     * on the interactive send path, while legacy SharedPreferences rows remain migratable.
+     * An empty snapshot intentionally remains discovery_pending for the bounded first
+     * discovery window; later verified peers may join only that still-open window.
+     */
+    public boolean enqueueWithRecipientSnapshot(String messageId, String senderPeerId,
+            String body, long createdAtMs,
+            java.util.Map<String, java.net.InetSocketAddress> verifiedRoutes) {
+        if (messageId == null || messageId.isEmpty()
+                || senderPeerId == null || senderPeerId.isEmpty() || body == null) return false;
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        Cursor cursor = null;
+        try {
+            cursor = db.rawQuery("SELECT sender_peer_id,body,state,delivery_deadline_ms "
+                    + "FROM lan_outbox WHERE message_id=?", new String[]{messageId});
+            boolean exists = cursor.moveToFirst();
+            String state = exists ? cursor.getString(2) : "";
+            long deadline = exists ? cursor.getLong(3) : 0L;
+            if (exists && (!senderPeerId.equals(cursor.getString(0))
+                    || !body.equals(cursor.getString(1)))) return false;
+            cursor.close();
+            cursor = null;
+
+            if (!exists) {
+                cursor = db.rawQuery("SELECT COUNT(*) FROM lan_outbox "
+                        + "WHERE state NOT IN ('delivered','expired','waiting_peers')", null);
+                int count = 0;
+                try { if (cursor.moveToFirst()) count = cursor.getInt(0); }
+                finally { cursor.close(); cursor = null; }
+                if (count >= MAX_PENDING_MESSAGES) return false;
+                ContentValues outbox = new ContentValues();
+                outbox.put("message_id", messageId);
+                outbox.put("sender_peer_id", senderPeerId);
+                outbox.put("message_type", "chat");
+                outbox.put("body", body);
+                outbox.put("created_at_ms", createdAtMs);
+                outbox.put("protocol_version", 2);
+                outbox.put("state", "discovery_pending");
+                outbox.put("delivery_deadline_ms", 0L);
+                if (db.insertWithOnConflict("lan_outbox", null, outbox,
+                        SQLiteDatabase.CONFLICT_IGNORE) < 0
+                        && !rowExists(db, "lan_outbox", "message_id=?", new String[]{messageId})) {
+                    return false;
+                }
+                state = "discovery_pending";
+                deadline = 0L;
+            }
+
+            // Idempotent re-entry must never alter an already frozen recipient set.
+            if (rowExists(db, "lan_outbox_targets", "message_id=?", new String[]{messageId})
+                    || !"discovery_pending".equals(state)
+                    || (deadline > 0L && System.currentTimeMillis() >= deadline)) {
+                db.setTransactionSuccessful();
+                return true;
+            }
+
+            java.util.LinkedHashMap<String, Target> recipients = new java.util.LinkedHashMap<>();
+            cursor = db.rawQuery("SELECT peer_id,endpoint_ip,endpoint_port FROM lan_peers "
+                    + "ORDER BY last_seen_at DESC", null);
+            while (cursor.moveToNext()) {
+                String peerId = cursor.getString(0);
+                if (peerId == null || peerId.isEmpty() || senderPeerId.equals(peerId)) continue;
+                recipients.put(peerId, new Target(peerId, "pending", 0,
+                        cursor.getString(1), cursor.getInt(2)));
+            }
+            cursor.close();
+            cursor = null;
+            if (verifiedRoutes != null) {
+                for (java.util.Map.Entry<String, java.net.InetSocketAddress> entry : verifiedRoutes.entrySet()) {
+                    String peerId = entry.getKey();
+                    java.net.InetSocketAddress endpoint = entry.getValue();
+                    if (peerId == null || peerId.isEmpty() || senderPeerId.equals(peerId)
+                            || endpoint == null || endpoint.getAddress() == null) continue;
+                    recipients.put(peerId, new Target(peerId, "pending", 0,
+                            endpoint.getAddress().getHostAddress(), endpoint.getPort()));
+                }
+            }
+
+            int inserted = 0;
+            for (Target target : recipients.values()) {
+                if (target.endpointIp == null || target.endpointIp.isEmpty()
+                        || !(target.endpointPort == 8888 || target.endpointPort == 8887
+                             || target.endpointPort == 8889 || target.endpointPort == 8890)) continue;
+                ContentValues row = new ContentValues();
+                row.put("message_id", messageId);
+                row.put("peer_id", target.peerId);
+                row.put("status", "pending");
+                row.put("last_endpoint", target.endpointIp + ":" + target.endpointPort);
+                long rowId = db.insertWithOnConflict("lan_outbox_targets", null, row,
+                        SQLiteDatabase.CONFLICT_IGNORE);
+                if (rowId < 0 && !rowExists(db, "lan_outbox_targets",
+                        "message_id=? AND peer_id=?", new String[]{messageId, target.peerId})) return false;
+                inserted++;
+            }
+            if (inserted > 0) {
+                ContentValues next = new ContentValues();
+                next.put("state", "pending");
+                if (db.update("lan_outbox", next, "message_id=?",
+                        new String[]{messageId}) != 1) return false;
+            }
+            // No known endpoint: keep discovery_pending with no deadline until the first
+            // actual broadcast is dispatched by the transport path.
+            db.setTransactionSuccessful();
+            return true;
+        } catch (Exception e) {
+            return false;
+        } finally {
+            if (cursor != null) cursor.close();
+            db.endTransaction();
+        }
+    }
+
     public boolean enqueue(String messageId, String senderPeerId, String body, long createdAtMs) {
         if (messageId == null || messageId.length() == 0
                 || senderPeerId == null || senderPeerId.length() == 0 || body == null) return false;
