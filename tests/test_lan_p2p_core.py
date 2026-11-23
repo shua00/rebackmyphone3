@@ -2271,6 +2271,12 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertLess(bind, socket_ready)
         self.assertLess(socket_ready, recovery)
         self.assertIn("rescueSocketRef = null", listener)
+        finally_start = listener.rindex("finally {")
+        finally_block = listener[finally_start:]
+        self.assertIn("if (rescueSocketRef == rescueSocket)", finally_block)
+        self.assertIn("lanChatBoundWifiNetwork = null", finally_block)
+        self.assertLess(finally_block.index("rescueSocketRef = null"),
+                        finally_block.index("lanChatBoundWifiNetwork = null"))
         self.assertIn("isListeningForRescue = false", listener)
         self.assertIn("triggerRescueListener()", listener)
 
