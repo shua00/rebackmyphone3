@@ -3,6 +3,10 @@ import sqlite3
 import time
 
 
+# Must match Android LanChatStore.FIRST_DISCOVERY_WINDOW_MS.
+FIRST_DISCOVERY_WINDOW_MS = 10_000
+
+
 class LanP2PStorageError(RuntimeError):
     """A durable LAN P2P ledger operation failed; callers must not treat it as empty state."""
 
@@ -528,7 +532,7 @@ def add_discovery_target(db_path, sender_scope, message_id, peer_id):
             _safe_rollback(conn)
             return False
         if not deadline:
-            deadline = now_ms + 5000
+            deadline = now_ms + FIRST_DISCOVERY_WINDOW_MS
             conn.execute("UPDATE lan_outbox SET delivery_deadline_ms=? WHERE message_id=?",
                          (deadline, message_id))
         conn.execute("""INSERT OR IGNORE INTO lan_outbox_targets
@@ -769,7 +773,7 @@ def send_startup_peer_beacon(sock, peer_id, peer_type, service_id, secret,
 
 
 def begin_outgoing_discovery_window(db_path, sender_scope, message_id,
-                                    window_ms=5000):
+                                    window_ms=FIRST_DISCOVERY_WINDOW_MS):
     """Start an empty-recipient discovery deadline on first actual UDP dispatch."""
     if not db_path or not sender_scope or not message_id:
         return False
