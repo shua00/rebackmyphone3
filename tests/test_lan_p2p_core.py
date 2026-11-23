@@ -2600,6 +2600,10 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("throws java.io.IOException", method)
         self.assertIn("selectWifiLanNetwork(cm)", method)
         self.assertIn("selected.bindSocket(socket)", method)
+        self.assertLess(method.index("selected.bindSocket(socket)"),
+                        method.index('FileLogger.logD("CHAT"'))
+        self.assertLess(method.index('FileLogger.logD("CHAT"'),
+                        method.index("return selected;"))
         self.assertIn("return selected;", method)
         self.assertNotIn("lanChatBoundWifiNetwork =", method)
         self.assertIn("Selected Wi-Fi network has incomplete link properties", method)
