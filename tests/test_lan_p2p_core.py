@@ -113,6 +113,26 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("db.setForeignKeyConstraintsEnabled(true);", configure)
         self.assertIn("FOREIGN KEY(message_id) REFERENCES lan_outbox(message_id) ON DELETE CASCADE", java)
 
+    def test_android_discovery_ledger_read_failure_never_means_window_closed(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        service = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+
+        pending = extract_java_method(store, "public boolean isDiscoveryPending(")
+        self.assertIn('throw new IllegalStateException("Failed to read LAN discovery state", e);', pending)
+        self.assertNotIn("catch (Exception e) {\\n            return false;", pending)
+
+        send = extract_java_method(service, "private void transmitLocalUdpMessageInternal(")
+        self.assertIn("discoveryWindowOpen = store.isDiscoveryPending(messageId)", send)
+        self.assertIn("发现窗口账本读取失败，停止本轮发送", send)
+        self.assertIn("发现窗口状态复核失败，停止广播", send)
+
+        ack_start = service.index("boolean discoveryAck = false;")
+        ack_end = service.index("// Discovery is a recipient-collection window", ack_start)
+        ack_gate = service[ack_start:ack_end]
+        self.assertIn("catch (Exception storageFailure)", ack_gate)
+        self.assertIn("拒绝释放发现观察槽", ack_gate)
+
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.temp_dir.name, "peers.sqlite3")
