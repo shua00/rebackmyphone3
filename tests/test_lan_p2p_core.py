@@ -69,6 +69,9 @@ def extract_java_method(source, signature):
         i += 1
     raise AssertionError("Unbalanced Java method body: " + signature)
 
+
+class LanP2PCoreTests(unittest.TestCase):
+
     def test_known_peer_queries_raise_storage_error_instead_of_appearing_empty(self):
         from lan_p2p_core import list_known_peers, list_known_peer_snapshot, LanP2PStorageError
         directory_path = os.path.join(self.temp_dir.name, "not-a-peer-database")
@@ -90,8 +93,6 @@ def extract_java_method(source, signature):
         self.assertLess(method.index("cm.registerDefaultNetworkCallback(networkCallback)"),
                         method.index("cm.registerNetworkCallback(wifiRequest, wifiLanNetworkCallback)"))
 
-
-class LanP2PCoreTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.temp_dir.name, "peers.sqlite3")
