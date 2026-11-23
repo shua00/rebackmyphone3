@@ -411,3 +411,6 @@ Android 的 `buildWifiLanFingerprint()` 继续生成完整、排序后的 Wi-Fi 
 该摘要只是可选的网络范围提示，不是稳定 peer ID、共享密钥认证、nonce challenge 或端点可达证明。协议 `MAX_DATAGRAM_BYTES=1200` 不变；不能通过提高上限掩盖字段膨胀。Android 普通广播发现、启动 Beacon 和定向 challenge 必须共用同一有界编码出口。Python 服务无需改变既有消息 envelope 或服务端身份/端口职责。
 
 本条修复只涉及对讲发现控制面，不改变 `chat.message` 正文、Outbox/Inbox/逐设备 ACK 语义，也不触碰悬浮留言独立通道。验收需覆盖大规模地址/路由快照、所有 Android HELLO 出口、v2 解码、Android 11/15 实机互发现，以及修复后 ACK 来源校验是否仍按真实成功发送端点严格工作。
+
+
+ACK 拒绝日志同时记录来源 IP/UDP 端口、内存 verified-route 匹配、持久化成功发送端点匹配和 discovery window 状态；Beacon 创建异常记录具体异常消息。日志不包含消息正文、HMAC 密钥或认证字段。
