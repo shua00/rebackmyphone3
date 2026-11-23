@@ -2080,7 +2080,7 @@ public class TrackingService extends Service implements LocationListener {
 
     private void registerNetworkCallback() {
         ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-        if (cm == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return;
+        if (cm == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return;
         // Registration is a pair: default-route and all-Wi-Fi observers must both exist.
         if (networkCallback != null && wifiLanNetworkCallback != null) return;
         try {
@@ -5901,8 +5901,8 @@ public class TrackingService extends Service implements LocationListener {
         handler.removeCallbacks(networkRefreshRunnable);
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-            if (cm != null && networkCallback != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) cm.unregisterNetworkCallback(networkCallback);
-            if (cm != null && wifiLanNetworkCallback != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            if (cm != null && networkCallback != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) cm.unregisterNetworkCallback(networkCallback);
+            if (cm != null && wifiLanNetworkCallback != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                 cm.unregisterNetworkCallback(wifiLanNetworkCallback);
             }
         } catch (Exception ignored) {}

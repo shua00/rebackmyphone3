@@ -90,7 +90,13 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("cm.unregisterNetworkCallback(wifiLanNetworkCallback)", method)
         self.assertIn("networkCallback = null;", method)
         self.assertIn("wifiLanNetworkCallback = null;", method)
+        self.assertIn("if (cm == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return;", method)
         self.assertIn("Build.VERSION.SDK_INT >= Build.VERSION_CODES.N", method)
+        self.assertIn("cm.registerNetworkCallback(defaultNetworkRequest, networkCallback)", method)
+        # API 21-23 use registerNetworkCallback and must also unregister both
+        # observers on service teardown; gating cleanup at API 24 leaks callbacks.
+        self.assertIn("if (cm != null && networkCallback != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP)", java)
+        self.assertIn("if (cm != null && wifiLanNetworkCallback != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP)", java)
         self.assertIn("cm.registerDefaultNetworkCallback(networkCallback)", method)
         self.assertIn("NET_CAPABILITY_INTERNET", method)
         self.assertIn("cm.registerNetworkCallback(defaultNetworkRequest, networkCallback)", method)
