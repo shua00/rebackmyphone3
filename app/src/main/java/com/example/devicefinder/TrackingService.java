@@ -4268,6 +4268,11 @@ public class TrackingService extends Service implements LocationListener {
                 return;
             }
             final long packetBuildMs = android.os.SystemClock.elapsedRealtime() - packetBuildStartedAt;
+            if (packetBuildMs >= 50L) {
+                FileLogger.log(this, "CHAT", "P2P authenticated packet prebuild message="
+                        + messageId + " targets=" + pendingSnapshotTargets
+                        + " buildMs=" + packetBuildMs);
+            }
             // Wait for the FIFO transmit turn before charging this message's retry epoch.
             // Time spent queued behind another sender is not a delivery attempt.
             long lockRequestedAt = android.os.SystemClock.elapsedRealtime();
