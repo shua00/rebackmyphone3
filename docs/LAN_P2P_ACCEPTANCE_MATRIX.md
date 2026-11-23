@@ -109,7 +109,7 @@
 | 范围 | 冻结时状态 | 说明 |
 |---|---|---|
 | A01–A10 | 未完成实机验收 | 不能由构建结果推断通过 |
-| S01–S25 | 未完成整体验收 | S19–S23 已有代码/自动化/CI证据；S24/S25 本批待CI；真实多设备/进程故障注入及Android SQLite故障注入仍待验收 |
+| S01–S25 | 未完成整体验收 | S19–S25 已有代码/自动化/CI证据；Android SQLite真实迁移/故障注入、真实多设备/进程故障注入仍待验收 |
 | M-A–M-C | 未完成实机验收 | 三种运行模式分别验收 |
 | F01–F19 | 未完成完整故障注入 | F13/F14已有自动化/CI证据；F15–F19真实多目标、监听及恢复冷却注入仍待补齐 |
 | G01–G13 | 未完成完整回归 | 尤其留言悬浮、找回定位、设备管理及三服务真实进程边界 |
@@ -270,3 +270,12 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | G13 | Android ACK endpoint provenance 回归 | last_endpoint 继续提供 route challenge 候选；matchesExpectedAckEndpoint 只查询 last_sent_endpoint；recordSuccessfulSendEndpoint 在 socket.send 成功后同步更新两字段 | 自动化/CI/真机 |
 
 以上 S24/S25、F18/F19、G12/G13 强化既有 S09、S21、F05、F15、G09，不替代原有验收项。
+
+
+## v2.8.22 自动化与构建证据
+
+- GitHub Actions run [45126734639](https://github.com/shua00/rebackmyphone3/actions/runs/45126734639)，对应最终代码/测试提交 `00473fb5939fc3bdba10f082b85c703cd375bec9`，workflow conclusion 为 success。
+- `validate-python`：140 项自动化测试全部通过。
+- `detect-android-changes`：通过；`build`：Android Debug APK 构建和 Upload APK 两步全部成功。
+- artifact：`app-debug`，ID `14795169216`，大小 `177488` bytes，预计于 `2027-02-21T06:49:28Z` 过期；GitHub artifact ZIP digest：`sha256:128ea91d82a40db66b873ca442cdf349eb39394e038ad62f849199d0827b70be`。
+- 本次 CI 证明 Python 自动化、Android 编译及产物上传成功；不证明 Android SQLite v7→v8 真实设备迁移、ACK端点故障注入、三服务真实进程 socket故障恢复或双手机互通已通过。上述仍按 A/S/F/G 条目保留为实机/真实进程待验收。
