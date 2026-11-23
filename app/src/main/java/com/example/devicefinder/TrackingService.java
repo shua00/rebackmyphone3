@@ -4381,7 +4381,6 @@ public class TrackingService extends Service implements LocationListener {
             return;
         }
         long broadcastLookupMs = 0L;
-        long targetLoadMs = 0L;
         long routeProbeMs = 0L;
         long packetBuildMs = 0L;
         if (!isCurrentLanChatSocket(socket, socketGeneration)) {
