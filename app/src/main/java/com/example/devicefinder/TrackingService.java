@@ -4120,18 +4120,29 @@ public class TrackingService extends Service implements LocationListener {
         try {
             List<LanChatStore.PendingMessage> pending = store.loadPending(50);
             int minimumAttempts = Integer.MAX_VALUE;
+            boolean hasUnattemptedRouteTargets = false;
             for (LanChatStore.PendingMessage item : pending) {
                 if (item.retryAttempts > 0) {
                     minimumAttempts = Math.min(minimumAttempts, item.retryAttempts);
+                } else if (store.hasUnattemptedTargets(item.messageId)) {
+                    // No route means markAttempt() has correctly not consumed a delivery attempt.
+                    // Still schedule a bounded re-challenge, otherwise a lost first peer.ack can
+                    // strand a durable fixed target until an unrelated network event occurs.
+                    hasUnattemptedRouteTargets = true;
                 }
             }
-            if (minimumAttempts == Integer.MAX_VALUE) return;
-            // loadPending() excludes messages that exhausted this epoch's finite budget.
+            if (minimumAttempts == Integer.MAX_VALUE && !hasUnattemptedRouteTargets) return;
+            // loadPending() excludes messages that exhausted this epoch's finite send budget.
             // Their SQLite rows and unacked target records remain intact for recovery events.
             // Empty discovery snapshots are finalized separately as waiting_peers.
-            final long delayMs = minimumAttempts <= 1 ? 1_500L
+            final long sendRetryDelayMs = minimumAttempts == Integer.MAX_VALUE ? Long.MAX_VALUE
+                    : (minimumAttempts <= 1 ? 1_500L
                     : (minimumAttempts == 2 ? 4_000L
-                    : Math.min(60_000L, 10_000L << Math.min(3, minimumAttempts - 3)));
+                    : Math.min(60_000L, 10_000L << Math.min(3, minimumAttempts - 3))));
+            // Fixed targets that have not yet had a real send get a separate route-probe wake.
+            // It does not increment attempt_count or weaken the per-message delivery budget.
+            final long delayMs = hasUnattemptedRouteTargets
+                    ? Math.min(5_000L, sendRetryDelayMs) : sendRetryDelayMs;
             if (!lanChatRetryWakeScheduled.compareAndSet(false, true)) return;
             boolean scheduled = scheduleLanChatTask("outbox-retry", () -> {
                 lanChatRetryWakeScheduled.set(false);
