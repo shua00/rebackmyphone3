@@ -2549,19 +2549,16 @@ class LanP2PCoreTests(unittest.TestCase):
         fingerprint_start = source.index("private String buildWifiLanFingerprint")
         fingerprint_end = source.index("private void refreshWifiLanTransport", fingerprint_start)
         fingerprint = source[fingerprint_start:fingerprint_end]
-        self.assertIn("boolean incompleteNetworkSnapshot = false;", fingerprint)
-        self.assertIn("if (caps == null) {", fingerprint)
-        self.assertIn('if (links == null || links.getInterfaceName() == null', fingerprint)
-        self.assertIn('|| links.getLinkAddresses().isEmpty())', fingerprint)
-        self.assertIn('return incompleteNetworkSnapshot ? "UNAVAILABLE" : "NO_WIFI";', fingerprint)
-        # Canonicalize both the outer network set and nested address/route lists.
+        self.assertIn("selectWifiLanNetwork(cm)", fingerprint)
+        self.assertIn('if (selected == null) return "NO_WIFI";', fingerprint)
         self.assertIn("java.util.Collections.sort(addressEntries)", fingerprint)
         self.assertIn("java.util.Collections.sort(routeEntries)", fingerprint)
-        sort_at = fingerprint.index("java.util.Collections.sort(wifiEntries)")
-        append_at = fingerprint.index("for (String entry : wifiEntries)")
-        self.assertLess(sort_at, append_at)
-        self.assertIn("wifiEntries.add(network.toString()", fingerprint)
-        self.assertIn("incompleteNetworkSnapshot = true;", fingerprint)
+        self.assertIn("selected.toString() + '|'", fingerprint)
+        self.assertNotIn("for (Network network : cm.getAllNetworks())", fingerprint)
+        broadcast = extract_java_method(source, "private String getWifiBroadcastAddress(")
+        self.assertIn("selectWifiLanNetwork(cm)", broadcast)
+        self.assertIn("NetworkInterface.getByName(links.getInterfaceName())", broadcast)
+        self.assertNotIn("name.startsWith(\"wlan\")", broadcast[:broadcast.index("// Pre-M fallback")])
 
     def test_outbox_database_read_failures_raise_instead_of_looking_empty(self):
         operations = (
@@ -2587,22 +2584,19 @@ class LanP2PCoreTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
         method = extract_java_method(source, "private void bindSocketToWifi(")
+        selector = extract_java_method(source, "private Network selectWifiLanNetwork(")
         self.assertIn("throws java.io.IOException", method)
-        self.assertIn("throw new java.io.IOException", method)
-        self.assertNotIn("将使用系统默认出口", method)
+        self.assertIn("selectWifiLanNetwork(cm)", method)
         self.assertIn("selected.bindSocket(socket)", method)
-        self.assertIn("incompleteNetworkSnapshot", method)
-        self.assertIn("No complete Wi-Fi candidate; defer UDP socket binding", method)
-        self.assertIn("if (wifiNetworks.isEmpty())", method)
-        self.assertIn("Ignore incomplete non-selected candidates", method)
-        self.assertIn("Network active = cm.getActiveNetwork()", method)
-        self.assertIn("wifiNetworks.contains(active)", method)
-        self.assertIn("wifiNetworks.size() == 1", method)
-        self.assertIn("Multiple non-default Wi-Fi networks; defer ambiguous UDP socket binding", method)
-        # Selection must be based on the complete candidate set, not enumeration order.
-        self.assertLess(method.index("for (Network network : cm.getAllNetworks())"),
-                        method.index("Network active = cm.getActiveNetwork()"))
-        self.assertLess(method.index("Network active = cm.getActiveNetwork()"),
+        self.assertIn("Selected Wi-Fi network has incomplete link properties", method)
+        self.assertIn("for (Network network : cm.getAllNetworks())", selector)
+        self.assertIn("Network active = cm.getActiveNetwork()", selector)
+        self.assertIn("wifiNetworks.contains(active)", selector)
+        self.assertIn("wifiNetworks.size() == 1", selector)
+        self.assertIn("Multiple non-default Wi-Fi networks; defer ambiguous UDP socket binding", selector)
+        self.assertLess(selector.index("for (Network network : cm.getAllNetworks())"),
+                        selector.index("Network active = cm.getActiveNetwork()"))
+        self.assertLess(selector.index("Network active = cm.getActiveNetwork()"),
                         method.index("selected.bindSocket(socket)"))
 
     def test_outbox_queries_still_return_empty_for_a_valid_empty_ledger(self):

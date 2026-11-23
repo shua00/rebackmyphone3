@@ -2150,60 +2150,75 @@ public class TrackingService extends Service implements LocationListener {
         else FileLogger.log(this, "SERVICE", "⚠️ 修改图标状态失败 (hideIcon=" + hideIcon + ")");
     }
 
-    private String buildWifiLanFingerprint(ConnectivityManager cm) {
-        if (cm == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return "UNAVAILABLE";
-        // ConnectivityManager does not promise a stable getAllNetworks() order.
-        // Canonicalize the complete Wi-Fi path set so enumeration reordering alone
-        // cannot revoke verified peers or restart the UDP listener.
-        List<String> wifiEntries = new ArrayList<>();
+    /**
+     * Socket binding, local fingerprinting and broadcast selection must use the same Wi-Fi
+     * Network. Selecting the active Wi-Fi wins; when cellular is default, only one
+     * non-default Wi-Fi candidate is unambiguous. Never pick an arbitrary interface.
+     */
+    private Network selectWifiLanNetwork(ConnectivityManager cm) throws java.io.IOException {
+        if (cm == null) throw new java.io.IOException("ConnectivityManager unavailable");
+        List<Network> wifiNetworks = new ArrayList<>();
         boolean incompleteNetworkSnapshot = false;
         try {
             for (Network network : cm.getAllNetworks()) {
                 NetworkCapabilities caps = cm.getNetworkCapabilities(network);
-                // getAllNetworks() also contains cellular/VPN candidates. One transient
-                // null capability must not disable an otherwise complete Wi-Fi LAN path.
                 if (caps == null) {
                     incompleteNetworkSnapshot = true;
                     continue;
                 }
-                if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue;
-                LinkProperties links = cm.getLinkProperties(network);
-                // An incomplete Wi-Fi candidate is ignored when another complete Wi-Fi
-                // path is available; if none is complete, preserve UNAVAILABLE semantics.
-                if (links == null || links.getInterfaceName() == null
-                        || links.getInterfaceName().isEmpty()
-                        || links.getLinkAddresses() == null
-                        || links.getLinkAddresses().isEmpty()) {
-                    incompleteNetworkSnapshot = true;
-                    continue;
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                    wifiNetworks.add(network);
                 }
-                List<String> addressEntries = new ArrayList<>();
-                for (android.net.LinkAddress address : links.getLinkAddresses()) {
-                    addressEntries.add(address.toString());
-                }
-                java.util.Collections.sort(addressEntries);
-                List<String> routeEntries = new ArrayList<>();
-                for (android.net.RouteInfo route : links.getRoutes()) {
-                    routeEntries.add(route.toString());
-                }
-                java.util.Collections.sort(routeEntries);
-                wifiEntries.add(network.toString() + '|'
-                        + links.getInterfaceName() + '|'
-                        + addressEntries + '|'
-                        + routeEntries);
             }
+            if (wifiNetworks.isEmpty()) {
+                if (incompleteNetworkSnapshot) {
+                    throw new java.io.IOException("No complete Wi-Fi candidate; defer UDP socket binding");
+                }
+                return null;
+            }
+            Network active = cm.getActiveNetwork();
+            if (active != null && wifiNetworks.contains(active)) return active;
+            if (wifiNetworks.size() == 1) return wifiNetworks.get(0);
+            throw new java.io.IOException("Multiple non-default Wi-Fi networks; defer ambiguous UDP socket binding");
+        } catch (java.io.IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new java.io.IOException("Unable to inspect Wi-Fi network candidates", e);
+        }
+    }
+
+    private String buildWifiLanFingerprint(ConnectivityManager cm) {
+        if (cm == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return "UNAVAILABLE";
+        final Network selected;
+        try {
+            selected = selectWifiLanNetwork(cm);
+        } catch (java.io.IOException unavailable) {
+            return "UNAVAILABLE";
+        }
+        if (selected == null) return "NO_WIFI";
+        try {
+            LinkProperties links = cm.getLinkProperties(selected);
+            if (links == null || links.getInterfaceName() == null
+                    || links.getInterfaceName().isEmpty()
+                    || links.getLinkAddresses() == null
+                    || links.getLinkAddresses().isEmpty()) return "UNAVAILABLE";
+            List<String> addressEntries = new ArrayList<>();
+            for (android.net.LinkAddress address : links.getLinkAddresses()) {
+                addressEntries.add(address.toString());
+            }
+            java.util.Collections.sort(addressEntries);
+            List<String> routeEntries = new ArrayList<>();
+            for (android.net.RouteInfo route : links.getRoutes()) {
+                routeEntries.add(route.toString());
+            }
+            java.util.Collections.sort(routeEntries);
+            // Only the selected socket-bound LAN path participates. Changes to a secondary
+            // non-default Wi-Fi candidate must not revoke peers or restart this socket.
+            return selected.toString() + '|' + links.getInterfaceName() + '|'
+                    + addressEntries + '|' + routeEntries;
         } catch (Exception e) {
             return "ERROR";
         }
-        if (wifiEntries.isEmpty()) {
-            return incompleteNetworkSnapshot ? "UNAVAILABLE" : "NO_WIFI";
-        }
-        java.util.Collections.sort(wifiEntries);
-        StringBuilder signature = new StringBuilder();
-        for (String entry : wifiEntries) {
-            signature.append(entry).append(';');
-        }
-        return signature.toString();
     }
 
     /**
@@ -3112,23 +3127,44 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private String getWifiBroadcastAddress() {
-        // 使用 Wi-Fi 接口实际配置的广播地址，不能假定所有家庭/企业网络都是 /24。
-        // 与 bindSocketToWifi 的 wlan/ap 接口选择保持一致，避免把移动数据地址当作 LAN 广播网段。
+        // Android 6+ uses the exact interface belonging to the Network that owns our socket.
+        // Do not guess by wlan/ap prefix: OEM interface names and multiple Wi-Fi candidates vary.
         try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+                Network selected = selectWifiLanNetwork(cm);
+                if (selected == null) return "255.255.255.255";
+                LinkProperties links = cm.getLinkProperties(selected);
+                if (links == null || links.getInterfaceName() == null) {
+                    return "255.255.255.255";
+                }
+                java.net.NetworkInterface intf =
+                        java.net.NetworkInterface.getByName(links.getInterfaceName());
+                if (intf == null || !intf.isUp() || intf.isLoopback()) {
+                    return "255.255.255.255";
+                }
+                for (java.net.InterfaceAddress interfaceAddress : intf.getInterfaceAddresses()) {
+                    java.net.InetAddress local = interfaceAddress.getAddress();
+                    java.net.InetAddress broadcast = interfaceAddress.getBroadcast();
+                    if (local instanceof java.net.Inet4Address && !local.isLoopbackAddress()
+                            && broadcast instanceof java.net.Inet4Address) {
+                        return broadcast.getHostAddress();
+                    }
+                }
+                return "255.255.255.255";
+            }
+            // Pre-M fallback: use the platform's Wi-Fi interface broadcast, without assuming /24.
             java.util.Enumeration<java.net.NetworkInterface> interfaces =
                     java.net.NetworkInterface.getNetworkInterfaces();
             while (interfaces != null && interfaces.hasMoreElements()) {
                 java.net.NetworkInterface intf = interfaces.nextElement();
                 String name = intf.getName();
                 if (!intf.isUp() || intf.isLoopback()
-                        || !(name.startsWith("wlan") || name.startsWith("ap"))) {
-                    continue;
-                }
+                        || !(name.startsWith("wlan") || name.startsWith("ap"))) continue;
                 for (java.net.InterfaceAddress interfaceAddress : intf.getInterfaceAddresses()) {
                     java.net.InetAddress local = interfaceAddress.getAddress();
                     java.net.InetAddress broadcast = interfaceAddress.getBroadcast();
-                    if (local instanceof java.net.Inet4Address
-                            && !local.isLoopbackAddress()
+                    if (local instanceof java.net.Inet4Address && !local.isLoopbackAddress()
                             && broadcast instanceof java.net.Inet4Address) {
                         return broadcast.getHostAddress();
                     }
@@ -3137,67 +3173,30 @@ public class TrackingService extends Service implements LocationListener {
         } catch (Exception e) {
             FileLogger.logD("CHAT", "读取 Wi-Fi 接口广播地址失败: " + e.getClass().getSimpleName());
         }
-        // 无法取得接口广播地址时保留原有全局广播兜底，不猜测 /24 网段。
         return "255.255.255.255";
     }
 
     private void bindSocketToWifi(java.net.DatagramSocket socket) throws java.io.IOException {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        Network selected = selectWifiLanNetwork(cm);
+        if (selected == null) {
+            // No Wi-Fi transport is currently visible; retain the platform default route
+            // for existing non-chat UDP business paths. LAN chat itself fails closed.
+            return;
+        }
+        LinkProperties links = cm.getLinkProperties(selected);
+        if (links == null || links.getInterfaceName() == null
+                || links.getInterfaceName().isEmpty()
+                || links.getLinkAddresses() == null || links.getLinkAddresses().isEmpty()) {
+            throw new java.io.IOException("Selected Wi-Fi network has incomplete link properties");
+        }
         try {
-            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-            if (cm == null) return;
-
-            // Collect the full Wi-Fi candidate set before binding. getAllNetworks()
-            // has no ordering guarantee, so "first Wi-Fi network" is not a stable
-            // route-selection policy on devices exposing more than one Wi-Fi network.
-            List<Network> wifiNetworks = new ArrayList<>();
-            boolean incompleteNetworkSnapshot = false;
-            for (Network network : cm.getAllNetworks()) {
-                NetworkCapabilities caps = cm.getNetworkCapabilities(network);
-                if (caps == null) {
-                    incompleteNetworkSnapshot = true;
-                    continue;
-                }
-                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-                    wifiNetworks.add(network);
-                }
-            }
-            if (wifiNetworks.isEmpty()) {
-                if (incompleteNetworkSnapshot) {
-                    throw new java.io.IOException("No complete Wi-Fi candidate; defer UDP socket binding");
-                }
-                // No Wi-Fi transport is currently visible; retain the platform default route
-                // for the existing non-chat UDP business paths.
-                return;
-            }
-            // Ignore incomplete non-selected candidates when at least one complete Wi-Fi
-            // network is available. The active Wi-Fi path still wins; ambiguous multiple
-            // non-default Wi-Fi candidates remain fail-closed below.
-
-            // Prefer the active default when it is Wi-Fi. If cellular is the default,
-            // a single Wi-Fi network is still the intended local-LAN transport. With
-            // multiple non-default Wi-Fi networks, fail closed rather than bind an
-            // arbitrary LAN that may not contain the intended peers.
-            Network active = cm.getActiveNetwork();
-            Network selected = null;
-            if (active != null && wifiNetworks.contains(active)) {
-                selected = active;
-            } else if (wifiNetworks.size() == 1) {
-                selected = wifiNetworks.get(0);
-            } else {
-                throw new java.io.IOException("Multiple non-default Wi-Fi networks; defer ambiguous UDP socket binding");
-            }
-
-            try {
-                selected.bindSocket(socket);
-                FileLogger.logD("CHAT", "UDP listener socket bound to selected Wi-Fi LAN network");
-            } catch (Exception bindError) {
-                throw new java.io.IOException("Wi-Fi LAN socket binding failed", bindError);
-            }
-        } catch (java.io.IOException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new java.io.IOException("Unable to inspect Wi-Fi LAN networks", e);
+            selected.bindSocket(socket);
+            FileLogger.logD("CHAT", "UDP listener socket bound to selected Wi-Fi LAN network="
+                    + links.getInterfaceName());
+        } catch (Exception bindError) {
+            throw new java.io.IOException("Wi-Fi LAN socket binding failed", bindError);
         }
     }
 
