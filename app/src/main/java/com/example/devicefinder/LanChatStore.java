@@ -67,6 +67,14 @@ public final class LanChatStore extends SQLiteOpenHelper {
     }
 
     @Override
+    public void onConfigure(SQLiteDatabase db) {
+        super.onConfigure(db);
+        // Enforce the declared outbox-target relationship on every connection.
+        // This keeps future outbox cleanup/migrations from leaving orphan targets.
+        db.setForeignKeyConstraintsEnabled(true);
+    }
+
+    @Override
     public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE IF NOT EXISTS lan_peers (" +
                 "peer_id TEXT PRIMARY KEY NOT NULL," +
