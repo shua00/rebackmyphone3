@@ -287,6 +287,7 @@ public class TrackingService extends Service implements LocationListener {
                     new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
     // Preserve FIFO send order while discovery/ACK state is shared across messages.
     // Fair admission prevents a long retry batch from repeatedly barging ahead of fresh user sends.
+    // Keep cross-lane serialization until per-stage measurements identify a safe narrower boundary.
     private final java.util.concurrent.locks.ReentrantLock lanChatTransmitLock =
             new java.util.concurrent.locks.ReentrantLock(true);
     // Invalidates queued sends and listener startups whenever the Wi-Fi LAN path changes.
