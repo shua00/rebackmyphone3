@@ -1505,7 +1505,7 @@ class LanP2PCoreTests(unittest.TestCase):
         start = store.index("public boolean isDiscoveryPending(String messageId)")
         end = store.index("\n    /** Add a newly discovered peer", start)
         discovery = store[start:end]
-        self.assertIn("delivery_deadline_ms>=?", discovery)
+        self.assertIn("delivery_deadline_ms>?", discovery)
         self.assertIn("System.currentTimeMillis()", discovery)
 
         tx_start = tracking.index("final int totalPeerCount = pendingTargetIds.size()")
