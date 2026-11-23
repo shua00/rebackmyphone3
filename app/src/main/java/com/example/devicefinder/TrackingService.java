@@ -2093,6 +2093,38 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     /**
+     * Keep the full canonical fingerprint locally for change detection, but never put
+     * Android LinkProperties.toString() output on the wire. Route lists can be large
+     * enough to exceed the strict 1200-byte UDP envelope. This digest is only a compact
+     * diagnostic/scope hint; it is not peer identity, authentication, or reachability proof.
+     */
+    static String buildLanProtocolNetworkScope(String fingerprint) {
+        if (fingerprint == null || fingerprint.isEmpty()
+                || "UNAVAILABLE".equals(fingerprint)
+                || "ERROR".equals(fingerprint)
+                || "NO_WIFI".equals(fingerprint)) return "";
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(fingerprint.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            final char[] hex = "0123456789abcdef".toCharArray();
+            StringBuilder out = new StringBuilder("sha256:");
+            for (byte value : digest) {
+                int b = value & 0xff;
+                out.append(hex[b >>> 4]).append(hex[b & 0x0f]);
+            }
+            return out.toString();
+        } catch (Exception unavailable) {
+            // The hint is optional. Never fail discovery because a local digest provider
+            // is unavailable; the authenticated nonce challenge remains authoritative.
+            return "";
+        }
+    }
+
+    private String getLanProtocolNetworkScope() {
+        return buildLanProtocolNetworkScope(wifiLanFingerprint);
+    }
+
+    /**
      * Wi-Fi can carry local P2P even when cellular remains the default route.
      * Rebind the UDP listener whenever the actual Wi-Fi LAN path changes.
      */
@@ -4203,7 +4235,7 @@ public class TrackingService extends Service implements LocationListener {
             try {
                 JSONObject helloPacket = LanP2pProtocol.create("peer.hello", myId, "android", "android-main");
                 helloPacket.put("nonce", nonce);
-                helloPacket.put("network_scope", wifiLanFingerprint == null ? "" : wifiLanFingerprint);
+                helloPacket.put("network_scope", getLanProtocolNetworkScope());
                 helloPacket.put("capabilities", new JSONArray().put("chat.text").put("chat.ack"));
                 byte[] hello = LanP2pProtocol.encode(helloPacket, RESCUE_SECRET);
                 for (String target : broadcasts) {
@@ -4505,7 +4537,7 @@ public class TrackingService extends Service implements LocationListener {
             hello.put("nonce", nonce);
             hello.put("listen_port", 8888);
             hello.put("challenge_only", challengeOnly);
-            hello.put("network_scope", wifiLanFingerprint == null ? "" : wifiLanFingerprint);
+            hello.put("network_scope", getLanProtocolNetworkScope());
             hello.put("capabilities", new JSONArray().put("chat.text").put("chat.ack"));
             byte[] bytes = LanP2pProtocol.encode(hello, RESCUE_SECRET);
             for (int port : ports) {
