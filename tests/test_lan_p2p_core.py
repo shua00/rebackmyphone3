@@ -3264,5 +3264,19 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         self.assertIn("queuedAtRequest=", send)
         self.assertIn("holdMs=", send)
 
+    def test_android_transmit_lock_separates_sqlite_and_udp_costs(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        send = extract_java_method(source, "private void transmitLocalUdpMessage(")
+        internal = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
+        self.assertIn("P2P SQLite outbox attempt", send)
+        self.assertIn("P2P SQLite target attempt", internal)
+        self.assertIn("P2P SQLite send-endpoint", internal)
+        self.assertIn("P2P directed challenge dispatch", internal)
+        self.assertIn("P2P 发送串行锁持有", send)
+        udp = extract_java_method(source, "private void sendLanUdpPacket(")
+        self.assertIn("lockWaitMs=", udp)
+        self.assertIn("sendMs=", udp)
+
 if __name__ == "__main__":
     unittest.main()

@@ -4149,7 +4149,8 @@ public class TrackingService extends Service implements LocationListener {
                 if (lockWaitMs >= 150L) {
                     FileLogger.log(this, "CHAT", "P2P 发送串行锁等待 message="
                             + messageId + " waitMs=" + lockWaitMs
-                            + " queuedAtRequest=" + queueDepthAtRequest);
+                            + " queuedAtRequest=" + queueDepthAtRequest
+                            + " thread=" + Thread.currentThread().getName());
                 }
                 if (serviceDestroyed) return;
                 if (!isCurrentLanChatSocket(socket, socketGeneration)) {
@@ -4157,7 +4158,16 @@ public class TrackingService extends Service implements LocationListener {
                             + messageId);
                     return;
                 }
-                attemptNumber = store.recordOutboxAttempt(messageId);
+                long outboxAttemptDbStartedAt = android.os.SystemClock.elapsedRealtime();
+                try {
+                    attemptNumber = store.recordOutboxAttempt(messageId);
+                } finally {
+                    long outboxAttemptDbMs = android.os.SystemClock.elapsedRealtime() - outboxAttemptDbStartedAt;
+                    if (outboxAttemptDbMs >= 50L) {
+                        FileLogger.log(this, "CHAT", "P2P SQLite outbox attempt message="
+                                + messageId + " dbMs=" + outboxAttemptDbMs);
+                    }
+                }
                 if (attemptNumber < 0) {
                     FileLogger.log(this, "CHAT", "⚠️ LAN SQLite 发送尝试记账失败或本轮预算已耗尽，停止发送");
                     return;
@@ -4171,7 +4181,8 @@ public class TrackingService extends Service implements LocationListener {
                 if (lockHoldMs >= 150L) {
                     FileLogger.log(this, "CHAT", "P2P 发送串行锁持有 message=" + messageId
                             + " holdMs=" + lockHoldMs
-                            + " queueDepthAfter=" + lanChatTransmitLock.getQueueLength());
+                            + " queueDepthAfter=" + lanChatTransmitLock.getQueueLength()
+                            + " thread=" + Thread.currentThread().getName());
                 }
                 lanChatTransmitLock.unlock();
             }
@@ -4356,7 +4367,13 @@ public class TrackingService extends Service implements LocationListener {
                         && savedAddress.isSiteLocalAddress()
                         && !savedAddress.isLoopbackAddress()
                         && !savedAddress.isAnyLocalAddress()) {
+                    long challengeStartedAt = android.os.SystemClock.elapsedRealtime();
                     sendDirectedPeerChallenge(socket, target.peerId, savedAddress, target.endpointPort);
+                    long challengeMs = android.os.SystemClock.elapsedRealtime() - challengeStartedAt;
+                    if (challengeMs >= 50L) {
+                        FileLogger.log(this, "CHAT", "P2P directed challenge dispatch message="
+                                + messageId + " peer=" + target.peerId + " elapsedMs=" + challengeMs);
+                    }
                     directedChallenges++;
                 }
             } catch (Exception staleEndpoint) {
@@ -4502,15 +4519,35 @@ public class TrackingService extends Service implements LocationListener {
                             // Recheck the durable target immediately before UDP dispatch.
                             // ACK may have arrived after the recipient snapshot was loaded;
                             // a failed ledger check must fail closed rather than resend to an ACKed peer.
-                            if (store == null || !store.markAttempt(messageId, peerId, "")) {
-                                continue;
+                            long targetAttemptDbStartedAt = android.os.SystemClock.elapsedRealtime();
+                            boolean targetAttemptAllowed;
+                            try {
+                                targetAttemptAllowed = store != null && store.markAttempt(messageId, peerId, "");
+                            } finally {
+                                long targetAttemptDbMs = android.os.SystemClock.elapsedRealtime() - targetAttemptDbStartedAt;
+                                if (targetAttemptDbMs >= 50L) {
+                                    FileLogger.log(this, "CHAT", "P2P SQLite target attempt message="
+                                            + messageId + " peer=" + peerId + " dbMs=" + targetAttemptDbMs);
+                                }
                             }
+                            if (!targetAttemptAllowed) continue;
                             byte[] peerData = buildAuthenticatedLanChatPacket(myId, peerId, messageId, message);
                             DatagramPacket p = new DatagramPacket(peerData, peerData.length,
                                     peer.getAddress(), peer.getPort());
                             sendLanUdpPacket(socket, p, "CHAT_UNICAST");
-                            if (store != null && !store.recordSuccessfulSendEndpoint(messageId, peerId,
-                                    peer.getAddress().getHostAddress() + ":" + peer.getPort())) {
+                            long endpointPersistStartedAt = android.os.SystemClock.elapsedRealtime();
+                            boolean endpointPersisted;
+                            try {
+                                endpointPersisted = store != null && store.recordSuccessfulSendEndpoint(messageId, peerId,
+                                        peer.getAddress().getHostAddress() + ":" + peer.getPort());
+                            } finally {
+                                long endpointPersistMs = android.os.SystemClock.elapsedRealtime() - endpointPersistStartedAt;
+                                if (endpointPersistMs >= 50L) {
+                                    FileLogger.log(this, "CHAT", "P2P SQLite send-endpoint message="
+                                            + messageId + " peer=" + peerId + " dbMs=" + endpointPersistMs);
+                                }
+                            }
+                            if (!endpointPersisted) {
                                 FileLogger.log(this, "CHAT", "⚠️ UDP 已发送但目标 endpoint 未能落账 message="
                                         + messageId + " peer=" + peerId);
                             }
