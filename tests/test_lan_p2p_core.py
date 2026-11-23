@@ -331,7 +331,7 @@ class LanP2PCoreTests(unittest.TestCase):
                 self.db_path, "server2", "m-open-discovery"))
             self.assertTrue(is_outgoing_discovery_pending(
                 self.db_path, "server2", "m-open-discovery"))
-        with patch("lan_p2p_core.time.time", return_value=1006.0):
+        with patch("lan_p2p_core.time.time", return_value=1011.0):
             self.assertFalse(is_outgoing_discovery_pending(
                 self.db_path, "server2", "m-open-discovery"))
             self.assertFalse(acknowledge_outgoing_message(
@@ -532,7 +532,7 @@ class LanP2PCoreTests(unittest.TestCase):
             deadline = conn.execute(
                 "SELECT delivery_deadline_ms FROM lan_outbox WHERE message_id='m-window-start'"
             ).fetchone()[0]
-        self.assertEqual(deadline, 1015000)
+        self.assertEqual(deadline, 1020000)
 
     def test_discovery_window_begin_is_idempotent_and_never_extends_deadline(self):
         from lan_p2p_core import persist_outgoing_message, begin_outgoing_discovery_window
@@ -548,7 +548,7 @@ class LanP2PCoreTests(unittest.TestCase):
             deadline = conn.execute(
                 "SELECT delivery_deadline_ms FROM lan_outbox WHERE message_id='m-window-idempotent'"
             ).fetchone()[0]
-        self.assertEqual(deadline, 1005000)
+        self.assertEqual(deadline, 1010000)
 
 
     def test_discovery_deadline_is_closed_at_exact_boundary_on_python_and_android(self):
@@ -572,7 +572,7 @@ class LanP2PCoreTests(unittest.TestCase):
                     self.db_path, scope, message_id))
 
         # Each operation is isolated by sender scope so one expiry sweep cannot mask another.
-        with patch("lan_p2p_core.time.time", return_value=1005.0):
+        with patch("lan_p2p_core.time.time", return_value=1010.0):
             self.assertFalse(add_discovery_target(
                 self.db_path, "scope-single", "m-boundary-single", "android-late"))
             self.assertFalse(begin_outgoing_discovery_window(
@@ -622,7 +622,7 @@ class LanP2PCoreTests(unittest.TestCase):
                 self.db_path, "server2", "server2-id", "m-too-late", "hello", []))
             self.assertTrue(begin_outgoing_discovery_window(
                 self.db_path, "server2", "m-too-late"))
-        with patch("lan_p2p_core.time.time", return_value=1006.0):
+        with patch("lan_p2p_core.time.time", return_value=1011.0):
             self.assertEqual(add_discovery_targets_for_peer(
                 self.db_path, "server2", "android-late"), 0)
             self.assertFalse(acknowledge_outgoing_message(
@@ -728,7 +728,7 @@ class LanP2PCoreTests(unittest.TestCase):
             self.assertTrue(remember_peer_challenge(
                 self.db_path, "server2", "nonce-expired", "android-a",
                 "192.168.1.10", 8888))
-        with patch("lan_p2p_core.time.time", return_value=1006.0):
+        with patch("lan_p2p_core.time.time", return_value=1011.0):
             self.assertFalse(complete_peer_challenge(
                 self.db_path, "server2", "nonce-expired", "android-a",
                 "192.168.1.10", 8888, "android", "android-main"))
