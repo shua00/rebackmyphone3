@@ -3078,7 +3078,7 @@ class AndroidLanAckDiagnosticsTests(unittest.TestCase):
         self.assertIn("reason=unverified_endpoint", ack)
 
         beacon_start = source.index("private void sendPeerHello(")
-        beacon_end = source.index("private void clearPendingPeerChallenge(", beacon_start)
+        beacon_end = source.index("private byte[] buildAuthenticatedLanChatPacket(", beacon_start)
         beacon = source[beacon_start:beacon_end]
         self.assertIn('" reason=" + e.getMessage()', beacon)
 
