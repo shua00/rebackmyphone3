@@ -356,3 +356,18 @@ IP 地址永远不能作为设备身份。网络变化时应使旧端点路由�
 初始发送路径继续保留原有最多三次、短间隔快速尝试；仅后台恢复 worker 使用严格退避模式。经过认证的 peer recovery 事件仍可按既有冷却策略重置耗尽预算，重置后的首次恢复发送允许立即执行。ACKed、预算耗尽和父消息终态条件仍在原子更新中检查。
 
 此机制消除“过期 due-scan 结果直接触发后台重发”的竞态，不承诺 UDP 层绝对不出现重复数据报：发送与 ACK 在网络上的先后无法由 SQLite 事务覆盖，接收端仍必须依靠 message_id 去重并对重复包重新 ACK。
+
+
+## 20. Android/Python 逐目标重试预算一致性（v2.8.20）
+
+固定收件人消息在 Android 与 Python 三服务中均按目标独立维护重试次数和退避。Android 的 `lan_outbox.retry_attempt_count` 仅保留给尚无固定收件人的首次发现广播；存在固定目标后，目标级 `attempt_count`、`last_attempt_at` 和 `last_recovery_at_ms` 决定是否允许发送。每个目标独立受8次预算和指数退避约束；某个目标 ACK 后不再参与重试。消息仅在所有未 ACK 目标都耗尽预算时暂停。
+
+恢复事件仅重置冷却到期的耗尽目标，未耗尽目标的计数和退避进度不清零。数据库版本7为目标账本增加 `last_recovery_at_ms` 和复合索引 `(message_id,status,attempt_count,last_attempt_at)`；升级时清除固定目标消息的旧聚合计数，并恢复仍有目标级预算的历史暂停消息。迁移只增列/索引和更新状态，不删除 Outbox、目标、Inbox 或历史展示记录。
+
+无固定收件人的发现广播仍使用原消息级有限预算，原有10秒首次发现窗口不变。ACK 只有在接收端持久化成功后才发送；留言悬浮消息与对讲消息管线保持分离。
+
+## 21. Python 服务监听生命周期与代理边界（v2.8.20）
+
+rescue2.py 与 server2.py 在 UDP listener 重新绑定成功后启动唯一恢复 worker；socket 断开时 worker 暂时看不到 listener socket，重新绑定后继续复用该 worker。chat.py 独立模式此前只尝试绑定一次，本版改为 bind/recv 异常后延迟重试并重新绑定；worker 的启动仍在 bind 成功之后，避免无可用 socket 时误认为 listener 已就绪。
+
+chat.py 在 server2.py 启动时采用代理模式，不启动自己的 UDP listener 和恢复 worker；这是有意的单一权威发送/接收边界，避免两个 chat 服务同时运行造成 UDP 端口冲突、重复消息身份和双 Outbox。若 server2.py 在 chat.py 启动后退出，chat.py 不自动切换到独立模式，需重启 chat.py 重新判定模式；不能在运行中未经协调地同时启用两个独立账本。

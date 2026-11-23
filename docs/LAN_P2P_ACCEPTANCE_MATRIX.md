@@ -223,3 +223,24 @@
 | G08 | 三服务严格退避模式回归 | rescue2.py、chat.py、server2.py 的后台恢复路径均调用严格退避复核；初始快速发送和 verified recovery 行为不回退 | 自动化/CI/三服务真实进程 |
 
 以上新增项不替代 A01–A10、S01–S19、M-A–M-C、F01–F13、G01–G07。
+
+
+## 追加验收条目（v2.8.20）
+
+| ID | 验收要求 | 必须验证的行为 | 证据 |
+|---|---|---|---|
+| S21 | Android/Python逐目标预算一致 | Android固定目标与Python目标均独立计数、独立退避；ACKed目标不影响其他目标预算；所有未ACK目标耗尽后才暂停 | 代码/自动化/CI/真机 |
+| F15 | 多目标部分ACK与不对称在线 | A目标ACK、B目标离线/延迟上线时，A不重发，B保留完整独立预算；A的尝试不消耗B的预算 | 自动化/CI/双设备 |
+| G09 | Android目标级恢复迁移 | 旧数据库增量迁移 last_recovery_at_ms；恢复事件只重置冷却到期的耗尽目标，其他目标计数不变 | 自动化/CI/Android SQLite故障注入 |
+| S22 | Python三服务监听生命周期 | rescue2/server2 在 listener 重绑后复用唯一 worker；chat.py 独立模式绑定/接收失败后延迟重试，代理模式不启动重复 UDP listener | 代码/自动化/三服务进程 |
+| F16 | chat.py 监听重绑定与代理隔离 | 注入独立模式 UDP bind/recv 异常，listener 清理旧 socket 并延迟重绑；server2 在线时不启动 chat.py 自己的 UDP listener | 自动化/CI/三服务进程 |
+| G10 | 三服务独立/代理边界 | 三服务各自使用独立 DB scope 和端口；chat.py 代理模式只通过 server2 API；server2 退出后需重启 chat.py 才重新判定独立模式 | 自动化/CI/真实进程 |
+
+### v2.8.20 自动化与构建证据
+
+- GitHub Actions run [45123636395](https://github.com/shua00/rebackmyphone3/actions/runs/45123636395)，最终代码 HEAD `cd1164c1d2f7c143e55d94952ad84733638c6155`：138 项 Python 自动化测试全部通过；validate-python、Android 变更检测和 build 三个 job 全部成功。
+- Android `:app:assembleDebug` 构建成功；artifact `app-debug` ID `14794508674`。
+- S21/S22 的代码级和 CI 回归已通过；F15/F16 的真实多设备/真实进程故障注入仍待执行，G09 的 Android SQLite真实迁移与故障注入仍待真机验收。
+- 本轮不是整体验收完成：原有 A01–A10、S01–S20、M-A–M-C、F01–F14、G01–G08 以及新增项目仍须按矩阵完成真实设备/真实进程验收。
+
+以上新增项不替代 A01–A10、S01–S20、M-A–M-C、F01–F14、G01–G08。
