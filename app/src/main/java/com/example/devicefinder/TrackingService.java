@@ -4788,6 +4788,14 @@ public class TrackingService extends Service implements LocationListener {
                         java.net.InetSocketAddress peer = dispatchEndpoints.get(peerId);
                         if (peer == null) continue;
                         try {
+                            // Resolve the immutable packet before charging the durable send budget.
+                            // A missing prebuilt frame is a local preparation failure, not a UDP attempt.
+                            byte[] peerData = preparedPeerPackets.get(peerId);
+                            if (peerData == null) {
+                                FileLogger.log(this, "CHAT", "⚠️ P2P 缺少预编码目标数据包，保留发送预算 peer="
+                                        + peerId + " message=" + messageId);
+                                continue;
+                            }
                             String attemptedEndpoint = peer.getAddress().getHostAddress() + ":" + peer.getPort();
                             // Persist the exact endpoint before UDP dispatch; this confirms this
                             // message only and does not promote the reusable peer route.
@@ -4807,8 +4815,6 @@ public class TrackingService extends Service implements LocationListener {
                                 }
                             }
                             if (!targetAttemptAllowed) continue;
-                            byte[] peerData = preparedPeerPackets.get(peerId);
-                            if (peerData == null) continue;
                             DatagramPacket p = new DatagramPacket(peerData, peerData.length,
                                     peer.getAddress(), peer.getPort());
                             hadUdpDispatchAttempt.set(true);
