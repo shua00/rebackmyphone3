@@ -4664,7 +4664,6 @@ public class TrackingService extends Service implements LocationListener {
                             hadUdpDispatchAttempt.set(true);
                             sendLanUdpPacket(socket, p, verifiedRoutePeerIds.contains(peerId)
                                     ? "CHAT_UNICAST_VERIFIED" : "CHAT_UNICAST_CACHED_ENDPOINT");
-                            long endpointPersistStartedAt = android.os.SystemClock.elapsedRealtime();
                             final String successfulEndpoint = peer.getAddress().getHostAddress() + ":" + peer.getPort();
                             final LanChatStore endpointStore = store;
                             try {
@@ -5389,16 +5388,9 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     /**
-     * LAN 对讲可靠接收：聊天历史与 messageId 去重记录在同一次 SharedPreferences commit 中落盘。
-     * 返回 true 表示消息已保存或已确认是重复包，可以安全 ACK；落盘失败返回 false，不 ACK 让发送端重试。
-     */
-    private boolean persistIncomingLanChat(String senderId, String messageId, String msgContent) {
-        return persistIncomingLanChat(senderId, messageId, msgContent, senderId);
-    }
-
-    /**
-     * Commit the immutable receive record only. A successful return is the durable
-     * delivery boundary and permits chat.ack; UI history is a recoverable projection.
+     * Compatibility overload for callers without a display name.
+     * A successful SQLite inbox commit is the durable delivery boundary; UI history
+     * is projected asynchronously and can be replayed after process recovery.
      */
     private boolean persistIncomingLanChat(String senderId, String messageId, String msgContent) {
         return persistIncomingLanChat(senderId, messageId, msgContent, senderId);

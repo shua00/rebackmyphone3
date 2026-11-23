@@ -1617,6 +1617,14 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertNotIn("store.recordSuccessfulSendEndpoint(", send_method)
         self.assertIn("last_attempt_endpoint", send_method)
         self.assertIn("recordTargetSendError(", send_method)
+        self.assertEqual(
+            tracking.count("private boolean persistIncomingLanChat("), 2,
+            "keep exactly one compatibility overload and one display-name implementation",
+        )
+        inbox_compat = extract_java_method(
+            tracking, "private boolean persistIncomingLanChat(String senderId, String messageId, String msgContent)"
+        )
+        self.assertIn("return persistIncomingLanChat(senderId, messageId, msgContent, senderId);", inbox_compat)
         udp_helper_start = tracking.index("private void sendLanUdpPacket(")
         udp_helper = tracking[udp_helper_start:udp_helper_start + 1500]
         self.assertIn("throw new java.net.SocketException", udp_helper)
