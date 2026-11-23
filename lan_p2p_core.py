@@ -528,13 +528,11 @@ def add_discovery_target(db_path, sender_scope, message_id, peer_id):
             return False
         now_ms = int(time.time() * 1000)
         deadline = int(row[1] or 0)
-        if deadline and now_ms >= deadline:
+        # Only the first actual UDP dispatch may open this window. A peer
+        # handshake or helper call while the message is merely queued must not.
+        if not deadline or now_ms >= deadline:
             _safe_rollback(conn)
             return False
-        if not deadline:
-            deadline = now_ms + FIRST_DISCOVERY_WINDOW_MS
-            conn.execute("UPDATE lan_outbox SET delivery_deadline_ms=? WHERE message_id=?",
-                         (deadline, message_id))
         conn.execute("""INSERT OR IGNORE INTO lan_outbox_targets
             (message_id,peer_id,status) VALUES(?,?,'pending')""", (message_id, peer_id))
         conn.commit()
