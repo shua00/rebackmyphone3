@@ -3139,5 +3139,28 @@ class AndroidLanControlQueueDiagnosticsTests(unittest.TestCase):
         peer_hello = source[peer_hello_start:peer_hello_end]
         self.assertIn("P2P peer.hello control queueMs=", peer_hello)
 
+
+class AndroidLanStoreLifecycleTests(unittest.TestCase):
+    def test_service_destroy_drains_communication_executors_before_closing_sqlite(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        destroy = extract_java_method(source, "public void onDestroy()")
+        self.assertIn("lanChatImmediateExecutor.shutdown()", destroy)
+        self.assertIn("lanChatSendExecutor.shutdown()", destroy)
+        self.assertIn("lanChatControlExecutor.shutdown()", destroy)
+        self.assertIn("lanChatIoExecutor.shutdown()", destroy)
+        self.assertIn("LanChatStore storeToClose = lanChatStore", destroy)
+        self.assertIn("closeLanChatStoreAfterExecutors(storeToClose)", destroy)
+        self.assertNotIn("lanChatStore.closeStore()", destroy)
+
+        closer = extract_java_method(source, "private void closeLanChatStoreAfterExecutors(")
+        for executor in ("lanChatScheduler", "lanChatImmediateExecutor", "lanChatSendExecutor",
+                         "lanChatControlExecutor", "lanChatIoExecutor", "maintenanceExecutor"):
+            self.assertIn("awaitLanExecutorTermination(" + executor + ")", closer)
+        self.assertIn("storeToClose.closeStore()", closer)
+        awaiter = extract_java_method(source, "private void awaitLanExecutorTermination(")
+        self.assertIn("while (!executor.isTerminated())", awaiter)
+        self.assertIn("executor.awaitTermination(5L, TimeUnit.SECONDS)", awaiter)
+
 if __name__ == "__main__":
     unittest.main()
