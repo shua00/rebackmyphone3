@@ -3090,7 +3090,10 @@ class AndroidLanSchedulingAndAckProgressTests(unittest.TestCase):
         retry_end = source.index("// Both the immediate and retry lanes", retry_start)
         retry = source[retry_start:retry_end]
         self.assertIn("lanChatSendExecutor.execute(", retry)
-        self.assertIn("synchronized (lanChatTransmitLock)", source)
+        self.assertIn("new java.util.concurrent.locks.ReentrantLock(true)", source)
+        self.assertIn("lanChatTransmitLock.lock()", source)
+        self.assertIn("lanChatTransmitLock.unlock()", source)
+        self.assertNotIn("synchronized (lanChatTransmitLock)", source)
         self.assertIn("if (!activeLanChatTransmissions.add(messageId))", source)
         self.assertIn("lanChatImmediateExecutor.shutdown()", source)
 
