@@ -4509,17 +4509,40 @@ public class TrackingService extends Service implements LocationListener {
             return;
         }
         packetBuildMs = android.os.SystemClock.elapsedRealtime() - stageStartedAt;
-        java.util.Set<String> awaitingPeerIds = java.util.Collections.newSetFromMap(
-                new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
-        if (store == null) {
-            awaitingPeerIds.addAll(verifiedChatPeers.keySet());
-        } else {
-            for (String peerId : pendingTargetIds) {
-                if (verifiedChatPeers.containsKey(peerId)) awaitingPeerIds.add(peerId);
+        java.util.Map<String, java.net.InetSocketAddress> dispatchEndpoints = new java.util.HashMap<>();
+        java.util.Set<String> verifiedRoutePeerIds = new java.util.HashSet<>();
+        for (LanChatStore.Target target : savedTargets) {
+            if (target == null || target.peerId == null || "acked".equals(target.status)) continue;
+            java.net.InetSocketAddress liveRoute = verifiedChatPeers.get(target.peerId);
+            if (liveRoute != null) {
+                dispatchEndpoints.put(target.peerId, liveRoute);
+                verifiedRoutePeerIds.add(target.peerId);
+                continue;
+            }
+            // A cached endpoint is sufficient for an immediate message attempt; the packet's
+            // stable target_peer_id prevents delivery to a different host reusing this address.
+            if (target.endpointIp == null || target.endpointIp.isEmpty()
+                    || !(target.endpointPort == 8888 || target.endpointPort == 8887
+                         || target.endpointPort == 8889 || target.endpointPort == 8890)) continue;
+            try {
+                java.net.InetAddress cachedAddress = java.net.InetAddress.getByName(target.endpointIp);
+                if (!(cachedAddress instanceof java.net.Inet4Address)
+                        || !cachedAddress.isSiteLocalAddress()
+                        || cachedAddress.isLoopbackAddress() || cachedAddress.isAnyLocalAddress()) continue;
+                dispatchEndpoints.put(target.peerId,
+                        new java.net.InetSocketAddress(cachedAddress, target.endpointPort));
+            } catch (Exception invalidCachedEndpoint) {
+                FileLogger.logD("CHAT", "cached LAN endpoint skipped peer=" + target.peerId
+                        + " reason=" + invalidCachedEndpoint.getClass().getSimpleName());
             }
         }
+        java.util.Set<String> awaitingPeerIds = java.util.Collections.newSetFromMap(
+                new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+        awaitingPeerIds.addAll(dispatchEndpoints.keySet());
         final int totalPeerCount = pendingTargetIds.size();
         final int reachablePeerCount = awaitingPeerIds.size();
+        final int verifiedRouteCount = verifiedRoutePeerIds.size();
+        final int cachedEndpointCount = Math.max(0, reachablePeerCount - verifiedRouteCount);
         final boolean firstDiscoveryWindowOpen;
         try {
             firstDiscoveryWindowOpen = store.isDiscoveryPending(messageId);
@@ -4550,7 +4573,8 @@ public class TrackingService extends Service implements LocationListener {
                             - targetLoadMs - routeProbeMs - packetBuildMs));
         }
         FileLogger.log(this, "CHAT", "⏱️ P2P UDP 开始发送，固定目标 " + totalPeerCount
-                + "，当前可达路由 " + reachablePeerCount + "，消息 " + messageId);
+                + "，已验证路由 " + verifiedRouteCount + "，历史端点直投 " + cachedEndpointCount
+                + "，消息 " + messageId);
         long ackLoopStartedAt = android.os.SystemClock.elapsedRealtime();
         boolean ackCleanupDeferred = false;
         try {
@@ -4576,16 +4600,20 @@ public class TrackingService extends Service implements LocationListener {
                     if (socket.isClosed()) break;
                     for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
                         if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
-                        java.net.InetSocketAddress peer = verifiedChatPeers.get(peerId);
+                        java.net.InetSocketAddress peer = dispatchEndpoints.get(peerId);
                         if (peer == null) continue;
                         try {
+                            String attemptedEndpoint = peer.getAddress().getHostAddress() + ":" + peer.getPort();
+                            // Persist the exact endpoint before UDP dispatch; this confirms this
+                            // message only and does not promote the reusable peer route.
                             // Recheck the durable target immediately before UDP dispatch.
                             // ACK may have arrived after the recipient snapshot was loaded;
                             // a failed ledger check must fail closed rather than resend to an ACKed peer.
                             long targetAttemptDbStartedAt = android.os.SystemClock.elapsedRealtime();
                             boolean targetAttemptAllowed;
                             try {
-                                targetAttemptAllowed = store != null && store.markAttempt(messageId, peerId, "");
+                                targetAttemptAllowed = store != null
+                                        && store.markAttempt(messageId, peerId, attemptedEndpoint, "");
                             } finally {
                                 long targetAttemptDbMs = android.os.SystemClock.elapsedRealtime() - targetAttemptDbStartedAt;
                                 if (targetAttemptDbMs >= 50L) {
@@ -4597,7 +4625,8 @@ public class TrackingService extends Service implements LocationListener {
                             byte[] peerData = buildAuthenticatedLanChatPacket(myId, peerId, messageId, message);
                             DatagramPacket p = new DatagramPacket(peerData, peerData.length,
                                     peer.getAddress(), peer.getPort());
-                            sendLanUdpPacket(socket, p, "CHAT_UNICAST");
+                            sendLanUdpPacket(socket, p, verifiedRoutePeerIds.contains(peerId)
+                                    ? "CHAT_UNICAST_VERIFIED" : "CHAT_UNICAST_CACHED_ENDPOINT");
                             long endpointPersistStartedAt = android.os.SystemClock.elapsedRealtime();
                             boolean endpointPersisted;
                             try {

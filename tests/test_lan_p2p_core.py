@@ -1550,6 +1550,7 @@ class LanP2PCoreTests(unittest.TestCase):
         end = store.index("public void recordTargetSendError(", start)
         attempt_method = store[start:end]
         self.assertIn("attempt_count=attempt_count+1", attempt_method)
+        self.assertIn("last_attempt_endpoint=?", attempt_method)
         self.assertIn("last_error=?", attempt_method)
         self.assertNotIn("last_endpoint", attempt_method)
 
@@ -1560,10 +1561,12 @@ class LanP2PCoreTests(unittest.TestCase):
         upgrade_method = extract_java_method(store, "public void onUpgrade(")
         self.assertIn("oldVersion < 8", upgrade_method)
         self.assertIn("ADD COLUMN last_sent_endpoint TEXT NOT NULL DEFAULT", upgrade_method)
+        self.assertIn("oldVersion < 9", upgrade_method)
+        self.assertIn("ADD COLUMN last_attempt_endpoint TEXT NOT NULL DEFAULT", upgrade_method)
 
         ack_endpoint_start = store.index("public boolean matchesExpectedAckEndpoint(")
         ack_endpoint_method = store[ack_endpoint_start:ack_endpoint_start + 1000]
-        self.assertIn("last_sent_endpoint=?", ack_endpoint_method)
+        self.assertIn("last_attempt_endpoint=? OR last_sent_endpoint=?", ack_endpoint_method)
         self.assertNotIn("last_endpoint=?", ack_endpoint_method)
 
         endpoint_start = store.index("public boolean recordSuccessfulSendEndpoint(")
@@ -1583,7 +1586,7 @@ class LanP2PCoreTests(unittest.TestCase):
         send_start = tracking.index("private void transmitLocalUdpMessageInternal(")
         send_end = tracking.index("private boolean sendAuthenticatedChatAck(", send_start)
         send_method = tracking[send_start:send_end]
-        attempt_pos = send_method.index("targetAttemptAllowed = store != null && store.markAttempt(messageId, peerId, \"\")")
+        attempt_pos = send_method.index("targetAttemptAllowed = store != null")
         skip_pos = send_method.index("continue;", attempt_pos)
         udp_pos = send_method.index('sendLanUdpPacket(socket, p, "CHAT_UNICAST")')
         endpoint_pos = send_method.index("store.recordSuccessfulSendEndpoint(messageId, peerId")
@@ -2006,7 +2009,8 @@ class LanP2PCoreTests(unittest.TestCase):
         # Check the meaning and counters, not one exact concatenation layout.
         self.assertIn("固定目标", method)
         self.assertIn("totalPeerCount", method)
-        self.assertIn("当前可达路由", method)
+        self.assertIn("已验证路由", method)
+        self.assertIn("历史端点直投", method)
         self.assertIn("reachablePeerCount", method)
         # Historical terminology in comments is harmless; the emitted log above
         # is what defines the operator-facing distinction.
@@ -3198,6 +3202,29 @@ class AndroidLanAckDiscoveryRaceTests(unittest.TestCase):
         self.assertIn("pendingChatAckRouteRechecks", source)
 
 
+
+
+
+class AndroidFixedTargetImmediateDispatchTests(unittest.TestCase):
+    def test_fixed_target_uses_persisted_endpoint_without_waiting_for_verified_route(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        send = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
+        self.assertIn("verifiedChatPeers.get(target.peerId)", send)
+        self.assertIn("dispatchEndpoints.put(target.peerId", send)
+        self.assertIn("target.endpointIp", send)
+        self.assertIn("store.markAttempt(messageId, peerId, attemptedEndpoint", send)
+        self.assertIn("CHAT_UNICAST_CACHED_ENDPOINT", send)
+
+    def test_ack_matches_attempted_endpoint_but_not_historical_route_candidate(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        attempt = extract_java_method(store, "public boolean markAttempt(")
+        match = extract_java_method(store, "public boolean matchesExpectedAckEndpoint(")
+        self.assertIn("last_attempt_endpoint=?", attempt)
+        self.assertIn("update.bindString(1, endpoint)", attempt)
+        self.assertIn("last_attempt_endpoint=? OR last_sent_endpoint=?", match)
+        self.assertNotIn("last_endpoint=?", match)
 
 
 class AndroidLanProbeIsolationTests(unittest.TestCase):

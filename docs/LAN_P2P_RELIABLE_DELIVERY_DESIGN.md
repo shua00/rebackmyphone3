@@ -420,3 +420,8 @@ ACK 拒绝日志同时记录来源 IP/UDP 端口、内存 verified-route 匹配�
 用户提供的 APK 已完成 Manifest、DEX 常量、实际服务调用链和主要 UDP 收发路径的静态提取。详细证据与限制记录在 [IPMSG_CLONE_1.1.11_REFERENCE_ANALYSIS.md](./IPMSG_CLONE_1.1.11_REFERENCE_ANALYSIS.md)。
 
 可借鉴的是发现命令、消息命令、接收确认与阅读通知之间的语义分离，以及已知成员路由复用的设计方向。该 APK 的 v1 冒号文本/GBK 信封、UDP 2425、8192 字节缓冲区、每包新线程和一次性发送线程不作为 v2 实现模板。当前 LAN v2 继续使用稳定 peer_id、nonce challenge、HMAC、1200 字节上限、SQLite Outbox/Inbox、逐目标 ACK 和有界重试。静态逆向未证明旧 APK 具有与当前 v2 等价的持久化 ACK/重试或密码学认证；动态抓包仍未完成。
+
+
+### 14. 即时投递修正（2026-11-23）
+
+固定收件人集合仍在消息创建时冻结，但首次发送不再强制等待内存路由重新验证。当前已验证路由优先；若进程重启或网络切换清空路由缓存，则立即向该固定 peer 的持久化最近 endpoint 发送带精确 target_peer_id 的消息。Android 在 UDP dispatch 前持久化 last_attempt_endpoint；匹配该 message_id + peer_id 的认证 ACK 只确认本次消息，不提升可复用路由信任。nonce challenge 与数据面发送并行。对端 IP 已变化时，仍通过新路径上的 peer hello/ack 更新 endpoint，再由 outbox 重试；绝不把旧消息改为通配广播。

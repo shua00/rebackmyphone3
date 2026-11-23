@@ -20,8 +20,8 @@ public final class LanChatStore extends SQLiteOpenHelper {
     /** Bounded first-recipient collection window, started on the first actual discovery send. */
     public static final long FIRST_DISCOVERY_WINDOW_MS = 10_000L;
     private static final String DB_NAME = "lan_p2p_delivery.db";
-    // v8 separates the last known route candidate from the last successful-send ACK endpoint.
-    private static final int DB_VERSION = 8;
+    // v9 records the exact endpoint attempted before UDP dispatch.
+    private static final int DB_VERSION = 9;
     public static final int MAX_PENDING_MESSAGES = 50;
     /** Maximum automatic sends in one retry epoch, including the original send. */
     public static final int MAX_AUTOMATIC_RETRY_ATTEMPTS = 8;
@@ -126,6 +126,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 "last_ack_at INTEGER NOT NULL DEFAULT 0," +
                 "last_endpoint TEXT NOT NULL DEFAULT ''," +
                 "last_sent_endpoint TEXT NOT NULL DEFAULT ''," +
+                "last_attempt_endpoint TEXT NOT NULL DEFAULT ''," +
                 "last_error TEXT NOT NULL DEFAULT ''," +
                 "last_recovery_at_ms INTEGER NOT NULL DEFAULT 0," +
                 "PRIMARY KEY(message_id, peer_id)," +
@@ -214,6 +215,9 @@ public final class LanChatStore extends SQLiteOpenHelper {
             // Older builds used last_endpoint both as a challenge candidate and as ACK evidence.
             // Keep old route candidates, but require an actual successful send for durable ACK fallback.
             db.execSQL("ALTER TABLE lan_outbox_targets ADD COLUMN last_sent_endpoint TEXT NOT NULL DEFAULT ''");
+        }
+        if (oldVersion < 9 && !hasColumn(db, "lan_outbox_targets", "last_attempt_endpoint")) {
+            db.execSQL("ALTER TABLE lan_outbox_targets ADD COLUMN last_attempt_endpoint TEXT NOT NULL DEFAULT ''");
         }
         if (oldVersion < 6) {
             // Fixed-recipient rows now use target-local counters. Discard the old aggregate
@@ -684,15 +688,15 @@ public final class LanChatStore extends SQLiteOpenHelper {
     }
 
     /** Atomically enforce the per-recipient attempt cap and persisted exponential backoff. */
-    public boolean markAttempt(String messageId, String peerId, String error) {
-        if (messageId == null || peerId == null) return false;
+    public boolean markAttempt(String messageId, String peerId, String endpoint, String error) {
+        if (messageId == null || peerId == null || endpoint == null || endpoint.length() == 0) return false;
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
             long now = System.currentTimeMillis();
             android.database.sqlite.SQLiteStatement update = db.compileStatement(
                     "UPDATE lan_outbox_targets SET status='sent',attempt_count=attempt_count+1," +
-                    "last_attempt_at=?,last_error=? WHERE message_id=? AND peer_id=? AND status!='acked' " +
+                    "last_attempt_endpoint=?,last_attempt_at=?,last_error=? WHERE message_id=? AND peer_id=? AND status!='acked' " +
                     "AND attempt_count<? AND (attempt_count=0 OR last_attempt_at + " +
                     "CASE attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000 WHEN 3 THEN 10000 " +
                     "WHEN 4 THEN 20000 WHEN 5 THEN 40000 ELSE 60000 END <= ?) " +
@@ -700,12 +704,13 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     "AND o.state NOT IN ('delivered','expired','waiting_peers'))");
             int changed;
             try {
-                update.bindLong(1, now);
-                update.bindString(2, error == null ? "" : error);
-                update.bindString(3, messageId);
-                update.bindString(4, peerId);
-                update.bindLong(5, MAX_AUTOMATIC_RETRY_ATTEMPTS);
-                update.bindLong(6, now);
+                update.bindString(1, endpoint);
+                update.bindLong(2, now);
+                update.bindString(3, error == null ? "" : error);
+                update.bindString(4, messageId);
+                update.bindString(5, peerId);
+                update.bindLong(6, MAX_AUTOMATIC_RETRY_ATTEMPTS);
+                update.bindLong(7, now);
                 changed = update.executeUpdateDelete();
             } finally { update.close(); }
             if (changed != 1) return false;
@@ -772,8 +777,10 @@ public final class LanChatStore extends SQLiteOpenHelper {
         Cursor c = null;
         try {
             c = getReadableDatabase().rawQuery(
-                    "SELECT 1 FROM lan_outbox_targets WHERE message_id=? AND peer_id=? AND last_sent_endpoint=? LIMIT 1",
-                    new String[]{messageId, peerId, endpointIp + ":" + endpointPort});
+                    "SELECT 1 FROM lan_outbox_targets WHERE message_id=? AND peer_id=? " +
+                            "AND (last_attempt_endpoint=? OR last_sent_endpoint=?) LIMIT 1",
+                    new String[]{messageId, peerId, endpointIp + ":" + endpointPort,
+                            endpointIp + ":" + endpointPort});
             return c.moveToFirst();
         } catch (Exception e) {
             return false;
