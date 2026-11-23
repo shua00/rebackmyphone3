@@ -476,47 +476,50 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
 
 def udp_listener():
     global UDP_LISTENER_SOCKET
-    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    try:
-        udp_sock.bind(('0.0.0.0', UDP_PORT))
-        UDP_LISTENER_SOCKET = udp_sock
-        _start_v2_recovery_retry_worker()
+    while True:
+        udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         try:
-            subnet_broadcast = get_subnet_broadcast()
-        except Exception:
-            subnet_broadcast = "255.255.255.255"
-        announced = send_startup_peer_beacon(
-            udp_sock, PEER_NODE_ID, "chat.py", PEER_NODE_ID, RESCUE_SECRET,
-            UDP_PORT, [8888, 8887, 8889],
-            [subnet_broadcast, "255.255.255.255"],
-            db_path=CHAT_DB, receiver_scope="chat.py")
-        print(f"🎧 UDP 监听已启动 (端口 {UDP_PORT})，等待对讲机消息...")
-        print(f"📡 chat.py startup peer beacon sent={announced}")
-        while True:
-            # [B2] 1024 → 4096，避免长消息被 UDP 层截断
-            data, addr = udp_sock.recvfrom(4096)
-            msg = data.decode('utf-8', errors='ignore')
-            if msg.startswith("{"):
-                try: envelope = decode_packet(data, RESCUE_SECRET)
-                except ValueError: envelope = None
-                if envelope is not None:
-                    _handle_authenticated_v2_packet(envelope, udp_sock, addr)
-                    continue
-    except OSError as e:
-        if e.errno == 98:
-            print(f"❌ UDP {UDP_PORT} 被占用（可能 rescue2.py 已在运行）。")
-            print(f"   本网页仍可打开，但无法接收手机消息。建议直接访问 {SERVER2_URL}/ 使用内置对讲机。")
-        else:
-            print(f"❌ UDP 端口 {UDP_PORT} 绑定失败: {e}")
-    except Exception as e:
-        print(f"❌ UDP 监听异常: {e}")
-    finally:
-        if UDP_LISTENER_SOCKET is udp_sock:
-            UDP_LISTENER_SOCKET = None
-        try: udp_sock.close()
-        except Exception: pass
+            udp_sock.bind(('0.0.0.0', UDP_PORT))
+            UDP_LISTENER_SOCKET = udp_sock
+            _start_v2_recovery_retry_worker()
+            try:
+                subnet_broadcast = get_subnet_broadcast()
+            except Exception:
+                subnet_broadcast = "255.255.255.255"
+            announced = send_startup_peer_beacon(
+                udp_sock, PEER_NODE_ID, "chat.py", PEER_NODE_ID, RESCUE_SECRET,
+                UDP_PORT, [8888, 8887, 8889],
+                [subnet_broadcast, "255.255.255.255"],
+                db_path=CHAT_DB, receiver_scope="chat.py")
+            print(f"🎧 UDP 监听已启动 (端口 {UDP_PORT})，等待对讲机消息...")
+            print(f"📡 chat.py startup peer beacon sent={announced}")
+            while True:
+                # [B2] 1024 → 4096，避免长消息被 UDP 层截断
+                data, addr = udp_sock.recvfrom(4096)
+                msg = data.decode('utf-8', errors='ignore')
+                if msg.startswith("{"):
+                    try: envelope = decode_packet(data, RESCUE_SECRET)
+                    except ValueError: envelope = None
+                    if envelope is not None:
+                        _handle_authenticated_v2_packet(envelope, udp_sock, addr)
+                        continue
+        except OSError as e:
+            if e.errno in (98, 10048) or "Address already in use" in str(e):
+                print(f"❌ UDP {UDP_PORT} 暂时被占用，10s 后重试: {e}")
+                time.sleep(10)
+            else:
+                print(f"❌ UDP 监听异常，5s 后重试: {e}")
+                time.sleep(5)
+        except Exception as e:
+            print(f"❌ UDP 监听异常，5s 后重试: {e}")
+            time.sleep(5)
+        finally:
+            if UDP_LISTENER_SOCKET is udp_sock:
+                UDP_LISTENER_SOCKET = None
+            try: udp_sock.close()
+            except Exception: pass
 
 
 class RequestHandler(BaseHTTPRequestHandler):
