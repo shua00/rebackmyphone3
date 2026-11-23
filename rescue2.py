@@ -115,7 +115,7 @@ PACKAGE_NAME = "com.example.devicefinder"
 
 # ===== 配置区 =====
 RESCUE_SECRET = "your_private_secret_key"
-from lan_p2p_core import LanP2PStorageError, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, load_active_pending_targets
+from lan_p2p_core import LanP2PStorageError, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, load_active_pending_targets, begin_outgoing_discovery_window
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "rescue2")
 DEFAULT_SERVER_URL = "http://dingwei.bai001.de5.net/api/report"
 DEFAULT_CONFIG_URL = "https://your-config-url.com/config.txt"
@@ -659,7 +659,9 @@ def send_chat_v2(body, target_ips):
             # The fixed recipient snapshot contains known but currently offline peers.
             # Never broadcast their old message to devices that join after the snapshot.
             print(f"ℹ️ 固定对讲目标当前无已验证路由，保留原消息等待 peer 重新上线: {message_id}")
-        elif broadcast_all and is_outgoing_discovery_pending(_CHAT_DEDUP_DB, "rescue2", message_id):
+        elif broadcast_all and begin_outgoing_discovery_window(
+                _CHAT_DEDUP_DB, "rescue2", message_id) and is_outgoing_discovery_pending(
+                    _CHAT_DEDUP_DB, "rescue2", message_id):
             subnet = get_subnet_broadcast()
             destinations = [(ip, UDP_DEVICE_PORT) for ip in dict.fromkeys(
                 [subnet, "255.255.255.255"])]
@@ -669,6 +671,8 @@ def send_chat_v2(body, target_ips):
                 should_continue=lambda: is_outgoing_discovery_pending(
                     _CHAT_DEDUP_DB, "rescue2", message_id))
         elif selected_ips and not broadcast_all:
+            if not begin_outgoing_discovery_window(_CHAT_DEDUP_DB, "rescue2", message_id):
+                return False
             # A specifically requested IP with no known peer identity is a directed
             # first-discovery probe, never a subnet-wide fallback.
             destinations = [(ip, UDP_DEVICE_PORT) for ip in selected_ips if ip != "255.255.255.255"]

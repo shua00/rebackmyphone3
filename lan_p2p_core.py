@@ -249,7 +249,9 @@ def persist_outgoing_message(db_path, sender_scope, sender_peer_id, message_id,
             conn.commit()
             return True
 
-        discovery_deadline_ms = 0 if targets else persisted_at_ms + 5000
+        # Empty-recipient discovery starts only when a real UDP dispatch begins.
+        # A queued message with no ready socket must not burn its discovery window.
+        discovery_deadline_ms = 0
         conn.execute("""INSERT INTO lan_outbox
             (message_id,sender_scope,sender_peer_id,message_type,body,created_at_ms,
              protocol_version,state,delivery_deadline_ms)
@@ -768,6 +770,51 @@ def send_startup_peer_beacon(sock, peer_id, peer_type, service_id, secret,
             except OSError:
                 continue
     return sent
+
+
+def begin_outgoing_discovery_window(db_path, sender_scope, message_id,
+                                    window_ms=5000):
+    """Start an empty-recipient discovery deadline on first actual UDP dispatch."""
+    if not db_path or not sender_scope or not message_id:
+        return False
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT state,delivery_deadline_ms FROM lan_outbox "
+            "WHERE sender_scope=? AND message_id=?",
+            (sender_scope, message_id),
+        ).fetchone()
+        if row is None or row[0] != "discovery_pending":
+            _safe_rollback(conn)
+            return False
+        now_ms = int(time.time() * 1000)
+        deadline = int(row[1] or 0)
+        if deadline > 0:
+            if now_ms > deadline:
+                _finalize_expired_discovery_windows(conn, sender_scope, now_ms)
+                conn.commit()
+                return False
+            conn.commit()
+            return True  # Already open; never extend the original window.
+        bounded_window = max(1000, min(30000, int(window_ms)))
+        conn.execute(
+            "UPDATE lan_outbox SET delivery_deadline_ms=? "
+            "WHERE sender_scope=? AND message_id=? AND state='discovery_pending' "
+            "AND delivery_deadline_ms=0",
+            (now_ms + bounded_window, sender_scope, message_id),
+        )
+        conn.commit()
+        return True
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        raise LanP2PStorageError("failed to start LAN discovery window") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
 
 
 def is_outgoing_discovery_pending(db_path, sender_scope, message_id):

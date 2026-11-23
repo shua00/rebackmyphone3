@@ -468,20 +468,48 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertEqual(targets, 0)
 
 
-    def test_initial_discovery_deadline_is_anchored_to_outbox_creation(self):
-        from lan_p2p_core import persist_outgoing_message
+    def test_initial_discovery_window_stays_unstarted_until_udp_dispatch(self):
+        from lan_p2p_core import (
+            persist_outgoing_message, is_outgoing_discovery_pending,
+            begin_outgoing_discovery_window,
+        )
         with patch("lan_p2p_core.time.time", return_value=1000.0):
             self.assertTrue(persist_outgoing_message(
                 self.db_path, "server2", "server2-id", "m-window-start", "hello", []))
-        conn = sqlite3.connect(self.db_path)
-        try:
+            self.assertTrue(is_outgoing_discovery_pending(
+                self.db_path, "server2", "m-window-start"))
+        with sqlite3.connect(self.db_path) as conn:
             state, deadline = conn.execute(
                 "SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id='m-window-start'"
             ).fetchone()
-        finally:
-            conn.close()
         self.assertEqual(state, "discovery_pending")
-        self.assertEqual(deadline, 1005000)
+        self.assertEqual(deadline, 0)
+
+        # A delayed listener starts the bounded window at the actual first dispatch.
+        with patch("lan_p2p_core.time.time", return_value=1010.0):
+            self.assertTrue(begin_outgoing_discovery_window(
+                self.db_path, "server2", "m-window-start"))
+        with sqlite3.connect(self.db_path) as conn:
+            deadline = conn.execute(
+                "SELECT delivery_deadline_ms FROM lan_outbox WHERE message_id='m-window-start'"
+            ).fetchone()[0]
+        self.assertEqual(deadline, 1015000)
+
+    def test_discovery_window_begin_is_idempotent_and_never_extends_deadline(self):
+        from lan_p2p_core import persist_outgoing_message, begin_outgoing_discovery_window
+        with patch("lan_p2p_core.time.time", return_value=1000.0):
+            self.assertTrue(persist_outgoing_message(
+                self.db_path, "server2", "server2-id", "m-window-idempotent", "hello", []))
+            self.assertTrue(begin_outgoing_discovery_window(
+                self.db_path, "server2", "m-window-idempotent"))
+        with patch("lan_p2p_core.time.time", return_value=1002.0):
+            self.assertTrue(begin_outgoing_discovery_window(
+                self.db_path, "server2", "m-window-idempotent"))
+        with sqlite3.connect(self.db_path) as conn:
+            deadline = conn.execute(
+                "SELECT delivery_deadline_ms FROM lan_outbox WHERE message_id='m-window-idempotent'"
+            ).fetchone()[0]
+        self.assertEqual(deadline, 6000)
 
     def test_first_peer_discovered_after_initial_window_is_not_added(self):
         from lan_p2p_core import (
