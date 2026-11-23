@@ -3032,5 +3032,34 @@ class LanP2PCoreTests(unittest.TestCase):
             self.assertIn("threading.Thread(target=_retry_deferred_v2_peer_recoveries", starter, filename)
             self.assertNotIn("return\n    with _V2_RECOVERY_RETRY_LOCK", starter, filename)
 
+
+class AndroidLanNetworkScopeTests(unittest.TestCase):
+    def test_android_peer_discovery_sends_bounded_scope_digest_not_raw_link_properties(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+
+        helper = extract_java_method(source, "static String buildLanProtocolNetworkScope(")
+        self.assertIn('MessageDigest.getInstance("SHA-256")', helper)
+        self.assertIn("StandardCharsets.UTF_8", helper)
+        self.assertIn('new StringBuilder("sha256:")', helper)
+        self.assertIn('"UNAVAILABLE".equals(fingerprint)', helper)
+        self.assertIn('"ERROR".equals(fingerprint)', helper)
+        self.assertIn('"NO_WIFI".equals(fingerprint)', helper)
+        self.assertIn("return \"\";", helper)
+
+        self.assertEqual(
+            source.count('put("network_scope", getLanProtocolNetworkScope())'), 2
+        )
+        self.assertNotIn(
+            'put("network_scope", wifiLanFingerprint == null ? "" : wifiLanFingerprint)',
+            source,
+        )
+        # The full fingerprint remains local for stable LAN-change comparison.
+        self.assertIn("previous.equals(current)", source)
+        self.assertIn("wifiLanFingerprint = current", source)
+
+
 if __name__ == "__main__":
     unittest.main()
