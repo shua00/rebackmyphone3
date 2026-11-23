@@ -579,10 +579,12 @@ public final class LanChatStore extends SQLiteOpenHelper {
     }
 
     /** Persist the discovery-only attempt before UDP; fixed recipients use independent target budgets. */
-    public int recordOutboxAttempt(String messageId) {
-        if (messageId == null || messageId.length() == 0) return -1;
-        SQLiteDatabase db = getWritableDatabase();
-        db.beginTransaction();
+    /**
+     * Returns the current retry epoch for fixed recipients without taking SQLite's writer
+     * transaction. Only legacy/open-discovery rows with no recipient snapshot need the
+     * atomic outbox counter update below.
+     */
+    private int[] readOutboxTargetAttemptProgress(SQLiteDatabase db, String messageId) {
         Cursor c = null;
         try {
             c = db.rawQuery("SELECT COUNT(*),SUM(CASE WHEN status!='acked' AND attempt_count<? " +
@@ -590,19 +592,39 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     "THEN attempt_count END) FROM lan_outbox_targets WHERE message_id=?",
                     new String[]{String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS),
                             String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS), messageId});
-            int targetCount = 0, remainingTargets = 0, minimumAttempts = 0;
-            try {
-                if (c.moveToFirst()) {
-                    targetCount = c.getInt(0);
-                    remainingTargets = c.isNull(1) ? 0 : c.getInt(1);
-                    minimumAttempts = c.isNull(2) ? 0 : c.getInt(2);
-                }
-            } finally { c.close(); c = null; }
+            if (!c.moveToFirst()) return new int[]{0, 0, 0};
+            return new int[]{c.getInt(0), c.isNull(1) ? 0 : c.getInt(1),
+                    c.isNull(2) ? 0 : c.getInt(2)};
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
+    public int recordOutboxAttempt(String messageId) {
+        if (messageId == null || messageId.length() == 0) return -1;
+
+        // The common fixed-recipient path is read-only. Do not acquire SQLite's single
+        // writer slot merely to read target attempt counts while the global send lock is held.
+        int[] fastProgress = readOutboxTargetAttemptProgress(getReadableDatabase(), messageId);
+        if (fastProgress[0] > 0) {
+            return fastProgress[1] == 0 ? -1 : fastProgress[2];
+        }
+
+        // No target snapshot exists yet. Recheck under the write transaction so a concurrent
+        // discovery ACK/peer admission cannot race the legacy outbox retry-counter update.
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        Cursor c = null;
+        try {
+            int[] lockedProgress = readOutboxTargetAttemptProgress(db, messageId);
+            int targetCount = lockedProgress[0];
+            int remainingTargets = lockedProgress[1];
+            int minimumAttempts = lockedProgress[2];
             if (targetCount > 0) {
-                if (remainingTargets == 0) return -1;
                 db.setTransactionSuccessful();
-                return minimumAttempts;
+                return remainingTargets == 0 ? -1 : minimumAttempts;
             }
+
             long now = System.currentTimeMillis();
             android.database.sqlite.SQLiteStatement update = db.compileStatement(
                     "UPDATE lan_outbox SET retry_attempt_count=retry_attempt_count+1,last_retry_at_ms=?," +
@@ -617,7 +639,9 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 update.bindString(3, messageId);
                 update.bindLong(4, MAX_AUTOMATIC_RETRY_ATTEMPTS);
                 changed = update.executeUpdateDelete();
-            } finally { update.close(); }
+            } finally {
+                update.close();
+            }
             if (changed != 1) return -1;
             c = db.rawQuery("SELECT retry_attempt_count FROM lan_outbox WHERE message_id=?",
                     new String[]{messageId});
