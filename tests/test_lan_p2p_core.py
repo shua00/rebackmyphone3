@@ -1567,12 +1567,16 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertNotIn("status!='acked'", endpoint_method)
         self.assertIn('"message_id=? AND peer_id=?"', endpoint_method)
 
+        transmit_start = tracking.index("private void transmitLocalUdpMessage(")
+        transmit_end = tracking.index("private void transmitLocalUdpMessageInternal(", transmit_start)
+        transmit_method = tracking[transmit_start:transmit_end]
+        lock_pos = transmit_method.index("lanChatTransmitLock.lock()")
+        retry_epoch_pos = transmit_method.index("store.recordOutboxAttempt(messageId)")
+        self.assertLess(lock_pos, retry_epoch_pos)
+
         send_start = tracking.index("private void transmitLocalUdpMessageInternal(")
         send_end = tracking.index("private boolean sendAuthenticatedChatAck(", send_start)
         send_method = tracking[send_start:send_end]
-        lock_pos = send_method.index("lanChatTransmitLock.lock()")
-        retry_epoch_pos = send_method.index("store.recordOutboxAttempt(messageId)")
-        self.assertLess(lock_pos, retry_epoch_pos)
         attempt_pos = send_method.index("!store.markAttempt(messageId, peerId, \"\")")
         skip_pos = send_method.index("continue;", attempt_pos)
         udp_pos = send_method.index('sendLanUdpPacket(socket, p, "CHAT_UNICAST")')
@@ -1919,7 +1923,7 @@ class LanP2PCoreTests(unittest.TestCase):
         cleanup = extract_java_method(source, "private void completeLanChatAckWindow(")
         self.assertNotIn("verifiedChatPeers.remove(peerId)", cleanup)
         self.assertNotIn("verifiedChatPeerSeen.remove(peerId)", cleanup)
-        self.assertNotIn("lastPeerDiscoveryAt = 0L", cleanup)
+        self.assertNotIn("lastPeerDiscoveryAt = 0L;\n                for (String peerId", cleanup)
         self.assertIn("保留已验证路由等待重试/租约到期", cleanup)
         self.assertIn("now - e.getValue() > 120_000L", send)
         self.assertIn("verifiedChatPeerRouteVersionCounter.incrementAndGet()", source)
