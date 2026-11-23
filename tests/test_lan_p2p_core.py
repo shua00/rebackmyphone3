@@ -3842,6 +3842,17 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         self.assertIn("sendMs=", udp)
         self.assertNotIn("lockWaitMs=", udp)
 
+    def test_chat_activity_restores_input_caret_when_resumed(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/ChatActivity.java").read_text(encoding="utf-8")
+        resume = extract_java_method(source, "protected void onResume()")
+        focus = extract_java_method(source, "private void restoreChatInputFocus()")
+        self.assertIn("refreshHistory(false);", resume)
+        self.assertIn("restoreChatInputFocus();", resume)
+        self.assertIn("inputMsg.requestFocus();", focus)
+        self.assertIn("inputMsg.setSelection(inputMsg.length());", focus)
+        self.assertNotIn("showSoftInput", focus)
+
     def test_android_authenticated_packets_are_prebuilt_before_transmit_lock(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
