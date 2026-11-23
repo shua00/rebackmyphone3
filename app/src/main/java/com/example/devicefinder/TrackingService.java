@@ -4542,11 +4542,12 @@ public class TrackingService extends Service implements LocationListener {
         boolean shouldDiscoverPeers = discoveryDue
                 && peerDiscoveryInFlight.compareAndSet(false, true);
 
-        // Only resolve the Wi-Fi broadcast address when a real discovery broadcast or
-        // an empty-recipient first delivery needs it. Fixed-target unicast avoids a full
-        // NetworkInterface enumeration on every message.
+        // Empty-recipient first delivery must broadcast the chat packet synchronously
+        // within this ordered send. For fixed recipients, discovery is only auxiliary:
+        // resolve its subnet broadcast address on the probe executor, not under the FIFO
+        // transmission lock.
         final String[] broadcasts;
-        if (shouldDiscoverPeers || pendingTargetIds.isEmpty()) {
+        if (pendingTargetIds.isEmpty()) {
             stageStartedAt = android.os.SystemClock.elapsedRealtime();
             String subnetBcast = getWifiBroadcastAddress();
             broadcastLookupMs = android.os.SystemClock.elapsedRealtime() - stageStartedAt;
@@ -4571,12 +4572,21 @@ public class TrackingService extends Service implements LocationListener {
                     long dispatchStartedAt = android.os.SystemClock.elapsedRealtime();
                     try {
                         if (serviceDestroyed || !isCurrentLanChatSocket(socket, socketGeneration)) return;
+                        long broadcastLookupStartedAt = android.os.SystemClock.elapsedRealtime();
+                        final String[] discoveryBroadcasts = broadcasts.length > 0
+                                ? broadcasts : new String[]{getWifiBroadcastAddress()};
+                        long discoveryBroadcastLookupMs = android.os.SystemClock.elapsedRealtime()
+                                - broadcastLookupStartedAt;
+                        if (discoveryBroadcastLookupMs >= 150L) {
+                            FileLogger.log(this, "CHAT", "P2P async discovery broadcast lookup message="
+                                    + messageId + " lookupMs=" + discoveryBroadcastLookupMs);
+                        }
                         JSONObject helloPacket = LanP2pProtocol.create("peer.hello", myId, "android", "android-main");
                         helloPacket.put("nonce", nonce);
                         helloPacket.put("network_scope", getLanProtocolNetworkScope());
                         helloPacket.put("capabilities", new JSONArray().put("chat.text").put("chat.ack"));
                         byte[] hello = LanP2pProtocol.encode(helloPacket, RESCUE_SECRET);
-                        for (String target : broadcasts) {
+                        for (String target : discoveryBroadcasts) {
                             if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
                             for (int peerPort : new int[]{8888, 8887, 8889, 8890}) {
                                 if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
