@@ -4237,6 +4237,32 @@ public class TrackingService extends Service implements LocationListener {
                 return;
             }
             final long targetLoadMs = android.os.SystemClock.elapsedRealtime() - targetLoadStartedAt;
+            // Build immutable authenticated datagrams before FIFO admission. Packet contents depend
+            // only on the durable message/peer snapshot, not on the selected route. This keeps JSON
+            // canonicalization and HMAC work out of the shared sender lock and before attempt charging.
+            final String senderPeerId = getUniqueDeviceId();
+            final java.util.Map<String, byte[]> preparedPeerPackets = new java.util.HashMap<>();
+            final int pendingSnapshotTargets = countPendingLanTargets(preparedTargets);
+            final long packetBuildStartedAt = android.os.SystemClock.elapsedRealtime();
+            final byte[] preparedBroadcastData;
+            try {
+                if (pendingSnapshotTargets == 0) {
+                    preparedBroadcastData = buildAuthenticatedLanChatPacket(
+                            senderPeerId, "*", messageId, message);
+                } else {
+                    preparedBroadcastData = null;
+                    for (LanChatStore.Target target : preparedTargets) {
+                        if (target == null || target.peerId == null || "acked".equals(target.status)) continue;
+                        preparedPeerPackets.put(target.peerId,
+                                buildAuthenticatedLanChatPacket(senderPeerId, target.peerId, messageId, message));
+                    }
+                }
+            } catch (Exception packetBuildFailure) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN v2 消息预编码失败，保留账本且不消耗发送预算: "
+                        + packetBuildFailure.getClass().getSimpleName());
+                return;
+            }
+            final long packetBuildMs = android.os.SystemClock.elapsedRealtime() - packetBuildStartedAt;
             // Wait for the FIFO transmit turn before charging this message's retry epoch.
             // Time spent queued behind another sender is not a delivery attempt.
             long lockRequestedAt = android.os.SystemClock.elapsedRealtime();
@@ -4273,7 +4299,9 @@ public class TrackingService extends Service implements LocationListener {
                 }
                 attemptRecorded = true;
                 if (!serviceDestroyed) {
-                    transmitLocalUdpMessageInternal(message, messageId, socket, socketGeneration, preparedTargets, targetLoadMs);
+                    transmitLocalUdpMessageInternal(message, messageId, socket, socketGeneration,
+                            preparedTargets, targetLoadMs, senderPeerId, preparedPeerPackets,
+                            preparedBroadcastData, packetBuildMs);
                 }
             } finally {
                 long lockHoldMs = android.os.SystemClock.elapsedRealtime() - lockAcquiredAt;
@@ -4374,7 +4402,9 @@ public class TrackingService extends Service implements LocationListener {
 
     private void transmitLocalUdpMessageInternal(final String message, final String messageId,
             DatagramSocket socket, long socketGeneration,
-            final List<LanChatStore.Target> savedTargets, long targetLoadMs) {
+            final List<LanChatStore.Target> savedTargets, long targetLoadMs,
+            final String myId, final java.util.Map<String, byte[]> preparedPeerPackets,
+            final byte[] preparedBroadcastData, long packetBuildMs) {
         final long preparationStartedAt = android.os.SystemClock.elapsedRealtime();
         if (!isCurrentLanChatSocket(socket, socketGeneration)) {
             FileLogger.log(this, "CHAT", "ℹ️ P2P send rejected for stale UDP socket generation message=" + messageId);
@@ -4382,7 +4412,6 @@ public class TrackingService extends Service implements LocationListener {
         }
         long broadcastLookupMs = 0L;
         long routeProbeMs = 0L;
-        long packetBuildMs = 0L;
         if (!isCurrentLanChatSocket(socket, socketGeneration)) {
             FileLogger.log(this, "CHAT", "⚠️ P2P UDP socket epoch expired before preparation message=" + messageId);
             return;
@@ -4392,7 +4421,6 @@ public class TrackingService extends Service implements LocationListener {
             FileLogger.log(this, "CHAT", "⚠️ LAN SQLite 账本尚未就绪，消息保留待恢复");
             return;
         }
-        String myId = getUniqueDeviceId();
         long stageStartedAt = android.os.SystemClock.elapsedRealtime();
 
         // The durable recipient snapshot was loaded before FIFO admission. It is read-only;
@@ -4625,14 +4653,6 @@ public class TrackingService extends Service implements LocationListener {
         }
         routeProbeMs = Math.max(0L, android.os.SystemClock.elapsedRealtime()
                 - routeProbeStartedAt - broadcastLookupMs);
-        stageStartedAt = android.os.SystemClock.elapsedRealtime();
-        byte[] broadcastData;
-        try { broadcastData = buildAuthenticatedLanChatPacket(myId, "*", messageId, message); }
-        catch (Exception e) {
-            FileLogger.log(this, "CHAT", "⚠️ LAN v2 消息编码失败，消息保留待确认: " + e.getClass().getSimpleName());
-            return;
-        }
-        packetBuildMs = android.os.SystemClock.elapsedRealtime() - stageStartedAt;
         java.util.Map<String, java.net.InetSocketAddress> dispatchEndpoints = new java.util.HashMap<>();
         java.util.Set<String> verifiedRoutePeerIds = new java.util.HashSet<>();
         for (LanChatStore.Target target : savedTargets) {
@@ -4755,7 +4775,8 @@ public class TrackingService extends Service implements LocationListener {
                                 }
                             }
                             if (!targetAttemptAllowed) continue;
-                            byte[] peerData = buildAuthenticatedLanChatPacket(myId, peerId, messageId, message);
+                            byte[] peerData = preparedPeerPackets.get(peerId);
+                            if (peerData == null) continue;
                             DatagramPacket p = new DatagramPacket(peerData, peerData.length,
                                     peer.getAddress(), peer.getPort());
                             hadUdpDispatchAttempt.set(true);
