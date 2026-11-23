@@ -288,11 +288,15 @@ def send_chat_v2(body, display_name, message_id):
 def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=True):
     """Replay due durable rows; verified peer recovery is throttled and finite."""
     with _V2_RECOVERY_RETRY_LOCK:
-        _V2_RECOVERY_RETRY_PEERS.add(peer_id)
+        # Consume a queued event only when this invocation can own the work.
+        # If another invocation is active, put it back for the next worker pass.
+        queued_recovery_event = peer_id in _V2_RECOVERY_RETRY_PEERS
+        _V2_RECOVERY_RETRY_PEERS.discard(peer_id)
         if peer_id in _V2_RECOVERY_INFLIGHT:
+            _V2_RECOVERY_RETRY_PEERS.add(peer_id)
             return
         _V2_RECOVERY_INFLIGHT.add(peer_id)
-    completed = False
+        recovery_event = recovery_event or queued_recovery_event
     try:
         try:
             add_discovery_targets_for_peer(CHAT_DB, "chat.py", peer_id)
@@ -326,12 +330,10 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=True):
                 with print_lock:
                     print(f"⚠️ chat.py pending chat retry failed peer={peer_id}: {type(e).__name__}")
                 return
-        completed = True
     finally:
         with _V2_RECOVERY_RETRY_LOCK:
+            # A new event may have arrived during this batch; never erase it here.
             _V2_RECOVERY_INFLIGHT.discard(peer_id)
-            if completed:
-                _V2_RECOVERY_RETRY_PEERS.discard(peer_id)
 
 
 def _retry_deferred_v2_peer_recoveries():
