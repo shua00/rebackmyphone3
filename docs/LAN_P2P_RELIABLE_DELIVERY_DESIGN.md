@@ -400,3 +400,14 @@ Python `prepare_outgoing_peer_recovery()` 与 Android `resumeExhaustedRetriesFor
 ### 验证边界
 
 本批增加 Python “预算耗尽前恢复事件不占用冷却”用例，并强化 Android 源码回归检查，覆盖 endpoint 两字段分工和 v8 增量迁移。CI 验证 Python 测试与 Android 编译；真实 Android SQLite迁移/故障注入、ACK与发送并发、三服务独立进程故障注入仍按验收矩阵执行，不能用CI代替实机。
+
+
+## 24. 发现控制报文的 network_scope 有界编码（v2.8.23）
+
+Android 的 `buildWifiLanFingerprint()` 继续生成完整、排序后的 Wi-Fi 网络路径指纹，用于本机比较网络路径变化。该值可能包含多个 `LinkProperties` 地址和路由条目，长度不受控制，因此不得直接放入受 1200 字节限制的 UDP v2 JSON 信封。
+
+所有 Android `peer.hello` 出口统一通过 `buildLanProtocolNetworkScope()` 将完整指纹计算为 `sha256:` 前缀加 64 位小写十六进制摘要（固定 71 个 ASCII 字符）。`UNAVAILABLE`、`ERROR`、`NO_WIFI` 等非路径状态发送为空 scope；摘要计算不可用时也退化为空提示，不阻断认证 nonce challenge。完整指纹仍保存在本地并继续参与网络变化检测，不会因压缩传输字段而削弱旧 endpoint 失效逻辑。
+
+该摘要只是可选的网络范围提示，不是稳定 peer ID、共享密钥认证、nonce challenge 或端点可达证明。协议 `MAX_DATAGRAM_BYTES=1200` 不变；不能通过提高上限掩盖字段膨胀。Android 普通广播发现、启动 Beacon 和定向 challenge 必须共用同一有界编码出口。Python 服务无需改变既有消息 envelope 或服务端身份/端口职责。
+
+本条修复只涉及对讲发现控制面，不改变 `chat.message` 正文、Outbox/Inbox/逐设备 ACK 语义，也不触碰悬浮留言独立通道。验收需覆盖大规模地址/路由快照、所有 Android HELLO 出口、v2 解码、Android 11/15 实机互发现，以及修复后 ACK 来源校验是否仍按真实成功发送端点严格工作。
