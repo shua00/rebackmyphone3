@@ -120,7 +120,7 @@ class LanP2PCoreTests(unittest.TestCase):
 
         pending = extract_java_method(store, "public boolean isDiscoveryPending(")
         self.assertIn('throw new IllegalStateException("Failed to read LAN discovery state", e);', pending)
-        self.assertNotIn("catch (Exception e) {\\n            return false;", pending)
+        self.assertNotIn("return false;", pending)
 
         send = extract_java_method(service, "private void transmitLocalUdpMessageInternal(")
         self.assertIn("discoveryWindowOpen = store.isDiscoveryPending(messageId)", send)
