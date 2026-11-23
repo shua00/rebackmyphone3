@@ -380,3 +380,23 @@ UDP listener 的 `recvfrom()` 异常不能仅记录日志后无限复用同一�
 server2.py 的接收异常现在向外传播，由 listener 外层异常处理执行退避等待，并由 `finally` 清理当前 socket、清空当前 listener 引用；外层主循环随后创建新 socket 并重新 bind。rescue2.py 与 chat.py 原有异常传播/清理路径保持不变。恢复 worker 是每个服务进程唯一实例，不随 socket 重建重复启动；它在 listener 引用恢复后继续使用新 socket。
 
 该修复不把临时网络错误误判为 peer 离线，也不清空 Outbox、目标账本或 peer 身份。验收需注入 recvfrom 异常，确认旧 socket 关闭、监听端口重新绑定、worker 不重复创建，且恢复后仍可收发认证 v2 包。
+
+
+## 23. 最终跨端状态机核查（v2.8.22）
+
+### Android ACK端点来源
+
+Android 分开保存两个 endpoint 语义：
+
+- `last_endpoint`：最近已知路由候选，可来自历史 peer 快照，仅用于定向 nonce challenge；不单独证明此消息曾成功发送。
+- `last_sent_endpoint`：消息目标的成功发送端点。只有 `DatagramSocket.send()` 正常返回后，`recordSuccessfulSendEndpoint()` 才写入；ACK 备用校验只匹配此字段。
+
+数据库 v8 增量新增 `last_sent_endpoint`。旧库中的新列保持空，不从旧 `last_endpoint` 回填，避免历史路由候选被误认为成功发送证据。Outbox、targets、attempt_count 和旧路由候选均保留；若旧 ACK 无法通过备用校验，后续 verified route 或有界重发仍可恢复投递。
+
+### Python恢复冷却与Android收敛
+
+Python `prepare_outgoing_peer_recovery()` 与 Android `resumeExhaustedRetriesForRecoveryEvent()` 一样，只更新状态未 ACK 且 `attempt_count>=8` 的目标。预算尚未耗尽时，恢复事件不能提前写入 `last_recovery_at_ms`；目标后续耗尽时，60秒冷却仍以真正重开过预算的恢复事件为基准。逐目标8次预算、1.5/4/10/20/40/60秒退避、ACK隔离和父消息终态保护均不变。
+
+### 验证边界
+
+本批增加 Python “预算耗尽前恢复事件不占用冷却”用例，并强化 Android 源码回归检查，覆盖 endpoint 两字段分工和 v8 增量迁移。CI 验证 Python 测试与 Android 编译；真实 Android SQLite迁移/故障注入、ACK与发送并发、三服务独立进程故障注入仍按验收矩阵执行，不能用CI代替实机。

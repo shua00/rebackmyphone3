@@ -1464,7 +1464,7 @@ class LanP2PCoreTests(unittest.TestCase):
         store = (
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         ).read_text(encoding="utf-8")
-        self.assertIn("DB_VERSION = 7", store)
+        self.assertIn("DB_VERSION = 8", store)
         self.assertIn("retry_attempt_count INTEGER NOT NULL DEFAULT 0", store)
         self.assertIn("state='retry_paused'", store)
         self.assertIn("'retry_paused' ELSE state", store)
@@ -1549,9 +1549,23 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("last_error=?", attempt_method)
         self.assertNotIn("last_endpoint", attempt_method)
 
+        targets_method = extract_java_method(store, "public boolean setTargets(")
+        self.assertIn('v.put("last_endpoint", target.endpointIp', targets_method)
+        self.assertNotIn("last_sent_endpoint", targets_method)
+
+        upgrade_method = extract_java_method(store, "public void onUpgrade(")
+        self.assertIn("oldVersion < 8", upgrade_method)
+        self.assertIn("ADD COLUMN last_sent_endpoint TEXT NOT NULL DEFAULT", upgrade_method)
+
+        ack_endpoint_start = store.index("public boolean matchesExpectedAckEndpoint(")
+        ack_endpoint_method = store[ack_endpoint_start:ack_endpoint_start + 1000]
+        self.assertIn("last_sent_endpoint=?", ack_endpoint_method)
+        self.assertNotIn("last_endpoint=?", ack_endpoint_method)
+
         endpoint_start = store.index("public boolean recordSuccessfulSendEndpoint(")
         endpoint_method = store[endpoint_start:endpoint_start + 1100]
         self.assertIn('values.put("last_endpoint", endpoint)', endpoint_method)
+        self.assertIn('values.put("last_sent_endpoint", endpoint)', endpoint_method)
         self.assertIn("status!='acked'", endpoint_method)
 
         send_start = tracking.index("private void transmitLocalUdpMessageInternal(")
@@ -2857,6 +2871,40 @@ class LanP2PCoreTests(unittest.TestCase):
             self.db_path, "m-budget", "android-a", "192.168.1.10", 8888))
         self.assertEqual(1, prepare_outgoing_peer_recovery(
             self.db_path, "server2", "android-a", now_ms=160_001))
+
+    def test_python_recovery_does_not_consume_cooldown_before_target_is_exhausted(self):
+        from lan_p2p_core import (
+            MAX_OUTBOX_TARGET_ATTEMPTS, persist_outgoing_message,
+            prepare_outgoing_peer_recovery,
+        )
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-recovery-before-cap",
+            "hello", ["android-a"]))
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE lan_outbox_targets SET attempt_count=3,last_attempt_at=1234,"
+                "last_recovery_at_ms=0 WHERE message_id=? AND peer_id=?",
+                ("m-recovery-before-cap", "android-a"))
+            conn.commit()
+        self.assertEqual(0, prepare_outgoing_peer_recovery(
+            self.db_path, "server2", "android-a", now_ms=100_000))
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertEqual((3, 1234, 0), conn.execute(
+                "SELECT attempt_count,last_attempt_at,last_recovery_at_ms "
+                "FROM lan_outbox_targets WHERE message_id='m-recovery-before-cap' "
+                "AND peer_id='android-a'").fetchone())
+            conn.execute(
+                "UPDATE lan_outbox_targets SET attempt_count=? "
+                "WHERE message_id=? AND peer_id=?",
+                (MAX_OUTBOX_TARGET_ATTEMPTS, "m-recovery-before-cap", "android-a"))
+            conn.commit()
+        self.assertEqual(1, prepare_outgoing_peer_recovery(
+            self.db_path, "server2", "android-a", now_ms=110_000))
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertEqual((0, 0, 110_000), conn.execute(
+                "SELECT attempt_count,last_attempt_at,last_recovery_at_ms "
+                "FROM lan_outbox_targets WHERE message_id='m-recovery-before-cap' "
+                "AND peer_id='android-a'").fetchone())
 
     def test_active_outbox_target_query_excludes_terminal_and_exhausted_targets(self):
         from lan_p2p_core import (
