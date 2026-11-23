@@ -259,6 +259,9 @@ public class TrackingService extends Service implements LocationListener {
     // 防止发送端重试/多端口重复广播时，同一消息在持久化完成前重复占用后台队列。
     private final java.util.concurrent.atomic.AtomicBoolean lanChatInboxProjectionInFlight =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+    // Preserve projection requests that arrive while another inbox batch is in flight.
+    private final java.util.concurrent.atomic.AtomicBoolean lanChatInboxProjectionRequested =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
     private final java.util.Set<String> pendingLanChatReceives =
             java.util.Collections.newSetFromMap(
                     new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
@@ -5452,21 +5455,32 @@ public class TrackingService extends Service implements LocationListener {
      * the next service start replays it. The stable ID list makes the projection idempotent.
      */
     private void scheduleLanChatInboxProjection() {
-        if (serviceDestroyed || lanChatStore == null
-                || !lanChatInboxProjectionInFlight.compareAndSet(false, true)) return;
+        if (serviceDestroyed || lanChatStore == null) return;
+        // A request coalesced while the worker is active must be observed after its
+        // current snapshot; otherwise a just-committed inbox row can remain undisplayed.
+        lanChatInboxProjectionRequested.set(true);
+        if (!lanChatInboxProjectionInFlight.compareAndSet(false, true)) return;
         try {
             lanChatIoExecutor.execute(() -> {
                 boolean morePending = false;
                 try {
+                    lanChatInboxProjectionRequested.set(false);
                     morePending = projectUndisplayedLanChatInbox();
                 } catch (Exception e) {
+                    morePending = true;
                     FileLogger.log(this, "CHAT", "LAN inbox UI projection deferred: "
                             + e.getClass().getSimpleName());
                 } finally {
                     lanChatInboxProjectionInFlight.set(false);
                 }
-                if (morePending && !serviceDestroyed) {
-                    scheduleLanChatTask("inbox-ui-projection", this::scheduleLanChatInboxProjection, 500L);
+                if (serviceDestroyed) return;
+                if (morePending) {
+                    lanChatInboxProjectionRequested.set(true);
+                    scheduleLanChatTask("inbox-ui-projection",
+                            this::scheduleLanChatInboxProjection, 500L);
+                } else if (lanChatInboxProjectionRequested.getAndSet(false)) {
+                    // A new durable row arrived after the current worker loaded its snapshot.
+                    scheduleLanChatInboxProjection();
                 }
             });
         } catch (java.util.concurrent.RejectedExecutionException rejected) {
