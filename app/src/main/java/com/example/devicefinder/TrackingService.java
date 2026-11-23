@@ -1129,7 +1129,7 @@ public class TrackingService extends Service implements LocationListener {
                 }).start();
             } else if ("ACTION_RESTART_UDP".equals(action)) {
                 FileLogger.log(this, "UDP", "🔄 收到手动重启监听指令");
-                if (rescueSocketRef != null) { try { rescueSocketRef.close(); } catch (Exception ignored) {} }
+                requestRescueListenerRestart("ACTION_RESTART_UDP");
             } else if ("ACTION_TEST_LOW_BATTERY".equals(action)) {
                 FileLogger.log(this, "BATTERY", "🧪 模拟低电量告警 (15%)");
                 sendReport(true, true);
@@ -2295,6 +2295,37 @@ public class TrackingService extends Service implements LocationListener {
      * Wi-Fi can carry local P2P even when cellular remains the default route.
      * Rebind the UDP listener whenever the actual Wi-Fi LAN path changes.
      */
+    /**
+     * Explicit listener restarts are generation handoffs, not transport failures.
+     * Advancing the generation makes the old receive loop bypass exponential failure
+     * backoff and immediately hand off to a fresh socket. Close outside rescueLock:
+     * DatagramSocket.close() must never hold the listener publication monitor.
+     */
+    private void requestRescueListenerRestart(String reason) {
+        if (serviceDestroyed) return;
+        final DatagramSocket oldSocket;
+        final long generation;
+        synchronized (rescueLock) {
+            generation = lanSocketGeneration.incrementAndGet();
+            lanChatBoundWifiNetwork = null;
+            oldSocket = rescueSocketRef;
+        }
+        FileLogger.log(this, "UDP", "主动重启 LAN UDP listener generation="
+                + generation + " reason=" + reason);
+        if (oldSocket != null && !oldSocket.isClosed()) {
+            try {
+                oldSocket.close();
+            } catch (Exception closeError) {
+                FileLogger.log(this, "UDP", "主动重启关闭旧 Socket 失败: "
+                        + closeError.getClass().getSimpleName());
+            }
+        } else {
+            // Covers startup/bind windows where the listener owns the lifecycle flag
+            // but has not published its socket yet, as well as an already-stopped listener.
+            triggerRescueListener();
+        }
+    }
+
     private void refreshWifiLanTransport(String reason) {
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
@@ -6436,9 +6467,7 @@ public class TrackingService extends Service implements LocationListener {
                     }).start();
                     return true;
                 case "restart_udp":
-                    if (rescueSocketRef != null) {
-                        try { rescueSocketRef.close(); } catch (Exception ignored) {}
-                    }
+                    requestRescueListenerRestart("restart_udp");
                     return true;
                 case "test_low_battery":
                     sendReport(true, true);
