@@ -1860,6 +1860,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("LAN_PEER_CHALLENGE_TIMEOUT_MS", method)
         self.assertNotIn("Thread.sleep(500L)", method)
         self.assertIn("Discovery is deliberately non-blocking", method)
+        self.assertIn("lanChatProbeExecutor.execute(", method)
+        self.assertIn("peerDiscoveryInFlight.set(false)", method)
         self.assertNotIn("clearPendingPeerChallenge(nonce);", method.split("finally {", 1)[-1])
 
     def test_android_known_offline_targets_are_rechallenged_at_saved_endpoint(self):
@@ -1873,7 +1875,9 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("store.loadTargets(messageId)", method)
         self.assertIn("target.endpointIp", method)
         self.assertIn("target.endpointPort", method)
-        self.assertIn("sendDirectedPeerChallenge(socket, target.peerId", method)
+        self.assertIn("sendDirectedPeerChallenge(socket, challengePeerId", method)
+        self.assertIn("pendingPeerChallengeDispatches.putIfAbsent(", method)
+        self.assertIn("lanChatProbeExecutor.execute(", method)
 
     def test_android_receive_latency_is_measured_from_udp_arrival(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -1963,8 +1967,9 @@ class LanP2PCoreTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         helper = extract_java_method(source, "private void sendLanUdpPacket(")
         self.assertIn('FileLogger.log(this, "UDP", "P2P UDP slow dispatch kind="', helper)
-        self.assertIn("monitorWaitMs=", helper)
         self.assertIn("sendMs=", helper)
+        self.assertNotIn("monitorWaitMs=", helper)
+        self.assertNotIn("synchronized (socket)", helper)
 
 
     def test_android_retry_scheduler_does_not_wake_during_active_batch(self):
@@ -3196,11 +3201,13 @@ class AndroidLanProbeIsolationTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
         internal = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
-        self.assertIn("lanChatPeerExecutor.execute(", internal)
+        self.assertIn("lanChatProbeExecutor.execute(", internal)
         self.assertIn("sendDirectedPeerChallenge(socket, challengePeerId", internal)
         self.assertIn("P2P discovery probe queueMs=", internal)
         self.assertIn("peerDiscoveryInFlight.set(false)", internal)
         self.assertIn("pendingPeerChallengeDispatches.putIfAbsent(", source)
+        self.assertIn("pendingPeerChallengeDispatches.remove(challengePeerId, challengeDispatchToken)", source)
+        self.assertIn("private final java.util.concurrent.ExecutorService lanChatProbeExecutor", source)
         self.assertIn("pendingPeerChallengeDispatches.clear()", source)
 
     def test_udp_send_does_not_serialize_all_senders_on_socket_monitor(self):
@@ -3259,6 +3266,7 @@ class AndroidLanStoreLifecycleTests(unittest.TestCase):
         self.assertIn("lanChatSendExecutor.shutdown()", destroy)
         self.assertIn("lanChatControlExecutor.shutdown()", destroy)
         self.assertIn("lanChatPeerExecutor.shutdown()", destroy)
+        self.assertIn("lanChatProbeExecutor.shutdown()", destroy)
         self.assertIn("lanChatIoExecutor.shutdown()", destroy)
         self.assertIn("LanChatStore storeToClose = lanChatStore", destroy)
         self.assertIn("closeLanChatStoreAfterExecutors(storeToClose)", destroy)
@@ -3266,7 +3274,7 @@ class AndroidLanStoreLifecycleTests(unittest.TestCase):
 
         closer = extract_java_method(source, "private void closeLanChatStoreAfterExecutors(")
         for executor in ("lanChatScheduler", "lanChatImmediateExecutor", "lanChatSendExecutor",
-                         "lanChatControlExecutor", "lanChatPeerExecutor", "lanChatIoExecutor",
+                         "lanChatControlExecutor", "lanChatPeerExecutor", "lanChatProbeExecutor", "lanChatIoExecutor",
                          "maintenanceExecutor"):
             self.assertIn("awaitLanExecutorTermination(" + executor + ")", closer)
         self.assertIn("storeToClose.closeStore()", closer)
@@ -3354,11 +3362,11 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         self.assertIn("P2P SQLite outbox attempt", send)
         self.assertIn("P2P SQLite target attempt", internal)
         self.assertIn("P2P SQLite send-endpoint", internal)
-        self.assertIn("P2P directed challenge dispatch", internal)
+        self.assertIn("P2P directed challenge queued", internal)
         self.assertIn("P2P 发送串行锁持有", send)
         udp = extract_java_method(source, "private void sendLanUdpPacket(")
-        self.assertIn("lockWaitMs=", udp)
         self.assertIn("sendMs=", udp)
+        self.assertNotIn("lockWaitMs=", udp)
 
 if __name__ == "__main__":
     unittest.main()

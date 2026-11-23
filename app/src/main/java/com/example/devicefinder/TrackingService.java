@@ -311,7 +311,7 @@ public class TrackingService extends Service implements LocationListener {
     private final java.util.concurrent.ConcurrentHashMap<String, java.net.InetSocketAddress> pendingPeerChallengeExpectedEndpoints =
             new java.util.concurrent.ConcurrentHashMap<>();
     // Deduplicate directed challenges while they wait in the peer executor queue.
-    private final java.util.concurrent.ConcurrentHashMap<String, Boolean> pendingPeerChallengeDispatches =
+    private final java.util.concurrent.ConcurrentHashMap<String, Object> pendingPeerChallengeDispatches =
             new java.util.concurrent.ConcurrentHashMap<>();
     // 有效 peer 存在时也定期重新发现，纳入后来上线/加入局域网的设备。
     private volatile long lastPeerDiscoveryAt = 0L;
@@ -503,6 +503,20 @@ public class TrackingService extends Service implements LocationListener {
                     new LinkedBlockingQueue<>(128),
                     runnable -> {
                         Thread thread = new Thread(runnable, "LanChat-Peer");
+                        thread.setPriority(Thread.NORM_PRIORITY);
+                        return thread;
+                    },
+                    new ThreadPoolExecutor.AbortPolicy()
+            );
+
+    // Outbound discovery/challenge sends are isolated from inbound peer admission.
+    // A slow UDP probe must not stall processing of the peer.ack that restores a route.
+    private final java.util.concurrent.ExecutorService lanChatProbeExecutor =
+            new ThreadPoolExecutor(
+                    1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(64),
+                    runnable -> {
+                        Thread thread = new Thread(runnable, "LanChat-Probe");
                         thread.setPriority(Thread.NORM_PRIORITY);
                         return thread;
                     },
@@ -4372,15 +4386,19 @@ public class TrackingService extends Service implements LocationListener {
                     || target.endpointIp == null || target.endpointIp.isEmpty()
                     || !(target.endpointPort == 8888 || target.endpointPort == 8887
                          || target.endpointPort == 8889 || target.endpointPort == 8890)
-                    || pendingPeerChallengeDispatches.putIfAbsent(target.peerId, Boolean.TRUE) != null) {
+                    ) {
                 continue;
             }
             final String challengePeerId = target.peerId;
+            final Object challengeDispatchToken = new Object();
+            if (pendingPeerChallengeDispatches.putIfAbsent(challengePeerId, challengeDispatchToken) != null) {
+                continue;
+            }
             final String challengeIp = target.endpointIp;
             final int challengePort = target.endpointPort;
             final long challengeQueuedAt = android.os.SystemClock.elapsedRealtime();
             try {
-                lanChatPeerExecutor.execute(() -> {
+                lanChatProbeExecutor.execute(() -> {
                     try {
                         long queueMs = android.os.SystemClock.elapsedRealtime() - challengeQueuedAt;
                         if (!isCurrentLanChatSocket(socket, socketGeneration)
@@ -4402,12 +4420,12 @@ public class TrackingService extends Service implements LocationListener {
                         FileLogger.logD("CHAT", "persisted peer endpoint challenge skipped peer="
                                 + challengePeerId + " reason=" + staleEndpoint.getClass().getSimpleName());
                     } finally {
-                        pendingPeerChallengeDispatches.remove(challengePeerId);
+                        pendingPeerChallengeDispatches.remove(challengePeerId, challengeDispatchToken);
                     }
                 });
                 directedChallenges++;
             } catch (java.util.concurrent.RejectedExecutionException rejected) {
-                pendingPeerChallengeDispatches.remove(challengePeerId);
+                pendingPeerChallengeDispatches.remove(challengePeerId, challengeDispatchToken);
                 FileLogger.log(this, "CHAT", "P2P directed challenge queue full peer=" + challengePeerId);
             }
         }
@@ -4416,9 +4434,10 @@ public class TrackingService extends Service implements LocationListener {
                     + directedChallenges + " message=" + messageId);
         }
 
-        // Discovery is also dispatched away from the FIFO sender. The chat packet below
-        // remains ordered on the transmit lane; authenticated discovery ACK grace and the
-        // durable recipient snapshot continue to govern any newly learned peer.
+        // Discovery is deliberately non-blocking: probe dispatch runs away from the FIFO
+        // sender and peer-admission lane. The chat packet below remains ordered on the
+        // transmit lane; authenticated discovery ACK grace and durable recipient snapshots
+        // continue to govern any newly learned peer.
         boolean discoveryDue = lastPeerDiscoveryAt == 0L
                 || now - lastPeerDiscoveryAt >= 30_000L;
         boolean shouldDiscoverPeers = discoveryDue
@@ -4435,7 +4454,7 @@ public class TrackingService extends Service implements LocationListener {
             }, LAN_PEER_CHALLENGE_TIMEOUT_MS);
             final long discoveryQueuedAt = android.os.SystemClock.elapsedRealtime();
             try {
-                lanChatPeerExecutor.execute(() -> {
+                lanChatProbeExecutor.execute(() -> {
                     long dispatchStartedAt = android.os.SystemClock.elapsedRealtime();
                     try {
                         if (!isCurrentLanChatSocket(socket, socketGeneration)) return;
@@ -4697,10 +4716,6 @@ public class TrackingService extends Service implements LocationListener {
         }
     }
 
-    /**
-     * Serialize UDP sends and log only materially slow lock waits or socket sends.
-     * Packet contents, authentication fields and chat bodies are never logged.
-     */
     /**
      * DatagramSocket is thread-safe; do not serialize unrelated chat, ACK and peer sends
      * on the socket monitor. A concurrent close is surfaced as IOException and the durable
@@ -6262,6 +6277,7 @@ public class TrackingService extends Service implements LocationListener {
             awaitLanExecutorTermination(lanChatSendExecutor);
             awaitLanExecutorTermination(lanChatControlExecutor);
             awaitLanExecutorTermination(lanChatPeerExecutor);
+            awaitLanExecutorTermination(lanChatProbeExecutor);
             awaitLanExecutorTermination(lanChatIoExecutor);
             awaitLanExecutorTermination(maintenanceExecutor);
             try {
@@ -6312,6 +6328,7 @@ public class TrackingService extends Service implements LocationListener {
         if (lanChatSendExecutor != null) lanChatSendExecutor.shutdown();
         if (lanChatControlExecutor != null) lanChatControlExecutor.shutdown();
         if (lanChatPeerExecutor != null) lanChatPeerExecutor.shutdown();
+        if (lanChatProbeExecutor != null) lanChatProbeExecutor.shutdown();
         if (lanChatIoExecutor != null) lanChatIoExecutor.shutdown();
         if (lanChatScheduler != null) lanChatScheduler.shutdownNow();
         if (maintenanceExecutor != null) maintenanceExecutor.shutdownNow();
