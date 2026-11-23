@@ -60,7 +60,7 @@ DEX 中可见独立命令：
 - `READMSG`：阅读通知请求。
 - `ANSREADMSG`：阅读通知应答。
 
-`readMsg()` 使用 `READMSG` 并带有 `READCHECKOPT` 位。接收线程也包含对 `RECVMSG` 和 `ANSREADMSG` 命令值的处理路径。由此可以确认协议语义上区分了“消息收到”和“用户阅读”两件事。
+`readMsg()` 使用 `READMSG` 并带有 `READCHECKOPT` 位。接收端会在 `SENDMSG` 分支发出 `RECVMSG`，并在 `READMSG` 分支构造 `ANSREADMSG` 应答；但进一步解码 sparse-switch 后确认，核心接收分发器没有 33/50 两个入站分支（详见10.6），因此不能称其存在完整的 ACK/已读应答消费路径。协议常量和应答发送动作仍表明它区分“收到消息”与“用户阅读”两种语义。
 
 但静态命令存在不等于已证明接收确认经过事务持久化。该 APK 的相关代码没有显示与当前项目 SQLite Outbox/Inbox 等价的持久化逐接收方账本，不能把其 `RECVMSG` 直接视为当前 v2 的 durable stored ACK。
 
