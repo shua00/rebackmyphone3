@@ -105,6 +105,14 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertLess(method.index("cm.registerDefaultNetworkCallback(networkCallback)"),
                         method.index("cm.registerNetworkCallback(wifiRequest, wifiLanNetworkCallback)"))
 
+    def test_android_outbox_foreign_key_constraints_are_enabled_on_every_connection(self):
+        source = Path(__file__).resolve().parents[1] / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        java = source.read_text(encoding="utf-8")
+        configure = extract_java_method(java, "public void onConfigure(SQLiteDatabase db)")
+        self.assertIn("super.onConfigure(db);", configure)
+        self.assertIn("db.setForeignKeyConstraintsEnabled(true);", configure)
+        self.assertIn("FOREIGN KEY(message_id) REFERENCES lan_outbox(message_id) ON DELETE CASCADE", java)
+
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.temp_dir.name, "peers.sqlite3")
