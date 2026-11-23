@@ -3842,6 +3842,22 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         self.assertIn("sendMs=", udp)
         self.assertNotIn("lockWaitMs=", udp)
 
+    def test_android_cached_endpoint_resolution_is_outside_transmit_lock(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        send = extract_java_method(source, "private void transmitLocalUdpMessage(")
+        internal = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
+        resolve = send.index("InetAddress.getByName(target.endpointIp)")
+        lock = send.index("lanChatTransmitLock.lock()")
+        self.assertLess(resolve, lock)
+        self.assertIn("preparedCachedEndpoints.put(target.peerId", send)
+        self.assertIn("preparedCachedEndpoints.get(target.peerId)", internal)
+        self.assertIn("if (liveRoute != null)", internal)
+        self.assertLess(internal.index("if (liveRoute != null)"),
+                        internal.index("preparedCachedEndpoints.get(target.peerId)"))
+        self.assertNotIn("InetAddress.getByName(target.endpointIp)", internal)
+        self.assertIn("preLockEndpointResolveMs=", internal)
+
     def test_chat_activity_restores_input_caret_when_resumed(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/ChatActivity.java").read_text(encoding="utf-8")
