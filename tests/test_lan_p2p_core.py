@@ -106,6 +106,30 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertLess(method.index("cm.registerDefaultNetworkCallback(networkCallback)"),
                         method.index("cm.registerNetworkCallback(wifiRequest, wifiLanNetworkCallback)"))
 
+    def test_chat_standalone_udp_listener_rebinds_and_proxy_mode_avoids_udp_conflict(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "chat.py").read_text(encoding="utf-8")
+        start = source.index("def udp_listener():")
+        end = source.index("\n\nclass RequestHandler", start)
+        listener = source[start:end]
+        self.assertIn("while True:", listener)
+        self.assertIn("udp_sock.bind(('0.0.0.0', UDP_PORT))", listener)
+        self.assertLess(listener.index("udp_sock.bind("),
+                        listener.index("_start_v2_recovery_retry_worker()"))
+        self.assertIn("time.sleep(10)", listener)
+        self.assertIn("time.sleep(5)", listener)
+        self.assertIn("if UDP_LISTENER_SOCKET is udp_sock:", listener)
+        self.assertIn("udp_sock.close()", listener)
+
+        main = source[source.index("if __name__ == '__main__':"):]
+        proxy = main.index("if PROXY_MODE:")
+        standalone = main.index("else:", proxy)
+        proxy_branch = main[proxy:standalone]
+        standalone_branch = main[standalone:]
+        self.assertNotIn("target=udp_listener", proxy_branch)
+        self.assertIn("target=udp_listener", standalone_branch)
+        self.assertIn("需重启 chat.py", proxy_branch)
+
     def test_android_outbox_foreign_key_constraints_are_enabled_on_every_connection(self):
         source = Path(__file__).resolve().parents[1] / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         java = source.read_text(encoding="utf-8")
