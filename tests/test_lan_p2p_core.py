@@ -2681,6 +2681,18 @@ class LanP2PCoreTests(unittest.TestCase):
         )
         self.assertNotIn("catch (Exception e) {\\n            return false;", method)
 
+    def test_python_receivers_never_prune_message_deduplication_records(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        for filename in ("rescue2.py", "chat.py", "server2.py"):
+            source = (repo_root / filename).read_text(encoding="utf-8")
+            start = source.index("def _claim_chat_message(")
+            end = source.index("\ndef ", start + 5)
+            claim = source[start:end]
+            self.assertIn("validate_incoming_message_claim(", claim, filename)
+            self.assertIn("INSERT OR IGNORE INTO received_chat_messages", claim, filename)
+            self.assertNotIn("DELETE FROM received_chat_messages", claim, filename)
+            self.assertNotIn("7 * 86400", claim, filename)
+            self.assertNotIn("OFFSET 10000", claim, filename)
 
 if __name__ == "__main__":
     unittest.main()
