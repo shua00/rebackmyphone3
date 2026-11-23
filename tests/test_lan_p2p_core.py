@@ -3919,5 +3919,21 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         self.assertLess(missing_guard_pos, attempt_pos)
         self.assertIn("保留发送预算 peer=", internal)
 
+
+class AndroidLanExplicitSocketRestartTests(unittest.TestCase):
+    def test_manual_restart_actions_use_generation_handoff_not_failure_backoff(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        helper = extract_java_method(source, "private void requestRescueListenerRestart(")
+        self.assertIn("lanSocketGeneration.incrementAndGet()", helper)
+        self.assertIn("synchronized (rescueLock)", helper)
+        self.assertIn("lanChatBoundWifiNetwork = null", helper)
+        self.assertIn("oldSocket.close()", helper)
+        self.assertLess(helper.index("synchronized (rescueLock)"), helper.index("oldSocket.close()"))
+        self.assertIn("triggerRescueListener()", helper)
+        self.assertIn('requestRescueListenerRestart("ACTION_RESTART_UDP")', source)
+        self.assertIn('requestRescueListenerRestart("restart_udp")', source)
+        self.assertNotIn("rescueSocketRef.close()", source)
+
 if __name__ == "__main__":
     unittest.main()
