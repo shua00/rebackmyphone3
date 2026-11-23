@@ -2099,7 +2099,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("if (!persisted)", handler)
         self.assertIn("if (!store.addDiscoveryPeerToOpenMessages(senderId))", handler)
         self.assertIn("return;", handler[persist:route])
-        self.assertIn("lanChatIoExecutor.execute", handler)
+        self.assertIn("lanChatControlExecutor.execute", handler)
 
 
     def test_chat_send_restores_editor_focus_for_continuous_typing(self):
