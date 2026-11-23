@@ -2405,6 +2405,7 @@ class LanP2PCoreTests(unittest.TestCase):
                         and node.name == "process_executed_commands")
         isolated = ast.Module(body=[function], type_ignores=[])
         namespace = {
+            "CHAT_DEDUP_DB": "CHAT_DEDUP_DB",
             "PENDING_COMMANDS": {
                 "android-a": [{
                     "id": "cmd-chat-1",
