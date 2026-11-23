@@ -45,12 +45,10 @@ SERVER2_URL = "http://127.0.0.1:8080"      # server2.py 的地址
 PROXY_MODE = False          # 由启动时探测决定
 CHAT_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.sqlite3")
 print_lock = threading.Lock()
-_CHAT_DB_OPS = 0
 
 
 def _claim_chat_message(sender, message_id, content):
     """Persist independent chat-mode message body and ID before ACK."""
-    global _CHAT_DB_OPS
     key = str(message_id or content or "")
     if not key:
         return None
@@ -74,13 +72,6 @@ def _claim_chat_message(sender, message_id, content):
                 conn.rollback()
                 print("⚠️ chat.py message_id payload conflict; refusing stored ACK")
                 return None
-            _CHAT_DB_OPS += 1 if claim else 0
-            if claim and _CHAT_DB_OPS % 128 == 0:
-                conn.execute("DELETE FROM received_chat_messages WHERE receiver_scope=? AND received_at<?",
-                             ("chat.py", now - 7 * 86400))
-                conn.execute("""DELETE FROM received_chat_messages WHERE receiver_scope=? AND rowid IN (
-                    SELECT rowid FROM received_chat_messages WHERE receiver_scope=?
-                    ORDER BY received_at DESC LIMIT -1 OFFSET 10000)""", ("chat.py", "chat.py"))
             conn.commit()
             return claim
         finally:
