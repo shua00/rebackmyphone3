@@ -1577,7 +1577,7 @@ class LanP2PCoreTests(unittest.TestCase):
         send_start = tracking.index("private void transmitLocalUdpMessageInternal(")
         send_end = tracking.index("private boolean sendAuthenticatedChatAck(", send_start)
         send_method = tracking[send_start:send_end]
-        attempt_pos = send_method.index("!store.markAttempt(messageId, peerId, \"\")")
+        attempt_pos = send_method.index("targetAttemptAllowed = store != null && store.markAttempt(messageId, peerId, \"\")")
         skip_pos = send_method.index("continue;", attempt_pos)
         udp_pos = send_method.index('sendLanUdpPacket(socket, p, "CHAT_UNICAST")')
         endpoint_pos = send_method.index("store.recordSuccessfulSendEndpoint(messageId, peerId")
