@@ -1,5 +1,7 @@
+import ast
 import os
 import sqlite3
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -2356,6 +2358,100 @@ class LanP2PCoreTests(unittest.TestCase):
             self.assertIn("_V2_RECOVERY_INFLIGHT", recovery)
             self.assertIn("_V2_RECOVERY_RETRY_PEERS.discard(peer_id)", recovery)
             self.assertIn("if completed:", recovery)
+
+
+
+
+    def test_outbox_ack_commit_failure_rolls_back_and_preserves_pending_recipient(self):
+        from lan_p2p_core import persist_outgoing_message, acknowledge_outgoing_message
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-ack-commit-fail",
+            "hello", ["android-a"]))
+        real_connect = sqlite3.connect
+
+        class CommitFailConnection:
+            def __init__(self, connection):
+                self.connection = connection
+            def __getattr__(self, name):
+                return getattr(self.connection, name)
+            def commit(self):
+                raise sqlite3.OperationalError("injected ACK commit failure")
+
+        with patch("lan_p2p_core.sqlite3.connect",
+                   side_effect=lambda *args, **kwargs: CommitFailConnection(
+                       real_connect(*args, **kwargs))):
+            self.assertFalse(acknowledge_outgoing_message(
+                self.db_path, "server2", "m-ack-commit-fail", "android-a"))
+
+        conn = real_connect(self.db_path)
+        try:
+            target = conn.execute(
+                "SELECT status FROM lan_outbox_targets WHERE message_id=? AND peer_id=?",
+                ("m-ack-commit-fail", "android-a")).fetchone()
+            state = conn.execute(
+                "SELECT state FROM lan_outbox WHERE message_id=?",
+                ("m-ack-commit-fail",)).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(target[0], "pending")
+        self.assertEqual(state, "pending")
+
+    def test_server2_executed_chat_ack_and_queue_cleanup_failure_replay_is_idempotent(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "server2.py").read_text(encoding="utf-8")
+        module = ast.parse(source, filename="server2.py")
+        function = next(node for node in module.body
+                        if isinstance(node, ast.FunctionDef)
+                        and node.name == "process_executed_commands")
+        isolated = ast.Module(body=[function], type_ignores=[])
+        namespace = {
+            "PENDING_COMMANDS": {
+                "android-a": [{
+                    "id": "cmd-chat-1",
+                    "type": "chat_msg",
+                    "payload": {"message_id": "shared-message-1"},
+                }]
+            },
+            "_cmd_lock": threading.Lock(),
+            "print_lock": threading.Lock(),
+            "decode_chat_http_fallback_payload": lambda payload: payload,
+        }
+        ack_results = iter([False, True, True])
+        ack_calls = []
+        def acknowledge(db_path, scope, message_id, peer_id):
+            ack_calls.append((db_path, scope, message_id, peer_id))
+            return next(ack_results)
+        persist_calls = []
+        def persist(dev_id):
+            persist_calls.append(dev_id)
+            if len(persist_calls) == 1:
+                raise sqlite3.OperationalError("injected command queue commit failure")
+        namespace["acknowledge_outgoing_message"] = acknowledge
+        namespace["_persist_command_queue_locked"] = persist
+        exec(compile(isolated, "server2.py", "exec"), namespace)
+        process = namespace["process_executed_commands"]
+
+        # HTTP execution without a durable shared-ID outbox ACK must retain fallback.
+        process("android-a", ["cmd-chat-1"])
+        self.assertEqual(len(namespace["PENDING_COMMANDS"]["android-a"]), 1)
+        self.assertEqual(persist_calls, [])
+
+        # ACK is durable, but queue persistence fails: memory restores the fallback.
+        process("android-a", ["cmd-chat-1"])
+        self.assertEqual(len(namespace["PENDING_COMMANDS"]["android-a"]), 1)
+        self.assertEqual(persist_calls, ["android-a"])
+
+        # The same executed receipt is replayed; duplicate ACK is accepted and cleanup commits.
+        process("android-a", ["cmd-chat-1"])
+        self.assertNotIn("android-a", namespace["PENDING_COMMANDS"])
+        self.assertEqual(persist_calls, ["android-a", "android-a"])
+        self.assertEqual(ack_calls, [
+            ("CHAT_DEDUP_DB", "server2", "shared-message-1", "android-a"),
+            ("CHAT_DEDUP_DB", "server2", "shared-message-1", "android-a"),
+            ("CHAT_DEDUP_DB", "server2", "shared-message-1", "android-a"),
+        ])
+        process("android-a", ["cmd-chat-1"])
+        self.assertEqual(len(ack_calls), 3)
 
 
 
