@@ -2877,29 +2877,50 @@ public class TrackingService extends Service implements LocationListener {
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
             if (cm == null) return;
+
+            // Collect the full Wi-Fi candidate set before binding. getAllNetworks()
+            // has no ordering guarantee, so "first Wi-Fi network" is not a stable
+            // route-selection policy on devices exposing more than one Wi-Fi network.
+            List<Network> wifiNetworks = new ArrayList<>();
             boolean incompleteNetworkSnapshot = false;
-            for (Network n : cm.getAllNetworks()) {
-                NetworkCapabilities nc = cm.getNetworkCapabilities(n);
-                if (nc == null) {
+            for (Network network : cm.getAllNetworks()) {
+                NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+                if (caps == null) {
                     incompleteNetworkSnapshot = true;
                     continue;
                 }
-                if (nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-                    try {
-                        // Once a Wi-Fi LAN is present, never silently leave this socket
-                        // on the default (possibly cellular) network if explicit binding fails.
-                        n.bindSocket(socket);
-                        FileLogger.logD("CHAT", "UDP listener socket bound to Wi-Fi LAN network");
-                        return;
-                    } catch (Exception bindError) {
-                        throw new java.io.IOException("Wi-Fi LAN socket binding failed", bindError);
-                    }
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                    wifiNetworks.add(network);
                 }
             }
             if (incompleteNetworkSnapshot) {
                 throw new java.io.IOException("Network capabilities incomplete; defer UDP socket binding");
             }
-            // No Wi-Fi transport is currently visible; retain the platform default route.
+            if (wifiNetworks.isEmpty()) {
+                // No Wi-Fi transport is currently visible; retain the platform default route.
+                return;
+            }
+
+            // Prefer the active default when it is Wi-Fi. If cellular is the default,
+            // a single Wi-Fi network is still the intended local-LAN transport. With
+            // multiple non-default Wi-Fi networks, fail closed rather than bind an
+            // arbitrary LAN that may not contain the intended peers.
+            Network active = cm.getActiveNetwork();
+            Network selected = null;
+            if (active != null && wifiNetworks.contains(active)) {
+                selected = active;
+            } else if (wifiNetworks.size() == 1) {
+                selected = wifiNetworks.get(0);
+            } else {
+                throw new java.io.IOException("Multiple non-default Wi-Fi networks; defer ambiguous UDP socket binding");
+            }
+
+            try {
+                selected.bindSocket(socket);
+                FileLogger.logD("CHAT", "UDP listener socket bound to selected Wi-Fi LAN network");
+            } catch (Exception bindError) {
+                throw new java.io.IOException("Wi-Fi LAN socket binding failed", bindError);
+            }
         } catch (java.io.IOException e) {
             throw e;
         } catch (Exception e) {

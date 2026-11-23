@@ -2115,9 +2115,18 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("throws java.io.IOException", method)
         self.assertIn("throw new java.io.IOException", method)
         self.assertNotIn("将使用系统默认出口", method)
-        self.assertIn("n.bindSocket(socket)", method)
+        self.assertIn("selected.bindSocket(socket)", method)
         self.assertIn("incompleteNetworkSnapshot", method)
         self.assertIn("Network capabilities incomplete; defer UDP socket binding", method)
+        self.assertIn("Network active = cm.getActiveNetwork()", method)
+        self.assertIn("wifiNetworks.contains(active)", method)
+        self.assertIn("wifiNetworks.size() == 1", method)
+        self.assertIn("Multiple non-default Wi-Fi networks; defer ambiguous UDP socket binding", method)
+        # Selection must be based on the complete candidate set, not enumeration order.
+        self.assertLess(method.index("for (Network network : cm.getAllNetworks())"),
+                        method.index("Network active = cm.getActiveNetwork()"))
+        self.assertLess(method.index("Network active = cm.getActiveNetwork()"),
+                        method.index("selected.bindSocket(socket)"))
 
     def test_outbox_queries_still_return_empty_for_a_valid_empty_ledger(self):
         conn = sqlite3.connect(self.db_path)
