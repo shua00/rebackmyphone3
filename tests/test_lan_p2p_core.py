@@ -2874,6 +2874,24 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertEqual([], list_due_outgoing_peers(
             self.db_path, "server2", now_ms=int(time.time() * 1000)))
 
+    def test_stale_worker_dispatch_rechecks_backoff_atomically(self):
+        from lan_p2p_core import persist_outgoing_message, mark_outgoing_attempt
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-stale-worker",
+            "hello", ["android-a"]))
+        # The initial burst has just persisted an attempt. A worker holding a
+        # stale due-scan result must not dispatch against that old observation.
+        self.assertTrue(mark_outgoing_attempt(
+            self.db_path, "m-stale-worker", "android-a", "192.168.1.10", 8888))
+        self.assertFalse(mark_outgoing_attempt(
+            self.db_path, "m-stale-worker", "android-a", "192.168.1.10", 8888,
+            allow_fast_retry=False))
+        with patch("lan_p2p_core.time.time", return_value=(
+                int(time.time() * 1000) / 1000.0 + 2.0)):
+            self.assertTrue(mark_outgoing_attempt(
+                self.db_path, "m-stale-worker", "android-a", "192.168.1.10", 8888,
+                allow_fast_retry=False))
+
     def test_python_retry_schema_migrates_existing_target_ledger(self):
         from lan_p2p_core import ensure_outbox_retry_schema
         with sqlite3.connect(self.db_path) as conn:

@@ -576,19 +576,33 @@ def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10, for
             _safe_close(conn)
 
 
-def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_port):
+def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_port,
+                         allow_fast_retry=True):
+    """Atomically account a send; recovery workers must revalidate the persisted backoff.
+
+    The initial bounded burst may retry quickly. Background workers pass
+    allow_fast_retry=False so a peer/message selected by an earlier due scan
+    cannot be sent again after another dispatcher has already advanced its
+    retry timestamp.
+    """
     conn = None
+    now_ms = int(time.time() * 1000)
     try:
         conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("PRAGMA busy_timeout=10000")
         cur = conn.execute("""UPDATE lan_outbox_targets SET status='sent',
             attempt_count=attempt_count+1,last_attempt_at=?,last_endpoint=?,last_error=''
             WHERE message_id=? AND peer_id=? AND status!='acked' AND attempt_count<?
+              AND (?=1 OR attempt_count=0 OR last_attempt_at +
+                   CASE attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000
+                     WHEN 3 THEN 10000 WHEN 4 THEN 20000 WHEN 5 THEN 40000
+                     ELSE 60000 END <= ?)
               AND EXISTS (SELECT 1 FROM lan_outbox o
                           WHERE o.message_id=lan_outbox_targets.message_id
                             AND o.state NOT IN ('delivered','expired','waiting_peers'))""",
-            (int(time.time() * 1000), str(endpoint_ip) + ":" + str(endpoint_port),
-             message_id, peer_id, MAX_OUTBOX_TARGET_ATTEMPTS))
+            (now_ms, str(endpoint_ip) + ":" + str(endpoint_port),
+             message_id, peer_id, MAX_OUTBOX_TARGET_ATTEMPTS,
+             1 if allow_fast_retry else 0, now_ms))
         conn.commit()
         return cur.rowcount > 0
     except Exception as exc:

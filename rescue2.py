@@ -537,7 +537,7 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=True):
                 target_port = int(pending.get("endpoint_port") or addr[1])
                 raw = encode_packet(chat_packet, RESCUE_SECRET)
                 if not mark_outgoing_attempt(_CHAT_DEDUP_DB, pending["message_id"], peer_id,
-                                              pending["endpoint_ip"], target_port):
+                                              pending["endpoint_ip"], target_port, allow_fast_retry=False):
                     continue
                 with UDP_CHAT_SEND_LOCK:
                     sock.sendto(raw, (pending["endpoint_ip"], target_port))
