@@ -488,7 +488,7 @@ public class TrackingService extends Service implements LocationListener {
             );
 
     // Peer presence announcements may perform SQLite work and directed challenges.
-    // A bounded FIFO lane isolates that burst from latency-sensitive peer.ack/chat.ack commits.
+    // Bounded FIFO isolation keeps peer presence bursts from delaying authenticated ACK commits.
     private final java.util.concurrent.ExecutorService lanChatPeerExecutor =
             new ThreadPoolExecutor(
                     1, 1, 0L, TimeUnit.MILLISECONDS,
