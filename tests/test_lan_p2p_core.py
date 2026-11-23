@@ -3825,7 +3825,7 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         self.assertNotIn("store.loadTargets(messageId)", internal)
         # A stale read is safe only because the durable target status is checked again
         # transactionally immediately before every actual unicast dispatch.
-        self.assertIn("store.markAttempt(messageId, peerId, attemptedEndpoint, \"\"))", internal)
+        self.assertIn("store.markAttempt(messageId, peerId, attemptedEndpoint, \"\");", internal)
 
 if __name__ == "__main__":
     unittest.main()
