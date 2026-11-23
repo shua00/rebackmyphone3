@@ -1945,6 +1945,37 @@ class LanP2PCoreTests(unittest.TestCase):
             self.assertIn(stage, send)
 
 
+    def test_android_peer_discovery_respects_cooldown_without_verified_routes(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        send = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
+        self.assertIn("boolean discoveryDue = lastPeerDiscoveryAt == 0L", send)
+        self.assertNotIn("verifiedChatPeers.isEmpty() || lastPeerDiscoveryAt", send)
+        self.assertIn("expiredPeerRouteRemoved && verifiedChatPeers.isEmpty()", send)
+
+
+    def test_android_slow_udp_socket_monitor_wait_is_persisted(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        helper = extract_java_method(source, "private void sendLanUdpPacket(")
+        self.assertIn('FileLogger.log(this, "UDP", "P2P UDP slow dispatch kind="', helper)
+        self.assertIn("monitorWaitMs=", helper)
+        self.assertIn("sendMs=", helper)
+
+
+    def test_android_retry_scheduler_does_not_wake_during_active_batch(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        scheduler = extract_java_method(source, "private void scheduleLanChatRetryFromOutbox(")
+        self.assertIn("lanChatRetryInFlight.get()", scheduler)
+
+
     def test_android_duplicate_ack_cannot_consume_another_peer_wait_slot(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")

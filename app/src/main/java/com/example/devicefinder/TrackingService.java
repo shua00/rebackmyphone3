@@ -4210,7 +4210,9 @@ public class TrackingService extends Service implements LocationListener {
      * may reopen one bounded epoch after the persisted cooldown. waiting_peers stays frozen.
      */
     private void scheduleLanChatRetryFromOutbox() {
-        if (serviceDestroyed || lanChatRetryWakeScheduled.get()) return;
+        // The active batch re-arms the scheduler from its finally block after releasing this guard.
+        // Do not enqueue timer callbacks that will only fail the single-flight CAS.
+        if (serviceDestroyed || lanChatRetryInFlight.get() || lanChatRetryWakeScheduled.get()) return;
         if (!hasUsableWifiLanPath()) return;
         DatagramSocket socket = rescueSocketRef;
         LanChatStore store = lanChatStore;
@@ -4339,15 +4341,21 @@ public class TrackingService extends Service implements LocationListener {
         // 先清理过期租约；同一网络内仍有已验证成员时直接复用单播路由，
         // 不再让每条聊天消息都额外等待一次 500ms 广播发现窗口。
         long now = System.currentTimeMillis();
+        boolean expiredPeerRouteRemoved = false;
         for (java.util.Map.Entry<String, Long> e : verifiedChatPeerSeen.entrySet()) {
             if (now - e.getValue() > 120_000L) {
                 synchronized (verifiedChatPeerRouteVersions) {
                     if (verifiedChatPeerSeen.remove(e.getKey(), e.getValue())) {
                         verifiedChatPeers.remove(e.getKey());
                         verifiedChatPeerRouteVersions.remove(e.getKey());
+                        expiredPeerRouteRemoved = true;
                     }
                 }
             }
+        }
+        if (expiredPeerRouteRemoved && verifiedChatPeers.isEmpty()) {
+            // A genuinely expired final route should trigger one fresh discovery immediately.
+            lastPeerDiscoveryAt = 0L;
         }
 
         // Revalidate persisted endpoints directly before treating a known target as offline.
@@ -4388,7 +4396,9 @@ public class TrackingService extends Service implements LocationListener {
         }
         // Reuse verified routes for up to 30 seconds; rediscover on first send, route expiry,
         // network change, or partial delivery. Avoid adding a 500 ms discovery wait to every message.
-        boolean discoveryDue = verifiedChatPeers.isEmpty() || lastPeerDiscoveryAt == 0L
+        // Discovery has its own cooldown even while no peer is currently verified.
+        // Otherwise every queued message rebroadcasts to four ports and amplifies socket contention.
+        boolean discoveryDue = lastPeerDiscoveryAt == 0L
                 || now - lastPeerDiscoveryAt >= 30_000L;
         boolean shouldDiscoverPeers = discoveryDue
                 && peerDiscoveryInFlight.compareAndSet(false, true);
@@ -4671,7 +4681,12 @@ public class TrackingService extends Service implements LocationListener {
             socket.send(packet);
             sendMs = android.os.SystemClock.elapsedRealtime() - sendStarted;
         }
-        if (lockWaitMs >= 50L || sendMs >= 50L) {
+        if (lockWaitMs >= 250L || sendMs >= 250L) {
+            // Persist material socket-monitor stalls; logD alone is absent from exported device_log.txt.
+            FileLogger.log(this, "UDP", "P2P UDP slow dispatch kind=" + kind
+                    + " monitorWaitMs=" + lockWaitMs + " sendMs=" + sendMs
+                    + " bytes=" + packet.getLength());
+        } else if (lockWaitMs >= 50L || sendMs >= 50L) {
             FileLogger.logD("UDP", "slow send kind=" + kind + " lockWaitMs="
                     + lockWaitMs + " sendMs=" + sendMs + " bytes=" + packet.getLength());
         }
