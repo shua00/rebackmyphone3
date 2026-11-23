@@ -1127,8 +1127,11 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("verifiedChatPeerSeen.put(senderId, System.currentTimeMillis())", ack_handler)
         self.assertIn("synchronized (verifiedChatPeerRouteVersions)", ack_handler)
         self.assertIn("if (store.allTargetsAcked(messageId))", ack_handler)
-        self.assertIn("removePendingLanChat(messageId)", ack_handler)
-        self.assertIn("P2P 最终 ACK 已落账并回收兼容队列", ack_handler)
+        self.assertIn("scheduleLanChatMirrorCleanup(messageId)", ack_handler)
+        self.assertIn("P2P 最终 ACK 已落账；兼容队列清理已异步排队", ack_handler)
+        cleanup = extract_java_method(source, "private void scheduleLanChatMirrorCleanup(")
+        self.assertIn("lanChatPeerExecutor.execute(", cleanup)
+        self.assertIn("removePendingLanChat(messageId)", cleanup)
         self.assertNotIn("verifiedChatPeers.put(", ack_handler)
         self.assertIn("store.matchesExpectedAckEndpoint(messageId, senderId", ack_handler)
         self.assertIn("persistedEndpointMatch", ack_handler)
@@ -1606,7 +1609,8 @@ class LanP2PCoreTests(unittest.TestCase):
         attempt_pos = send_method.index("targetAttemptAllowed = store != null")
         skip_pos = send_method.index("continue;", attempt_pos)
         udp_pos = send_method.index("sendLanUdpPacket(socket, p, verifiedRoutePeerIds.contains(peerId)")
-        endpoint_pos = send_method.index("lanChatControlExecutor.execute(", udp_pos)
+        endpoint_pos = send_method.index("lanChatPeerExecutor.execute(", udp_pos)
+        self.assertNotIn("lanChatControlExecutor.execute(", send_method)
         self.assertLess(attempt_pos, skip_pos)
         self.assertLess(skip_pos, udp_pos)
         self.assertLess(udp_pos, endpoint_pos)
@@ -2012,6 +2016,19 @@ class LanP2PCoreTests(unittest.TestCase):
         scheduler = extract_java_method(source, "private void scheduleLanChatRetryFromOutbox(")
         self.assertIn("lanChatRetryInFlight.get()", scheduler)
 
+
+    def test_android_ack_control_lane_does_not_run_noncritical_bookkeeping(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        ack = extract_java_method(source, "private void processAuthenticatedLanChatAck(")
+        self.assertIn("scheduleLanChatMirrorCleanup(messageId)", ack)
+        self.assertNotIn("removePendingLanChat(messageId)", ack)
+        send = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
+        self.assertIn("lanChatPeerExecutor.execute(", send)
+        self.assertNotIn("lanChatControlExecutor.execute(", send)
+        cleanup = extract_java_method(source, "private void scheduleLanChatMirrorCleanup(")
+        self.assertIn("lanChatPeerExecutor.execute(", cleanup)
+        self.assertIn("removePendingLanChat(messageId)", cleanup)
 
     def test_android_duplicate_ack_cannot_consume_another_peer_wait_slot(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -3370,8 +3387,9 @@ class AndroidLanInstantRouteRecoveryTests(unittest.TestCase):
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
         send = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
         udp = send.index("sendLanUdpPacket(socket, p, verifiedRoutePeerIds.contains(peerId)")
-        persist = send.index("lanChatControlExecutor.execute(", udp)
+        persist = send.index("lanChatPeerExecutor.execute(", udp)
         self.assertLess(udp, persist)
+        self.assertNotIn("lanChatControlExecutor.execute(", send)
         self.assertNotIn("store.recordSuccessfulSendEndpoint(", send)
         self.assertIn("markAttempt() already durably recorded this exact endpoint", send)
 

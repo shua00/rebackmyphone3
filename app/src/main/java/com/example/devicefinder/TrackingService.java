@@ -4015,6 +4015,22 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     /**
+     * Legacy SharedPreferences mirror cleanup is not part of ACK acceptance.
+     * Run its synchronous commit away from the single-threaded ACK/control lane.
+     */
+    private void scheduleLanChatMirrorCleanup(String messageId) {
+        if (messageId == null || messageId.isEmpty() || serviceDestroyed) return;
+        try {
+            lanChatPeerExecutor.execute(() -> {
+                if (!serviceDestroyed) removePendingLanChat(messageId);
+            });
+        } catch (java.util.concurrent.RejectedExecutionException rejected) {
+            // SQLite already records the terminal ACK state. Recovery can clean the mirror later.
+            FileLogger.logD("CHAT", "legacy LAN queue cleanup deferred message=" + messageId);
+        }
+    }
+
+    /**
      * 网络恢复后按 3 条一批补发；只有队列确实缩短才继续下一批，
      * 单次最多推进 3 批，避免离线成员导致无限重试/长时间占用线程。
      * 沿用原 message_id，接收端会 ACK 但不会重复显示。
@@ -4655,7 +4671,7 @@ public class TrackingService extends Service implements LocationListener {
                                 // UDP dispatch, so ACK validation is safe immediately. Updating the
                                 // reusable last-successful endpoint is secondary bookkeeping and must
                                 // not hold the FIFO sender lock after the packet has left.
-                                lanChatControlExecutor.execute(() -> {
+                                lanChatPeerExecutor.execute(() -> {
                                     long endpointPersistStartedAt = android.os.SystemClock.elapsedRealtime();
                                     boolean endpointPersisted = endpointStore != null
                                             && endpointStore.recordSuccessfulSendEndpoint(
@@ -4679,7 +4695,7 @@ public class TrackingService extends Service implements LocationListener {
                             final String sendError = e.getClass().getSimpleName();
                             final LanChatStore errorStore = store;
                             try {
-                                lanChatControlExecutor.execute(() -> {
+                                lanChatPeerExecutor.execute(() -> {
                                     if (errorStore != null) {
                                         errorStore.recordTargetSendError(messageId, peerId, sendError);
                                     }
@@ -5202,8 +5218,8 @@ public class TrackingService extends Service implements LocationListener {
                     && expected.isEmpty() && latch != null && latch.getCount() > 0;
             if (latch != null && (wasExpected || discoveryBroadcastAck)) latch.countDown();
             if (store.allTargetsAcked(messageId)) {
-                removePendingLanChat(messageId);
-                FileLogger.log(this, "CHAT", "P2P 最终 ACK 已落账并回收兼容队列 message="
+                scheduleLanChatMirrorCleanup(messageId);
+                FileLogger.log(this, "CHAT", "P2P 最终 ACK 已落账；兼容队列清理已异步排队 message="
                         + messageId + " peer=" + senderId);
             }
         } else {
