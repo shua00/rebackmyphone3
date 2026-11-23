@@ -3426,6 +3426,8 @@ class AndroidLanInboxProjectionRecoveryTests(unittest.TestCase):
         self.assertIn("editor.commit()", project)
         self.assertIn("store.markIncomingDisplayed(", project)
         self.assertIn("knownIds.add(stableId)", project)
+        self.assertIn("catch (org.json.JSONException malformedIds)", project)
+        self.assertIn("rebuilding from durable inbox", project)
         self.assertIn("return pending.size() >= 100", project)
 
 

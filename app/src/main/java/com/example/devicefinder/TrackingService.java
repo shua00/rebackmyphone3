@@ -5460,8 +5460,16 @@ public class TrackingService extends Service implements LocationListener {
                     store.loadUndisplayedIncoming(receiverScope, 100);
             if (pending.isEmpty()) return false;
             SharedPreferences sp = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
-            org.json.JSONArray ids = new org.json.JSONArray(
-                    sp.getString(PREF_LAN_CHAT_RECEIVED_IDS, "[]"));
+            org.json.JSONArray ids;
+            try {
+                ids = new org.json.JSONArray(sp.getString(PREF_LAN_CHAT_RECEIVED_IDS, "[]"));
+            } catch (org.json.JSONException malformedIds) {
+                // SharedPreferences commit stores history and stable IDs together. If the
+                // ID index is corrupt, rebuild it from the still-durable undisplayed inbox
+                // rows rather than crashing the projection worker or withholding future UI.
+                FileLogger.log(this, "CHAT", "LAN inbox stable-ID index malformed; rebuilding from durable inbox");
+                ids = new org.json.JSONArray();
+            }
             java.util.HashSet<String> knownIds = new java.util.HashSet<>();
             for (int i = 0; i < ids.length(); i++) knownIds.add(ids.optString(i, ""));
             String history = sp.getString("chat_history", "");
