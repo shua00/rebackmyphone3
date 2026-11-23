@@ -4400,7 +4400,7 @@ public class TrackingService extends Service implements LocationListener {
                 lanChatProbeExecutor.execute(() -> {
                     try {
                         long queueMs = android.os.SystemClock.elapsedRealtime() - challengeQueuedAt;
-                        if (!isCurrentLanChatSocket(socket, socketGeneration)
+                        if (serviceDestroyed || !isCurrentLanChatSocket(socket, socketGeneration)
                                 || verifiedChatPeers.containsKey(challengePeerId)) return;
                         java.net.InetAddress savedAddress = java.net.InetAddress.getByName(challengeIp);
                         if (!(savedAddress instanceof java.net.Inet4Address)
@@ -4456,7 +4456,7 @@ public class TrackingService extends Service implements LocationListener {
                 lanChatProbeExecutor.execute(() -> {
                     long dispatchStartedAt = android.os.SystemClock.elapsedRealtime();
                     try {
-                        if (!isCurrentLanChatSocket(socket, socketGeneration)) return;
+                        if (serviceDestroyed || !isCurrentLanChatSocket(socket, socketGeneration)) return;
                         JSONObject helloPacket = LanP2pProtocol.create("peer.hello", myId, "android", "android-main");
                         helloPacket.put("nonce", nonce);
                         helloPacket.put("network_scope", getLanProtocolNetworkScope());

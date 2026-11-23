@@ -3213,6 +3213,7 @@ class AndroidLanProbeIsolationTests(unittest.TestCase):
         self.assertIn("pendingPeerChallengeDispatches.remove(challengePeerId, challengeDispatchToken)", source)
         self.assertIn("private final java.util.concurrent.ExecutorService lanChatProbeExecutor", source)
         self.assertIn("pendingPeerChallengeDispatches.clear()", source)
+        self.assertIn("if (serviceDestroyed || !isCurrentLanChatSocket(socket, socketGeneration)) return;", internal)
 
     def test_udp_send_does_not_serialize_all_senders_on_socket_monitor(self):
         repo_root = Path(__file__).resolve().parents[1]
