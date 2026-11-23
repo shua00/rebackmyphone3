@@ -1130,7 +1130,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("reason=unverified_endpoint", ack_handler)
         endpoint_start = store_source.index("public boolean matchesExpectedAckEndpoint(")
         endpoint_method = store_source[endpoint_start:endpoint_start + 1200]
-        self.assertIn("last_endpoint=?", endpoint_method)
+        self.assertIn("last_sent_endpoint=?", endpoint_method)
+        self.assertNotIn("last_endpoint=?", endpoint_method)
         self.assertIn("endpointIp + \":\" + endpointPort", endpoint_method)
 
     def test_android_inbox_conflicting_payload_is_rejected_and_duplicate_refreshes_ui(self):
@@ -1527,7 +1528,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("NOT EXISTS (SELECT 1 FROM lan_outbox_targets t", attempt)
         self.assertIn("retry_attempt_count<?", attempt)
         self.assertIn("last_recovery_at_ms INTEGER NOT NULL DEFAULT 0", store)
-        self.assertIn("DB_VERSION = 7", store)
+        self.assertIn("DB_VERSION = 8", store)
         self.assertIn("idx_lan_targets_retry", store)
         self.assertIn("DB_VERSION = 7", store)
         self.assertIn("retry_attempt_count=0,last_retry_at_ms=0", store)
