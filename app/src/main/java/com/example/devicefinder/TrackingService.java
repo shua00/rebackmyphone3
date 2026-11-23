@@ -2156,6 +2156,7 @@ public class TrackingService extends Service implements LocationListener {
      * non-default Wi-Fi candidate is unambiguous. Never pick an arbitrary interface.
      */
     private Network selectWifiLanNetwork(ConnectivityManager cm) throws java.io.IOException {
+        // This is the single authority for the socket, its path fingerprint and its broadcast NIC.
         if (cm == null) throw new java.io.IOException("ConnectivityManager unavailable");
         List<Network> wifiNetworks = new ArrayList<>();
         boolean incompleteNetworkSnapshot = false;

@@ -2596,7 +2596,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("Multiple non-default Wi-Fi networks; defer ambiguous UDP socket binding", selector)
         self.assertLess(selector.index("for (Network network : cm.getAllNetworks())"),
                         selector.index("Network active = cm.getActiveNetwork()"))
-        self.assertLess(selector.index("Network active = cm.getActiveNetwork()"),
+        self.assertLess(method.index("selectWifiLanNetwork(cm)"),
                         method.index("selected.bindSocket(socket)"))
 
     def test_outbox_queries_still_return_empty_for_a_valid_empty_ledger(self):
