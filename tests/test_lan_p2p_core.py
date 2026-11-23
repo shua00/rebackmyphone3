@@ -3228,5 +3228,39 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         self.assertIn("markAttempt()", scheduler)
         self.assertIn("does not increment attempt_count", scheduler)
 
+    def test_android_lan_chat_requires_current_wifi_socket_before_charging_attempt(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        send = extract_java_method(source, "private void transmitLocalUdpMessage(")
+        self.assertIn("hasUsableWifiLanPath()", send)
+        self.assertLess(send.index("hasUsableWifiLanPath()"), send.index("store.recordOutboxAttempt(messageId)"))
+        self.assertIn("isCurrentLanChatSocket(socket, socketGeneration)", send)
+        scheduler = extract_java_method(source, "private void scheduleLanChatRetryFromOutbox(")
+        self.assertIn("if (!hasUsableWifiLanPath()) return;", scheduler)
+
+    def test_android_udp_socket_generation_rejects_stale_listener_and_send_work(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        self.assertIn("AtomicLong lanSocketGeneration", source)
+        refresh = extract_java_method(source, "private void refreshWifiLanTransport(")
+        self.assertIn("lanSocketGeneration.incrementAndGet()", refresh)
+        listener = extract_java_method(source, "private void startRescueListener()")
+        self.assertIn("listenerGeneration != lanSocketGeneration.get()", listener)
+        self.assertIn("if (rescueSocketRef == rescueSocket) rescueSocketRef = null;", listener)
+        send = extract_java_method(source, "private void transmitLocalUdpMessage(")
+        self.assertIn("socketGeneration = lanSocketGeneration.get()", send)
+        self.assertIn("isCurrentLanChatSocket(socket, socketGeneration)", send)
+        internal = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
+        self.assertIn("isCurrentLanChatSocket(socket, socketGeneration)", internal)
+
+    def test_android_transmit_lock_reports_wait_and_hold_separately(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        send = extract_java_method(source, "private void transmitLocalUdpMessage(")
+        self.assertIn("P2P 发送串行锁等待", send)
+        self.assertIn("P2P 发送串行锁持有", send)
+        self.assertIn("queuedAtRequest=", send)
+        self.assertIn("holdMs=", send)
+
 if __name__ == "__main__":
     unittest.main()
