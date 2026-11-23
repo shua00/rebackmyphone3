@@ -4385,8 +4385,7 @@ public class TrackingService extends Service implements LocationListener {
                     || verifiedChatPeers.containsKey(target.peerId)
                     || target.endpointIp == null || target.endpointIp.isEmpty()
                     || !(target.endpointPort == 8888 || target.endpointPort == 8887
-                         || target.endpointPort == 8889 || target.endpointPort == 8890)
-                    ) {
+                         || target.endpointPort == 8889 || target.endpointPort == 8890)) {
                 continue;
             }
             final String challengePeerId = target.peerId;

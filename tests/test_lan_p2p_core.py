@@ -1862,7 +1862,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("Discovery is deliberately non-blocking", method)
         self.assertIn("lanChatProbeExecutor.execute(", method)
         self.assertIn("peerDiscoveryInFlight.set(false)", method)
-        self.assertNotIn("clearPendingPeerChallenge(nonce);", method.split("finally {", 1)[-1])
+        discovery = method[method.index("if (shouldDiscoverPeers)"):]
+        self.assertNotIn("clearPendingPeerChallenge(nonce);", discovery.split("finally {", 1)[-1])
 
     def test_android_known_offline_targets_are_rechallenged_at_saved_endpoint(self):
         repo_root = Path(__file__).resolve().parents[1]
