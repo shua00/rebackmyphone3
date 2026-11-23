@@ -470,7 +470,8 @@ public class TrackingService extends Service implements LocationListener {
                     new ThreadPoolExecutor.AbortPolicy()
             );
 
-    // Serialize peer trust transitions and chat ACK commits on a control-only lane.
+    // Serialize peer trust transitions and chat ACK commits on a control-only FIFO lane;
+    // a peer.ack route commit and a following chat.ack can no longer race each other.
     // Inbox persistence stays on LanChat-IO so a burst of messages cannot starve ACKs.
     private final java.util.concurrent.ExecutorService lanChatControlExecutor =
             new ThreadPoolExecutor(
