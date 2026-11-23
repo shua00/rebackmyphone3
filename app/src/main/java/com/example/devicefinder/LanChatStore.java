@@ -20,7 +20,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
     /** Bounded first-recipient collection window, started on the first actual discovery send. */
     public static final long FIRST_DISCOVERY_WINDOW_MS = 10_000L;
     private static final String DB_NAME = "lan_p2p_delivery.db";
-    private static final int DB_VERSION = 6;
+    private static final int DB_VERSION = 7;
     public static final int MAX_PENDING_MESSAGES = 50;
     /** Maximum automatic sends in one retry epoch, including the original send. */
     public static final int MAX_AUTOMATIC_RETRY_ATTEMPTS = 8;
@@ -118,6 +118,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 "PRIMARY KEY(message_id, peer_id)," +
                 "FOREIGN KEY(message_id) REFERENCES lan_outbox(message_id) ON DELETE CASCADE)");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_lan_targets_status ON lan_outbox_targets(message_id, status)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_lan_targets_retry ON lan_outbox_targets(message_id, status, attempt_count, last_attempt_at)");
 
         db.execSQL("CREATE TABLE IF NOT EXISTS lan_inbox (" +
                 "receiver_scope TEXT NOT NULL," +
@@ -191,6 +192,10 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
         if (oldVersion < 6 && !hasColumn(db, "lan_outbox_targets", "last_recovery_at_ms")) {
             db.execSQL("ALTER TABLE lan_outbox_targets ADD COLUMN last_recovery_at_ms INTEGER NOT NULL DEFAULT 0");
+        }
+        if (oldVersion < 7) {
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_lan_targets_retry " +
+                    "ON lan_outbox_targets(message_id, status, attempt_count, last_attempt_at)");
         }
         if (oldVersion < 6) {
             // Fixed-recipient rows now use target-local counters. Discard the old aggregate

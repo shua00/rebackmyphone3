@@ -1497,6 +1497,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("NOT EXISTS (SELECT 1 FROM lan_outbox_targets t", attempt)
         self.assertIn("retry_attempt_count<?", attempt)
         self.assertIn("last_recovery_at_ms INTEGER NOT NULL DEFAULT 0", store)
+        self.assertIn("DB_VERSION = 7", store)
+        self.assertIn("idx_lan_targets_retry", store)
         self.assertIn("DB_VERSION = 6", store)
         self.assertIn("retry_attempt_count=0,last_retry_at_ms=0", store)
         ack = extract_java_method(store, "public boolean acknowledge(")
