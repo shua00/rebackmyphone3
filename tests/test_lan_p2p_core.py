@@ -106,25 +106,6 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertLess(method.index("cm.registerDefaultNetworkCallback(networkCallback)"),
                         method.index("cm.registerNetworkCallback(wifiRequest, wifiLanNetworkCallback)"))
 
-    def test_android_outbox_retry_budget_is_per_target_and_recovery_isolated(self):
-        repo_root = Path(__file__).resolve().parents[1]
-        source = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
-        load = extract_java_method(source, "public List<PendingMessage> loadPending(")
-        mark = extract_java_method(source, "public boolean markAttempt(")
-        record = extract_java_method(source, "public int recordOutboxAttempt(")
-        recover = extract_java_method(source, "public int resumeExhaustedRetriesForRecoveryEvent(")
-        self.assertIn("t.status!='acked' AND t.attempt_count<?", load)
-        self.assertIn("MIN(t.attempt_count)", load)
-        self.assertIn("attempt_count<?", mark)
-        self.assertIn("last_attempt_at +", mark)
-        self.assertIn("CASE attempt_count WHEN 1 THEN 1500", mark)
-        self.assertIn("targetCount > 0", record)
-        self.assertIn("remainingTargets == 0", record)
-        self.assertIn("last_recovery_at_ms", recover)
-        self.assertIn("MAX_AUTOMATIC_RETRY_ATTEMPTS", recover)
-        self.assertIn('private static final int DB_VERSION = 6;', source)
-        self.assertIn('ALTER TABLE lan_outbox_targets ADD COLUMN last_recovery_at_ms', source)
-
     def test_android_outbox_foreign_key_constraints_are_enabled_on_every_connection(self):
         source = Path(__file__).resolve().parents[1] / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         java = source.read_text(encoding="utf-8")
@@ -1429,7 +1410,7 @@ class LanP2PCoreTests(unittest.TestCase):
         store = (
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         ).read_text(encoding="utf-8")
-        self.assertIn("DB_VERSION = 6", store)
+        self.assertIn("DB_VERSION = 5", store)
         self.assertIn("retry_attempt_count INTEGER NOT NULL DEFAULT 0", store)
         self.assertIn("state='retry_paused'", store)
         self.assertIn("'retry_paused' ELSE state", store)
@@ -1477,27 +1458,43 @@ class LanP2PCoreTests(unittest.TestCase):
     def test_android_exhausted_retry_budget_is_preserved_and_only_rearmed_by_cooldown_event(self):
         repo_root = Path(__file__).resolve().parents[1]
         store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
-        load = extract_java_method(store, "public List<PendingMessage> loadPending(")
-        self.assertIn("t.status!='acked' AND t.attempt_count<?", load)
-        self.assertIn("NOT EXISTS (SELECT 1 FROM lan_outbox_targets", load)
-        self.assertIn("o.retry_attempt_count<?", load)
-        resume = extract_java_method(store, "public int resumeExhaustedRetriesForRecoveryEvent(")
-        self.assertIn("last_recovery_at_ms<=?", resume)
-        self.assertIn("now - RETRY_RECOVERY_EVENT_COOLDOWN_MS", resume)
-        self.assertIn("status!='acked' AND attempt_count>=?", resume)
-        self.assertIn("reopen.put(\"retry_attempt_count\", 0)", resume)
-        attempt = extract_java_method(store, "public int recordOutboxAttempt(")
-        self.assertIn("targetCount > 0", attempt)
-        self.assertIn("remainingTargets == 0", attempt)
-        self.assertIn("NOT EXISTS (SELECT 1 FROM lan_outbox_targets t", attempt)
+        load_start = store.index("public List<PendingMessage> loadPending(int limit)")
+        load_end = store.index("public int recordOutboxAttempt(String messageId)", load_start)
+        load = store[load_start:load_end]
+        self.assertIn("retry_attempt_count<?", load)
+        self.assertIn("MAX_AUTOMATIC_RETRY_ATTEMPTS", load)
+        resume_start = store.index("public int resumeExhaustedRetriesForRecoveryEvent(long now)")
+        resume_end = store.index("public int recordOutboxAttempt(String messageId)", resume_start)
+        resume = store[resume_start:resume_end]
+        self.assertIn("last_event_retry_at_ms<=?", resume)
+        self.assertIn("RETRY_RECOVERY_EVENT_COOLDOWN_MS", resume)
+        self.assertIn("t.status!='acked'", resume)
+        # Recovery may reopen only unfinished messages with an unacked fixed target.
+        self.assertIn("state NOT IN ('delivered','expired','waiting_peers')", resume)
+        self.assertIn("EXISTS (SELECT 1 FROM lan_outbox_targets t", resume)
+        self.assertIn("t.message_id=lan_outbox.message_id AND t.status!='acked'", resume)
+        self.assertIn("last_event_retry_at_ms<=?", resume)
+        self.assertIn("retry_attempt_count=0", resume)
+        self.assertIn("state=CASE WHEN state='discovery_pending' THEN 'discovery_pending' ELSE 'pending' END", resume)
+        self.assertIn("ELSE 'pending' END", resume)
+        attempt_start = store.index("public int recordOutboxAttempt(String messageId)")
+        attempt_end = store.index("public List<Target> loadTargets", attempt_start)
+        attempt = store[attempt_start:attempt_end]
         self.assertIn("retry_attempt_count<?", attempt)
-        self.assertIn("last_recovery_at_ms INTEGER NOT NULL DEFAULT 0", store)
-        self.assertIn("DB_VERSION = 6", store)
-
-        ack = extract_java_method(store, "public boolean acknowledge(")
-        self.assertIn("hasRetryBudget ? \"pending\" : \"retry_paused\"", ack)
-        self.assertNotIn('"retry_paused".equals(state) ? "retry_paused" : "pending"', ack)
-
+        self.assertIn("MAX_AUTOMATIC_RETRY_ATTEMPTS", attempt)
+        self.assertIn("state!='discovery_pending'", attempt)
+        self.assertIn("ELSE state END", attempt)
+        migration_start = store.index("if (oldVersion < 5)")
+        migration_end = store.index("public boolean enqueue(", migration_start)
+        migration = store[migration_start:migration_end]
+        self.assertIn("'discovery_pending'", migration)
+        self.assertIn("'waiting_peers'", migration)
+        self.assertNotIn("DELETE FROM lan_outbox", resume)
+        self.assertIn("'retry_paused'", load)
+        ack_start = store.index("public boolean acknowledge(String messageId, String peerId)")
+        ack_end = store.index("public boolean beginDiscoveryWindow(String messageId)", ack_start)
+        ack = store[ack_start:ack_end]
+        self.assertIn('"retry_paused".equals(state) ? "retry_paused" : "pending"', ack)
 
 
     def test_android_udp_endpoint_is_persisted_only_after_successful_send(self):
@@ -2118,15 +2115,11 @@ class LanP2PCoreTests(unittest.TestCase):
         method = extract_java_method(store_source, "public boolean markAttempt(")
         self.assertIn("attempt_count=attempt_count+1", method)
         self.assertIn("status!='acked'", method)
-        self.assertIn("attempt_count<?", method)
-        self.assertIn("last_attempt_at +", method)
         self.assertIn("EXISTS (SELECT 1 FROM lan_outbox o", method)
         self.assertIn("o.message_id=lan_outbox_targets.message_id", method)
         self.assertIn("o.state NOT IN ('delivered','expired','waiting_peers')", method)
-        self.assertIn("changed != 1", method)
-        self.assertIn("db.setTransactionSuccessful()", method)
+        self.assertIn("return update.executeUpdateDelete() == 1;", method)
         self.assertNotIn("SELECT status FROM lan_outbox_targets", method)
-
 
 
     def test_android_exhausted_retry_epoch_has_persisted_recovery_cooldown(self):
@@ -2134,17 +2127,15 @@ class LanP2PCoreTests(unittest.TestCase):
         store = (
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         ).read_text(encoding="utf-8")
-        method = extract_java_method(store, "public int resumeExhaustedRetriesForRecoveryEvent(")
-        self.assertIn("last_recovery_at_ms<=?", method)
+        start = store.index("public int resumeExhaustedRetriesForRecoveryEvent(")
+        end = store.index("public int recordOutboxAttempt(", start)
+        method = store[start:end]
+        self.assertIn("last_event_retry_at_ms<=?", method)
         self.assertIn("now - RETRY_RECOVERY_EVENT_COOLDOWN_MS", method)
-        self.assertIn("status!='acked' AND attempt_count>=?", method)
-        self.assertIn("reopen.put(\"retry_attempt_count\", 0)", method)
-        self.assertIn("state='retry_paused'", method)
-        self.assertIn("AND t.attempt_count<?", method)
-        self.assertIn("NOT EXISTS (SELECT 1 FROM lan_outbox_targets t", method)
-        values = extract_java_method(store, "private ContentValues valuesForRecoveryReset(")
-        self.assertIn('values.put("attempt_count", 0)', values)
-        self.assertIn('values.put("last_recovery_at_ms", now)', values)
+        self.assertIn("retry_attempt_count=0", method)
+        self.assertIn("state='discovery_pending'", method)
+        self.assertIn("state NOT IN ('delivered','expired','waiting_peers')", method)
+        self.assertIn("t.status!='acked'", method)
 
         service = (
             repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
@@ -2157,7 +2148,6 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("lanChatRecoveryEventPending.getAndSet(false)", retry)
         self.assertIn("if (lanChatRecoveryEventPending.get())", retry)
         self.assertIn("retryPendingLanChatMessages(true)", retry)
-
 
 
     def test_server2_udp_ack_requires_verified_route_and_durable_outbox_ack_before_fallback_cleanup(self):

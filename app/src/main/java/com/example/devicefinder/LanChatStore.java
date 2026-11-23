@@ -193,6 +193,10 @@ public final class LanChatStore extends SQLiteOpenHelper {
             db.execSQL("ALTER TABLE lan_outbox_targets ADD COLUMN last_recovery_at_ms INTEGER NOT NULL DEFAULT 0");
         }
         if (oldVersion < 6) {
+            // Fixed-recipient rows now use target-local counters. Discard the old aggregate
+            // retry counter so it cannot distort the new per-target scheduling delay.
+            db.execSQL("UPDATE lan_outbox SET retry_attempt_count=0,last_retry_at_ms=0 " +
+                    "WHERE EXISTS (SELECT 1 FROM lan_outbox_targets t WHERE t.message_id=lan_outbox.message_id)");
             // Existing message-level pauses must not strand targets that still have
             // independent retry budget under the new per-recipient ledger.
             db.execSQL("UPDATE lan_outbox SET state='pending' WHERE state='retry_paused' " +
