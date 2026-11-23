@@ -4304,6 +4304,15 @@ public class TrackingService extends Service implements LocationListener {
                         + messageId + " targets=" + pendingSnapshotTargets
                         + " buildMs=" + packetBuildMs);
             }
+            final long preLockBroadcastLookupStartedAt = android.os.SystemClock.elapsedRealtime();
+            final String preparedBroadcastAddress = pendingSnapshotTargets == 0
+                    ? getWifiBroadcastAddress() : null;
+            final long preLockBroadcastLookupMs = android.os.SystemClock.elapsedRealtime()
+                    - preLockBroadcastLookupStartedAt;
+            if (preLockBroadcastLookupMs >= 50L) {
+                FileLogger.log(this, "CHAT", "P2P first-discovery broadcast address pre-resolution message="
+                        + messageId + " lookupMs=" + preLockBroadcastLookupMs);
+            }
             // Resolve persisted numeric IPv4 endpoints before FIFO admission as well. The
             // selected live verified route still takes precedence under the lock; this map
             // is only the unchanged durable-endpoint fallback.
@@ -4373,7 +4382,8 @@ public class TrackingService extends Service implements LocationListener {
                 if (!serviceDestroyed) {
                     transmitLocalUdpMessageInternal(message, messageId, socket, socketGeneration,
                             preparedTargets, targetLoadMs, senderPeerId, preparedPeerPackets,
-                            preparedBroadcastData, packetBuildMs, preparedCachedEndpoints, endpointResolveMs);
+                            preparedBroadcastData, packetBuildMs, preparedBroadcastAddress,
+                            preLockBroadcastLookupMs, preparedCachedEndpoints, endpointResolveMs);
                 }
             } finally {
                 long lockHoldMs = android.os.SystemClock.elapsedRealtime() - lockAcquiredAt;
@@ -4477,6 +4487,7 @@ public class TrackingService extends Service implements LocationListener {
             final List<LanChatStore.Target> savedTargets, long targetLoadMs,
             final String myId, final java.util.Map<String, byte[]> preparedPeerPackets,
             final byte[] preparedBroadcastData, long packetBuildMs,
+            final String preparedBroadcastAddress, long preLockBroadcastLookupMs,
             final java.util.Map<String, java.net.InetSocketAddress> preparedCachedEndpoints,
             long endpointResolveMs) {
         final long preparationStartedAt = android.os.SystemClock.elapsedRealtime();
@@ -4484,7 +4495,7 @@ public class TrackingService extends Service implements LocationListener {
             FileLogger.log(this, "CHAT", "ℹ️ P2P send rejected for stale UDP socket generation message=" + messageId);
             return;
         }
-        long broadcastLookupMs = 0L;
+        long broadcastLookupMs = preLockBroadcastLookupMs;
         long routeProbeMs = 0L;
         if (!isCurrentLanChatSocket(socket, socketGeneration)) {
             FileLogger.log(this, "CHAT", "⚠️ P2P UDP socket epoch expired before preparation message=" + messageId);
@@ -4647,15 +4658,10 @@ public class TrackingService extends Service implements LocationListener {
         // within this ordered send. For fixed recipients, discovery is only auxiliary:
         // resolve its subnet broadcast address on the probe executor, not under the FIFO
         // transmission lock.
-        final String[] broadcasts;
-        if (pendingTargetIds.isEmpty()) {
-            stageStartedAt = android.os.SystemClock.elapsedRealtime();
-            String subnetBcast = getWifiBroadcastAddress();
-            broadcastLookupMs = android.os.SystemClock.elapsedRealtime() - stageStartedAt;
-            broadcasts = new String[]{subnetBcast};
-        } else {
-            broadcasts = new String[0];
-        }
+        // The first-discovery broadcast address was resolved before FIFO admission;
+        // only the actual chat datagrams remain serialized on this ordered send lane.
+        final String[] broadcasts = pendingTargetIds.isEmpty()
+                ? new String[]{preparedBroadcastAddress} : new String[0];
 
         if (shouldDiscoverPeers) {
             lastPeerDiscoveryAt = now;
@@ -4726,7 +4732,7 @@ public class TrackingService extends Service implements LocationListener {
             }
         }
         routeProbeMs = Math.max(0L, android.os.SystemClock.elapsedRealtime()
-                - routeProbeStartedAt - broadcastLookupMs);
+                - routeProbeStartedAt);
         java.util.Map<String, java.net.InetSocketAddress> dispatchEndpoints = new java.util.HashMap<>();
         java.util.Set<String> verifiedRoutePeerIds = new java.util.HashSet<>();
         for (LanChatStore.Target target : savedTargets) {
