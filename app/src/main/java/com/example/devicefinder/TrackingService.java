@@ -487,6 +487,20 @@ public class TrackingService extends Service implements LocationListener {
                     new ThreadPoolExecutor.AbortPolicy()
             );
 
+    // Peer presence announcements may perform SQLite work and directed challenges.
+    // Keep that burst away from the latency-sensitive peer.ack/chat.ack FIFO lane.
+    private final java.util.concurrent.ExecutorService lanChatPeerExecutor =
+            new ThreadPoolExecutor(
+                    1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(128),
+                    runnable -> {
+                        Thread thread = new Thread(runnable, "LanChat-Peer");
+                        thread.setPriority(Thread.NORM_PRIORITY);
+                        return thread;
+                    },
+                    new ThreadPoolExecutor.AbortPolicy()
+            );
+
     // Keep durable inbox work independent from location/HTTP reporting and control ACKs.
     private final java.util.concurrent.ExecutorService lanChatIoExecutor =
             new ThreadPoolExecutor(
@@ -4663,12 +4677,12 @@ public class TrackingService extends Service implements LocationListener {
                 final String peerIp = peerAddress.getHostAddress();
                 final boolean challengeOnly = envelope.optBoolean("challenge_only", false);
                 try {
-                    lanChatControlExecutor.execute(() -> {
-                        long controlQueueMs = android.os.SystemClock.elapsedRealtime()
+                    lanChatPeerExecutor.execute(() -> {
+                        long peerQueueMs = android.os.SystemClock.elapsedRealtime()
                                 - packetReceivedAtElapsedMs;
-                        if (controlQueueMs >= 150L) {
-                            FileLogger.log(this, "CHAT", "P2P peer.hello control queueMs="
-                                    + controlQueueMs + " peer=" + senderId);
+                        if (peerQueueMs >= 150L) {
+                            FileLogger.log(this, "CHAT", "P2P peer.hello peer queueMs="
+                                    + peerQueueMs + " peer=" + senderId);
                         }
                         try {
                             if (!store.observePeer(senderId, peerType, serviceId, peerNetwork,
@@ -6071,6 +6085,7 @@ public class TrackingService extends Service implements LocationListener {
             awaitLanExecutorTermination(lanChatImmediateExecutor);
             awaitLanExecutorTermination(lanChatSendExecutor);
             awaitLanExecutorTermination(lanChatControlExecutor);
+            awaitLanExecutorTermination(lanChatPeerExecutor);
             awaitLanExecutorTermination(lanChatIoExecutor);
             awaitLanExecutorTermination(maintenanceExecutor);
             try {
@@ -6120,6 +6135,7 @@ public class TrackingService extends Service implements LocationListener {
         if (lanChatImmediateExecutor != null) lanChatImmediateExecutor.shutdown();
         if (lanChatSendExecutor != null) lanChatSendExecutor.shutdown();
         if (lanChatControlExecutor != null) lanChatControlExecutor.shutdown();
+        if (lanChatPeerExecutor != null) lanChatPeerExecutor.shutdown();
         if (lanChatIoExecutor != null) lanChatIoExecutor.shutdown();
         if (lanChatScheduler != null) lanChatScheduler.shutdownNow();
         if (maintenanceExecutor != null) maintenanceExecutor.shutdownNow();

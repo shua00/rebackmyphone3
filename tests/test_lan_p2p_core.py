@@ -3158,7 +3158,14 @@ class AndroidLanControlQueueDiagnosticsTests(unittest.TestCase):
         peer_hello_start = source.index('if ("peer.hello".equals(type))')
         peer_hello_end = source.index('if ("peer.ack".equals(type))', peer_hello_start)
         peer_hello = source[peer_hello_start:peer_hello_end]
-        self.assertIn("P2P peer.hello control queueMs=", peer_hello)
+        self.assertIn("lanChatPeerExecutor.execute(", peer_hello)
+        self.assertIn("P2P peer.hello peer queueMs=", peer_hello)
+        self.assertNotIn("lanChatControlExecutor.execute(", peer_hello)
+        chat_ack_start = source.index('if ("chat.ack".equals(type))')
+        chat_ack_end = source.index('if ("peer.hello".equals(type))', chat_ack_start) if 'if ("peer.hello".equals(type))' in source[chat_ack_start:] else len(source)
+        chat_ack = source[chat_ack_start:chat_ack_end]
+        self.assertIn("lanChatControlExecutor.execute(", chat_ack)
+        self.assertIn("lanChatControlExecutor.execute(", peer_ack)
 
 
 class AndroidLanStoreLifecycleTests(unittest.TestCase):
@@ -3169,6 +3176,7 @@ class AndroidLanStoreLifecycleTests(unittest.TestCase):
         self.assertIn("lanChatImmediateExecutor.shutdown()", destroy)
         self.assertIn("lanChatSendExecutor.shutdown()", destroy)
         self.assertIn("lanChatControlExecutor.shutdown()", destroy)
+        self.assertIn("lanChatPeerExecutor.shutdown()", destroy)
         self.assertIn("lanChatIoExecutor.shutdown()", destroy)
         self.assertIn("LanChatStore storeToClose = lanChatStore", destroy)
         self.assertIn("closeLanChatStoreAfterExecutors(storeToClose)", destroy)
@@ -3176,7 +3184,8 @@ class AndroidLanStoreLifecycleTests(unittest.TestCase):
 
         closer = extract_java_method(source, "private void closeLanChatStoreAfterExecutors(")
         for executor in ("lanChatScheduler", "lanChatImmediateExecutor", "lanChatSendExecutor",
-                         "lanChatControlExecutor", "lanChatIoExecutor", "maintenanceExecutor"):
+                         "lanChatControlExecutor", "lanChatPeerExecutor", "lanChatIoExecutor",
+                         "maintenanceExecutor"):
             self.assertIn("awaitLanExecutorTermination(" + executor + ")", closer)
         self.assertIn("storeToClose.closeStore()", closer)
         awaiter = extract_java_method(source, "private void awaitLanExecutorTermination(")
