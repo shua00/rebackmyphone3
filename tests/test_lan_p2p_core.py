@@ -3061,5 +3061,27 @@ class AndroidLanNetworkScopeTests(unittest.TestCase):
         self.assertIn("wifiLanFingerprint = current", source)
 
 
+
+class AndroidLanAckDiagnosticsTests(unittest.TestCase):
+    def test_android_rejected_ack_log_includes_actual_endpoint_and_all_trust_gates(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        start = source.index('if ("chat.ack".equals(type))')
+        end = source.index('if ("chat.message".equals(type))', start)
+        ack = source[start:end]
+        self.assertIn('source=" + sourceAddress.getHostAddress() + ":" + sourcePort', ack)
+        self.assertIn('" routeMatch=" + routeMatches', ack)
+        self.assertIn('" persistedSendEndpointMatch=" + persistedEndpointMatch', ack)
+        self.assertIn('" discoveryPending=" + discoveryAck', ack)
+        self.assertIn("reason=unverified_endpoint", ack)
+
+        beacon_start = source.index("private void sendPeerHello(")
+        beacon_end = source.index("private void clearPendingPeerChallenge(", beacon_start)
+        beacon = source[beacon_start:beacon_end]
+        self.assertIn('" reason=" + e.getMessage()', beacon)
+
+
 if __name__ == "__main__":
     unittest.main()
