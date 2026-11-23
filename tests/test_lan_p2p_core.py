@@ -3190,6 +3190,29 @@ class AndroidLanAckDiscoveryRaceTests(unittest.TestCase):
 
 
 
+
+class AndroidLanProbeIsolationTests(unittest.TestCase):
+    def test_route_challenges_and_discovery_run_outside_fifo_transmit_lock(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        internal = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
+        self.assertIn("lanChatPeerExecutor.execute(", internal)
+        self.assertIn("sendDirectedPeerChallenge(socket, challengePeerId", internal)
+        self.assertIn("P2P discovery probe queueMs=", internal)
+        self.assertIn("peerDiscoveryInFlight.set(false)", internal)
+        self.assertIn("pendingPeerChallengeDispatches.putIfAbsent(", source)
+        self.assertIn("pendingPeerChallengeDispatches.clear()", source)
+
+    def test_udp_send_does_not_serialize_all_senders_on_socket_monitor(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        send = extract_java_method(source, "private void sendLanUdpPacket(")
+        self.assertIn("socket.send(packet)", send)
+        self.assertIn("socket.isClosed()", send)
+        self.assertIn("sendMs=", send)
+        self.assertNotIn("synchronized (socket)", send)
+
+
 class AndroidLanAckFastPathTests(unittest.TestCase):
     def test_verified_live_route_skips_redundant_sqlite_endpoint_lookup(self):
         repo_root = Path(__file__).resolve().parents[1]

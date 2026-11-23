@@ -310,6 +310,9 @@ public class TrackingService extends Service implements LocationListener {
             new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, java.net.InetSocketAddress> pendingPeerChallengeExpectedEndpoints =
             new java.util.concurrent.ConcurrentHashMap<>();
+    // Deduplicate directed challenges while they wait in the peer executor queue.
+    private final java.util.concurrent.ConcurrentHashMap<String, Boolean> pendingPeerChallengeDispatches =
+            new java.util.concurrent.ConcurrentHashMap<>();
     // 有效 peer 存在时也定期重新发现，纳入后来上线/加入局域网的设备。
     private volatile long lastPeerDiscoveryAt = 0L;
     private static final long PEER_DISCOVERY_REFRESH_MS = 30_000L;
@@ -352,6 +355,7 @@ public class TrackingService extends Service implements LocationListener {
         pendingPeerChallenges.clear();
         pendingPeerChallengeExpectedIds.clear();
         pendingPeerChallengeExpectedEndpoints.clear();
+        pendingPeerChallengeDispatches.clear();
         FileLogger.log(this, "CHAT", "LAN P2P peer 路由已失效，等待重新发现: " + reason);
     }
     // The listener-running flag is process-wide; its guard must be process-wide too.
@@ -4358,8 +4362,8 @@ public class TrackingService extends Service implements LocationListener {
             lastPeerDiscoveryAt = 0L;
         }
 
-        // Revalidate persisted endpoints directly before treating a known target as offline.
-        // Stable peer ID and exact endpoint must both match the authenticated challenge response.
+        // Revalidate persisted endpoints off the FIFO transmit lock. A slow challenge
+        // must never hold up an ordinary chat message or unrelated ACK/control traffic.
         int directedChallenges = 0;
         for (LanChatStore.Target target : savedTargets) {
             if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
@@ -4367,37 +4371,54 @@ public class TrackingService extends Service implements LocationListener {
                     || verifiedChatPeers.containsKey(target.peerId)
                     || target.endpointIp == null || target.endpointIp.isEmpty()
                     || !(target.endpointPort == 8888 || target.endpointPort == 8887
-                         || target.endpointPort == 8889 || target.endpointPort == 8890)) {
+                         || target.endpointPort == 8889 || target.endpointPort == 8890)
+                    || pendingPeerChallengeDispatches.putIfAbsent(target.peerId, Boolean.TRUE) != null) {
                 continue;
             }
+            final String challengePeerId = target.peerId;
+            final String challengeIp = target.endpointIp;
+            final int challengePort = target.endpointPort;
+            final long challengeQueuedAt = android.os.SystemClock.elapsedRealtime();
             try {
-                java.net.InetAddress savedAddress = java.net.InetAddress.getByName(target.endpointIp);
-                if (savedAddress instanceof java.net.Inet4Address
-                        && savedAddress.isSiteLocalAddress()
-                        && !savedAddress.isLoopbackAddress()
-                        && !savedAddress.isAnyLocalAddress()) {
-                    long challengeStartedAt = android.os.SystemClock.elapsedRealtime();
-                    sendDirectedPeerChallenge(socket, target.peerId, savedAddress, target.endpointPort);
-                    long challengeMs = android.os.SystemClock.elapsedRealtime() - challengeStartedAt;
-                    if (challengeMs >= 50L) {
-                        FileLogger.log(this, "CHAT", "P2P directed challenge dispatch message="
-                                + messageId + " peer=" + target.peerId + " elapsedMs=" + challengeMs);
+                lanChatPeerExecutor.execute(() -> {
+                    try {
+                        long queueMs = android.os.SystemClock.elapsedRealtime() - challengeQueuedAt;
+                        if (!isCurrentLanChatSocket(socket, socketGeneration)
+                                || verifiedChatPeers.containsKey(challengePeerId)) return;
+                        java.net.InetAddress savedAddress = java.net.InetAddress.getByName(challengeIp);
+                        if (!(savedAddress instanceof java.net.Inet4Address)
+                                || !savedAddress.isSiteLocalAddress()
+                                || savedAddress.isLoopbackAddress()
+                                || savedAddress.isAnyLocalAddress()) return;
+                        long dispatchStartedAt = android.os.SystemClock.elapsedRealtime();
+                        sendDirectedPeerChallenge(socket, challengePeerId, savedAddress, challengePort);
+                        long dispatchMs = android.os.SystemClock.elapsedRealtime() - dispatchStartedAt;
+                        if (queueMs >= 150L || dispatchMs >= 150L) {
+                            FileLogger.log(this, "CHAT", "P2P directed challenge queued message="
+                                    + messageId + " peer=" + challengePeerId
+                                    + " queueMs=" + queueMs + " dispatchMs=" + dispatchMs);
+                        }
+                    } catch (Exception staleEndpoint) {
+                        FileLogger.logD("CHAT", "persisted peer endpoint challenge skipped peer="
+                                + challengePeerId + " reason=" + staleEndpoint.getClass().getSimpleName());
+                    } finally {
+                        pendingPeerChallengeDispatches.remove(challengePeerId);
                     }
-                    directedChallenges++;
-                }
-            } catch (Exception staleEndpoint) {
-                FileLogger.logD("CHAT", "persisted peer endpoint challenge skipped peer="
-                        + target.peerId + " reason=" + staleEndpoint.getClass().getSimpleName());
+                });
+                directedChallenges++;
+            } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                pendingPeerChallengeDispatches.remove(challengePeerId);
+                FileLogger.log(this, "CHAT", "P2P directed challenge queue full peer=" + challengePeerId);
             }
         }
         if (directedChallenges > 0) {
-            FileLogger.log(this, "CHAT", "P2P 正在验证已保存的目标路由 count="
+            FileLogger.log(this, "CHAT", "P2P 已排队验证已保存目标路由 count="
                     + directedChallenges + " message=" + messageId);
         }
-        // Reuse verified routes for up to 30 seconds; rediscover on first send, route expiry,
-        // network change, or partial delivery. Avoid adding a 500 ms discovery wait to every message.
-        // Discovery has its own cooldown even while no peer is currently verified.
-        // Otherwise every queued message rebroadcasts to four ports and amplifies socket contention.
+
+        // Discovery is also dispatched away from the FIFO sender. The chat packet below
+        // remains ordered on the transmit lane; authenticated discovery ACK grace and the
+        // durable recipient snapshot continue to govern any newly learned peer.
         boolean discoveryDue = lastPeerDiscoveryAt == 0L
                 || now - lastPeerDiscoveryAt >= 30_000L;
         boolean shouldDiscoverPeers = discoveryDue
@@ -4412,40 +4433,53 @@ public class TrackingService extends Service implements LocationListener {
                     clearPendingPeerChallenge(nonce);
                 }
             }, LAN_PEER_CHALLENGE_TIMEOUT_MS);
+            final long discoveryQueuedAt = android.os.SystemClock.elapsedRealtime();
             try {
-                JSONObject helloPacket = LanP2pProtocol.create("peer.hello", myId, "android", "android-main");
-                helloPacket.put("nonce", nonce);
-                helloPacket.put("network_scope", getLanProtocolNetworkScope());
-                helloPacket.put("capabilities", new JSONArray().put("chat.text").put("chat.ack"));
-                byte[] hello = LanP2pProtocol.encode(helloPacket, RESCUE_SECRET);
-                for (String target : broadcasts) {
-                    if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
-                    // server2 使用 8887；Android 手机使用 8888；rescue2 使用 8889；
-                    // 独立 chat.py 使用 8890。分端口发现后，单播路由对应唯一接收进程。
-                    for (int peerPort : new int[]{8888, 8887, 8889, 8890}) {
-                        if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
-                        try {
-                            DatagramPacket p = new DatagramPacket(hello, hello.length,
-                                    java.net.InetAddress.getByName(target), peerPort);
-                            sendLanUdpPacket(socket, p, "PEER_HELLO_" + peerPort);
-                        } catch (Exception e) {
-                            FileLogger.log(this, "CHAT", "⚠️ P2P 发现广播失败 port="
-                                    + peerPort + ": " + e.getMessage());
+                lanChatPeerExecutor.execute(() -> {
+                    long dispatchStartedAt = android.os.SystemClock.elapsedRealtime();
+                    try {
+                        if (!isCurrentLanChatSocket(socket, socketGeneration)) return;
+                        JSONObject helloPacket = LanP2pProtocol.create("peer.hello", myId, "android", "android-main");
+                        helloPacket.put("nonce", nonce);
+                        helloPacket.put("network_scope", getLanProtocolNetworkScope());
+                        helloPacket.put("capabilities", new JSONArray().put("chat.text").put("chat.ack"));
+                        byte[] hello = LanP2pProtocol.encode(helloPacket, RESCUE_SECRET);
+                        for (String target : broadcasts) {
+                            if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
+                            for (int peerPort : new int[]{8888, 8887, 8889, 8890}) {
+                                if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
+                                try {
+                                    DatagramPacket packet = new DatagramPacket(hello, hello.length,
+                                            java.net.InetAddress.getByName(target), peerPort);
+                                    sendLanUdpPacket(socket, packet, "PEER_HELLO_" + peerPort);
+                                } catch (Exception e) {
+                                    FileLogger.log(this, "CHAT", "⚠️ P2P 发现广播失败 port="
+                                            + peerPort + ": " + e.getClass().getSimpleName());
+                                }
+                            }
                         }
+                        long queueMs = dispatchStartedAt - discoveryQueuedAt;
+                        long dispatchMs = android.os.SystemClock.elapsedRealtime() - dispatchStartedAt;
+                        if (queueMs >= 150L || dispatchMs >= 150L) {
+                            FileLogger.log(this, "CHAT", "P2P discovery probe queueMs="
+                                    + queueMs + " dispatchMs=" + dispatchMs
+                                    + " socketGeneration=" + socketGeneration);
+                        }
+                        FileLogger.logD("CHAT", "P2P discovery broadcast dispatched cachedPeers="
+                                + verifiedChatPeers.size());
+                    } catch (Exception e) {
+                        FileLogger.log(this, "CHAT", "⚠️ P2P 发现失败: " + e.getClass().getSimpleName());
+                        lastPeerDiscoveryAt = 0L;
+                    } finally {
+                        // The nonce remains valid for late authenticated peer.ack responses.
+                        peerDiscoveryInFlight.set(false);
                     }
-                }
-                // Discovery is deliberately non-blocking: the message send path must not
-                // hold the FIFO transmit lock while waiting for a peer list. During the
-                // bounded first-discovery window, authenticated peer/chat ACKs add recipients
-                // durably and trigger a targeted retry; later devices cannot join that snapshot.
-                FileLogger.logD("CHAT", "P2P discovery broadcast dispatched cachedPeers="
-                        + verifiedChatPeers.size());
-            } catch (Exception e) {
-                FileLogger.log(this, "CHAT", "⚠️ P2P 发现失败: " + e.getMessage());
-            } finally {
-                // Keep the nonce alive after the 500 ms collection wait so late authenticated ACKs
-                // can still restore the route and trigger an immediate outbox retry.
+                });
+            } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                clearPendingPeerChallenge(nonce);
                 peerDiscoveryInFlight.set(false);
+                lastPeerDiscoveryAt = 0L;
+                FileLogger.log(this, "CHAT", "P2P discovery queue full; retry on next send");
             }
         }
         routeProbeMs = android.os.SystemClock.elapsedRealtime() - stageStartedAt;
@@ -4667,28 +4701,25 @@ public class TrackingService extends Service implements LocationListener {
      * Serialize UDP sends and log only materially slow lock waits or socket sends.
      * Packet contents, authentication fields and chat bodies are never logged.
      */
+    /**
+     * DatagramSocket is thread-safe; do not serialize unrelated chat, ACK and peer sends
+     * on the socket monitor. A concurrent close is surfaced as IOException and the durable
+     * outbox retains the message for the next valid socket generation.
+     */
     private void sendLanUdpPacket(DatagramSocket socket, DatagramPacket packet, String kind)
             throws java.io.IOException {
-        long lockWaitStarted = android.os.SystemClock.elapsedRealtime();
-        long lockWaitMs;
-        long sendMs;
-        synchronized (socket) {
-            lockWaitMs = android.os.SystemClock.elapsedRealtime() - lockWaitStarted;
-            if (socket.isClosed()) {
-                throw new java.net.SocketException("UDP socket closed before send");
-            }
-            long sendStarted = android.os.SystemClock.elapsedRealtime();
-            socket.send(packet);
-            sendMs = android.os.SystemClock.elapsedRealtime() - sendStarted;
+        if (socket == null || socket.isClosed()) {
+            throw new java.net.SocketException("UDP socket closed before send");
         }
-        if (lockWaitMs >= 250L || sendMs >= 250L) {
-            // Persist material socket-monitor stalls; logD alone is absent from exported device_log.txt.
+        long sendStarted = android.os.SystemClock.elapsedRealtime();
+        socket.send(packet);
+        long sendMs = android.os.SystemClock.elapsedRealtime() - sendStarted;
+        if (sendMs >= 250L) {
             FileLogger.log(this, "UDP", "P2P UDP slow dispatch kind=" + kind
-                    + " monitorWaitMs=" + lockWaitMs + " sendMs=" + sendMs
-                    + " bytes=" + packet.getLength());
-        } else if (lockWaitMs >= 50L || sendMs >= 50L) {
-            FileLogger.logD("UDP", "slow send kind=" + kind + " lockWaitMs="
-                    + lockWaitMs + " sendMs=" + sendMs + " bytes=" + packet.getLength());
+                    + " sendMs=" + sendMs + " bytes=" + packet.getLength());
+        } else if (sendMs >= 50L) {
+            FileLogger.logD("UDP", "slow send kind=" + kind
+                    + " sendMs=" + sendMs + " bytes=" + packet.getLength());
         }
     }
 
