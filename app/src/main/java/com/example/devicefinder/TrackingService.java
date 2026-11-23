@@ -3183,23 +3183,20 @@ public class TrackingService extends Service implements LocationListener {
         return "255.255.255.255";
     }
 
-    private void bindSocketToWifi(java.net.DatagramSocket socket) throws java.io.IOException {
+    private Network bindSocketToWifi(java.net.DatagramSocket socket) throws java.io.IOException {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
-            lanChatBoundWifiNetwork = null;
-            return;
+            return null;
         }
         ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
         if (cm == null) {
             // Preserve the pre-existing default-route listener behavior for non-chat UDP.
-            lanChatBoundWifiNetwork = null;
-            return;
+            return null;
         }
         Network selected = selectWifiLanNetwork(cm);
         if (selected == null) {
             // No Wi-Fi transport is currently visible; retain the platform default route
             // for existing non-chat UDP business paths. LAN chat itself fails closed.
-            lanChatBoundWifiNetwork = null;
-            return;
+            return null;
         }
         LinkProperties links = cm.getLinkProperties(selected);
         if (links == null || links.getInterfaceName() == null
@@ -3209,7 +3206,7 @@ public class TrackingService extends Service implements LocationListener {
         }
         try {
             selected.bindSocket(socket);
-            lanChatBoundWifiNetwork = selected;
+            return selected;
             FileLogger.logD("CHAT", "UDP listener socket bound to selected Wi-Fi LAN network="
                     + links.getInterfaceName());
         } catch (Exception bindError) {
@@ -5664,7 +5661,7 @@ public class TrackingService extends Service implements LocationListener {
                 rescueSocket = new DatagramSocket(null);
                 rescueSocket.setReuseAddress(true);
                 rescueSocket.setBroadcast(true);
-                bindSocketToWifi(rescueSocket);
+                Network boundWifiNetwork = bindSocketToWifi(rescueSocket);
                 rescueSocket.bind(new InetSocketAddress(8888));
                 rescueSocket.setSoTimeout(3000);
                 synchronized (rescueLock) {
@@ -5672,6 +5669,8 @@ public class TrackingService extends Service implements LocationListener {
                         throw new java.net.SocketException("Wi-Fi LAN generation changed during UDP bind");
                     }
                     rescueSocketRef = rescueSocket;
+                    // Publish the socket's exact bound Network in the same generation-checked critical section.
+                    lanChatBoundWifiNetwork = boundWifiNetwork;
                 }
                 udpBindFailCount = 0;
                 FileLogger.log(this, "UDP", "✅ 监听已绑定 8888");
