@@ -1645,9 +1645,10 @@ def udp_listener():
                 try:
                     data, addr = udp_sock.recvfrom(4096)
                 except Exception as recv_err:
-                    print(f"⚠️ UDP recvfrom 异常: {recv_err}")
-                    time.sleep(1)
-                    continue
+                    # A failed recvfrom may indicate a closed/broken socket. Leave the
+                    # receive loop so the outer handler/finally closes it and rebinds.
+                    print(f"⚠️ UDP recvfrom 异常，退出当前 socket 并重新绑定: {recv_err}")
+                    raise
                 msg = data.decode('utf-8', errors='ignore')
                 source_ip = addr[0]
                 # v2-only：LAN 对讲/发现只接收经过认证的 v2 JSON 信封

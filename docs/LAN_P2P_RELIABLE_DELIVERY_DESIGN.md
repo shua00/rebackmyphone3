@@ -371,3 +371,12 @@ IP 地址永远不能作为设备身份。网络变化时应使旧端点路由�
 rescue2.py 与 server2.py 在 UDP listener 重新绑定成功后启动唯一恢复 worker；socket 断开时 worker 暂时看不到 listener socket，重新绑定后继续复用该 worker。chat.py 独立模式此前只尝试绑定一次，本版改为 bind/recv 异常后延迟重试并重新绑定；worker 的启动仍在 bind 成功之后，避免无可用 socket 时误认为 listener 已就绪。
 
 chat.py 在 server2.py 启动时采用代理模式，不启动自己的 UDP listener 和恢复 worker；这是有意的单一权威发送/接收边界，避免两个 chat 服务同时运行造成 UDP 端口冲突、重复消息身份和双 Outbox。若 server2.py 在 chat.py 启动后退出，chat.py 不自动切换到独立模式，需重启 chat.py 重新判定模式；不能在运行中未经协调地同时启用两个独立账本。
+
+
+## 22. UDP 接收 socket 失效后的重绑定（v2.8.21）
+
+UDP listener 的 `recvfrom()` 异常不能仅记录日志后无限复用同一个 socket。若底层 socket 已关闭或进入不可恢复状态，继续循环会造成“线程仍在、端口实际不可用”，同时恢复 worker 也无法通过该 listener 发出补发数据报。
+
+server2.py 的接收异常现在向外传播，由 listener 外层异常处理执行退避等待，并由 `finally` 清理当前 socket、清空当前 listener 引用；外层主循环随后创建新 socket 并重新 bind。rescue2.py 与 chat.py 原有异常传播/清理路径保持不变。恢复 worker 是每个服务进程唯一实例，不随 socket 重建重复启动；它在 listener 引用恢复后继续使用新 socket。
+
+该修复不把临时网络错误误判为 peer 离线，也不清空 Outbox、目标账本或 peer 身份。验收需注入 recvfrom 异常，确认旧 socket 关闭、监听端口重新绑定、worker 不重复创建，且恢复后仍可收发认证 v2 包。

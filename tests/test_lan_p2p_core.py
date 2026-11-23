@@ -130,6 +130,36 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("target=udp_listener", standalone_branch)
         self.assertIn("需重启 chat.py", proxy_branch)
 
+    def test_python_udp_listener_recv_errors_release_socket_and_rebind(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        for filename, socket_name in (
+                ("chat.py", "udp_sock"),
+                ("rescue2.py", "sock"),
+                ("server2.py", "udp_sock")):
+            source = (repo_root / filename).read_text(encoding="utf-8")
+            start = source.index("def udp_listener():")
+            end_candidates = [
+                source.find("\\ndef ", start + 1),
+                source.find("\\nclass ", start + 1),
+            ]
+            ends = [value for value in end_candidates if value >= 0]
+            listener = source[start:min(ends)] if ends else source[start:]
+            self.assertIn("while True:", listener, filename)
+            self.assertIn(f"{socket_name}.close()", listener, filename)
+            self.assertIn("finally:", listener, filename)
+            self.assertIn(f"{socket_name}.bind(", listener, filename)
+            if filename == "server2.py":
+                recv_start = listener.index("except Exception as recv_err:")
+                recv_end = listener.index("msg = data.decode", recv_start)
+                recv_handler = listener[recv_start:recv_end]
+                self.assertIn("raise", recv_handler)
+                self.assertNotIn("continue", recv_handler)
+                self.assertNotIn("time.sleep(1)", recv_handler)
+            else:
+                # These listeners already let recvfrom failures reach the outer
+                # exception handler, which closes the socket before the next bind.
+                self.assertNotIn("except Exception as recv_err:", listener)
+
     def test_android_outbox_foreign_key_constraints_are_enabled_on_every_connection(self):
         source = Path(__file__).resolve().parents[1] / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         java = source.read_text(encoding="utf-8")
