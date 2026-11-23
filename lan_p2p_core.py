@@ -544,8 +544,7 @@ def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10, for
     try:
         conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("PRAGMA busy_timeout=10000")
-        now = time.time()
-        now_ms = int(now * 1000)
+        now_ms = int(time.time() * 1000)
         _finalize_expired_discovery_windows(conn, sender_scope, now_ms)
         conn.commit()
         rows = conn.execute("""SELECT o.message_id,o.sender_peer_id,o.body,o.created_at_ms,
@@ -556,14 +555,13 @@ def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10, for
             WHERE o.sender_scope=? AND t.peer_id=? AND t.status!='acked'
               AND o.state NOT IN ('delivered','expired','waiting_peers')
               AND t.attempt_count<?
-              AND p.status='active' AND p.lease_expires_at>?
               AND (?=1 OR t.attempt_count=0 OR t.last_attempt_at +
                    CASE t.attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000
                      WHEN 3 THEN 10000 WHEN 4 THEN 20000 WHEN 5 THEN 40000
                      ELSE 60000 END <= ?)
             ORDER BY o.created_at_ms LIMIT ?""",
             (sender_scope, sender_scope, peer_id, MAX_OUTBOX_TARGET_ATTEMPTS,
-             now, 1 if force else 0, now_ms, max(1, min(50, int(limit))))).fetchall()
+             1 if force else 0, now_ms, max(1, min(50, int(limit))))).fetchall()
         return [{"message_id": r[0], "sender_peer_id": r[1], "body": r[2],
                  "created_at_ms": r[3], "endpoint_ip": r[4], "endpoint_port": r[5]}
                 for r in rows]
@@ -1013,17 +1011,47 @@ def load_active_pending_targets(db_path, sender_scope, message_id, limit=500):
             _safe_close(conn)
 
 
+
+def load_pending_fixed_targets(db_path, sender_scope, message_id, limit=500):
+    """Load all immutable unacked recipients with persisted endpoints, regardless of lease state."""
+    if not db_path or not sender_scope or not message_id:
+        return []
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        rows = conn.execute("""SELECT t.peer_id,COALESCE(p.endpoint_ip,''),COALESCE(p.endpoint_port,0),
+                    COALESCE(p.status,'unknown')
+            FROM lan_outbox o
+            JOIN lan_outbox_targets t ON t.message_id=o.message_id
+            LEFT JOIN lan_peers p ON p.receiver_scope=? AND p.peer_id=t.peer_id
+            WHERE o.sender_scope=? AND o.message_id=?
+              AND o.state NOT IN ('delivered','expired','waiting_peers')
+              AND t.status!='acked' AND t.attempt_count<?
+            ORDER BY t.peer_id LIMIT ?""",
+            (sender_scope, sender_scope, message_id, MAX_OUTBOX_TARGET_ATTEMPTS,
+             max(1, min(1000, int(limit))))).fetchall()
+        return [{"peer_id": row[0], "endpoint_ip": row[1],
+                 "endpoint_port": row[2], "peer_status": row[3]} for row in rows]
+    except Exception as exc:
+        raise LanP2PStorageError("failed to load fixed LAN outbox targets") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+
 def send_outbox_to_active_peers(sock, db_path, sender_scope, message_id,
                                 packet_template, secret, send_lock=None,
                                 attempts=3, retry_delay_seconds=0.25):
-    """Send to active fixed targets; retry only those still unacked, with one route query per round."""
+    """Send to all fixed targets with persisted endpoints, even if their lease is suspect or expired."""
     if sock is None or not db_path or not sender_scope or not message_id:
         return 0
     max_attempts = max(1, min(3, int(attempts)))
     delay = max(0.0, min(1.0, float(retry_delay_seconds)))
     sent_total = 0
     for attempt in range(max_attempts):
-        targets = load_active_pending_targets(db_path, sender_scope, message_id)
+        targets = load_pending_fixed_targets(db_path, sender_scope, message_id)
         if not targets:
             break
         for target in targets:
@@ -1049,7 +1077,7 @@ def send_outbox_to_active_peers(sock, db_path, sender_scope, message_id,
                 continue
         if attempt + 1 < max_attempts and delay > 0:
             # Recheck once per round: do not sleep/retry when every target ACKed.
-            if load_active_pending_targets(db_path, sender_scope, message_id):
+            if load_pending_fixed_targets(db_path, sender_scope, message_id):
                 time.sleep(delay)
     return sent_total
 
@@ -1117,3 +1145,27 @@ def peer_endpoint_matches(db_path, receiver_scope, peer_id, endpoint_ip, endpoin
     finally:
         if conn is not None:
             _safe_close(conn)
+
+
+def outgoing_ack_endpoint_matches(db_path, sender_scope, message_id, peer_id,
+                                 endpoint_ip, endpoint_port):
+    """Match an ACK to the exact endpoint attempted for this fixed message target."""
+    if not db_path or not sender_scope or not message_id or not peer_id or not endpoint_ip:
+        return False
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        try:
+            conn.execute("PRAGMA busy_timeout=10000")
+            row = conn.execute("""SELECT 1 FROM lan_outbox o
+                JOIN lan_outbox_targets t ON t.message_id=o.message_id
+                WHERE o.sender_scope=? AND o.message_id=? AND t.peer_id=?
+                  AND o.state NOT IN ('expired','waiting_peers')
+                  AND t.status='sent' AND t.attempt_count>0
+                  AND t.last_endpoint=? LIMIT 1""",
+                (sender_scope, message_id, peer_id,
+                 str(endpoint_ip) + ":" + str(int(endpoint_port)))).fetchone()
+            return row is not None
+        finally:
+            _safe_close(conn)
+    except Exception:
+        return False
