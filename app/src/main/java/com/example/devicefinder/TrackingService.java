@@ -4441,7 +4441,7 @@ public class TrackingService extends Service implements LocationListener {
             ackCleanupDeferred = true;
             boolean completionScheduled = scheduleLanChatTask("chat-ack-grace-" + messageId, () -> {
                 Runnable completion = () -> completeLanChatAckWindow(messageId,
-                        completionAwaitingPeerIds, completionRouteVersionSnapshot, completionAck,
+                        completionAwaitingPeerIds, completionAck,
                         completionTotalPeerCount, completionReachablePeerCount,
                         completionStore, completionStartedAt);
                 try {
@@ -4454,7 +4454,7 @@ public class TrackingService extends Service implements LocationListener {
                 lanChatAckGraceInFlight.remove(messageId);
                 ackCleanupDeferred = false;
                 completeLanChatAckWindow(messageId, completionAwaitingPeerIds,
-                        completionRouteVersionSnapshot, completionAck, completionTotalPeerCount,
+                        completionAck, completionTotalPeerCount,
                         completionReachablePeerCount, completionStore, completionStartedAt);
             }
         } finally {
