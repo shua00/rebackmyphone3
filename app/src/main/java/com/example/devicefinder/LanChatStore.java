@@ -192,6 +192,13 @@ public final class LanChatStore extends SQLiteOpenHelper {
         if (oldVersion < 6 && !hasColumn(db, "lan_outbox_targets", "last_recovery_at_ms")) {
             db.execSQL("ALTER TABLE lan_outbox_targets ADD COLUMN last_recovery_at_ms INTEGER NOT NULL DEFAULT 0");
         }
+        if (oldVersion < 6) {
+            // Existing message-level pauses must not strand targets that still have
+            // independent retry budget under the new per-recipient ledger.
+            db.execSQL("UPDATE lan_outbox SET state='pending' WHERE state='retry_paused' " +
+                    "AND EXISTS (SELECT 1 FROM lan_outbox_targets t WHERE t.message_id=lan_outbox.message_id " +
+                    "AND t.status!='acked' AND t.attempt_count<8)");
+        }
     }
 
     /** Persist an outgoing message before any network send. */
