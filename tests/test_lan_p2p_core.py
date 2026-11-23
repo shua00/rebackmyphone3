@@ -507,6 +507,25 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertEqual(targets, 0)
 
 
+    def test_single_discovery_target_cannot_start_window_before_udp_dispatch(self):
+        from lan_p2p_core import persist_outgoing_message, add_discovery_target
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-no-early-window", "hello", []))
+        with patch("lan_p2p_core.time.time", return_value=1000.0):
+            self.assertFalse(add_discovery_target(
+                self.db_path, "server2", "m-no-early-window", "android-early"))
+        with sqlite3.connect(self.db_path) as conn:
+            state, deadline = conn.execute(
+                "SELECT state,delivery_deadline_ms FROM lan_outbox "
+                "WHERE message_id='m-no-early-window'"
+            ).fetchone()
+            target_count = conn.execute(
+                "SELECT COUNT(*) FROM lan_outbox_targets WHERE message_id='m-no-early-window'"
+            ).fetchone()[0]
+        self.assertEqual(state, "discovery_pending")
+        self.assertEqual(deadline, 0)
+        self.assertEqual(target_count, 0)
+
     def test_initial_discovery_window_stays_unstarted_until_udp_dispatch(self):
         from lan_p2p_core import (
             persist_outgoing_message, is_outgoing_discovery_pending,
