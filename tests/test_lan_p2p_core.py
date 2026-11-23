@@ -3572,7 +3572,7 @@ class AndroidLanFixedTargetFastPathTests(unittest.TestCase):
         self.assertIn("preparedBroadcastAddress, preLockBroadcastLookupMs", send)
         self.assertIn("final String[] broadcasts = pendingTargetIds.isEmpty()", internal)
         self.assertIn("new String[]{preparedBroadcastAddress}", internal)
-        self.assertNotIn("getWifiBroadcastAddress()", internal)
+        self.assertEqual(internal.count("getWifiBroadcastAddress()"), 1)
         # Fixed-recipient discovery still resolves its auxiliary broadcast address asynchronously.
         self.assertIn("new String[]{getWifiBroadcastAddress()}", internal)
         probe_queue = internal.index("lanChatProbeExecutor.execute(() ->")
