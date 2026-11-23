@@ -686,7 +686,8 @@ public final class LanChatStore extends SQLiteOpenHelper {
     }
 
     /**
-     * Accept a delayed ACK only from the endpoint durably recorded for this fixed recipient.
+     * Accept a delayed ACK only from the endpoint durably recorded after this target's UDP send succeeded.
+     * Historical last_endpoint remains a route-challenge candidate, never ACK evidence by itself.
      * This remains valid after the short-lived in-memory route cache is evicted.
      */
     public boolean matchesExpectedAckEndpoint(String messageId, String peerId,
