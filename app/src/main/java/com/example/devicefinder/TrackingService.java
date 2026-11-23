@@ -4242,7 +4242,12 @@ public class TrackingService extends Service implements LocationListener {
             // canonicalization and HMAC work out of the shared sender lock and before attempt charging.
             final String senderPeerId = getUniqueDeviceId();
             final java.util.Map<String, byte[]> preparedPeerPackets = new java.util.HashMap<>();
-            final int pendingSnapshotTargets = countPendingLanTargets(preparedTargets);
+            int pendingSnapshotTargets = 0;
+            for (LanChatStore.Target target : preparedTargets) {
+                if (target != null && target.peerId != null && !"acked".equals(target.status)) {
+                    pendingSnapshotTargets++;
+                }
+            }
             final long packetBuildStartedAt = android.os.SystemClock.elapsedRealtime();
             final byte[] preparedBroadcastData;
             try {
