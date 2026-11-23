@@ -419,6 +419,25 @@ class LanP2PCoreTests(unittest.TestCase):
             conn.close()
         self.assertEqual(state, "delivered")
 
+    def test_python_outbox_attempt_cannot_mutate_terminal_message_states(self):
+        from lan_p2p_core import persist_outgoing_message
+        terminal_states = ("delivered", "expired", "waiting_peers")
+        for state in terminal_states:
+            message_id = "m-terminal-attempt-" + state
+            self.assertTrue(persist_outgoing_message(
+                self.db_path, "server2", "server2-id", message_id, "hello", ["android-a"]))
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("UPDATE lan_outbox SET state=? WHERE message_id=?",
+                             (state, message_id))
+            self.assertFalse(mark_outgoing_attempt(
+                self.db_path, message_id, "android-a", "192.168.1.10", 8888))
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT status,attempt_count FROM lan_outbox_targets "
+                    "WHERE message_id=? AND peer_id='android-a'", (message_id,)
+                ).fetchone()
+            self.assertEqual(row, ("pending", 0), state)
+
     def test_first_discovery_target_set_freezes_after_deadline(self):
         from lan_p2p_core import (
             persist_outgoing_message, record_peer, add_discovery_targets_for_peer,
