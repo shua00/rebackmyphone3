@@ -3534,7 +3534,7 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         internal = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
         self.assertIn("P2P SQLite outbox attempt", send)
         self.assertIn("P2P SQLite target attempt", internal)
-        self.assertIn("P2P SQLite send-endpoint", internal)
+        self.assertIn("P2P async SQLite send-endpoint", internal)
         self.assertIn("P2P directed challenge queued", internal)
         self.assertIn("P2P 发送串行锁持有", send)
         udp = extract_java_method(source, "private void sendLanUdpPacket(")
