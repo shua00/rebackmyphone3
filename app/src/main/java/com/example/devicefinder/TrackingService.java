@@ -4235,7 +4235,23 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.log(this, "CHAT", "LAN 自动补发预算已耗尽，SQLite 消息及未 ACK 目标继续保留，等待网络/peer 恢复事件: "
                         + messageId + " attempts=" + attemptNumber);
             }
-            scheduleLanChatRetryFromOutbox();
+            requestLanChatRetryPlan();
+        }
+    }
+
+    /**
+     * A fresh send must not perform the outbox-wide retry scan on the interactive
+     * sender thread. Retry batches re-arm their own timer after releasing the
+     * single-flight guard; immediate sends hand planning to the retry executor.
+     */
+    private void requestLanChatRetryPlan() {
+        if (serviceDestroyed || lanChatRetryInFlight.get()) return;
+        try {
+            lanChatSendExecutor.execute(this::scheduleLanChatRetryFromOutbox);
+        } catch (java.util.concurrent.RejectedExecutionException rejected) {
+            // Rare queue saturation fallback: defer planning rather than block the immediate lane.
+            scheduleLanChatTask("outbox-retry-plan-fallback",
+                    this::scheduleLanChatRetryFromOutbox, 500L);
         }
     }
 

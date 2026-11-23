@@ -3431,6 +3431,21 @@ class AndroidLanInboxProjectionRecoveryTests(unittest.TestCase):
         self.assertIn("return pending.size() >= 100", project)
 
 
+
+class AndroidLanImmediateSendIsolationTests(unittest.TestCase):
+    def test_immediate_send_does_not_scan_outbox_for_retry_plan_inline(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        transmit = extract_java_method(source, "private void transmitLocalUdpMessage(")
+        self.assertIn("requestLanChatRetryPlan()", transmit)
+        self.assertNotIn("scheduleLanChatRetryFromOutbox()", transmit)
+        planner = extract_java_method(source, "private void requestLanChatRetryPlan(")
+        self.assertIn("lanChatSendExecutor.execute(this::scheduleLanChatRetryFromOutbox)", planner)
+        self.assertIn("if (serviceDestroyed || lanChatRetryInFlight.get()) return", planner)
+        self.assertIn('"outbox-retry-plan-fallback"', planner)
+
+
+
 class AndroidLanProbeIsolationTests(unittest.TestCase):
     def test_route_challenges_and_discovery_run_outside_fifo_transmit_lock(self):
         repo_root = Path(__file__).resolve().parents[1]
