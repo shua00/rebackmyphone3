@@ -3432,6 +3432,29 @@ class AndroidLanInboxProjectionRecoveryTests(unittest.TestCase):
 
 
 
+
+class AndroidLanFixedTargetFastPathTests(unittest.TestCase):
+    def test_fixed_target_unicast_skips_broadcast_address_enumeration(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        internal = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
+        discover = internal.index("boolean shouldDiscoverPeers =")
+        broadcast = internal.index("String subnetBcast = getWifiBroadcastAddress()")
+        self.assertGreater(broadcast, discover)
+        self.assertIn("if (shouldDiscoverPeers || pendingTargetIds.isEmpty())", internal)
+        self.assertIn("broadcasts = new String[0]", internal)
+
+    def test_fixed_target_unicast_skips_discovery_window_sqlite_read(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        internal = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
+        guard = internal.index("if (totalPeerCount == 0) {")
+        read = internal.index("store.isDiscoveryPending(messageId)", guard)
+        self.assertGreater(read, guard)
+        self.assertIn("if (totalPeerCount == 0 && !firstDiscoveryWindowOpen)", internal)
+
+
+
 class AndroidLanImmediateSendIsolationTests(unittest.TestCase):
     def test_immediate_send_does_not_scan_outbox_for_retry_plan_inline(self):
         repo_root = Path(__file__).resolve().parents[1]

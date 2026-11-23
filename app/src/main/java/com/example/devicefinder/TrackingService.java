@@ -4327,12 +4327,9 @@ public class TrackingService extends Service implements LocationListener {
         }
         String myId = getUniqueDeviceId();
         long stageStartedAt = android.os.SystemClock.elapsedRealtime();
-        String subnetBcast = getWifiBroadcastAddress();
-        broadcastLookupMs = android.os.SystemClock.elapsedRealtime() - stageStartedAt;
-        // 当前子网广播足以覆盖同一 LAN；同时发 255.255.255.255 会让同一包重复到达。
-        String[] broadcasts = new String[]{subnetBcast};
 
-        // Measure target lookup independently; the previous stage timer included broadcast lookup.
+        // Measure target lookup independently; do not enumerate network interfaces yet.
+        // Known fixed recipients use unicast and do not need a broadcast address at all.
         stageStartedAt = android.os.SystemClock.elapsedRealtime();
         // Recipient membership was snapshotted at enqueue time. Only an empty initial
         // snapshot may collect newly verified peers through addDiscoveryPeerToOpenMessages().
@@ -4486,6 +4483,20 @@ public class TrackingService extends Service implements LocationListener {
                 || now - lastPeerDiscoveryAt >= LAN_PEER_DISCOVERY_COOLDOWN_MS);
         boolean shouldDiscoverPeers = discoveryDue
                 && peerDiscoveryInFlight.compareAndSet(false, true);
+
+        // Only resolve the Wi-Fi broadcast address when a real discovery broadcast or
+        // an empty-recipient first delivery needs it. Fixed-target unicast avoids a full
+        // NetworkInterface enumeration on every message.
+        final String[] broadcasts;
+        if (shouldDiscoverPeers || pendingTargetIds.isEmpty()) {
+            stageStartedAt = android.os.SystemClock.elapsedRealtime();
+            String subnetBcast = getWifiBroadcastAddress();
+            broadcastLookupMs = android.os.SystemClock.elapsedRealtime() - stageStartedAt;
+            broadcasts = new String[]{subnetBcast};
+        } else {
+            broadcasts = new String[0];
+        }
+
         if (shouldDiscoverPeers) {
             lastPeerDiscoveryAt = now;
             String nonce = java.util.UUID.randomUUID().toString();
@@ -4545,7 +4556,8 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.log(this, "CHAT", "P2P discovery queue full; retry on next send");
             }
         }
-        routeProbeMs = android.os.SystemClock.elapsedRealtime() - stageStartedAt;
+        routeProbeMs = Math.max(0L, android.os.SystemClock.elapsedRealtime()
+                - stageStartedAt - broadcastLookupMs);
         stageStartedAt = android.os.SystemClock.elapsedRealtime();
         byte[] broadcastData;
         try { broadcastData = buildAuthenticatedLanChatPacket(myId, "*", messageId, message); }
@@ -4592,13 +4604,15 @@ public class TrackingService extends Service implements LocationListener {
             FileLogger.log(this, "CHAT", "P2P 即时投递走持久化 endpoint count="
                     + cachedEndpointCount + " message=" + messageId);
         }
-        final boolean firstDiscoveryWindowOpen;
-        try {
-            firstDiscoveryWindowOpen = store.isDiscoveryPending(messageId);
-        } catch (Exception storageFailure) {
-            FileLogger.log(this, "CHAT", "⚠️ LAN 发现窗口状态复核失败，停止广播以防误投: "
-                    + storageFailure.getClass().getSimpleName());
-            return;
+        boolean firstDiscoveryWindowOpen = false;
+        if (totalPeerCount == 0) {
+            try {
+                firstDiscoveryWindowOpen = store.isDiscoveryPending(messageId);
+            } catch (Exception storageFailure) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN 发现窗口状态复核失败，停止广播以防误投: "
+                        + storageFailure.getClass().getSimpleName());
+                return;
+            }
         }
         if (totalPeerCount == 0 && !firstDiscoveryWindowOpen) {
             FileLogger.log(this, "CHAT", "ℹ️ 消息首次发现窗口已关闭且没有固定目标；禁止向晚加入设备广播旧消息，保留待诊断状态: "
