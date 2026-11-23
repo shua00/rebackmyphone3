@@ -4552,7 +4552,8 @@ public class TrackingService extends Service implements LocationListener {
             }
         } catch (Exception e) {
             clearPendingPeerChallenge(nonce);
-            FileLogger.log(this, "CHAT", "LAN peer beacon creation failed: " + e.getClass().getSimpleName());
+            FileLogger.log(this, "CHAT", "LAN peer beacon creation failed: "
+                    + e.getClass().getSimpleName() + " reason=" + e.getMessage());
             return;
         }
         scheduleLanChatTask("peer-challenge-timeout", () -> {
@@ -4737,7 +4738,12 @@ public class TrackingService extends Service implements LocationListener {
                         // delayed ACKs may alternatively use the exact endpoint persisted for this target.
                         if (!routeMatches && !persistedEndpointMatch) {
                             FileLogger.log(this, "CHAT", "P2P ACK rejected message=" + messageId
-                                    + " peer=" + senderId + " reason=unverified_endpoint");
+                                    + " peer=" + senderId
+                                    + " source=" + sourceAddress.getHostAddress() + ":" + sourcePort
+                                    + " routeMatch=" + routeMatches
+                                    + " persistedSendEndpointMatch=" + persistedEndpointMatch
+                                    + " discoveryPending=" + discoveryAck
+                                    + " reason=unverified_endpoint");
                             return;
                         }
                         // Durable ACK state is authoritative: only release the in-memory
