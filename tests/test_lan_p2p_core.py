@@ -2603,7 +2603,7 @@ class LanP2PCoreTests(unittest.TestCase):
         for filename in ("chat.py", "rescue2.py", "server2.py"):
             source = (repo_root / filename).read_text(encoding="utf-8")
             start = source.index("def _resume_pending_v2_for_peer(")
-            end = source.index("\\ndef _retry_deferred_v2_peer_recoveries(", start)
+            end = source.index("\ndef _retry_deferred_v2_peer_recoveries(", start)
             worker = source[start:end]
             queued = worker.index("queued_recovery_event = peer_id in _V2_RECOVERY_RETRY_PEERS")
             consume = worker.index("_V2_RECOVERY_RETRY_PEERS.discard(peer_id)", queued)
