@@ -4273,6 +4273,37 @@ public class TrackingService extends Service implements LocationListener {
                         + messageId + " targets=" + pendingSnapshotTargets
                         + " buildMs=" + packetBuildMs);
             }
+            // Resolve persisted numeric IPv4 endpoints before FIFO admission as well. The
+            // selected live verified route still takes precedence under the lock; this map
+            // is only the unchanged durable-endpoint fallback.
+            final long endpointResolveStartedAt = android.os.SystemClock.elapsedRealtime();
+            final java.util.Map<String, java.net.InetSocketAddress> preparedCachedEndpoints =
+                    new java.util.HashMap<>();
+            for (LanChatStore.Target target : preparedTargets) {
+                if (target == null || target.peerId == null || "acked".equals(target.status)
+                        || target.endpointIp == null || target.endpointIp.isEmpty()
+                        || !(target.endpointPort == 8888 || target.endpointPort == 8887
+                             || target.endpointPort == 8889 || target.endpointPort == 8890)) {
+                    continue;
+                }
+                try {
+                    java.net.InetAddress cachedAddress = java.net.InetAddress.getByName(target.endpointIp);
+                    if (!(cachedAddress instanceof java.net.Inet4Address)
+                            || !cachedAddress.isSiteLocalAddress()
+                            || cachedAddress.isLoopbackAddress() || cachedAddress.isAnyLocalAddress()) continue;
+                    preparedCachedEndpoints.put(target.peerId,
+                            new java.net.InetSocketAddress(cachedAddress, target.endpointPort));
+                } catch (Exception invalidCachedEndpoint) {
+                    FileLogger.logD("CHAT", "cached LAN endpoint skipped peer=" + target.peerId
+                            + " reason=" + invalidCachedEndpoint.getClass().getSimpleName());
+                }
+            }
+            final long endpointResolveMs = android.os.SystemClock.elapsedRealtime() - endpointResolveStartedAt;
+            if (endpointResolveMs >= 50L) {
+                FileLogger.log(this, "CHAT", "P2P cached endpoint pre-resolution message="
+                        + messageId + " targets=" + preparedCachedEndpoints.size()
+                        + " resolveMs=" + endpointResolveMs);
+            }
             // Wait for the FIFO transmit turn before charging this message's retry epoch.
             // Time spent queued behind another sender is not a delivery attempt.
             long lockRequestedAt = android.os.SystemClock.elapsedRealtime();
@@ -4311,7 +4342,7 @@ public class TrackingService extends Service implements LocationListener {
                 if (!serviceDestroyed) {
                     transmitLocalUdpMessageInternal(message, messageId, socket, socketGeneration,
                             preparedTargets, targetLoadMs, senderPeerId, preparedPeerPackets,
-                            preparedBroadcastData, packetBuildMs);
+                            preparedBroadcastData, packetBuildMs, preparedCachedEndpoints, endpointResolveMs);
                 }
             } finally {
                 long lockHoldMs = android.os.SystemClock.elapsedRealtime() - lockAcquiredAt;
@@ -4414,7 +4445,9 @@ public class TrackingService extends Service implements LocationListener {
             DatagramSocket socket, long socketGeneration,
             final List<LanChatStore.Target> savedTargets, long targetLoadMs,
             final String myId, final java.util.Map<String, byte[]> preparedPeerPackets,
-            final byte[] preparedBroadcastData, long packetBuildMs) {
+            final byte[] preparedBroadcastData, long packetBuildMs,
+            final java.util.Map<String, java.net.InetSocketAddress> preparedCachedEndpoints,
+            long endpointResolveMs) {
         final long preparationStartedAt = android.os.SystemClock.elapsedRealtime();
         if (!isCurrentLanChatSocket(socket, socketGeneration)) {
             FileLogger.log(this, "CHAT", "ℹ️ P2P send rejected for stale UDP socket generation message=" + messageId);
@@ -4673,22 +4706,10 @@ public class TrackingService extends Service implements LocationListener {
                 verifiedRoutePeerIds.add(target.peerId);
                 continue;
             }
-            // A cached endpoint is sufficient for an immediate message attempt; the packet's
-            // stable target_peer_id prevents delivery to a different host reusing this address.
-            if (target.endpointIp == null || target.endpointIp.isEmpty()
-                    || !(target.endpointPort == 8888 || target.endpointPort == 8887
-                         || target.endpointPort == 8889 || target.endpointPort == 8890)) continue;
-            try {
-                java.net.InetAddress cachedAddress = java.net.InetAddress.getByName(target.endpointIp);
-                if (!(cachedAddress instanceof java.net.Inet4Address)
-                        || !cachedAddress.isSiteLocalAddress()
-                        || cachedAddress.isLoopbackAddress() || cachedAddress.isAnyLocalAddress()) continue;
-                dispatchEndpoints.put(target.peerId,
-                        new java.net.InetSocketAddress(cachedAddress, target.endpointPort));
-            } catch (Exception invalidCachedEndpoint) {
-                FileLogger.logD("CHAT", "cached LAN endpoint skipped peer=" + target.peerId
-                        + " reason=" + invalidCachedEndpoint.getClass().getSimpleName());
-            }
+            // The durable endpoint was validated before FIFO admission. The stable
+            // target_peer_id still binds the packet to its intended recipient.
+            java.net.InetSocketAddress cachedRoute = preparedCachedEndpoints.get(target.peerId);
+            if (cachedRoute != null) dispatchEndpoints.put(target.peerId, cachedRoute);
         }
         java.util.Set<String> awaitingPeerIds = java.util.Collections.newSetFromMap(
                 new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
@@ -4729,6 +4750,7 @@ public class TrackingService extends Service implements LocationListener {
                     + " preLockTargetDbMs=" + targetLoadMs
                     + " routeProbeMs=" + routeProbeMs
                     + " preLockPacketBuildMs=" + packetBuildMs
+                    + " preLockEndpointResolveMs=" + endpointResolveMs
                     + " otherLockMs=" + Math.max(0L, preparationMs - broadcastLookupMs
                             - routeProbeMs));
         }
