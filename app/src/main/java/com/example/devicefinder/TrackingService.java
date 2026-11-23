@@ -247,6 +247,9 @@ public class TrackingService extends Service implements LocationListener {
     private final String serviceInstanceId = java.util.UUID.randomUUID().toString();
     private volatile DatagramSocket rescueSocketRef = null;
     // LAN P2P v2：消息 ACK 等待表。每条消息只保留一个短时 latch，不启动常驻线程。
+    // Coalesce one bounded recheck when a broadcast ACK races its peer-route handshake.
+    private final java.util.Set<String> pendingChatAckRouteRechecks =
+            java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CountDownLatch> pendingChatAcks =
             new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.Set<String>> pendingChatAckPeers =
@@ -4722,89 +4725,11 @@ public class TrackingService extends Service implements LocationListener {
                     return true;
                 }
                 final java.net.InetAddress sourceAddress = packet.getAddress();
-                final java.util.concurrent.CountDownLatch latch = pendingChatAcks.get(messageId);
-                final java.net.InetSocketAddress verified = verifiedChatPeers.get(senderId);
-                final boolean routeMatches = verified != null
-                        && verified.getAddress().equals(sourceAddress)
-                        && verified.getPort() == sourcePort;
-                final java.util.Set<String> expected = pendingChatAckPeers.get(messageId);
                 final LanChatStore store = lanChatStore;
-                // Keep the UDP receive path free of SQLite reads. A delayed ACK may still be
-                // accepted from the exact endpoint durably recorded for this fixed recipient,
-                // even after its short-lived in-memory route has been evicted.
                 try {
-                    lanChatIoExecutor.execute(() -> {
-                        long ackQueueMs = android.os.SystemClock.elapsedRealtime()
-                                - packetReceivedAtElapsedMs;
-                        long ackPersistStarted = android.os.SystemClock.elapsedRealtime();
-                        boolean persistedEndpointMatch = store != null
-                                && store.matchesExpectedAckEndpoint(messageId, senderId,
-                                        sourceAddress.getHostAddress(), sourcePort);
-                        // Discovery status is retained only for delivery-latch accounting;
-                        // it never bypasses the verified-route / persisted-endpoint identity gate.
-                        boolean discoveryAck = false;
-                        try {
-                            discoveryAck = store != null && store.isDiscoveryPending(messageId);
-                        } catch (Exception storageFailure) {
-                            // Fixed-target ACK persistence remains independently authoritative;
-                            // without a readable discovery state, never release the broadcast slot.
-                            FileLogger.log(this, "CHAT", "⚠️ LAN ACK 发现窗口读取失败，拒绝释放发现观察槽: "
-                                    + storageFailure.getClass().getSimpleName());
-                        }
-                        // Discovery is a recipient-collection window, not an identity bypass.
-                        // A newly discovered peer must first complete peer.ack route verification;
-                        // delayed ACKs may alternatively use the exact endpoint persisted for this target.
-                        if (!routeMatches && !persistedEndpointMatch) {
-                            FileLogger.log(this, "CHAT", "P2P ACK rejected message=" + messageId
-                                    + " peer=" + senderId
-                                    + " source=" + sourceAddress.getHostAddress() + ":" + sourcePort
-                                    + " routeMatch=" + routeMatches
-                                    + " persistedSendEndpointMatch=" + persistedEndpointMatch
-                                    + " discoveryPending=" + discoveryAck
-                                    + " reason=unverified_endpoint");
-                            return;
-                        }
-                        // Durable ACK state is authoritative: only release the in-memory
-                        // wait slot after SQLite commits, so a failed duplicate ACK cannot
-                        // race with a successful duplicate and strand the latch.
-                        boolean persistedAck = store != null && store.acknowledge(messageId, senderId);
-                        if (persistedAck) {
-                            boolean wasExpected = expected != null && expected.remove(senderId);
-                            if (routeMatches) {
-                                synchronized (verifiedChatPeerRouteVersions) {
-                                    if (verifiedChatPeers.get(senderId) == verified) {
-                                        verifiedChatPeerRouteVersions.put(senderId,
-                                                verifiedChatPeerRouteVersionCounter.incrementAndGet());
-                                        verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
-                                    }
-                                }
-                            }
-                            // Only a first ACK from the discovery-only broadcast may release its single
-                            // observation slot. Unknown discovery peers must never consume
-                            // the wait slots reserved for other fixed, reachable recipients.
-                            boolean discoveryBroadcastAck = discoveryAck && expected != null
-                                    && expected.isEmpty() && latch != null && latch.getCount() > 0;
-                            if (latch != null && (wasExpected || discoveryBroadcastAck)) latch.countDown();
-                            if (store.allTargetsAcked(messageId)) {
-                                removePendingLanChat(messageId);
-                                FileLogger.log(this, "CHAT", "P2P 最终 ACK 已落账并回收兼容队列 message="
-                                        + messageId + " peer=" + senderId);
-                            }
-                        } else {
-                            FileLogger.log(this, "CHAT", "⚠️ v2 ACK 账本写入失败，等待重试: "
-                                    + messageId + " peer=" + senderId);
-                        }
-                        long ackTotalMs = android.os.SystemClock.elapsedRealtime()
-                                - packetReceivedAtElapsedMs;
-                        if (ackQueueMs >= 100L || ackTotalMs >= 200L) {
-                            FileLogger.log(this, "CHAT", "P2P ACK 处理耗时 message=" + messageId
-                                    + " queueMs=" + ackQueueMs
-                                    + " dbMs=" + (android.os.SystemClock.elapsedRealtime() - ackPersistStarted)
-                                    + " totalMs=" + ackTotalMs
-                                    + " persisted=" + persistedAck
-                                    + " endpointMatch=" + persistedEndpointMatch);
-                        }
-                    });
+                    lanChatIoExecutor.execute(() -> processAuthenticatedLanChatAck(
+                            messageId, senderId, sourceAddress, sourcePort, store,
+                            packetReceivedAtElapsedMs, true));
                 } catch (java.util.concurrent.RejectedExecutionException rejected) {
                     FileLogger.log(this, "CHAT", "⚠️ LAN ACK IO 队列已满，保留发送端待确认状态 message="
                             + messageId + " peer=" + senderId);
@@ -4863,6 +4788,101 @@ public class TrackingService extends Service implements LocationListener {
             FileLogger.logD("UDP", "authenticated LAN packet rejected: " + e.getClass().getSimpleName());
         }
         return true;
+    }
+
+    /**
+     * Persist a chat ACK only after its sender endpoint is verified. During an open
+     * first-discovery window, allow one short asynchronous recheck so a fast chat.ack
+     * cannot lose a race against the peer.ack route-persistence task on the IO pool.
+     * This grace never bypasses either routeMatches or persistedEndpointMatch.
+     */
+    private void processAuthenticatedLanChatAck(String messageId, String senderId,
+            java.net.InetAddress sourceAddress, int sourcePort, LanChatStore store,
+            long packetReceivedAtElapsedMs, boolean allowDiscoveryGrace) {
+        if (store == null || sourceAddress == null) return;
+        long ackQueueMs = android.os.SystemClock.elapsedRealtime() - packetReceivedAtElapsedMs;
+        long ackPersistStarted = android.os.SystemClock.elapsedRealtime();
+        java.net.InetSocketAddress verified = verifiedChatPeers.get(senderId);
+        boolean routeMatches = verified != null
+                && verified.getAddress().equals(sourceAddress)
+                && verified.getPort() == sourcePort;
+        boolean persistedEndpointMatch = store.matchesExpectedAckEndpoint(messageId, senderId,
+                sourceAddress.getHostAddress(), sourcePort);
+        boolean discoveryAck = false;
+        try {
+            discoveryAck = store.isDiscoveryPending(messageId);
+        } catch (Exception storageFailure) {
+            FileLogger.log(this, "CHAT", "⚠️ LAN ACK 发现窗口读取失败，拒绝释放发现观察槽: "
+                    + storageFailure.getClass().getSimpleName());
+        }
+        if (!routeMatches && !persistedEndpointMatch) {
+            if (allowDiscoveryGrace && discoveryAck) {
+                String recheckKey = messageId + ":" + senderId + ":"
+                        + sourceAddress.getHostAddress() + ":" + sourcePort;
+                if (!pendingChatAckRouteRechecks.add(recheckKey)) return;
+                boolean scheduled = scheduleLanChatTask("chat-ack-route-recheck", () -> {
+                    pendingChatAckRouteRechecks.remove(recheckKey);
+                    try {
+                        lanChatIoExecutor.execute(() -> processAuthenticatedLanChatAck(
+                                messageId, senderId, sourceAddress, sourcePort, store,
+                                packetReceivedAtElapsedMs, false));
+                    } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                        FileLogger.log(this, "CHAT", "⚠️ LAN ACK 路由复核队列已满，继续保留待确认 message="
+                                + messageId + " peer=" + senderId);
+                    }
+                }, 200L);
+                if (scheduled) {
+                    FileLogger.logD("CHAT", "P2P ACK 暂缓复核握手路由 message="
+                            + messageId + " peer=" + senderId + " graceMs=200");
+                    return;
+                }
+                pendingChatAckRouteRechecks.remove(recheckKey);
+            }
+            FileLogger.log(this, "CHAT", "P2P ACK rejected message=" + messageId
+                    + " peer=" + senderId
+                    + " source=" + sourceAddress.getHostAddress() + ":" + sourcePort
+                    + " routeMatch=" + routeMatches
+                    + " persistedSendEndpointMatch=" + persistedEndpointMatch
+                    + " discoveryPending=" + discoveryAck
+                    + " reason=unverified_endpoint");
+            return;
+        }
+        // Re-read the current latch/expected set after any asynchronous route grace.
+        java.util.concurrent.CountDownLatch latch = pendingChatAcks.get(messageId);
+        java.util.Set<String> expected = pendingChatAckPeers.get(messageId);
+        boolean persistedAck = store.acknowledge(messageId, senderId);
+        if (persistedAck) {
+            boolean wasExpected = expected != null && expected.remove(senderId);
+            if (routeMatches) {
+                synchronized (verifiedChatPeerRouteVersions) {
+                    if (verifiedChatPeers.get(senderId) == verified) {
+                        verifiedChatPeerRouteVersions.put(senderId,
+                                verifiedChatPeerRouteVersionCounter.incrementAndGet());
+                        verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
+                    }
+                }
+            }
+            boolean discoveryBroadcastAck = discoveryAck && expected != null
+                    && expected.isEmpty() && latch != null && latch.getCount() > 0;
+            if (latch != null && (wasExpected || discoveryBroadcastAck)) latch.countDown();
+            if (store.allTargetsAcked(messageId)) {
+                removePendingLanChat(messageId);
+                FileLogger.log(this, "CHAT", "P2P 最终 ACK 已落账并回收兼容队列 message="
+                        + messageId + " peer=" + senderId);
+            }
+        } else {
+            FileLogger.log(this, "CHAT", "⚠️ v2 ACK 账本写入失败，等待重试: "
+                    + messageId + " peer=" + senderId);
+        }
+        long ackTotalMs = android.os.SystemClock.elapsedRealtime() - packetReceivedAtElapsedMs;
+        if (ackQueueMs >= 100L || ackTotalMs >= 200L) {
+            FileLogger.log(this, "CHAT", "P2P ACK 处理耗时 message=" + messageId
+                    + " queueMs=" + ackQueueMs
+                    + " dbMs=" + (android.os.SystemClock.elapsedRealtime() - ackPersistStarted)
+                    + " totalMs=" + ackTotalMs
+                    + " persisted=" + persistedAck
+                    + " endpointMatch=" + persistedEndpointMatch);
+        }
     }
 
     private boolean sendAuthenticatedChatAck(DatagramSocket socket, java.net.InetAddress address,
