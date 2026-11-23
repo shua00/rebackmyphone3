@@ -355,13 +355,11 @@ def acknowledge_outgoing_message(db_path, sender_scope, message_id, peer_id):
                     _safe_rollback(conn)
                     return False
                 deadline = int(row[1] or 0)
-                if deadline and now_ms >= deadline:
+                # Unknown ACKs may join only after the first actual UDP dispatch
+                # opened the bounded discovery window; handshakes alone cannot start it.
+                if not deadline or now_ms >= deadline:
                     _safe_rollback(conn)
                     return False
-                if not deadline:
-                    deadline = now_ms + 5000
-                    conn.execute("UPDATE lan_outbox SET delivery_deadline_ms=? WHERE sender_scope=? AND message_id=?",
-                                 (deadline, sender_scope, message_id))
                 conn.execute("""INSERT OR IGNORE INTO lan_outbox_targets
                     (message_id,peer_id,status,last_ack_at) VALUES(?,?,'acked',?)""",
                     (message_id, peer_id, now_ms))
@@ -558,12 +556,10 @@ def add_discovery_targets_for_peer(db_path, sender_scope, peer_id):
         added = 0
         for message_id, deadline_value in rows:
             deadline = int(deadline_value or 0)
-            if deadline and now_ms >= deadline:
+            # A peer handshake before the first message dispatch must not start
+            # or consume this message's bounded discovery window.
+            if not deadline or now_ms >= deadline:
                 continue
-            if not deadline:
-                deadline = now_ms + 5000
-                conn.execute("UPDATE lan_outbox SET delivery_deadline_ms=? WHERE message_id=?",
-                             (deadline, message_id))
             cur = conn.execute("""INSERT OR IGNORE INTO lan_outbox_targets
                 (message_id,peer_id,status) VALUES(?,?,'pending')""", (message_id, peer_id))
             added += max(0, cur.rowcount)

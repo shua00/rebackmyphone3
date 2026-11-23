@@ -634,14 +634,8 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     // A repeated ACK is idempotent; continue to reconcile the message state.
                 } else {
                     if (existingStatus != null || !"discovery_pending".equals(state)
-                            || (deadline > 0 && now >= deadline)) return false;
-                    if (deadline == 0L) {
-                        deadline = now + FIRST_DISCOVERY_WINDOW_MS;
-                        ContentValues window = new ContentValues();
-                        window.put("delivery_deadline_ms", deadline);
-                        if (db.update("lan_outbox", window, "message_id=?",
-                                new String[]{messageId}) != 1) return false;
-                    }
+                            || deadline <= 0L || now >= deadline) return false;
+                    // An authenticated ACK can join only a window opened by actual UDP dispatch.
                     ContentValues targetValues = new ContentValues();
                     targetValues.put("message_id", messageId);
                     targetValues.put("peer_id", peerId);
@@ -816,15 +810,14 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 while (c.moveToNext()) {
                     String messageId = c.getString(0);
                     long deadline = c.getLong(1);
-                    if (deadline > 0 && now >= deadline) {
-                        if (!finalizeDiscoveryMessage(db, messageId)) return false;
+                    if (deadline <= 0L) {
+                        // A verified peer may appear while the message is still queued.
+                        // Discovery membership starts only after the first actual UDP dispatch.
                         continue;
                     }
-                    if (deadline == 0L) {
-                        ContentValues window = new ContentValues();
-                        window.put("delivery_deadline_ms", now + FIRST_DISCOVERY_WINDOW_MS);
-                        if (db.update("lan_outbox", window, "message_id=?",
-                                new String[]{messageId}) != 1) return false;
+                    if (now >= deadline) {
+                        if (!finalizeDiscoveryMessage(db, messageId)) return false;
+                        continue;
                     }
                     ContentValues target = new ContentValues();
                     target.put("message_id", messageId);

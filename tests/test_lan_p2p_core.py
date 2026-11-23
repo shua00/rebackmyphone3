@@ -2532,5 +2532,102 @@ class LanP2PCoreTests(unittest.TestCase):
 
 
 
+
+    def test_peer_discovery_before_first_dispatch_does_not_start_or_join_window(self):
+        from lan_p2p_core import (
+            persist_outgoing_message, add_discovery_targets_for_peer,
+            begin_outgoing_discovery_window,
+        )
+        with patch("lan_p2p_core.time.time", return_value=1000.0):
+            self.assertTrue(persist_outgoing_message(
+                self.db_path, "server2", "server2-id", "m-pre-discovery", "hello", []))
+        with patch("lan_p2p_core.time.time", return_value=1001.0):
+            self.assertEqual(0, add_discovery_targets_for_peer(
+                self.db_path, "server2", "android-early"))
+        with sqlite3.connect(self.db_path) as conn:
+            state, deadline = conn.execute(
+                "SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id='m-pre-discovery'"
+            ).fetchone()
+            targets = conn.execute(
+                "SELECT COUNT(*) FROM lan_outbox_targets WHERE message_id='m-pre-discovery'"
+            ).fetchone()[0]
+        self.assertEqual(("discovery_pending", 0), (state, deadline))
+        self.assertEqual(0, targets)
+
+        with patch("lan_p2p_core.time.time", return_value=1010.0):
+            self.assertTrue(begin_outgoing_discovery_window(
+                self.db_path, "server2", "m-pre-discovery"))
+        with patch("lan_p2p_core.time.time", return_value=1011.0):
+            self.assertEqual(1, add_discovery_targets_for_peer(
+                self.db_path, "server2", "android-during"))
+        with sqlite3.connect(self.db_path) as conn:
+            deadline, peer = conn.execute(
+                "SELECT o.delivery_deadline_ms,t.peer_id FROM lan_outbox o "
+                "JOIN lan_outbox_targets t ON t.message_id=o.message_id "
+                "WHERE o.message_id='m-pre-discovery'"
+            ).fetchone()
+        self.assertEqual(1015000, deadline)
+        self.assertEqual("android-during", peer)
+
+        repo_root = Path(__file__).resolve().parents[1]
+        store_source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        add_peer = extract_java_method(
+            store_source, "public boolean addDiscoveryPeerToOpenMessages("
+        )
+        self.assertIn("if (deadline <= 0L)", add_peer)
+        self.assertIn("continue;", add_peer)
+        self.assertNotIn("now + FIRST_DISCOVERY_WINDOW_MS", add_peer)
+
+    def test_unknown_ack_before_first_dispatch_is_rejected_on_python_and_android(self):
+        from lan_p2p_core import (
+            persist_outgoing_message, acknowledge_outgoing_message,
+            begin_outgoing_discovery_window,
+        )
+        with patch("lan_p2p_core.time.time", return_value=2000.0):
+            self.assertTrue(persist_outgoing_message(
+                self.db_path, "server2", "server2-id", "m-early-ack", "hello", []))
+        with patch("lan_p2p_core.time.time", return_value=2001.0):
+            self.assertFalse(acknowledge_outgoing_message(
+                self.db_path, "server2", "m-early-ack", "android-early"))
+        with sqlite3.connect(self.db_path) as conn:
+            state, deadline = conn.execute(
+                "SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id='m-early-ack'"
+            ).fetchone()
+            count = conn.execute(
+                "SELECT COUNT(*) FROM lan_outbox_targets WHERE message_id='m-early-ack'"
+            ).fetchone()[0]
+        self.assertEqual(("discovery_pending", 0), (state, deadline))
+        self.assertEqual(0, count)
+
+        with patch("lan_p2p_core.time.time", return_value=2010.0):
+            self.assertTrue(begin_outgoing_discovery_window(
+                self.db_path, "server2", "m-early-ack"))
+        with patch("lan_p2p_core.time.time", return_value=2011.0):
+            self.assertTrue(acknowledge_outgoing_message(
+                self.db_path, "server2", "m-early-ack", "android-during"))
+        with sqlite3.connect(self.db_path) as conn:
+            state, deadline = conn.execute(
+                "SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id='m-early-ack'"
+            ).fetchone()
+            status = conn.execute(
+                "SELECT status FROM lan_outbox_targets WHERE message_id='m-early-ack' "
+                "AND peer_id='android-during'"
+            ).fetchone()[0]
+        self.assertEqual("discovery_pending", state)
+        self.assertEqual(2015000, deadline)
+        self.assertEqual("acked", status)
+
+        repo_root = Path(__file__).resolve().parents[1]
+        store_source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        acknowledge = extract_java_method(store_source, "public boolean acknowledge(")
+        self.assertIn("deadline <= 0L || now >= deadline", acknowledge)
+        self.assertNotIn("deadline = now + FIRST_DISCOVERY_WINDOW_MS", acknowledge)
+
+
+
 if __name__ == "__main__":
     unittest.main()
