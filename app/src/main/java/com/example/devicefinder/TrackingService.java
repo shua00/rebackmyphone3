@@ -257,6 +257,8 @@ public class TrackingService extends Service implements LocationListener {
     private final java.util.concurrent.ConcurrentHashMap<String, Long> pendingChatAckStartedAt =
             new java.util.concurrent.ConcurrentHashMap<>();
     // 防止发送端重试/多端口重复广播时，同一消息在持久化完成前重复占用后台队列。
+    private final java.util.concurrent.atomic.AtomicBoolean lanChatInboxProjectionInFlight =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
     private final java.util.Set<String> pendingLanChatReceives =
             java.util.Collections.newSetFromMap(
                     new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
@@ -611,6 +613,7 @@ public class TrackingService extends Service implements LocationListener {
             FileLogger.log(this, "CHAT",
                     "LAN delivery store initialization failed: " + e.getClass().getSimpleName());
         }
+        scheduleLanChatInboxProjection();
         serviceCreateTimeMs = SystemClock.elapsedRealtime();
         logLifecycle("SERVICE_CREATE", "foregroundStarted=" + isForegroundStarted);
         locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
@@ -5083,6 +5086,9 @@ public class TrackingService extends Service implements LocationListener {
                             if (stored) {
                                 boolean ackSent = sendAuthenticatedChatAck(
                                         socket, ackAddress, ackPort, senderId, messageId);
+                                // The SQLite inbox commit is the delivery boundary. Project
+                                // into SharedPreferences/UI only after the ACK has been dispatched.
+                                scheduleLanChatInboxProjection();
                                 FileLogger.log(this, "CHAT", "P2P RX durable message=" + messageId
                                         + " sender=" + senderId + " persisted=true ackSent=" + ackSent);
                             } else {
@@ -5370,108 +5376,138 @@ public class TrackingService extends Service implements LocationListener {
         return persistIncomingLanChat(senderId, messageId, msgContent, senderId);
     }
 
+    /**
+     * Commit the immutable receive record only. A successful return is the durable
+     * delivery boundary and permits chat.ack; UI history is a recoverable projection.
+     */
+    private boolean persistIncomingLanChat(String senderId, String messageId, String msgContent) {
+        return persistIncomingLanChat(senderId, messageId, msgContent, senderId);
+    }
+
     private boolean persistIncomingLanChat(String senderId, String messageId, String msgContent,
                                            String displayName) {
         if (senderId == null || senderId.isEmpty() || messageId == null || messageId.isEmpty()) return false;
-        boolean historyChanged = false;
-        String shortName = (displayName == null || displayName.isEmpty()) ? senderId : displayName;
-        if (shortName.contains("_") && (displayName == null || displayName.isEmpty())) {
-            shortName = shortName.substring(0, shortName.lastIndexOf("_"));
+        LanChatStore store = lanChatStore;
+        if (store == null) return false;
+        long inboxNow = System.currentTimeMillis();
+        String displayTime = new java.text.SimpleDateFormat(
+                "HH:mm", java.util.Locale.getDefault()).format(new java.util.Date(inboxNow));
+        long persistStarted = android.os.SystemClock.elapsedRealtime();
+        boolean stored = store.storeIncoming("android:" + getUniqueDeviceId(),
+                senderId, messageId, msgContent, displayName, inboxNow, displayTime);
+        long persistMs = android.os.SystemClock.elapsedRealtime() - persistStarted;
+        if (persistMs >= 50L || !stored) {
+            FileLogger.log(this, "CHAT", "P2P inbox SQLite commit message=" + messageId
+                    + " dbMs=" + persistMs + " stored=" + stored);
         }
-        synchronized (lanChatReceiveLock) {
-            try {
-                LanChatStore store = lanChatStore;
-                long inboxNow = System.currentTimeMillis();
-                String displayTime = new java.text.SimpleDateFormat(
-                        "HH:mm", java.util.Locale.getDefault()).format(new java.util.Date(inboxNow));
-                if (store == null || !store.storeIncoming("android:" + getUniqueDeviceId(),
-                        senderId, messageId, msgContent, displayName, inboxNow, displayTime)) {
-                    FileLogger.log(this, "CHAT", "⚠️ LAN SQLite inbox 持久化失败，不发送 ACK");
-                    return false;
-                }
-                SharedPreferences sp = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
-                String receiverScope = "android:" + getUniqueDeviceId();
-                String stableId = senderId + ":" + messageId;
-                org.json.JSONArray ids = new org.json.JSONArray(
-                        sp.getString(PREF_LAN_CHAT_RECEIVED_IDS, "[]"));
-                boolean alreadyInLegacyIds = false;
-                for (int i = 0; i < ids.length(); i++) {
-                    if (stableId.equals(ids.optString(i, ""))) {
-                        alreadyInLegacyIds = true;
-                        break;
-                    }
-                }
-                // SQLite is the durable dedup authority; the bounded legacy ID list is only
-                // a migration/recovery aid for the history commit crash window.
-                if (alreadyInLegacyIds) {
-                    if (!store.markIncomingDisplayed(receiverScope, senderId, messageId)) {
-                        FileLogger.log(this, "CHAT", "⚠️ LAN inbox presentation marker failed; withhold ACK");
-                        return false;
-                    }
-                    // History/ID may have committed just before process death, but the
-                    // previous process may not have notified an already-open ChatActivity.
-                    scheduleLanChatUiRefresh();
-                    return true;
-                }
-                if (store.isIncomingDisplayed(receiverScope, senderId, messageId)) {
-                    // Safe idempotent refresh: history is not appended again.
-                    scheduleLanChatUiRefresh();
-                    return true;
-                }
+        return stored;
+    }
 
-                long now = System.currentTimeMillis();
-                String history = sp.getString("chat_history", "");
-                String timeStr = new java.text.SimpleDateFormat(
-                        "HH:mm", java.util.Locale.getDefault()).format(new java.util.Date(now));
-                String newRecord = timeStr + " | [" + shortName + "] " + msgContent;
-                String updatedHistory = history.isEmpty() ? newRecord : history + "\n" + newRecord;
-                String[] records = updatedHistory.split("\n");
-                if (records.length > 100) {
-                    StringBuilder trimmed = new StringBuilder();
-                    for (int i = records.length - 100; i < records.length; i++) {
-                        if (trimmed.length() > 0) trimmed.append("\n");
-                        trimmed.append(records[i]);
-                    }
-                    updatedHistory = trimmed.toString();
+    /**
+     * Project durable inbox rows to the existing chat-history preference asynchronously.
+     * If the process dies after ACK but before this projection, displayed=0 survives and
+     * the next service start replays it. The stable ID list makes the projection idempotent.
+     */
+    private void scheduleLanChatInboxProjection() {
+        if (serviceDestroyed || lanChatStore == null
+                || !lanChatInboxProjectionInFlight.compareAndSet(false, true)) return;
+        try {
+            lanChatIoExecutor.execute(() -> {
+                boolean morePending = false;
+                try {
+                    morePending = projectUndisplayedLanChatInbox();
+                } catch (Exception e) {
+                    FileLogger.log(this, "CHAT", "LAN inbox UI projection deferred: "
+                            + e.getClass().getSimpleName());
+                } finally {
+                    lanChatInboxProjectionInFlight.set(false);
                 }
-                // Different message IDs are different messages, even if their text is identical.
-                historyChanged = true;
-
-                ids.put(stableId);
-                while (ids.length() > 500) {
-                    org.json.JSONArray trimmedIds = new org.json.JSONArray();
-                    for (int i = ids.length() - 500; i < ids.length(); i++) {
-                        trimmedIds.put(ids.optString(i, ""));
-                    }
-                    ids = trimmedIds;
+                if (morePending && !serviceDestroyed) {
+                    scheduleLanChatTask("inbox-ui-projection", this::scheduleLanChatInboxProjection, 50L);
                 }
-                android.content.SharedPreferences.Editor editor = sp.edit()
-                        .putString(PREF_LAN_CHAT_RECEIVED_IDS, ids.toString());
-                if (historyChanged) editor.putString("chat_history", updatedHistory);
-                long persistStarted = android.os.SystemClock.elapsedRealtime();
-                if (!editor.commit()) {
-                    FileLogger.log(this, "CHAT", "⚠️ LAN 对讲落盘失败，不发送 ACK，等待发送端重试");
-                    return false;
-                }
-                if (!store.markIncomingDisplayed(receiverScope, senderId, messageId)) {
-                    FileLogger.log(this, "CHAT", "⚠️ LAN inbox presentation marker failed; withhold ACK for retry");
-                    return false;
-                }
-                long persistMs = android.os.SystemClock.elapsedRealtime() - persistStarted;
-                if (persistMs >= 100L) {
-                    FileLogger.logD("CHAT", "LAN chat durable commit elapsedMs=" + persistMs);
-                }
-            } catch (Exception e) {
-                FileLogger.log(this, "CHAT", "⚠️ LAN 对讲持久化异常，不发送 ACK: "
-                        + e.getClass().getSimpleName());
-                return false;
+            });
+        } catch (java.util.concurrent.RejectedExecutionException rejected) {
+            lanChatInboxProjectionInFlight.set(false);
+            if (!serviceDestroyed) {
+                scheduleLanChatTask("inbox-ui-projection-retry",
+                        this::scheduleLanChatInboxProjection, 500L);
             }
         }
-        if (historyChanged) {
-            FileLogger.log(this, "CHAT", "收到来自 " + shortName + " 的 LAN 聊天消息（正文不写入日志）");
-            scheduleLanChatUiRefresh();
+    }
+
+    /**
+     * Returns true when another batch may remain. The history commit precedes displayed=1;
+     * a crash between them is safe because the persisted stable ID prevents duplicate append.
+     */
+    private boolean projectUndisplayedLanChatInbox() {
+        LanChatStore store = lanChatStore;
+        if (store == null || serviceDestroyed) return false;
+        final String receiverScope = "android:" + getUniqueDeviceId();
+        synchronized (lanChatReceiveLock) {
+            List<LanChatStore.IncomingMessage> pending =
+                    store.loadUndisplayedIncoming(receiverScope, 100);
+            if (pending.isEmpty()) return false;
+            SharedPreferences sp = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
+            org.json.JSONArray ids = new org.json.JSONArray(
+                    sp.getString(PREF_LAN_CHAT_RECEIVED_IDS, "[]"));
+            java.util.HashSet<String> knownIds = new java.util.HashSet<>();
+            for (int i = 0; i < ids.length(); i++) knownIds.add(ids.optString(i, ""));
+            String history = sp.getString("chat_history", "");
+            StringBuilder updated = new StringBuilder(history);
+            boolean historyChanged = false;
+            for (LanChatStore.IncomingMessage item : pending) {
+                if (item.senderPeerId == null || item.messageId == null) continue;
+                String stableId = item.senderPeerId + ":" + item.messageId;
+                if (knownIds.add(stableId)) {
+                    String name = item.displayName == null || item.displayName.isEmpty()
+                            ? item.senderPeerId : item.displayName;
+                    if ((item.displayName == null || item.displayName.isEmpty()) && name.contains("_")) {
+                        name = name.substring(0, name.lastIndexOf("_"));
+                    }
+                    String time = item.displayTime == null || item.displayTime.isEmpty()
+                            ? new java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+                                    .format(new java.util.Date())
+                            : item.displayTime;
+                    if (updated.length() > 0) updated.append("\n");
+                    updated.append(time).append(" | [").append(name).append("] ").append(item.body);
+                    ids.put(stableId);
+                    historyChanged = true;
+                }
+            }
+            while (ids.length() > 500) {
+                org.json.JSONArray trimmed = new org.json.JSONArray();
+                for (int i = ids.length() - 500; i < ids.length(); i++) {
+                    trimmed.put(ids.optString(i, ""));
+                }
+                ids = trimmed;
+            }
+            String updatedHistory = updated.toString();
+            String[] records = updatedHistory.split("\n");
+            if (records.length > 100) {
+                StringBuilder trimmedHistory = new StringBuilder();
+                for (int i = records.length - 100; i < records.length; i++) {
+                    if (trimmedHistory.length() > 0) trimmedHistory.append("\n");
+                    trimmedHistory.append(records[i]);
+                }
+                updatedHistory = trimmedHistory.toString();
+                historyChanged = true;
+            }
+            SharedPreferences.Editor editor = sp.edit().putString(PREF_LAN_CHAT_RECEIVED_IDS, ids.toString());
+            if (historyChanged) editor.putString("chat_history", updatedHistory);
+            if (!editor.commit()) {
+                FileLogger.log(this, "CHAT", "LAN inbox UI projection commit failed; rows remain replayable");
+                return true;
+            }
+            for (LanChatStore.IncomingMessage item : pending) {
+                if (item.senderPeerId == null || item.messageId == null) continue;
+                if (!store.markIncomingDisplayed(receiverScope, item.senderPeerId, item.messageId)) {
+                    FileLogger.log(this, "CHAT", "LAN inbox displayed marker deferred message=" + item.messageId);
+                    return true;
+                }
+            }
+            if (historyChanged) scheduleLanChatUiRefresh();
+            return pending.size() >= 100;
         }
-        return true;
     }
 
     private void startRescueListener() {

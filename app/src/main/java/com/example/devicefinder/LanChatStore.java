@@ -46,6 +46,23 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
+    public static final class IncomingMessage {
+        public final String senderPeerId;
+        public final String messageId;
+        public final String body;
+        public final String displayName;
+        public final String displayTime;
+
+        IncomingMessage(String senderPeerId, String messageId, String body,
+                String displayName, String displayTime) {
+            this.senderPeerId = senderPeerId;
+            this.messageId = messageId;
+            this.body = body;
+            this.displayName = displayName;
+            this.displayTime = displayTime;
+        }
+    }
+
     public static final class Target {
         public final String peerId;
         public final String status;
@@ -1277,6 +1294,30 @@ public final class LanChatStore extends SQLiteOpenHelper {
             return false;
         } finally {
             db.endTransaction();
+        }
+    }
+
+    /**
+     * Read durable inbox rows that still need projection into the legacy UI history.
+     * ACK state is independent: an accepted row remains recoverable across process death.
+     */
+    public List<IncomingMessage> loadUndisplayedIncoming(String receiverScope, int limit) {
+        if (receiverScope == null || receiverScope.isEmpty()) return new ArrayList<>();
+        ArrayList<IncomingMessage> result = new ArrayList<>();
+        Cursor c = null;
+        try {
+            c = getReadableDatabase().rawQuery(
+                    "SELECT sender_peer_id,message_id,body,display_name,display_time "
+                            + "FROM lan_inbox WHERE receiver_scope=? AND displayed=0 "
+                            + "ORDER BY received_at_ms,created_at_ms LIMIT ?",
+                    new String[]{receiverScope, String.valueOf(Math.max(1, Math.min(200, limit)))});
+            while (c.moveToNext()) {
+                result.add(new IncomingMessage(c.getString(0), c.getString(1),
+                        c.getString(2), c.getString(3), c.getString(4)));
+            }
+            return result;
+        } finally {
+            if (c != null) c.close();
         }
     }
 

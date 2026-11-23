@@ -1190,13 +1190,17 @@ class LanP2PCoreTests(unittest.TestCase):
 
         receive = extract_java_method(source, "private boolean persistIncomingLanChat(String senderId, String messageId, String msgContent,")
         sqlite_commit = receive.index("store.storeIncoming(")
-        history_commit = receive.index("editor.commit()")
-        presentation_commit = receive.rindex("store.markIncomingDisplayed(")
-        self.assertLess(sqlite_commit, history_commit)
+        self.assertIn("return stored", receive)
+        self.assertNotIn("editor.commit()", receive)
+        self.assertNotIn("markIncomingDisplayed(", receive)
+        projection = extract_java_method(source, "private boolean projectUndisplayedLanChatInbox(")
+        history_commit = projection.index("editor.commit()")
+        presentation_commit = projection.index("store.markIncomingDisplayed(")
         self.assertLess(history_commit, presentation_commit)
-        self.assertIn("if (!editor.commit())", receive)
-        self.assertIn("if (!store.markIncomingDisplayed", receive)
-        self.assertIn("return false", receive[presentation_commit:])
+        self.assertIn("knownIds.add(stableId)", projection)
+        self.assertIn("loadUndisplayedIncoming(receiverScope, 100)", projection)
+        self.assertIn("scheduleLanChatInboxProjection()", source)
+        self.assertIn("private final java.util.concurrent.atomic.AtomicBoolean lanChatInboxProjectionInFlight", source)
 
         packet_start = source.index('if ("chat.message".equals(type))')
         packet_end = source.index("\n        } catch (Exception e)", packet_start)
@@ -3366,6 +3370,33 @@ class AndroidLanInstantRouteRecoveryTests(unittest.TestCase):
         self.assertLess(udp, persist)
         self.assertNotIn("store.recordSuccessfulSendEndpoint(", send)
         self.assertIn("markAttempt() already durably recorded this exact endpoint", send)
+
+
+
+class AndroidLanInboxProjectionRecoveryTests(unittest.TestCase):
+    def test_durable_inbox_rows_can_be_replayed_after_ack_before_ui_projection(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        method = extract_java_method(store, "public List<IncomingMessage> loadUndisplayedIncoming(")
+        self.assertIn("WHERE receiver_scope=? AND displayed=0", method)
+        self.assertIn("ORDER BY received_at_ms,created_at_ms", method)
+        self.assertIn("new IncomingMessage(", method)
+
+    def test_chat_ack_follows_sqlite_inbox_commit_and_projection_is_scheduled_after_ack(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        handler = source[source.index('if ("chat.message".equals(type))'):
+                         source.index("\n        } catch (Exception e)", source.index('if ("chat.message".equals(type))'))]
+        persist = handler.index("persistIncomingLanChat(")
+        ack = handler.index("sendAuthenticatedChatAck(", persist)
+        projection = handler.index("scheduleLanChatInboxProjection()", ack)
+        self.assertLess(persist, ack)
+        self.assertLess(ack, projection)
+        project = extract_java_method(source, "private boolean projectUndisplayedLanChatInbox(")
+        self.assertIn("editor.commit()", project)
+        self.assertIn("store.markIncomingDisplayed(", project)
+        self.assertIn("knownIds.add(stableId)", project)
+        self.assertIn("return pending.size() >= 100", project)
 
 
 class AndroidLanProbeIsolationTests(unittest.TestCase):
