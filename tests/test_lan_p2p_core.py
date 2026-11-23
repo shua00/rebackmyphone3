@@ -3120,5 +3120,24 @@ class AndroidLanAckDiscoveryRaceTests(unittest.TestCase):
         self.assertIn("store.acknowledge(messageId, senderId)", helper)
         self.assertIn("pendingChatAckRouteRechecks", source)
 
+
+class AndroidLanControlQueueDiagnosticsTests(unittest.TestCase):
+    def test_ack_rejections_and_peer_handshakes_report_control_queue_delay(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        ack = extract_java_method(source, "private void processAuthenticatedLanChatAck(")
+        self.assertIn('" queueMs=" + ackQueueMs', ack)
+        self.assertIn('" totalMs=" + ackDecisionMs', ack)
+        self.assertIn('" graceMs=200 queueMs=" + ackQueueMs', ack)
+        peer_ack_start = source.index('if ("peer.ack".equals(type))')
+        peer_ack_end = source.index('if ("chat.ack".equals(type))', peer_ack_start)
+        peer_ack = source[peer_ack_start:peer_ack_end]
+        self.assertIn("controlQueueMs", peer_ack)
+        self.assertIn("P2P peer.ack control queueMs=", peer_ack)
+        peer_hello_start = source.index('if ("peer.hello".equals(type))')
+        peer_hello_end = source.index('if ("peer.ack".equals(type))', peer_hello_start)
+        peer_hello = source[peer_hello_start:peer_hello_end]
+        self.assertIn("P2P peer.hello control queueMs=", peer_hello)
+
 if __name__ == "__main__":
     unittest.main()
