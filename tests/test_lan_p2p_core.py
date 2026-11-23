@@ -2421,7 +2421,6 @@ class LanP2PCoreTests(unittest.TestCase):
 
     def test_outbox_queries_still_return_empty_for_a_valid_empty_ledger(self):
         from lan_p2p_core import ensure_outbox_retry_schema
-        self.assertTrue(ensure_outbox_retry_schema(self.db_path))
         conn = sqlite3.connect(self.db_path)
         try:
             conn.executescript("""
@@ -2441,6 +2440,7 @@ class LanP2PCoreTests(unittest.TestCase):
             conn.commit()
         finally:
             conn.close()
+        self.assertTrue(ensure_outbox_retry_schema(self.db_path))
         self.assertEqual([], load_pending_outgoing_for_peer(self.db_path, "server2", "peer-a"))
         self.assertEqual(0, add_discovery_targets_for_peer(self.db_path, "server2", "peer-a"))
         self.assertEqual([], load_active_pending_targets(self.db_path, "server2", "message-a"))
