@@ -287,6 +287,12 @@ CHAT_DEDUP_LOCK = threading.Lock()
 CHAT_DEDUP_OPS = 0
 UDP_LISTENER_SOCKET = None
 UDP_CHAT_SEND_LOCK = threading.Lock()
+_V2_RECOVERY_RETRY_PEERS = set()
+_V2_RECOVERY_RETRY_LOCK = threading.Lock()
+_V2_RECOVERY_INFLIGHT = set()
+_V2_RECOVERY_WORKER_STARTED = False
+
+
 CHAT_MESSAGES.extend(_restore_chat_history())
 
 UPLOAD_LOG_DIR = "uploads/logs"
@@ -1368,35 +1374,90 @@ def cmd_cleaner():
 # ==================== UDP 监听 ====================
 
 def _resume_pending_v2_for_peer(sock, peer_id, addr):
-    """Attach a verified peer to open discovery snapshots and replay durable pending rows."""
-    try:
-        add_discovery_targets_for_peer(CHAT_DEDUP_DB, "server2", peer_id)
-        pending_rows = load_pending_outgoing_for_peer(CHAT_DEDUP_DB, "server2", peer_id, limit=10)
-    except Exception as e:
-        with print_lock:
-            print(f"⚠️ server2 LAN outbox recovery deferred; durable ledger read failed: {type(e).__name__}")
-        return
-    for pending in pending_rows:
-        chat_packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
-                       "sender_peer_type": "server2", "service_id": PEER_NODE_ID,
-                       "target_peer_id": peer_id, "message_id": pending["message_id"],
-                       "created_at_ms": pending["created_at_ms"],
-                       "display_name": "Web_Console", "body": pending["body"]}
-        try:
-            target_port = int(pending.get("endpoint_port") or addr[1])
-            raw = encode_packet(chat_packet, RESCUE_SECRET)
-            if not mark_outgoing_attempt(CHAT_DEDUP_DB, pending["message_id"], peer_id,
-                                         pending["endpoint_ip"], target_port):
-                continue
-            with UDP_CHAT_SEND_LOCK:
-                sock.sendto(raw, (pending["endpoint_ip"], target_port))
-        except LanP2PStorageError as e:
-            with print_lock:
-                print(f"⚠️ server2 pending chat retry stopped; durable ledger write failed: {type(e).__name__}")
+    """Replay durable pending rows; retain failed peers for periodic recovery."""
+    with _V2_RECOVERY_RETRY_LOCK:
+        _V2_RECOVERY_RETRY_PEERS.add(peer_id)
+        if peer_id in _V2_RECOVERY_INFLIGHT:
             return
+        _V2_RECOVERY_INFLIGHT.add(peer_id)
+    completed = False
+    try:
+        try:
+            add_discovery_targets_for_peer(CHAT_DEDUP_DB, "server2", peer_id)
+            pending_rows = load_pending_outgoing_for_peer(CHAT_DEDUP_DB, "server2", peer_id, limit=10)
         except Exception as e:
             with print_lock:
-                print(f"⚠️ server2 pending chat retry failed peer={peer_id}: {type(e).__name__}")
+                print(f"⚠️ server2 LAN outbox recovery deferred; durable ledger read failed: {type(e).__name__}")
+            return
+        for pending in pending_rows:
+            chat_packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
+                           "sender_peer_type": "server2", "service_id": PEER_NODE_ID,
+                           "target_peer_id": peer_id, "message_id": pending["message_id"],
+                           "created_at_ms": pending["created_at_ms"],
+                           "display_name": "Web_Console", "body": pending["body"]}
+            try:
+                target_port = int(pending.get("endpoint_port") or addr[1])
+                raw = encode_packet(chat_packet, RESCUE_SECRET)
+                if not mark_outgoing_attempt(CHAT_DEDUP_DB, pending["message_id"], peer_id,
+                                              pending["endpoint_ip"], target_port):
+                    continue
+                with UDP_CHAT_SEND_LOCK:
+                    sock.sendto(raw, (pending["endpoint_ip"], target_port))
+            except LanP2PStorageError as e:
+                with print_lock:
+                    print(f"⚠️ server2 pending chat retry stopped; durable ledger write failed: {type(e).__name__}")
+                return
+            except Exception as e:
+                with print_lock:
+                    print(f"⚠️ server2 pending chat retry failed peer={peer_id}: {type(e).__name__}")
+                return
+        completed = True
+    finally:
+        with _V2_RECOVERY_RETRY_LOCK:
+            _V2_RECOVERY_INFLIGHT.discard(peer_id)
+            if completed:
+                _V2_RECOVERY_RETRY_PEERS.discard(peer_id)
+
+
+
+def _retry_deferred_v2_peer_recoveries():
+    """Retry only deferred peers; one worker and no per-peer timers."""
+    while True:
+        time.sleep(10)
+        with _V2_RECOVERY_RETRY_LOCK:
+            pending_peer_ids = tuple(_V2_RECOVERY_RETRY_PEERS)
+        if not pending_peer_ids:
+            continue
+        sock = UDP_LISTENER_SOCKET
+        if sock is None:
+            continue
+        try:
+            if sock.fileno() < 0:
+                continue
+            active_peers = {row["peer_id"]: row for row in list_known_peers(CHAT_DEDUP_DB, "server2", limit=500)}
+        except Exception as exc:
+            with print_lock:
+                print(f"⚠️ server2 LAN recovery retry scan deferred: {type(exc).__name__}")
+            continue
+        for peer_id in pending_peer_ids:
+            peer = active_peers.get(peer_id)
+            if peer:
+                _resume_pending_v2_for_peer(
+                    sock, peer_id, (peer["endpoint_ip"], int(peer["endpoint_port"])))
+
+
+def _start_v2_recovery_retry_worker():
+    """Start exactly one bounded recovery worker per service process."""
+    global _V2_RECOVERY_WORKER_STARTED
+    with _V2_RECOVERY_RETRY_LOCK:
+        if _V2_RECOVERY_WORKER_STARTED:
+            return
+        _V2_RECOVERY_WORKER_STARTED = True
+    threading.Thread(target=_retry_deferred_v2_peer_recoveries, daemon=True,
+                     name="lan-v2-recovery-retry").start()
+
+
+
 def _handle_authenticated_v2_packet(envelope, sock, addr):
     packet_type = envelope.get("type")
     sender = str(envelope.get("sender_peer_id") or "")
@@ -1558,6 +1619,7 @@ def udp_listener():
         try:
             udp_sock.bind(('0.0.0.0', UDP_LISTEN_PORT))
             UDP_LISTENER_SOCKET = udp_sock
+            _start_v2_recovery_retry_worker()
             UDP_LISTENING = True
             announced = send_startup_peer_beacon(
                 udp_sock, PEER_NODE_ID, "server2", PEER_NODE_ID, RESCUE_SECRET,

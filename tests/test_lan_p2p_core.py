@@ -2338,5 +2338,27 @@ class LanP2PCoreTests(unittest.TestCase):
 
 
 
+    def test_all_python_services_retry_deferred_peer_recovery_without_new_handshake(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        for filename in ("rescue2.py", "chat.py", "server2.py"):
+            source = (repo_root / filename).read_text(encoding="utf-8")
+            self.assertIn("_V2_RECOVERY_RETRY_PEERS = set()", source, filename)
+            self.assertIn("_V2_RECOVERY_INFLIGHT = set()", source, filename)
+            self.assertIn("def _retry_deferred_v2_peer_recoveries():", source, filename)
+            self.assertIn("time.sleep(10)", source, filename)
+            self.assertIn("list_known_peers(", source, filename)
+            self.assertIn("def _start_v2_recovery_retry_worker():", source, filename)
+            self.assertIn("if _V2_RECOVERY_WORKER_STARTED:", source, filename)
+            start = source.index("def _resume_pending_v2_for_peer(")
+            end = source.index("\ndef _retry_deferred_v2_peer_recoveries", start)
+            recovery = source[start:end]
+            self.assertIn("_V2_RECOVERY_RETRY_PEERS.add(peer_id)", recovery)
+            self.assertIn("_V2_RECOVERY_INFLIGHT", recovery)
+            self.assertIn("_V2_RECOVERY_RETRY_PEERS.discard(peer_id)", recovery)
+            self.assertIn("if completed:", recovery)
+
+
+
+
 if __name__ == "__main__":
     unittest.main()
