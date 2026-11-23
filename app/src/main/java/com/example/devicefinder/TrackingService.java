@@ -4071,13 +4071,8 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.log(this, "CHAT", "ℹ️ LAN 监听或账本尚未就绪，消息保留待恢复");
                 return;
             }
-            attemptNumber = store.recordOutboxAttempt(messageId);
-            if (attemptNumber < 0) {
-                FileLogger.log(this, "CHAT", "⚠️ LAN SQLite 发送尝试记账失败或本轮预算已耗尽，停止发送");
-                return;
-            }
-            attemptRecorded = true;
-            // Preserve FIFO dispatch order; ACK retries are bounded and persisted in the outbox.
+            // Wait for the FIFO transmit turn before charging this message's retry epoch.
+            // Time spent queued behind another sender is not a delivery attempt.
             long lockRequestedAt = android.os.SystemClock.elapsedRealtime();
             lanChatTransmitLock.lock();
             try {
@@ -4086,6 +4081,13 @@ public class TrackingService extends Service implements LocationListener {
                     FileLogger.log(this, "CHAT", "P2P 发送串行锁等待 message="
                             + messageId + " waitMs=" + lockWaitMs);
                 }
+                if (serviceDestroyed) return;
+                attemptNumber = store.recordOutboxAttempt(messageId);
+                if (attemptNumber < 0) {
+                    FileLogger.log(this, "CHAT", "⚠️ LAN SQLite 发送尝试记账失败或本轮预算已耗尽，停止发送");
+                    return;
+                }
+                attemptRecorded = true;
                 if (!serviceDestroyed) transmitLocalUdpMessageInternal(message, messageId);
             } finally {
                 lanChatTransmitLock.unlock();
@@ -4155,6 +4157,11 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private void transmitLocalUdpMessageInternal(final String message, final String messageId) {
+        final long preparationStartedAt = android.os.SystemClock.elapsedRealtime();
+        long broadcastLookupMs = 0L;
+        long targetLoadMs = 0L;
+        long routeProbeMs = 0L;
+        long packetBuildMs = 0L;
         DatagramSocket socket = rescueSocketRef;
         if (socket == null || socket.isClosed()) {
             FileLogger.log(this, "CHAT", "⚠️ P2P UDP 监听尚未就绪，消息保留在本地待确认队列");
@@ -4166,7 +4173,9 @@ public class TrackingService extends Service implements LocationListener {
             return;
         }
         String myId = getUniqueDeviceId();
+        long stageStartedAt = android.os.SystemClock.elapsedRealtime();
         String subnetBcast = getWifiBroadcastAddress();
+        broadcastLookupMs = android.os.SystemClock.elapsedRealtime() - stageStartedAt;
         // 当前子网广播足以覆盖同一 LAN；同时发 255.255.255.255 会让同一包重复到达。
         String[] broadcasts = new String[]{subnetBcast};
 
@@ -4180,6 +4189,7 @@ public class TrackingService extends Service implements LocationListener {
                     + e.getClass().getSimpleName());
             return;
         }
+        targetLoadMs = android.os.SystemClock.elapsedRealtime() - stageStartedAt;
         java.util.Set<String> pendingTargetIds = new java.util.HashSet<>();
         for (LanChatStore.Target target : savedTargets) {
             if (!"acked".equals(target.status)) pendingTargetIds.add(target.peerId);
@@ -4223,6 +4233,7 @@ public class TrackingService extends Service implements LocationListener {
             }
         }
 
+        stageStartedAt = android.os.SystemClock.elapsedRealtime();
         // 先清理过期租约；同一网络内仍有已验证成员时直接复用单播路由，
         // 不再让每条聊天消息都额外等待一次 500ms 广播发现窗口。
         long now = System.currentTimeMillis();
@@ -4316,12 +4327,15 @@ public class TrackingService extends Service implements LocationListener {
                 peerDiscoveryInFlight.set(false);
             }
         }
+        routeProbeMs = android.os.SystemClock.elapsedRealtime() - stageStartedAt;
+        stageStartedAt = android.os.SystemClock.elapsedRealtime();
         byte[] broadcastData;
         try { broadcastData = buildAuthenticatedLanChatPacket(myId, "*", messageId, message); }
         catch (Exception e) {
             FileLogger.log(this, "CHAT", "⚠️ LAN v2 消息编码失败，消息保留待确认: " + e.getClass().getSimpleName());
             return;
         }
+        packetBuildMs = android.os.SystemClock.elapsedRealtime() - stageStartedAt;
         java.util.Set<String> awaitingPeerIds = java.util.Collections.newSetFromMap(
                 new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
         if (store == null) {
@@ -4329,16 +4343,6 @@ public class TrackingService extends Service implements LocationListener {
         } else {
             for (String peerId : pendingTargetIds) {
                 if (verifiedChatPeers.containsKey(peerId)) awaitingPeerIds.add(peerId);
-            }
-        }
-        // Snapshot verified route generations at dispatch time. A same-endpoint
-        // refresh is still a new verification and must survive this message's stale
-        // ACK-grace cleanup.
-        final java.util.Map<String, Long> awaitingRouteVersionSnapshot = new java.util.HashMap<>();
-        synchronized (verifiedChatPeerRouteVersions) {
-            for (String peerId : awaitingPeerIds) {
-                Long version = verifiedChatPeerRouteVersions.get(peerId);
-                if (version != null) awaitingRouteVersionSnapshot.put(peerId, version);
             }
         }
         final int totalPeerCount = pendingTargetIds.size();
@@ -4361,6 +4365,17 @@ public class TrackingService extends Service implements LocationListener {
         pendingChatAckPeers.put(messageId, awaitingPeerIds);
         pendingChatAckStartedAt.put(messageId, android.os.SystemClock.elapsedRealtime());
         pendingChatAcks.put(messageId, ack);
+        long preparationMs = android.os.SystemClock.elapsedRealtime() - preparationStartedAt;
+        if (preparationMs >= 250L) {
+            FileLogger.log(this, "CHAT", "P2P 发送准备耗时 message=" + messageId
+                    + " totalMs=" + preparationMs
+                    + " broadcastLookupMs=" + broadcastLookupMs
+                    + " targetDbMs=" + targetLoadMs
+                    + " routeProbeMs=" + routeProbeMs
+                    + " packetBuildMs=" + packetBuildMs
+                    + " otherMs=" + Math.max(0L, preparationMs - broadcastLookupMs
+                            - targetLoadMs - routeProbeMs - packetBuildMs));
+        }
         FileLogger.log(this, "CHAT", "⏱️ P2P UDP 开始发送，固定目标 " + totalPeerCount
                 + "，当前可达路由 " + reachablePeerCount + "，消息 " + messageId);
         long ackLoopStartedAt = android.os.SystemClock.elapsedRealtime();
@@ -4415,8 +4430,6 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.log(this, "CHAT", "ℹ️ 固定目标当前均离线，保留逐设备待送达记录: " + messageId);
             }
             final java.util.Set<String> completionAwaitingPeerIds = awaitingPeerIds;
-            final java.util.Map<String, Long> completionRouteVersionSnapshot =
-                    awaitingRouteVersionSnapshot;
             final java.util.concurrent.CountDownLatch completionAck = ack;
             final int completionTotalPeerCount = totalPeerCount;
             final int completionReachablePeerCount = reachablePeerCount;
@@ -4459,7 +4472,6 @@ public class TrackingService extends Service implements LocationListener {
      */
     private void completeLanChatAckWindow(String messageId,
             java.util.Set<String> awaitingPeerIds,
-            java.util.Map<String, Long> routeVersionSnapshot,
             java.util.concurrent.CountDownLatch ack,
             int totalPeerCount, int reachablePeerCount,
             LanChatStore store, long ackStartedAt) {
@@ -4483,22 +4495,12 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.log(this, "CHAT", "✅ P2P 固定目标全部持久化 ACK: "
                         + durableAckProgress + "，消息 " + messageId);
             } else {
-                lastPeerDiscoveryAt = 0L;
-                for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
-                    Long sentVersion = routeVersionSnapshot.get(peerId);
-                    if (sentVersion != null) {
-                        synchronized (verifiedChatPeerRouteVersions) {
-                            Long currentVersion = verifiedChatPeerRouteVersions.get(peerId);
-                            if (sentVersion.equals(currentVersion)) {
-                                verifiedChatPeers.remove(peerId);
-                                verifiedChatPeerSeen.remove(peerId);
-                                verifiedChatPeerRouteVersions.remove(peerId);
-                            }
-                        }
-                    }
-                }
+                // A missing message ACK is not proof that the peer endpoint is invalid.
+                // Keep the independently challenge-verified route until its lease expires,
+                // a real network-path change invalidates it, or a later challenge fails.
+                // The message itself remains durable and follows its normal retry budget.
                 FileLogger.log(this, "CHAT", "⚠️ P2P 消息仍待确认并保留本地队列: "
-                        + durableAckProgress + "，失联成员已清理，消息 " + messageId);
+                        + durableAckProgress + "，保留已验证路由等待重试/租约到期，消息 " + messageId);
             }
             if (elapsed >= 400L) {
                 FileLogger.logD("CHAT", "P2P ACK grace elapsedMs=" + elapsed

@@ -1564,11 +1564,15 @@ class LanP2PCoreTests(unittest.TestCase):
         endpoint_method = store[endpoint_start:endpoint_start + 1100]
         self.assertIn('values.put("last_endpoint", endpoint)', endpoint_method)
         self.assertIn('values.put("last_sent_endpoint", endpoint)', endpoint_method)
-        self.assertIn("status!='acked'", endpoint_method)
+        self.assertNotIn("status!='acked'", endpoint_method)
+        self.assertIn('"message_id=? AND peer_id=?"', endpoint_method)
 
         send_start = tracking.index("private void transmitLocalUdpMessageInternal(")
         send_end = tracking.index("private boolean sendAuthenticatedChatAck(", send_start)
         send_method = tracking[send_start:send_end]
+        lock_pos = send_method.index("lanChatTransmitLock.lock()")
+        retry_epoch_pos = send_method.index("store.recordOutboxAttempt(messageId)")
+        self.assertLess(lock_pos, retry_epoch_pos)
         attempt_pos = send_method.index("!store.markAttempt(messageId, peerId, \"\")")
         skip_pos = send_method.index("continue;", attempt_pos)
         udp_pos = send_method.index('sendLanUdpPacket(socket, p, "CHAT_UNICAST")')
@@ -1906,22 +1910,29 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("lanChatTransmitLock.unlock()", source)
         self.assertNotIn("synchronized (lanChatTransmitLock)", source)
 
-    def test_android_ack_grace_cleanup_cannot_remove_a_newly_verified_peer_route(self):
+    def test_android_message_ack_timeout_does_not_evict_a_validated_peer_lease(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (
             repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
         ).read_text(encoding="utf-8")
         send = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
         cleanup = extract_java_method(source, "private void completeLanChatAckWindow(")
-        self.assertIn("awaitingRouteVersionSnapshot", send)
-        self.assertIn("completionRouteVersionSnapshot", send)
-        self.assertIn("routeVersionSnapshot.get(peerId)", cleanup)
-        self.assertIn("sentVersion.equals(currentVersion)", cleanup)
-        self.assertIn("verifiedChatPeerRouteVersions.remove(peerId)", cleanup)
-        self.assertIn("verifiedChatPeers.remove(peerId)", cleanup)
-        self.assertIn("synchronized (verifiedChatPeerRouteVersions)", cleanup)
-        self.assertIn("synchronized (verifiedChatPeerRouteVersions)", send)
+        self.assertNotIn("verifiedChatPeers.remove(peerId)", cleanup)
+        self.assertNotIn("verifiedChatPeerSeen.remove(peerId)", cleanup)
+        self.assertNotIn("lastPeerDiscoveryAt = 0L", cleanup)
+        self.assertIn("保留已验证路由等待重试/租约到期", cleanup)
+        self.assertIn("now - e.getValue() > 120_000L", send)
         self.assertIn("verifiedChatPeerRouteVersionCounter.incrementAndGet()", source)
+
+    def test_android_slow_pre_dispatch_work_is_stage_timed(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        send = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
+        self.assertIn("P2P 发送准备耗时", send)
+        for stage in ("broadcastLookupMs", "targetDbMs", "routeProbeMs", "packetBuildMs", "otherMs"):
+            self.assertIn(stage, send)
 
 
     def test_android_duplicate_ack_cannot_consume_another_peer_wait_slot(self):
@@ -3177,6 +3188,9 @@ class AndroidLanTransmitFairnessTests(unittest.TestCase):
         transmit = extract_java_method(source, "private void transmitLocalUdpMessage(")
         self.assertIn("lanChatTransmitLock.lock()", transmit)
         self.assertIn("lanChatTransmitLock.unlock()", transmit)
+        self.assertIn("store.recordOutboxAttempt(messageId)", transmit)
+        self.assertLess(transmit.index("lanChatTransmitLock.lock()"),
+                        transmit.index("store.recordOutboxAttempt(messageId)"))
         self.assertIn("finally", transmit)
         self.assertNotIn("synchronized (lanChatTransmitLock)", source)
         self.assertIn("lanChatImmediateExecutor", source)

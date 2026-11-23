@@ -725,8 +725,11 @@ public final class LanChatStore extends SQLiteOpenHelper {
             values.put("last_endpoint", endpoint);
             values.put("last_sent_endpoint", endpoint);
             values.put("last_error", "");
+            // The send may have succeeded and its authenticated ACK may already have
+            // committed status='acked' on the control executor. Preserve the real endpoint
+            // evidence even in that race; this method is called only after socket.send returns.
             return db.update("lan_outbox_targets", values,
-                    "message_id=? AND peer_id=? AND status!='acked'",
+                    "message_id=? AND peer_id=?",
                     new String[]{messageId, peerId}) == 1;
         } catch (Exception e) {
             return false;
