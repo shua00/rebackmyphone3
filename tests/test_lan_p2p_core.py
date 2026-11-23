@@ -1110,7 +1110,9 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("boolean discoveryAck", ack_handler)
         self.assertIn("if (!routeMatches && !persistedEndpointMatch)", ack_handler)
         self.assertNotIn("&& !discoveryAck)", ack_handler)
-        self.assertIn("never bypasses either routeMatches or persistedEndpointMatch", ack_handler)
+        self.assertIn("allowDiscoveryGrace && discoveryAck", ack_handler)
+        self.assertLess(ack_handler.index("if (!routeMatches && !persistedEndpointMatch)"),
+                        ack_handler.index("store.acknowledge(messageId, senderId)"))
         self.assertIn("if (routeMatches) {", ack_handler)
         self.assertIn("verifiedChatPeerRouteVersions.put(senderId", ack_handler)
         self.assertIn("verifiedChatPeerSeen.put(senderId, System.currentTimeMillis())", ack_handler)
