@@ -414,3 +414,9 @@ Android 的 `buildWifiLanFingerprint()` 继续生成完整、排序后的 Wi-Fi 
 
 
 ACK 拒绝日志同时记录来源 IP/UDP 端口、内存 verified-route 匹配、持久化成功发送端点匹配和 discovery window 状态；Beacon 创建异常记录具体异常消息。日志不包含消息正文、HMAC 密钥或认证字段。
+
+## 25. IPMessenger Clone! 1.1.11 静态参考分析
+
+用户提供的 APK 已完成 Manifest、DEX 常量、实际服务调用链和主要 UDP 收发路径的静态提取。详细证据与限制记录在 [IPMSG_CLONE_1.1.11_REFERENCE_ANALYSIS.md](./IPMSG_CLONE_1.1.11_REFERENCE_ANALYSIS.md)。
+
+可借鉴的是发现命令、消息命令、接收确认与阅读通知之间的语义分离，以及已知成员路由复用的设计方向。该 APK 的 v1 冒号文本/GBK 信封、UDP 2425、8192 字节缓冲区、每包新线程和一次性发送线程不作为 v2 实现模板。当前 LAN v2 继续使用稳定 peer_id、nonce challenge、HMAC、1200 字节上限、SQLite Outbox/Inbox、逐目标 ACK 和有界重试。静态逆向未证明旧 APK 具有与当前 v2 等价的持久化 ACK/重试或密码学认证；动态抓包仍未完成。
