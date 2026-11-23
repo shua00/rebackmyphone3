@@ -115,7 +115,7 @@ PACKAGE_NAME = "com.example.devicefinder"
 
 # ===== 配置区 =====
 RESCUE_SECRET = "your_private_secret_key"
-from lan_p2p_core import LanP2PStorageError, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, load_active_pending_targets, begin_outgoing_discovery_window
+from lan_p2p_core import LanP2PStorageError, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, load_active_pending_targets, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, list_due_outgoing_peers
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "rescue2")
 DEFAULT_SERVER_URL = "http://dingwei.bai001.de5.net/api/report"
 DEFAULT_CONFIG_URL = "https://your-config-url.com/config.txt"
@@ -505,8 +505,8 @@ def start_log_receiver():
         server.serve_forever()
     except Exception as e: print(f"{I.warn} 接收端启动失败: {e}")
 
-def _resume_pending_v2_for_peer(sock, peer_id, addr):
-    """Replay durable pending rows; retain failed peers for periodic recovery."""
+def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=True):
+    """Replay due durable rows; verified peer recovery is throttled and finite."""
     with _V2_RECOVERY_RETRY_LOCK:
         _V2_RECOVERY_RETRY_PEERS.add(peer_id)
         if peer_id in _V2_RECOVERY_INFLIGHT:
@@ -516,7 +516,12 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr):
     try:
         try:
             add_discovery_targets_for_peer(_CHAT_DEDUP_DB, "rescue2", peer_id)
-            pending_rows = load_pending_outgoing_for_peer(_CHAT_DEDUP_DB, "rescue2", peer_id, limit=10)
+            force_replay = False
+            if recovery_event:
+                force_replay = prepare_outgoing_peer_recovery(
+                    _CHAT_DEDUP_DB, "rescue2", peer_id) > 0
+            pending_rows = load_pending_outgoing_for_peer(
+                _CHAT_DEDUP_DB, "rescue2", peer_id, limit=10, force=force_replay)
         except Exception as e:
             with print_lock:
                 print(f"⚠️ rescue2 LAN outbox recovery deferred; durable ledger read failed: {type(e).__name__}")
@@ -551,20 +556,20 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr):
                 _V2_RECOVERY_RETRY_PEERS.discard(peer_id)
 
 
-
 def _retry_deferred_v2_peer_recoveries():
-    """Retry only deferred peers; one worker and no per-peer timers."""
+    """One process-wide worker handles ACK-timeout retries and deferred storage failures."""
     while True:
-        time.sleep(10)
+        time.sleep(1)
         with _V2_RECOVERY_RETRY_LOCK:
-            pending_peer_ids = tuple(_V2_RECOVERY_RETRY_PEERS)
-        if not pending_peer_ids:
-            continue
+            pending_peer_ids = set(_V2_RECOVERY_RETRY_PEERS)
         sock = UDP_LISTENER_SOCKET
         if sock is None:
             continue
         try:
             if sock.fileno() < 0:
+                continue
+            pending_peer_ids.update(list_due_outgoing_peers(_CHAT_DEDUP_DB, "rescue2", limit=500))
+            if not pending_peer_ids:
                 continue
             active_peers = {row["peer_id"]: row for row in list_known_peers(_CHAT_DEDUP_DB, "rescue2", limit=500)}
         except Exception as exc:
@@ -575,19 +580,25 @@ def _retry_deferred_v2_peer_recoveries():
             peer = active_peers.get(peer_id)
             if peer:
                 _resume_pending_v2_for_peer(
-                    sock, peer_id, (peer["endpoint_ip"], int(peer["endpoint_port"])))
+                    sock, peer_id, (peer["endpoint_ip"], int(peer["endpoint_port"])),
+                    recovery_event=False)
 
 
 def _start_v2_recovery_retry_worker():
-    """Start exactly one bounded recovery worker per service process."""
+    """Start exactly one bounded retry worker after upgrading the durable retry schema."""
     global _V2_RECOVERY_WORKER_STARTED
+    try:
+        ensure_outbox_retry_schema(_CHAT_DEDUP_DB)
+    except Exception as exc:
+        with print_lock:
+            print(f"⚠️ rescue2 LAN retry schema initialization failed: {type(exc).__name__}")
+        return
     with _V2_RECOVERY_RETRY_LOCK:
         if _V2_RECOVERY_WORKER_STARTED:
             return
         _V2_RECOVERY_WORKER_STARTED = True
     threading.Thread(target=_retry_deferred_v2_peer_recoveries, daemon=True,
                      name="lan-v2-recovery-retry").start()
-
 
 
 def _handle_authenticated_v2_packet(envelope, sock, addr):

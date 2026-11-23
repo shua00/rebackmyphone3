@@ -2756,5 +2756,96 @@ class LanP2PCoreTests(unittest.TestCase):
             self.assertNotIn("7 * 86400", claim, filename)
             self.assertNotIn("OFFSET 10000", claim, filename)
 
+    def test_python_outbox_retries_use_persisted_backoff_and_active_peer_scan(self):
+        from lan_p2p_core import (
+            persist_outgoing_message, record_peer, load_pending_outgoing_for_peer,
+            mark_outgoing_attempt, list_due_outgoing_peers,
+        )
+        with patch("lan_p2p_core.time.time", return_value=1000.0):
+            self.assertTrue(persist_outgoing_message(
+                self.db_path, "server2", "server2-id", "m-backoff", "hello", ["android-a"]))
+            record_peer(self.db_path, "server2", "android-a", "android", "android-main",
+                        "192.168.1.10", 8888, "active")
+            self.assertEqual(["android-a"], list_due_outgoing_peers(
+                self.db_path, "server2", now_ms=1_000_000))
+            self.assertTrue(mark_outgoing_attempt(
+                self.db_path, "m-backoff", "android-a", "192.168.1.10", 8888))
+        with patch("lan_p2p_core.time.time", return_value=1001.0):
+            self.assertEqual([], load_pending_outgoing_for_peer(
+                self.db_path, "server2", "android-a"))
+            self.assertEqual([], list_due_outgoing_peers(
+                self.db_path, "server2", now_ms=1_001_000))
+            self.assertEqual(["m-backoff"], [
+                row["message_id"] for row in load_pending_outgoing_for_peer(
+                    self.db_path, "server2", "android-a", force=True)])
+        with patch("lan_p2p_core.time.time", return_value=1001.6):
+            self.assertEqual(["m-backoff"], [
+                row["message_id"] for row in load_pending_outgoing_for_peer(
+                    self.db_path, "server2", "android-a")])
+            self.assertEqual(["android-a"], list_due_outgoing_peers(
+                self.db_path, "server2", now_ms=1_001_600))
+
+    def test_python_outbox_retry_attempt_cap_and_verified_recovery_cooldown(self):
+        from lan_p2p_core import (
+            MAX_OUTBOX_TARGET_ATTEMPTS, persist_outgoing_message, record_peer,
+            mark_outgoing_attempt, prepare_outgoing_peer_recovery,
+        )
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-budget", "hello", ["android-a"]))
+        record_peer(self.db_path, "server2", "android-a", "android", "android-main",
+                    "192.168.1.10", 8888, "active")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE lan_outbox_targets SET attempt_count=?,last_attempt_at=? "
+                         "WHERE message_id=? AND peer_id=?",
+                         (MAX_OUTBOX_TARGET_ATTEMPTS, 1234, "m-budget", "android-a"))
+            conn.commit()
+        self.assertEqual(1, prepare_outgoing_peer_recovery(
+            self.db_path, "server2", "android-a", now_ms=100_000))
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertEqual((0, 0, 100_000), conn.execute(
+                "SELECT attempt_count,last_attempt_at,last_recovery_at_ms FROM lan_outbox_targets "
+                "WHERE message_id='m-budget' AND peer_id='android-a'").fetchone())
+        self.assertEqual(0, prepare_outgoing_peer_recovery(
+            self.db_path, "server2", "android-a", now_ms=150_000))
+        for _ in range(MAX_OUTBOX_TARGET_ATTEMPTS):
+            self.assertTrue(mark_outgoing_attempt(
+                self.db_path, "m-budget", "android-a", "192.168.1.10", 8888))
+        self.assertFalse(mark_outgoing_attempt(
+            self.db_path, "m-budget", "android-a", "192.168.1.10", 8888))
+        self.assertEqual(1, prepare_outgoing_peer_recovery(
+            self.db_path, "server2", "android-a", now_ms=160_001))
+
+    def test_python_retry_schema_migrates_existing_target_ledger(self):
+        from lan_p2p_core import ensure_outbox_retry_schema
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""CREATE TABLE lan_outbox_targets (
+                message_id TEXT NOT NULL, peer_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_attempt_at INTEGER NOT NULL DEFAULT 0,
+                last_ack_at INTEGER NOT NULL DEFAULT 0,
+                last_endpoint TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(message_id, peer_id))""")
+        self.assertTrue(ensure_outbox_retry_schema(self.db_path))
+        with sqlite3.connect(self.db_path) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(lan_outbox_targets)")}
+        self.assertIn("last_recovery_at_ms", columns)
+
+    def test_all_python_services_retry_ack_timeouts_with_finite_backoff(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        for filename in ("rescue2.py", "chat.py", "server2.py"):
+            source = (repo_root / filename).read_text(encoding="utf-8")
+            self.assertIn("list_due_outgoing_peers(", source, filename)
+            self.assertIn("recovery_event=False", source, filename)
+            self.assertIn("prepare_outgoing_peer_recovery(", source, filename)
+            self.assertIn("ensure_outbox_retry_schema(", source, filename)
+            self.assertIn("time.sleep(1)", source, filename)
+        core = (repo_root / "lan_p2p_core.py").read_text(encoding="utf-8")
+        self.assertIn("MAX_OUTBOX_TARGET_ATTEMPTS = 8", core)
+        self.assertIn("OUTBOX_RETRY_RECOVERY_COOLDOWN_MS = 60_000", core)
+        self.assertIn("WHEN 1 THEN 1500 WHEN 2 THEN 4000", core)
+        self.assertIn("WHEN 3 THEN 10000 WHEN 4 THEN 20000", core)
+
 if __name__ == "__main__":
     unittest.main()

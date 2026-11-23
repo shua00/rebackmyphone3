@@ -320,3 +320,12 @@ IP 地址永远不能作为设备身份。网络变化时应使旧端点路由�
 最新提交 `5fd24070bdbcf57897de82d5ace185b473014b7c` 的 GitHub Actions [run 44997507429](https://github.com/shua00/rebackmyphone3/actions/runs/44997507429) 已通过 Python 服务语法检查、44 项 Python 单元测试、Android Java 编译、Debug APK 构建及 artifact 上传。APK artifact ID 为 `14744068334`。
 
 这些结果证明该提交通过自动化与云构建，不证明真实手机间双向、多设备、断网恢复或服务组合实测通过。真实设备验收仍严格以冻结文件 `LAN_P2P_ACCEPTANCE_MATRIX.md` 的 A/S/M/F/G 全部条目为准。
+
+
+## 16. Python Outbox ACK 超时重试补充（2026-11-23）
+
+- Python 三服务共享同一持久化逐目标重试策略：最多 8 次自动发送尝试；重试间隔按目标已记录尝试次数退避，依次为 1.5 秒、4 秒、10 秒、20 秒、40 秒，之后最多 60 秒。
+- 单一进程级 worker 每秒扫描已验证且租约有效的 peer，只处理到期的未 ACK 目标；不会为每条消息或每个 peer 创建独立定时器。正常发送但 ACK 丢失的消息也因此能够自动重试，不再只依赖下一次握手。
+- 每个目标独立计数，某个离线成员不会消耗其他成员的预算。达到 8 次后停止定时发送，消息和目标仍持久保留；只有经过 nonce challenge 验证的 peer 恢复事件才可能重开预算，且同一目标至少间隔 60 秒，防止重复 HELLO/ACK 事件反复重置。
+- 新增 last_recovery_at_ms 增量迁移；旧数据库在 UDP 恢复 worker 启动前自动补列。发送尝试仍必须先成功写入 SQLite，再进行 UDP I/O。
+- 本策略只约束 Python 三服务的逐目标 LAN 补发，不改变 Android 原有 8 次消息级预算、悬浮留言独立通道或 HTTP 兜底语义；端到端跨端时序仍需按验收矩阵实测。

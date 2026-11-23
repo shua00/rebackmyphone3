@@ -5,6 +5,8 @@ import time
 
 # Must match Android LanChatStore.FIRST_DISCOVERY_WINDOW_MS.
 FIRST_DISCOVERY_WINDOW_MS = 10_000
+MAX_OUTBOX_TARGET_ATTEMPTS = 8
+OUTBOX_RETRY_RECOVERY_COOLDOWN_MS = 60_000
 
 
 class LanP2PStorageError(RuntimeError):
@@ -234,8 +236,12 @@ def persist_outgoing_message(db_path, sender_scope, sender_peer_id, message_id,
             last_ack_at INTEGER NOT NULL DEFAULT 0,
             last_endpoint TEXT NOT NULL DEFAULT '',
             last_error TEXT NOT NULL DEFAULT '',
+            last_recovery_at_ms INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(message_id, peer_id)
         )""")
+        target_columns = {row[1] for row in conn.execute("PRAGMA table_info(lan_outbox_targets)")}
+        if "last_recovery_at_ms" not in target_columns:
+            conn.execute("ALTER TABLE lan_outbox_targets ADD COLUMN last_recovery_at_ms INTEGER NOT NULL DEFAULT 0")
         conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
             "SELECT sender_scope,sender_peer_id,body FROM lan_outbox WHERE message_id=?",
@@ -272,6 +278,108 @@ def persist_outgoing_message(db_path, sender_scope, sender_peer_id, message_id,
         return False
     finally:
         _safe_close(conn)
+
+
+def ensure_outbox_retry_schema(db_path):
+    """Create/migrate the durable per-target retry ledger before recovery workers start."""
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("""CREATE TABLE IF NOT EXISTS lan_outbox (
+            message_id TEXT PRIMARY KEY NOT NULL, sender_scope TEXT NOT NULL,
+            sender_peer_id TEXT NOT NULL, message_type TEXT NOT NULL DEFAULT 'chat',
+            body TEXT NOT NULL, created_at_ms INTEGER NOT NULL,
+            protocol_version INTEGER NOT NULL DEFAULT 2,
+            state TEXT NOT NULL DEFAULT 'discovery_pending',
+            delivery_deadline_ms INTEGER NOT NULL DEFAULT 0)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS lan_outbox_targets (
+            message_id TEXT NOT NULL, peer_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            last_attempt_at INTEGER NOT NULL DEFAULT 0,
+            last_ack_at INTEGER NOT NULL DEFAULT 0,
+            last_endpoint TEXT NOT NULL DEFAULT '',
+            last_error TEXT NOT NULL DEFAULT '',
+            last_recovery_at_ms INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(message_id, peer_id))""")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(lan_outbox_targets)")}
+        if "last_recovery_at_ms" not in columns:
+            conn.execute("ALTER TABLE lan_outbox_targets ADD COLUMN last_recovery_at_ms INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+        return True
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        raise LanP2PStorageError("failed to initialize LAN outbox retry schema") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def prepare_outgoing_peer_recovery(db_path, sender_scope, peer_id, now_ms=None):
+    """Throttle verified-route recovery and reopen exhausted targets after cooldown."""
+    if not sender_scope or not peer_id:
+        return 0
+    conn = None
+    now = int(now_ms if now_ms is not None else time.time() * 1000)
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute("""UPDATE lan_outbox_targets
+            SET attempt_count=CASE WHEN attempt_count>=? THEN 0 ELSE attempt_count END,
+                last_attempt_at=CASE WHEN attempt_count>=? THEN 0 ELSE last_attempt_at END,
+                last_error=CASE WHEN attempt_count>=? THEN '' ELSE last_error END,
+                last_recovery_at_ms=?
+            WHERE peer_id=? AND last_recovery_at_ms<=?
+              AND EXISTS (SELECT 1 FROM lan_outbox o
+                          WHERE o.message_id=lan_outbox_targets.message_id
+                            AND o.sender_scope=?
+                            AND o.state NOT IN ('delivered','expired','waiting_peers'))""",
+            (MAX_OUTBOX_TARGET_ATTEMPTS, MAX_OUTBOX_TARGET_ATTEMPTS,
+             MAX_OUTBOX_TARGET_ATTEMPTS, now, str(peer_id),
+             now - OUTBOX_RETRY_RECOVERY_COOLDOWN_MS, str(sender_scope)))
+        conn.commit()
+        return int(cur.rowcount or 0)
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        raise LanP2PStorageError("failed to prepare LAN peer recovery retry epoch") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def list_due_outgoing_peers(db_path, sender_scope, limit=500, now_ms=None):
+    """Find active peers with unacked targets whose persisted backoff elapsed."""
+    conn = None
+    now = int(now_ms if now_ms is not None else time.time() * 1000)
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        rows = conn.execute("""SELECT DISTINCT t.peer_id
+            FROM lan_outbox o
+            JOIN lan_outbox_targets t ON t.message_id=o.message_id
+            JOIN lan_peers p ON p.receiver_scope=? AND p.peer_id=t.peer_id
+            WHERE o.sender_scope=? AND o.state NOT IN ('delivered','expired','waiting_peers')
+              AND t.status!='acked' AND t.attempt_count<?
+              AND p.status='active' AND p.lease_expires_at>?
+              AND (t.attempt_count=0 OR t.last_attempt_at +
+                   CASE t.attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000
+                     WHEN 3 THEN 10000 WHEN 4 THEN 20000 WHEN 5 THEN 40000
+                     ELSE 60000 END <= ?)
+            ORDER BY t.peer_id LIMIT ?""",
+            (sender_scope, sender_scope, MAX_OUTBOX_TARGET_ATTEMPTS,
+             now / 1000.0, now, max(1, min(500, int(limit))))).fetchall()
+        return [str(row[0]) for row in rows]
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        raise LanP2PStorageError("failed to scan due LAN outbox peer retries") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
 
 
 def encode_chat_http_fallback_payload(message_id, sender_peer_id, display_name, body):
@@ -415,15 +523,14 @@ def _finalize_expired_discovery_windows(conn, sender_scope, now_ms):
         (sender_scope, now_ms))
 
 
-def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10):
-    """Load only unacked messages addressed to a peer whose current LAN lease is valid."""
+def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10, force=False):
+    """Load due unacked targets; verified recovery may bypass backoff, never the attempt cap."""
     conn = None
     try:
         conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("PRAGMA busy_timeout=10000")
         now = time.time()
         now_ms = int(now * 1000)
-        # Settle expired snapshots atomically; an empty snapshot becomes terminal waiting_peers.
         _finalize_expired_discovery_windows(conn, sender_scope, now_ms)
         conn.commit()
         rows = conn.execute("""SELECT o.message_id,o.sender_peer_id,o.body,o.created_at_ms,
@@ -432,10 +539,16 @@ def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10):
             JOIN lan_outbox_targets t ON t.message_id=o.message_id
             JOIN lan_peers p ON p.receiver_scope=? AND p.peer_id=t.peer_id
             WHERE o.sender_scope=? AND t.peer_id=? AND t.status!='acked'
-              AND o.state NOT IN ('delivered','expired') AND p.status='active'
-              AND p.lease_expires_at>?
+              AND o.state NOT IN ('delivered','expired','waiting_peers')
+              AND t.attempt_count<?
+              AND p.status='active' AND p.lease_expires_at>?
+              AND (?=1 OR t.attempt_count=0 OR t.last_attempt_at +
+                   CASE t.attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000
+                     WHEN 3 THEN 10000 WHEN 4 THEN 20000 WHEN 5 THEN 40000
+                     ELSE 60000 END <= ?)
             ORDER BY o.created_at_ms LIMIT ?""",
-            (sender_scope, sender_scope, peer_id, now, max(1, min(50, int(limit))))).fetchall()
+            (sender_scope, sender_scope, peer_id, MAX_OUTBOX_TARGET_ATTEMPTS,
+             now, 1 if force else 0, now_ms, max(1, min(50, int(limit))))).fetchall()
         return [{"message_id": r[0], "sender_peer_id": r[1], "body": r[2],
                  "created_at_ms": r[3], "endpoint_ip": r[4], "endpoint_port": r[5]}
                 for r in rows]
@@ -443,6 +556,30 @@ def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10):
         if conn is not None:
             _safe_rollback(conn)
         raise LanP2PStorageError("failed to load pending LAN outbox rows for peer") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_port):
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        cur = conn.execute("""UPDATE lan_outbox_targets SET status='sent',
+            attempt_count=attempt_count+1,last_attempt_at=?,last_endpoint=?,last_error=''
+            WHERE message_id=? AND peer_id=? AND status!='acked' AND attempt_count<?
+              AND EXISTS (SELECT 1 FROM lan_outbox o
+                          WHERE o.message_id=lan_outbox_targets.message_id
+                            AND o.state NOT IN ('delivered','expired','waiting_peers'))""",
+            (int(time.time() * 1000), str(endpoint_ip) + ":" + str(endpoint_port),
+             message_id, peer_id, MAX_OUTBOX_TARGET_ATTEMPTS))
+        conn.commit()
+        return cur.rowcount > 0
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        raise LanP2PStorageError("failed to persist LAN outbox send attempt") from exc
     finally:
         if conn is not None:
             _safe_close(conn)
