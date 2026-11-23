@@ -943,7 +943,9 @@ public final class LanChatStore extends SQLiteOpenHelper {
     }
 
     public boolean acknowledge(String messageId, String peerId) {
-        if (messageId == null || peerId == null) return false;
+        // Empty identities must never become synthetic recipients during discovery ACK admission.
+        if (messageId == null || messageId.length() == 0
+                || peerId == null || peerId.length() == 0) return false;
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
