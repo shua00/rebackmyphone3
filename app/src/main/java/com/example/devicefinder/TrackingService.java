@@ -4543,6 +4543,10 @@ public class TrackingService extends Service implements LocationListener {
         final int reachablePeerCount = awaitingPeerIds.size();
         final int verifiedRouteCount = verifiedRoutePeerIds.size();
         final int cachedEndpointCount = Math.max(0, reachablePeerCount - verifiedRouteCount);
+        if (cachedEndpointCount > 0) {
+            FileLogger.log(this, "CHAT", "P2P 即时投递走持久化 endpoint count="
+                    + cachedEndpointCount + " message=" + messageId);
+        }
         final boolean firstDiscoveryWindowOpen;
         try {
             firstDiscoveryWindowOpen = store.isDiscoveryPending(messageId);

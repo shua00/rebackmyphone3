@@ -425,3 +425,11 @@ ACK 拒绝日志同时记录来源 IP/UDP 端口、内存 verified-route 匹配�
 ### 14. 即时投递修正（2026-11-23）
 
 固定收件人集合仍在消息创建时冻结，但首次发送不再强制等待内存路由重新验证。当前已验证路由优先；若进程重启或网络切换清空路由缓存，则立即向该固定 peer 的持久化最近 endpoint 发送带精确 target_peer_id 的消息。Android 在 UDP dispatch 前持久化 last_attempt_endpoint；匹配该 message_id + peer_id 的认证 ACK 只确认本次消息，不提升可复用路由信任。nonce challenge 与数据面发送并行。对端 IP 已变化时，仍通过新路径上的 peer hello/ack 更新 endpoint，再由 outbox 重试；绝不把旧消息改为通配广播。
+
+
+### 15. Python 固定目标即时发送与恢复调度（2026-11-23）
+
+- Python 端 outbox 首次发送和定时重试不再只查询 active lease；固定 target 仍使用最后持久化 endpoint 发起定向尝试。
+- Python ACK 要求 target/message 身份匹配，并匹配当前 active route 或该消息最近一次精确尝试 endpoint；尝试 endpoint 只用于该消息确认，不会把 peer 状态提升为 active。
+- peer.ack 的历史 outbox 重放由恢复 worker 执行；UDP receive loop 只登记 peer recovery 并唤醒 worker，避免在接收线程中同步批量发送。
+- 路由重新验证事件可绕过普通重试 backoff，但不绕过每目标最大尝试次数；只有冷却后的显式恢复才重开耗尽预算。

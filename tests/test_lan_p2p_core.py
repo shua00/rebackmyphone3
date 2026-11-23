@@ -455,8 +455,9 @@ class LanP2PCoreTests(unittest.TestCase):
             self.db_path, "m-retry", "android-a", "192.168.1.10", 8888))
         self.assertTrue(acknowledge_outgoing_message(
             self.db_path, "server2", "m-retry", "android-a"))
-        self.assertEqual(load_pending_outgoing_for_peer(
-            self.db_path, "server2", "android-a"), [])
+        pending = load_pending_outgoing_for_peer(self.db_path, "server2", "android-a")
+        self.assertEqual(["m-suspect-route"], [row["message_id"] for row in pending])
+        self.assertEqual("192.168.1.10", pending[0]["endpoint_ip"])
         remaining = load_pending_outgoing_for_peer(
             self.db_path, "server2", "android-b")
         self.assertEqual([x["message_id"] for x in remaining], ["m-retry"])
@@ -1077,7 +1078,8 @@ class LanP2PCoreTests(unittest.TestCase):
                 end = source.index('if packet_type != "chat.message":', start)
                 handler = source[start:end]
                 self.assertIn("active_route = peer_endpoint_matches(", handler)
-                self.assertIn("and sender and active_route)", handler)
+                self.assertIn("attempted_route = outgoing_ack_endpoint_matches(", handler)
+                self.assertIn("and sender and (active_route or attempted_route))", handler)
                 self.assertNotIn("discovery_ack", handler)
                 self.assertNotIn("is_outgoing_discovery_pending(", handler)
 
@@ -1097,8 +1099,9 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertEqual(list_known_peers(self.db_path, "server2"), [])
         self.assertTrue(persist_outgoing_message(
             self.db_path, "server2", "server2-id", "m-suspect-route", "hello", ["android-a"]))
-        self.assertEqual(load_pending_outgoing_for_peer(
-            self.db_path, "server2", "android-a"), [])
+        pending = load_pending_outgoing_for_peer(self.db_path, "server2", "android-a")
+        self.assertEqual(["m-suspect-route"], [row["message_id"] for row in pending])
+        self.assertEqual("192.168.1.10", pending[0]["endpoint_ip"])
 
     def test_android_discovery_ack_never_grants_future_route_trust(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -1665,16 +1668,18 @@ class LanP2PCoreTests(unittest.TestCase):
         rescue_start = rescue.index("def send_chat_v2(")
         rescue_end = rescue.index("\ndef udp_listener", rescue_start)
         rescue_sender = rescue[rescue_start:rescue_end]
-        self.assertIn("elif target_ids:", rescue_sender)
-        self.assertIn("保留原消息等待 peer 重新上线", rescue_sender)
+        self.assertIn("if target_ids:", rescue_sender)
+        self.assertIn("attempts=1", rescue_sender)
+        self.assertNotIn("selected_peers", rescue_sender)
         self.assertIn("broadcast_all and begin_outgoing_discovery_window", rescue_sender)
 
         chat = (repo_root / "chat.py").read_text(encoding="utf-8")
         chat_start = chat.index("def send_chat_v2(")
         chat_end = chat.index("\n\n# UDP 监听线程", chat_start)
         chat_sender = chat[chat_start:chat_end]
-        self.assertIn("elif target_ids:", chat_sender)
-        self.assertIn("message remains pending", chat_sender)
+        self.assertIn("if target_ids:", chat_sender)
+        self.assertIn("attempts=1", chat_sender)
+        self.assertNotIn("message remains pending", chat_sender)
         self.assertIn("elif begin_outgoing_discovery_window", chat_sender)
 
         server = (repo_root / "server2.py").read_text(encoding="utf-8")
@@ -1683,6 +1688,7 @@ class LanP2PCoreTests(unittest.TestCase):
         server_sender = server[server_start:server_end]
         self.assertIn("if fixed_target_ids:", server_sender)
         self.assertIn("send_outbox_to_active_peers(", server_sender)
+        self.assertIn("attempts=1", server_sender)
         self.assertIn("if not begin_outgoing_discovery_window(", server_sender)
         self.assertIn("send_broadcast_packet_with_retries(", server_sender)
         self.assertIn("[(ip, 8888)", server_sender)
@@ -3203,6 +3209,43 @@ class AndroidLanAckDiscoveryRaceTests(unittest.TestCase):
 
 
 
+
+
+class PythonFixedTargetImmediateDispatchTests(unittest.TestCase):
+    def test_suspect_peer_endpoint_can_be_attempted_and_ack_is_endpoint_bound(self):
+        from lan_p2p_core import (
+            persist_outgoing_message, record_peer, load_pending_fixed_targets,
+            mark_outgoing_attempt, outgoing_ack_endpoint_matches, list_known_peers,
+        )
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-fixed-fast", "hello", ["android-a"]))
+        record_peer(self.db_path, "server2", "android-a", "android", "android-main",
+                    "192.168.1.10", 8888, "suspect")
+        self.assertEqual([], list_known_peers(self.db_path, "server2"))
+        targets = load_pending_fixed_targets(self.db_path, "server2", "m-fixed-fast")
+        self.assertEqual([("android-a", "192.168.1.10", 8888)],
+                         [(x["peer_id"], x["endpoint_ip"], x["endpoint_port"]) for x in targets])
+        self.assertTrue(mark_outgoing_attempt(
+            self.db_path, "m-fixed-fast", "android-a", "192.168.1.10", 8888))
+        self.assertTrue(outgoing_ack_endpoint_matches(
+            self.db_path, "server2", "m-fixed-fast", "android-a", "192.168.1.10", 8888))
+        self.assertFalse(outgoing_ack_endpoint_matches(
+            self.db_path, "server2", "m-fixed-fast", "android-a", "192.168.1.11", 8888))
+
+    def test_peer_ack_recovery_is_woken_off_udp_receive_loop(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        for filename in ("server2.py", "rescue2.py", "chat.py"):
+            source = (repo_root / filename).read_text(encoding="utf-8")
+            handler_start = source.index("def _handle_authenticated_v2_packet(")
+            handler_end = source.index("\ndef ", handler_start + 5)
+            handler = source[handler_start:handler_end]
+            self.assertIn("_V2_RECOVERY_WAKE_EVENT.set()", handler, filename)
+            self.assertNotIn("_resume_pending_v2_for_peer(sock, sender, addr)", handler, filename)
+            worker_start = source.index("def _retry_deferred_v2_peer_recoveries(")
+            worker_end = source.index("def _start_v2_recovery_retry_worker(", worker_start)
+            worker = source[worker_start:worker_end]
+            self.assertIn("list_known_peer_snapshot(", worker, filename)
+            self.assertIn("recovery_event=peer_id in recovery_event_peers", worker, filename)
 
 
 class AndroidFixedTargetImmediateDispatchTests(unittest.TestCase):
