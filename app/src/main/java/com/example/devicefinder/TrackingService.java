@@ -470,7 +470,21 @@ public class TrackingService extends Service implements LocationListener {
                     new ThreadPoolExecutor.AbortPolicy()
             );
 
-    // Keep LAN control, durable inbox and ACK work independent from location/HTTP reporting.
+    // Serialize peer trust transitions and chat ACK commits on a control-only lane.
+    // Inbox persistence stays on LanChat-IO so a burst of messages cannot starve ACKs.
+    private final java.util.concurrent.ExecutorService lanChatControlExecutor =
+            new ThreadPoolExecutor(
+                    1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(128),
+                    runnable -> {
+                        Thread thread = new Thread(runnable, "LanChat-Control");
+                        thread.setPriority(Thread.NORM_PRIORITY);
+                        return thread;
+                    },
+                    new ThreadPoolExecutor.AbortPolicy()
+            );
+
+    // Keep durable inbox work independent from location/HTTP reporting and control ACKs.
     private final java.util.concurrent.ExecutorService lanChatIoExecutor =
             new ThreadPoolExecutor(
                     2, 2, 0L, TimeUnit.MILLISECONDS,
@@ -4630,7 +4644,7 @@ public class TrackingService extends Service implements LocationListener {
                 final String peerIp = peerAddress.getHostAddress();
                 final boolean challengeOnly = envelope.optBoolean("challenge_only", false);
                 try {
-                    lanChatIoExecutor.execute(() -> {
+                    lanChatControlExecutor.execute(() -> {
                         try {
                             if (!store.observePeer(senderId, peerType, serviceId, peerNetwork,
                                     peerIp, sourcePort, now, now + 120_000L)) {
@@ -4687,7 +4701,7 @@ public class TrackingService extends Service implements LocationListener {
                     final String peerType = envelope.optString("sender_peer_type", "unknown");
                     final String peerNetwork = envelope.optString("network_scope", "");
                     try {
-                        lanChatIoExecutor.execute(() -> {
+                        lanChatControlExecutor.execute(() -> {
                             boolean persisted = store.upsertPeer(senderId, peerType, serviceId,
                                     peerNetwork, peerAddress.getHostAddress(), port, now, now + 120_000L);
                             if (!persisted) {
@@ -4727,7 +4741,7 @@ public class TrackingService extends Service implements LocationListener {
                 final java.net.InetAddress sourceAddress = packet.getAddress();
                 final LanChatStore store = lanChatStore;
                 try {
-                    lanChatIoExecutor.execute(() -> processAuthenticatedLanChatAck(
+                    lanChatControlExecutor.execute(() -> processAuthenticatedLanChatAck(
                             messageId, senderId, sourceAddress, sourcePort, store,
                             packetReceivedAtElapsedMs, true));
                 } catch (java.util.concurrent.RejectedExecutionException rejected) {
@@ -4823,7 +4837,7 @@ public class TrackingService extends Service implements LocationListener {
                 boolean scheduled = scheduleLanChatTask("chat-ack-route-recheck", () -> {
                     pendingChatAckRouteRechecks.remove(recheckKey);
                     try {
-                        lanChatIoExecutor.execute(() -> processAuthenticatedLanChatAck(
+                        lanChatControlExecutor.execute(() -> processAuthenticatedLanChatAck(
                                 messageId, senderId, sourceAddress, sourcePort, store,
                                 packetReceivedAtElapsedMs, false));
                     } catch (java.util.concurrent.RejectedExecutionException rejected) {
@@ -6033,6 +6047,7 @@ public class TrackingService extends Service implements LocationListener {
         if (reportExecutor != null) reportExecutor.shutdown();
         if (lanChatImmediateExecutor != null) lanChatImmediateExecutor.shutdown();
         if (lanChatSendExecutor != null) lanChatSendExecutor.shutdown();
+        if (lanChatControlExecutor != null) lanChatControlExecutor.shutdown();
         if (lanChatIoExecutor != null) lanChatIoExecutor.shutdown();
         if (lanChatScheduler != null) lanChatScheduler.shutdownNow();
         if (maintenanceExecutor != null) maintenanceExecutor.shutdownNow();
