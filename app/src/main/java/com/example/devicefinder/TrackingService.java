@@ -4783,13 +4783,12 @@ public class TrackingService extends Service implements LocationListener {
         if (preparationMs >= 100L) {
             FileLogger.log(this, "CHAT", "P2P 发送锁内准备耗时 message=" + messageId
                     + " lockMs=" + preparationMs
-                    + " broadcastLookupMs=" + broadcastLookupMs
+                    + " preLockBroadcastLookupMs=" + broadcastLookupMs
                     + " preLockTargetDbMs=" + targetLoadMs
                     + " routeProbeMs=" + routeProbeMs
                     + " preLockPacketBuildMs=" + packetBuildMs
                     + " preLockEndpointResolveMs=" + endpointResolveMs
-                    + " otherLockMs=" + Math.max(0L, preparationMs - broadcastLookupMs
-                            - routeProbeMs));
+                    + " otherLockMs=" + Math.max(0L, preparationMs - routeProbeMs));
         }
         FileLogger.log(this, "CHAT", "⏱️ P2P UDP 开始发送，固定目标 " + totalPeerCount
                 + "，已验证路由 " + verifiedRouteCount + "，历史端点直投 " + cachedEndpointCount
