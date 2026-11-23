@@ -5932,7 +5932,11 @@ public class TrackingService extends Service implements LocationListener {
                 if (rescueSocket != null && !rescueSocket.isClosed()) rescueSocket.close();
                 final boolean networkGenerationChanged;
                 synchronized (rescueLock) {
-                    if (rescueSocketRef == rescueSocket) rescueSocketRef = null;
+                    if (rescueSocketRef == rescueSocket) {
+                        rescueSocketRef = null;
+                        // The published Network is valid only while its owning listener socket is current.
+                        lanChatBoundWifiNetwork = null;
+                    }
                     isListeningForRescue = false;
                     // A deliberate Wi-Fi path replacement is not a socket failure. Its old
                     // listener must hand off immediately instead of entering the 5s+ backoff.
