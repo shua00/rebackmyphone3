@@ -1863,7 +1863,10 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("lanChatProbeExecutor.execute(", method)
         self.assertIn("peerDiscoveryInFlight.set(false)", method)
         discovery = method[method.index("if (shouldDiscoverPeers)"):]
-        self.assertNotIn("clearPendingPeerChallenge(nonce);", discovery.split("finally {", 1)[-1])
+        nonce_finally = discovery[discovery.index("// The nonce remains valid for late authenticated peer.ack responses"):]
+        nonce_finally = nonce_finally[:nonce_finally.index("});")]
+        self.assertNotIn("clearPendingPeerChallenge(nonce);", nonce_finally)
+        self.assertIn("clearPendingPeerChallenge(nonce);", discovery)  # queue rejection cleanup
 
     def test_android_known_offline_targets_are_rechallenged_at_saved_endpoint(self):
         repo_root = Path(__file__).resolve().parents[1]
