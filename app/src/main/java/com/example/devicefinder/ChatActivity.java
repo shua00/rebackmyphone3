@@ -128,9 +128,9 @@ public class ChatActivity extends Activity {
         String msg = inputMsg.getText().toString().trim();
         if (!msg.isEmpty()) {
             inputMsg.setText("");
-            // The send button may take focus away from the editor. Restore it immediately
-            // so an already-visible IME can accept the next message without another tap.
-            inputMsg.requestFocus();
+            // Restore focus after the Button click has fully completed. An immediate
+            // requestFocus() can be overwritten by the Button's own focus dispatch.
+            restoreChatInputFocus();
 
             // 【新增】拦截暗号清空指令
             if ("/clear".equalsIgnoreCase(msg)) {
@@ -181,6 +181,20 @@ public class ChatActivity extends Activity {
                 Toast.makeText(this, "⚠️ 发送失败，请稍后重试", Toast.LENGTH_SHORT).show();
             }
         }
+    }
+
+    /**
+     * Keep continuous typing usable after sending from either the button or IME action.
+     * Post the focus request so it runs after the current click/focus dispatch; do not
+     * force-show the keyboard when the user had intentionally dismissed it.
+     */
+    private void restoreChatInputFocus() {
+        if (inputMsg == null) return;
+        inputMsg.post(() -> {
+            if (isFinishing()) return;
+            inputMsg.requestFocus();
+            inputMsg.setSelection(inputMsg.length());
+        });
     }
 
     private void refreshHistory(boolean isNewMessage) {

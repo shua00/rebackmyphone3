@@ -5001,8 +5001,12 @@ public class TrackingService extends Service implements LocationListener {
         boolean routeMatches = verified != null
                 && verified.getAddress().equals(sourceAddress)
                 && verified.getPort() == sourcePort;
-        boolean persistedEndpointMatch = store.matchesExpectedAckEndpoint(messageId, senderId,
-                sourceAddress.getHostAddress(), sourcePort);
+        // A live authenticated route already proves this exact sender endpoint. Avoid a
+        // redundant SQLite endpoint lookup on the common ACK fast path; do not label the
+        // skipped persisted check as a match in diagnostics.
+        boolean persistedEndpointMatch = !routeMatches
+                && store.matchesExpectedAckEndpoint(messageId, senderId,
+                        sourceAddress.getHostAddress(), sourcePort);
         boolean discoveryAck = false;
         try {
             discoveryAck = store.isDiscoveryPending(messageId);

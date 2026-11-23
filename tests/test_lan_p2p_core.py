@@ -2166,8 +2166,18 @@ class LanP2PCoreTests(unittest.TestCase):
         end = source.index("\n    private void refreshHistory(", start)
         send = source[start:end]
         self.assertIn('inputMsg.setText("");', send)
-        self.assertIn("inputMsg.requestFocus();", send)
-        self.assertLess(send.index('inputMsg.setText("");'), send.index("inputMsg.requestFocus();"))
+        self.assertIn("restoreChatInputFocus();", send)
+        self.assertLess(send.index('inputMsg.setText("");'), send.index("restoreChatInputFocus();"))
+        self.assertIn("private void restoreChatInputFocus()", source)
+        focus = source[source.index("private void restoreChatInputFocus()"):
+                       source.index("private void refreshHistory(")]
+        self.assertIn("inputMsg.post(", focus)
+        self.assertIn("inputMsg.requestFocus();", focus)
+        self.assertIn("inputMsg.setSelection(inputMsg.length());", focus)
+        layout = (repo_root / "app/src/main/res/layout/activity_chat.xml").read_text(encoding="utf-8")
+        send_button = layout[layout.index('@+id/btnSend'):]
+        self.assertIn('android:focusable="false"', send_button)
+        self.assertIn('android:focusableInTouchMode="false"', send_button)
 
 
     def test_android_wifi_lan_change_rebinds_listener_before_outbox_recovery(self):
@@ -3177,6 +3187,18 @@ class AndroidLanAckDiscoveryRaceTests(unittest.TestCase):
         self.assertIn("reason=unverified_endpoint", helper)
         self.assertIn("store.acknowledge(messageId, senderId)", helper)
         self.assertIn("pendingChatAckRouteRechecks", source)
+
+
+
+class AndroidLanAckFastPathTests(unittest.TestCase):
+    def test_verified_live_route_skips_redundant_sqlite_endpoint_lookup(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        ack = extract_java_method(source, "private void processAuthenticatedLanChatAck(")
+        self.assertIn("boolean persistedEndpointMatch = !routeMatches", ack)
+        self.assertIn("&& store.matchesExpectedAckEndpoint(messageId, senderId", ack)
+        self.assertIn("if (!routeMatches && !persistedEndpointMatch)", ack)
+        self.assertIn("discoveryAck = store.isDiscoveryPending(messageId)", ack)
 
 
 class AndroidLanControlQueueDiagnosticsTests(unittest.TestCase):

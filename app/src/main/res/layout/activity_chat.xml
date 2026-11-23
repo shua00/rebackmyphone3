@@ -94,6 +94,8 @@
             android:text="发送"
             android:layout_marginStart="10dp"
             android:backgroundTint="#1f2937"
-            android:textColor="#FFFFFF" />
+            android:textColor="#FFFFFF"
+            android:focusable="false"
+            android:focusableInTouchMode="false" />
     </LinearLayout>
 </LinearLayout>
