@@ -1148,7 +1148,8 @@ public class TrackingService extends Service implements LocationListener {
                     try { startLocationUpdates(); } catch (Exception ignored) {}
                 }
 
-                if (networkCallback == null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                if ((networkCallback == null || wifiLanNetworkCallback == null)
+                        && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                     FileLogger.log(this, "SERVICE", "⚠️ 自愈: networkCallback 为空，重新注册");
                     registerNetworkCallback();
                 }

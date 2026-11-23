@@ -2246,6 +2246,19 @@ class LanP2PCoreTests(unittest.TestCase):
 
 
 
+    def test_android_network_callback_pair_self_heals_on_api_21_and_above(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        method = extract_java_method(source, "private void selfHeal()")
+        self.assertIn("(networkCallback == null || wifiLanNetworkCallback == null)", method)
+        self.assertIn("Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP", method)
+        register = extract_java_method(source, "private void registerNetworkCallback()")
+        self.assertIn("Build.VERSION_CODES.N", register)
+        self.assertIn("registerNetworkCallback(defaultNetworkRequest, networkCallback)", register)
+        self.assertIn("registerNetworkCallback(wifiRequest, wifiLanNetworkCallback)", register)
+
+
+
 
 if __name__ == "__main__":
     unittest.main()
