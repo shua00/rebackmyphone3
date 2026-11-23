@@ -1572,8 +1572,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("coalescedMaintenanceStates", source)
         self.assertIn("state.compareAndSet(1, 2)", source)
         self.assertIn("completedState == 2 && !serviceDestroyed", source)
-        dispatch = source[source.index("private void executeMaintenance("):
-                          source.index("private void logLifecycle(")]
+        dispatch_start = source.index("private void executeMaintenance(")
+        dispatch = source[dispatch_start:dispatch_start + 1600]
         for task_name in ("peer-route-refresh", "wifi-lan-refresh", "network-refresh"):
             self.assertIn('"'+task_name+'".equals(taskName)', dispatch)
             self.assertIn("executeCoalescedMaintenance(taskName, task)", dispatch)
