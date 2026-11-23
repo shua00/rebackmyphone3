@@ -2130,8 +2130,17 @@ public class TrackingService extends Service implements LocationListener {
                         handler.postDelayed(networkRefreshRunnable, 800L);
                     }
                 };
-                // Android 7.0+ 使用默认网络回调，避免把同时存在的非默认网络误判为当前出口。
-                cm.registerDefaultNetworkCallback(networkCallback);
+                // Android 7.0+ 可直接观察默认网络；Android 5/6 使用 INTERNET 请求回调
+                // 兼容旧系统。旧系统回调可能覆盖多个候选网络，刷新逻辑始终重新读取系统当前默认网络。
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    cm.registerDefaultNetworkCallback(networkCallback);
+                } else {
+                    android.net.NetworkRequest defaultNetworkRequest =
+                            new android.net.NetworkRequest.Builder()
+                                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                                    .build();
+                    cm.registerNetworkCallback(defaultNetworkRequest, networkCallback);
+                }
                 // Observe all Wi-Fi networks even when the active default network is cellular.
                 wifiLanNetworkCallback = new ConnectivityManager.NetworkCallback() {
                     @Override public void onAvailable(Network network) {

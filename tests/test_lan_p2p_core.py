@@ -90,6 +90,10 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("cm.unregisterNetworkCallback(wifiLanNetworkCallback)", method)
         self.assertIn("networkCallback = null;", method)
         self.assertIn("wifiLanNetworkCallback = null;", method)
+        self.assertIn("Build.VERSION.SDK_INT >= Build.VERSION_CODES.N", method)
+        self.assertIn("cm.registerDefaultNetworkCallback(networkCallback)", method)
+        self.assertIn("NET_CAPABILITY_INTERNET", method)
+        self.assertIn("cm.registerNetworkCallback(defaultNetworkRequest, networkCallback)", method)
         self.assertLess(method.index("cm.registerDefaultNetworkCallback(networkCallback)"),
                         method.index("cm.registerNetworkCallback(wifiRequest, wifiLanNetworkCallback)"))
 
