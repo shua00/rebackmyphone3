@@ -798,7 +798,9 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     new String[]{messageId, String.valueOf(System.currentTimeMillis())});
             return c.moveToFirst();
         } catch (Exception e) {
-            return false;
+            // A storage failure is not evidence that the discovery window is closed.
+            // Propagate it so callers can stop the operation without widening recipients.
+            throw new IllegalStateException("Failed to read LAN discovery state", e);
         } finally {
             if (c != null) c.close();
         }
