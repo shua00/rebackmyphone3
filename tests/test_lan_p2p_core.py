@@ -1165,6 +1165,27 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertTrue(all(packet["nonce"] == decoded[0]["nonce"] for packet in decoded))
 
 
+    def test_startup_peer_beacon_is_withheld_when_challenge_nonce_cannot_be_persisted(self):
+        from lan_p2p_core import send_startup_peer_beacon
+
+        class FakeSocket:
+            def __init__(self):
+                self.sent = []
+            def sendto(self, data, target):
+                self.sent.append((data, target))
+
+        sock = FakeSocket()
+        with patch("lan_p2p_core.remember_peer_challenge", return_value=False) as persist:
+            sent = send_startup_peer_beacon(
+                sock, "server2-stable", "server2", "server2-stable",
+                "test-secret", 8887, [8888, 8889], ["255.255.255.255"],
+                db_path=self.db_path, receiver_scope="server2",
+            )
+        self.assertEqual(sent, 0)
+        self.assertEqual(sock.sent, [])
+        persist.assert_called_once()
+
+
     def test_android_retry_recovery_reads_durable_sqlite_outbox(self):
         repo_root = Path(__file__).resolve().parents[1]
         tracking = (

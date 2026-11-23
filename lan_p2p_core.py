@@ -739,8 +739,6 @@ def send_startup_peer_beacon(sock, peer_id, peer_type, service_id, secret,
     if not ports or not addresses:
         return 0
     nonce = uuid.uuid4().hex
-    if db_path and receiver_scope:
-        remember_peer_challenge(db_path, receiver_scope, nonce, ttl_seconds=5)
     packet = {
         "type": "peer.hello",
         "sender_peer_id": str(peer_id),
@@ -756,6 +754,11 @@ def send_startup_peer_beacon(sock, peer_id, peer_type, service_id, secret,
         raw = encode_packet(packet, secret)
     except Exception:
         return 0
+    # A peer.ack can activate a route only if its nonce was durably recorded.
+    # Never emit a challenge that this process cannot later authenticate.
+    if db_path and receiver_scope:
+        if not remember_peer_challenge(db_path, receiver_scope, nonce, ttl_seconds=5):
+            return 0
     sent = 0
     for address in addresses:
         for port in ports:
