@@ -6042,6 +6042,44 @@ public class TrackingService extends Service implements LocationListener {
         }
     }
 
+    /**
+     * SQLite must outlive every in-flight LAN task. Executor shutdown is asynchronous,
+     * so close the shared helper only after all producers/consumers have drained.
+     */
+    private void closeLanChatStoreAfterExecutors(final LanChatStore storeToClose) {
+        if (storeToClose == null) return;
+        Thread closer = new Thread(() -> {
+            awaitLanExecutorTermination(lanChatScheduler);
+            awaitLanExecutorTermination(lanChatImmediateExecutor);
+            awaitLanExecutorTermination(lanChatSendExecutor);
+            awaitLanExecutorTermination(lanChatControlExecutor);
+            awaitLanExecutorTermination(lanChatIoExecutor);
+            awaitLanExecutorTermination(maintenanceExecutor);
+            try {
+                storeToClose.closeStore();
+                FileLogger.log(this, "SERVICE", "LAN SQLite store closed after communication queues drained");
+            } catch (Exception e) {
+                FileLogger.log(this, "SERVICE", "⚠️ 延后关闭 LAN SQLite 失败: "
+                        + e.getClass().getSimpleName());
+            }
+        }, "LanChat-Store-Close");
+        closer.setDaemon(true);
+        closer.start();
+    }
+
+    private void awaitLanExecutorTermination(java.util.concurrent.ExecutorService executor) {
+        if (executor == null) return;
+        boolean interrupted = false;
+        while (!executor.isTerminated()) {
+            try {
+                executor.awaitTermination(5L, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
+    }
+
     @Override
     public void onDestroy() {
         super.onDestroy();
@@ -6067,7 +6105,9 @@ public class TrackingService extends Service implements LocationListener {
         if (lanChatIoExecutor != null) lanChatIoExecutor.shutdown();
         if (lanChatScheduler != null) lanChatScheduler.shutdownNow();
         if (maintenanceExecutor != null) maintenanceExecutor.shutdownNow();
-        if (lanChatStore != null) { try { lanChatStore.closeStore(); } catch (Exception ignored) {} lanChatStore = null; }
+        LanChatStore storeToClose = lanChatStore;
+        lanChatStore = null;
+        closeLanChatStoreAfterExecutors(storeToClose);
         if (rescueSocketRef != null) {
             try { rescueSocketRef.close(); } catch (Exception e) { FileLogger.log(this, "SERVICE", "⚠️ close rescueSocket 失败: " + e.getMessage()); }
             rescueSocketRef = null;
