@@ -331,3 +331,10 @@ IP 地址永远不能作为设备身份。网络变化时应使旧端点路由�
 - 本策略只约束 Python 三服务的逐目标 LAN 补发，不改变 Android 原有 8 次消息级预算、悬浮留言独立通道或 HTTP 兜底语义；端到端跨端时序仍需按验收矩阵实测。
 
 - 为每秒重试扫描增加 peer/status/attempt_count/last_attempt_at 复合索引及 sender_scope/state 索引，避免 Outbox 增长后周期性扫描退化为全表遍历。
+
+
+## 17. 重试 schema 启动失败自恢复（2026-11-23）
+
+- Outbox 重试 worker 不再因服务启动时 SQLite 暂时锁定、schema 迁移失败而永久不启动。worker 始终只启动一个；schema 未就绪时按低频间隔重试迁移，成功后再进入 ACK 超时扫描。
+- 数据库迁移失败期间不伪装为空队列、不执行依赖新列的重试扫描；现有 UDP listener 生命周期不被迁移线程阻塞。
+- 新增三服务静态回归检查，确保 schema 初始化失败不会提前 return 并丢失唯一恢复 worker。

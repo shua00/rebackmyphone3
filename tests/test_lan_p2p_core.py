@@ -2881,5 +2881,22 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("WHEN 1 THEN 1500 WHEN 2 THEN 4000", core)
         self.assertIn("WHEN 3 THEN 10000 WHEN 4 THEN 20000", core)
 
+    def test_all_python_services_keep_retry_worker_alive_when_schema_migration_is_deferred(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        for filename in ("rescue2.py", "chat.py", "server2.py"):
+            source = (repo_root / filename).read_text(encoding="utf-8")
+            self.assertIn("_V2_RECOVERY_SCHEMA_READY = False", source, filename)
+            worker_start = source.index("def _retry_deferred_v2_peer_recoveries():")
+            worker_end = source.index("\ndef _start_v2_recovery_retry_worker", worker_start)
+            worker = source[worker_start:worker_end]
+            self.assertIn("if not _V2_RECOVERY_SCHEMA_READY:", worker, filename)
+            self.assertIn("ensure_outbox_retry_schema(", worker, filename)
+            start = source.index("def _start_v2_recovery_retry_worker():")
+            end = source.index("\ndef _handle_authenticated_v2_packet", start)
+            starter = source[start:end]
+            self.assertIn("_V2_RECOVERY_SCHEMA_READY = False", starter, filename)
+            self.assertIn("threading.Thread(target=_retry_deferred_v2_peer_recoveries", starter, filename)
+            self.assertNotIn("return\n    with _V2_RECOVERY_RETRY_LOCK", starter, filename)
+
 if __name__ == "__main__":
     unittest.main()

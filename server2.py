@@ -282,6 +282,7 @@ _V2_RECOVERY_RETRY_PEERS = set()
 _V2_RECOVERY_RETRY_LOCK = threading.Lock()
 _V2_RECOVERY_INFLIGHT = set()
 _V2_RECOVERY_WORKER_STARTED = False
+_V2_RECOVERY_SCHEMA_READY = False
 
 
 CHAT_MESSAGES.extend(_restore_chat_history())
@@ -1417,8 +1418,18 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=True):
 
 def _retry_deferred_v2_peer_recoveries():
     """One process-wide worker handles ACK-timeout retries and deferred storage failures."""
+    global _V2_RECOVERY_SCHEMA_READY
     while True:
         time.sleep(1)
+        if not _V2_RECOVERY_SCHEMA_READY:
+            try:
+                ensure_outbox_retry_schema(CHAT_DEDUP_DB)
+                _V2_RECOVERY_SCHEMA_READY = True
+            except Exception as exc:
+                with print_lock:
+                    print(f"⚠️ server2 LAN retry schema initialization still deferred: {type(exc).__name__}")
+                time.sleep(4)
+                continue
         with _V2_RECOVERY_RETRY_LOCK:
             pending_peer_ids = set(_V2_RECOVERY_RETRY_PEERS)
         sock = UDP_LISTENER_SOCKET
@@ -1444,14 +1455,15 @@ def _retry_deferred_v2_peer_recoveries():
 
 
 def _start_v2_recovery_retry_worker():
-    """Start exactly one bounded retry worker after upgrading the durable retry schema."""
-    global _V2_RECOVERY_WORKER_STARTED
+    """Start one worker even if schema migration is temporarily locked; it retries migration."""
+    global _V2_RECOVERY_WORKER_STARTED, _V2_RECOVERY_SCHEMA_READY
     try:
         ensure_outbox_retry_schema(CHAT_DEDUP_DB)
+        _V2_RECOVERY_SCHEMA_READY = True
     except Exception as exc:
+        _V2_RECOVERY_SCHEMA_READY = False
         with print_lock:
-            print(f"⚠️ server2 LAN retry schema initialization failed: {type(exc).__name__}")
-        return
+            print(f"⚠️ server2 LAN retry schema initialization deferred to recovery worker: {type(exc).__name__}")
     with _V2_RECOVERY_RETRY_LOCK:
         if _V2_RECOVERY_WORKER_STARTED:
             return
