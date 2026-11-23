@@ -240,9 +240,14 @@ class LanP2PCoreTests(unittest.TestCase):
 
 
     def test_unknown_recipient_ack_window_collects_multiple_peers(self):
-        from lan_p2p_core import persist_outgoing_message, acknowledge_outgoing_message, record_peer, load_pending_outgoing_for_peer
+        from lan_p2p_core import (
+            persist_outgoing_message, acknowledge_outgoing_message, record_peer,
+            load_pending_outgoing_for_peer, begin_outgoing_discovery_window,
+        )
         self.assertTrue(persist_outgoing_message(self.db_path, "server2", "server2-id",
                                                  "m-discovery", "hello", []))
+        self.assertTrue(begin_outgoing_discovery_window(
+            self.db_path, "server2", "m-discovery"))
         self.assertTrue(acknowledge_outgoing_message(self.db_path, "server2", "m-discovery", "android-a"))
         self.assertTrue(acknowledge_outgoing_message(self.db_path, "server2", "m-discovery", "android-b"))
         conn = sqlite3.connect(self.db_path)
@@ -389,10 +394,12 @@ class LanP2PCoreTests(unittest.TestCase):
     def test_first_discovery_target_set_freezes_after_deadline(self):
         from lan_p2p_core import (
             persist_outgoing_message, record_peer, add_discovery_targets_for_peer,
-            load_pending_outgoing_for_peer,
+            load_pending_outgoing_for_peer, begin_outgoing_discovery_window,
         )
         self.assertTrue(persist_outgoing_message(
             self.db_path, "server2", "server2-id", "m-freeze", "hello", []))
+        self.assertTrue(begin_outgoing_discovery_window(
+            self.db_path, "server2", "m-freeze"))
         self.assertEqual(add_discovery_targets_for_peer(
             self.db_path, "server2", "android-a"), 1)
         conn = sqlite3.connect(self.db_path)
