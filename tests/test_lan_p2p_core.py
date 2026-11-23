@@ -1825,10 +1825,14 @@ class LanP2PCoreTests(unittest.TestCase):
         start = source.index("private boolean handleAuthenticatedLanPacket(")
         end = source.index("private void processAuthenticatedLanChatAck(", start)
         handler = source[start:end]
-        self.assertEqual(handler.count("lanChatIoExecutor.execute(() -> {"), 3)
-        self.assertIn("lanChatIoExecutor.execute(() -> processAuthenticatedLanChatAck(", handler)
+        self.assertEqual(handler.count("lanChatControlExecutor.execute(() -> {"), 2)
+        self.assertEqual(handler.count("lanChatIoExecutor.execute(() -> {"), 1)
+        self.assertIn("lanChatControlExecutor.execute(() -> processAuthenticatedLanChatAck(", handler)
         self.assertNotIn("reportExecutor.execute(", handler)
+        self.assertIn('new Thread(runnable, "LanChat-Control")', source)
         self.assertIn('new Thread(runnable, "LanChat-IO")', source)
+        ack = extract_java_method(source, "private void processAuthenticatedLanChatAck(")
+        self.assertIn("lanChatControlExecutor.execute(() -> processAuthenticatedLanChatAck(", ack)
 
     def test_android_peer_challenge_nonce_outlives_initial_discovery_wait(self):
         repo_root = Path(__file__).resolve().parents[1]
