@@ -295,6 +295,13 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertFalse(peer_endpoint_matches(
             directory_path, "server2", "android-a", "192.168.1.10", 8888))
 
+    def test_outgoing_ack_fails_closed_when_database_cannot_be_opened(self):
+        from lan_p2p_core import acknowledge_outgoing_message
+        directory_path = os.path.join(self.temp_dir.name, "not-an-ack-database")
+        os.mkdir(directory_path)
+        self.assertFalse(acknowledge_outgoing_message(
+            directory_path, "server2", "message-a", "android-a"))
+
     def test_retry_only_returns_unacked_fixed_targets(self):
         from lan_p2p_core import (
             persist_outgoing_message, record_peer, load_pending_outgoing_for_peer,

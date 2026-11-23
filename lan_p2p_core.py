@@ -361,10 +361,18 @@ def acknowledge_outgoing_message(db_path, sender_scope, message_id, peer_id):
         conn.commit()
         return True
     except Exception:
-        conn.rollback()
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         return False
     finally:
-        conn.close()
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _finalize_expired_discovery_windows(conn, sender_scope, now_ms):
