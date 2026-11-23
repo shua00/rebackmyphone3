@@ -62,6 +62,17 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
+    /** Read-only snapshot of durable per-recipient ACK progress for truthful diagnostics. */
+    public static final class AckProgress {
+        public final int totalTargets;
+        public final int ackedTargets;
+
+        AckProgress(int total, int acked) {
+            this.totalTargets = total;
+            this.ackedTargets = acked;
+        }
+    }
+
     public LanChatStore(Context context) {
         super(context.getApplicationContext(), DB_NAME, null, DB_VERSION);
         setWriteAheadLoggingEnabled(true);
@@ -345,6 +356,26 @@ public final class LanChatStore extends SQLiteOpenHelper {
             return c.moveToFirst();
         } catch (Exception e) {
             return false;
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
+    /** Counts only durable target rows; it does not infer delivery from a transient ACK latch. */
+    public AckProgress getTargetAckProgress(String messageId) {
+        if (messageId == null || messageId.length() == 0) return null;
+        Cursor c = null;
+        try {
+            c = getReadableDatabase().rawQuery(
+                    "SELECT COUNT(*),SUM(CASE WHEN status='acked' THEN 1 ELSE 0 END) " +
+                    "FROM lan_outbox_targets WHERE message_id=?",
+                    new String[]{messageId});
+            if (!c.moveToFirst()) return new AckProgress(0, 0);
+            int total = c.getInt(0);
+            int acked = c.isNull(1) ? 0 : c.getInt(1);
+            return new AckProgress(total, acked);
+        } catch (Exception e) {
+            return null;
         } finally {
             if (c != null) c.close();
         }
