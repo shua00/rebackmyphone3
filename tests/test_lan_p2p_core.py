@@ -267,6 +267,13 @@ class LanP2PCoreTests(unittest.TestCase):
                                                "192.168.1.10", 8888))
 
 
+    def test_ack_route_database_read_failure_fails_closed(self):
+        from lan_p2p_core import peer_endpoint_matches
+        with tempfile.TemporaryDirectory() as invalid_db_path:
+            self.assertFalse(peer_endpoint_matches(
+                invalid_db_path, "server2", "android-a", "192.168.1.10", 8888))
+
+
     def test_unknown_recipient_ack_is_only_allowed_inside_open_discovery_window(self):
         from lan_p2p_core import (
             persist_outgoing_message, is_outgoing_discovery_pending,
