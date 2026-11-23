@@ -2187,6 +2187,24 @@ class LanP2PCoreTests(unittest.TestCase):
             self.assertIn("return", storage_handler, filename)
 
 
+    def test_outbox_storage_error_is_not_masked_by_rollback_or_close_failure(self):
+        class BrokenCleanupConnection:
+            def execute(self, *args, **kwargs):
+                raise sqlite3.OperationalError("primary write failure")
+            def rollback(self):
+                raise RuntimeError("rollback cleanup failure")
+            def close(self):
+                raise RuntimeError("close cleanup failure")
+
+        with patch("lan_p2p_core.sqlite3.connect", return_value=BrokenCleanupConnection()):
+            with self.assertRaises(LanP2PStorageError) as caught:
+                mark_outgoing_attempt(self.db_path, "message-a", "peer-a",
+                                      "192.168.1.20", 8888)
+        self.assertIsInstance(caught.exception.__cause__, sqlite3.OperationalError)
+        self.assertEqual("primary write failure", str(caught.exception.__cause__))
+
+
+
 
 
 

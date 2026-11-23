@@ -7,6 +7,24 @@ class LanP2PStorageError(RuntimeError):
     """A durable LAN P2P ledger operation failed; callers must not treat it as empty state."""
 
 
+def _safe_rollback(conn):
+    """Best-effort rollback that never masks the original storage failure."""
+    if conn is not None:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+
+def _safe_close(conn):
+    """Best-effort close; a cleanup failure must not replace the operation result."""
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def record_peer(db_path, receiver_scope, peer_id, peer_type, service_id,
                 endpoint_ip, endpoint_port, status="suspect"):
     """Persist a discovered peer without treating an unconfirmed HELLO as active."""
@@ -64,7 +82,7 @@ def record_peer(db_path, receiver_scope, peer_id, peer_type, service_id,
             conn.commit()
             return True
         finally:
-            conn.close()
+            _safe_close(conn)
     except Exception:
         return False
 
@@ -96,10 +114,10 @@ def load_stable_peer_id(db_path, service_name):
         conn.commit()
         return peer_id
     except Exception:
-        conn.rollback()
+        _safe_rollback(conn)
         raise
     finally:
-        conn.close()
+        _safe_close(conn)
 
 
 def _canonical_envelope_bytes(fields):
@@ -226,7 +244,7 @@ def persist_outgoing_message(db_path, sender_scope, sender_peer_id, message_id,
                             and existing[1] == sender_peer_id
                             and existing[2] == str(body))
             if not same_message:
-                conn.rollback()
+                _safe_rollback(conn)
                 return False
             conn.commit()
             return True
@@ -244,10 +262,10 @@ def persist_outgoing_message(db_path, sender_scope, sender_peer_id, message_id,
         conn.commit()
         return True
     except Exception:
-        conn.rollback()
+        _safe_rollback(conn)
         return False
     finally:
-        conn.close()
+        _safe_close(conn)
 
 
 def encode_chat_http_fallback_payload(message_id, sender_peer_id, display_name, body):
@@ -311,7 +329,7 @@ def acknowledge_outgoing_message(db_path, sender_scope, message_id, peer_id):
         # Expired is terminal. A delayed ACK must not mutate target rows or
         # resurrect the aggregate outbox state, matching the Android ledger.
         if row is None or row[0] == "expired":
-            conn.rollback()
+            _safe_rollback(conn)
             return False
         now_ms = int(time.time() * 1000)
         cur = conn.execute("""UPDATE lan_outbox_targets
@@ -332,11 +350,11 @@ def acknowledge_outgoing_message(db_path, sender_scope, message_id, peer_id):
                 row = conn.execute("SELECT state,delivery_deadline_ms FROM lan_outbox WHERE sender_scope=? AND message_id=?",
                                    (sender_scope, message_id)).fetchone()
                 if row is None or row[0] != "discovery_pending":
-                    conn.rollback()
+                    _safe_rollback(conn)
                     return False
                 deadline = int(row[1] or 0)
                 if deadline and now_ms > deadline:
-                    conn.rollback()
+                    _safe_rollback(conn)
                     return False
                 if not deadline:
                     deadline = now_ms + 5000
@@ -363,14 +381,14 @@ def acknowledge_outgoing_message(db_path, sender_scope, message_id, peer_id):
     except Exception:
         if conn is not None:
             try:
-                conn.rollback()
+                _safe_rollback(conn)
             except Exception:
                 pass
         return False
     finally:
         if conn is not None:
             try:
-                conn.close()
+                _safe_close(conn)
             except Exception:
                 pass
 
@@ -419,11 +437,11 @@ def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10):
                 for r in rows]
     except Exception as exc:
         if conn is not None:
-            conn.rollback()
+            _safe_rollback(conn)
         raise LanP2PStorageError("failed to load pending LAN outbox rows for peer") from exc
     finally:
         if conn is not None:
-            conn.close()
+            _safe_close(conn)
 
 
 def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_port):
@@ -440,11 +458,11 @@ def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_po
         return cur.rowcount > 0
     except Exception as exc:
         if conn is not None:
-            conn.rollback()
+            _safe_rollback(conn)
         raise LanP2PStorageError("failed to persist LAN outbox send attempt") from exc
     finally:
         if conn is not None:
-            conn.close()
+            _safe_close(conn)
 
 
 def list_known_peers(db_path, receiver_scope, limit=100):
@@ -465,7 +483,7 @@ def list_known_peers(db_path, receiver_scope, limit=100):
     except Exception:
         return []
     finally:
-        conn.close()
+        _safe_close(conn)
 
 
 def list_known_peer_snapshot(db_path, receiver_scope, limit=500):
@@ -489,7 +507,7 @@ def list_known_peer_snapshot(db_path, receiver_scope, limit=500):
     except Exception:
         return []
     finally:
-        conn.close()
+        _safe_close(conn)
 def add_discovery_target(db_path, sender_scope, message_id, peer_id):
     """Add a peer only during the first bounded discovery window of an unknown-recipient message."""
     if not sender_scope or not message_id or not peer_id:
@@ -502,12 +520,12 @@ def add_discovery_target(db_path, sender_scope, message_id, peer_id):
                            "WHERE sender_scope=? AND message_id=?",
                            (sender_scope, message_id)).fetchone()
         if row is None or row[0] != "discovery_pending":
-            conn.rollback()
+            _safe_rollback(conn)
             return False
         now_ms = int(time.time() * 1000)
         deadline = int(row[1] or 0)
         if deadline and now_ms > deadline:
-            conn.rollback()
+            _safe_rollback(conn)
             return False
         if not deadline:
             deadline = now_ms + 5000
@@ -518,10 +536,10 @@ def add_discovery_target(db_path, sender_scope, message_id, peer_id):
         conn.commit()
         return True
     except Exception:
-        conn.rollback()
+        _safe_rollback(conn)
         return False
     finally:
-        conn.close()
+        _safe_close(conn)
 
 
 def add_discovery_targets_for_peer(db_path, sender_scope, peer_id):
@@ -551,11 +569,11 @@ def add_discovery_targets_for_peer(db_path, sender_scope, peer_id):
         return added
     except Exception as exc:
         if conn is not None:
-            conn.rollback()
+            _safe_rollback(conn)
         raise LanP2PStorageError("failed to attach peer to LAN discovery snapshots") from exc
     finally:
         if conn is not None:
-            conn.close()
+            _safe_close(conn)
 
 def remember_peer_challenge(db_path, receiver_scope, nonce, expected_peer_id="",
                             expected_ip="", expected_port=0, ttl_seconds=5):
@@ -586,7 +604,7 @@ def remember_peer_challenge(db_path, receiver_scope, nonce, expected_peer_id="",
             conn.commit()
             return True
         finally:
-            conn.close()
+            _safe_close(conn)
     except Exception:
         return False
 
@@ -633,14 +651,14 @@ def complete_peer_challenge(db_path, receiver_scope, nonce, peer_id,
             FROM lan_peer_challenges WHERE receiver_scope=? AND nonce=?""",
             (receiver_scope, str(nonce))).fetchone()
         if row is None:
-            conn.rollback()
+            _safe_rollback(conn)
             return False
         expected_peer_id, expected_ip, expected_port, expires_at = row
         if (float(expires_at) <= now
                 or (expected_peer_id and str(expected_peer_id) != str(peer_id))
                 or (expected_ip and str(expected_ip) != str(endpoint_ip))
                 or (expected_port and int(expected_port) != int(endpoint_port))):
-            conn.rollback()
+            _safe_rollback(conn)
             return False
         # Validation, route activation, and directed nonce consumption share one
         # write transaction. Concurrent replay cannot race between SELECT/DELETE.
@@ -667,13 +685,13 @@ def complete_peer_challenge(db_path, receiver_scope, nonce, peer_id,
     except Exception:
         if conn is not None:
             try:
-                conn.rollback()
+                _safe_rollback(conn)
             except Exception:
                 pass
         return False
     finally:
         if conn is not None:
-            conn.close()
+            _safe_close(conn)
 
 
 def send_directed_peer_challenge(sock, db_path, receiver_scope, sender_peer_id,
@@ -770,7 +788,7 @@ def is_outgoing_discovery_pending(db_path, sender_scope, message_id):
         return False
     finally:
         if conn is not None:
-            conn.close()
+            _safe_close(conn)
 
 
 def load_active_pending_targets(db_path, sender_scope, message_id, limit=500):
@@ -797,7 +815,7 @@ def load_active_pending_targets(db_path, sender_scope, message_id, limit=500):
         raise LanP2PStorageError("failed to load active LAN outbox targets") from exc
     finally:
         if conn is not None:
-            conn.close()
+            _safe_close(conn)
 
 
 def send_outbox_to_active_peers(sock, db_path, sender_scope, message_id,
@@ -903,4 +921,4 @@ def peer_endpoint_matches(db_path, receiver_scope, peer_id, endpoint_ip, endpoin
         return False
     finally:
         if conn is not None:
-            conn.close()
+            _safe_close(conn)
