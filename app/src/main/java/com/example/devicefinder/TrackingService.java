@@ -3206,9 +3206,9 @@ public class TrackingService extends Service implements LocationListener {
         }
         try {
             selected.bindSocket(socket);
-            return selected;
             FileLogger.logD("CHAT", "UDP listener socket bound to selected Wi-Fi LAN network="
                     + links.getInterfaceName());
+            return selected;
         } catch (Exception bindError) {
             throw new java.io.IOException("Wi-Fi LAN socket binding failed", bindError);
         }
