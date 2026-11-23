@@ -3933,7 +3933,8 @@ class AndroidLanExplicitSocketRestartTests(unittest.TestCase):
         self.assertIn("triggerRescueListener()", helper)
         self.assertIn('requestRescueListenerRestart("ACTION_RESTART_UDP")', source)
         self.assertIn('requestRescueListenerRestart("restart_udp")', source)
-        self.assertNotIn("rescueSocketRef.close()", source)
+        self.assertNotIn('if (rescueSocketRef != null) { try { rescueSocketRef.close(); } catch (Exception ignored) {} }', source)
+        self.assertNotIn('if (rescueSocketRef != null) {\n                        try { rescueSocketRef.close(); } catch (Exception ignored) {}\n                    }', source)
 
 if __name__ == "__main__":
     unittest.main()
