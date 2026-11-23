@@ -106,6 +106,25 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertLess(method.index("cm.registerDefaultNetworkCallback(networkCallback)"),
                         method.index("cm.registerNetworkCallback(wifiRequest, wifiLanNetworkCallback)"))
 
+    def test_android_outbox_retry_budget_is_per_target_and_recovery_isolated(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        load = extract_java_method(source, "public List<PendingMessage> loadPending(")
+        mark = extract_java_method(source, "public boolean markAttempt(")
+        record = extract_java_method(source, "public int recordOutboxAttempt(")
+        recover = extract_java_method(source, "public int resumeExhaustedRetriesForRecoveryEvent(")
+        self.assertIn("t.status!='acked' AND t.attempt_count<?", load)
+        self.assertIn("MIN(t.attempt_count)", load)
+        self.assertIn("attempt_count<?", mark)
+        self.assertIn("last_attempt_at +", mark)
+        self.assertIn("CASE attempt_count WHEN 1 THEN 1500", mark)
+        self.assertIn("targetCount > 0", record)
+        self.assertIn("remainingTargets == 0", record)
+        self.assertIn("last_recovery_at_ms", recover)
+        self.assertIn("MAX_AUTOMATIC_RETRY_ATTEMPTS", recover)
+        self.assertIn('private static final int DB_VERSION = 6;', source)
+        self.assertIn('ALTER TABLE lan_outbox_targets ADD COLUMN last_recovery_at_ms', source)
+
     def test_android_outbox_foreign_key_constraints_are_enabled_on_every_connection(self):
         source = Path(__file__).resolve().parents[1] / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         java = source.read_text(encoding="utf-8")

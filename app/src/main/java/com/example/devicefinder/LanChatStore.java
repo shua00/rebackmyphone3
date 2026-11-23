@@ -20,7 +20,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
     /** Bounded first-recipient collection window, started on the first actual discovery send. */
     public static final long FIRST_DISCOVERY_WINDOW_MS = 10_000L;
     private static final String DB_NAME = "lan_p2p_delivery.db";
-    private static final int DB_VERSION = 5;
+    private static final int DB_VERSION = 6;
     public static final int MAX_PENDING_MESSAGES = 50;
     /** Maximum automatic sends in one retry epoch, including the original send. */
     public static final int MAX_AUTOMATIC_RETRY_ATTEMPTS = 8;
@@ -114,6 +114,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 "last_ack_at INTEGER NOT NULL DEFAULT 0," +
                 "last_endpoint TEXT NOT NULL DEFAULT ''," +
                 "last_error TEXT NOT NULL DEFAULT ''," +
+                "last_recovery_at_ms INTEGER NOT NULL DEFAULT 0," +
                 "PRIMARY KEY(message_id, peer_id)," +
                 "FOREIGN KEY(message_id) REFERENCES lan_outbox(message_id) ON DELETE CASCADE)");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_lan_targets_status ON lan_outbox_targets(message_id, status)");
@@ -187,6 +188,9 @@ public final class LanChatStore extends SQLiteOpenHelper {
         if (oldVersion < 5) {
             db.execSQL("UPDATE lan_outbox SET state='retry_paused' " +
                     "WHERE retry_attempt_count>=8 AND state NOT IN ('delivered','expired','waiting_peers','discovery_pending')");
+        }
+        if (oldVersion < 6 && !hasColumn(db, "lan_outbox_targets", "last_recovery_at_ms")) {
+            db.execSQL("ALTER TABLE lan_outbox_targets ADD COLUMN last_recovery_at_ms INTEGER NOT NULL DEFAULT 0");
         }
     }
 
@@ -427,10 +431,19 @@ public final class LanChatStore extends SQLiteOpenHelper {
         Cursor c = null;
         try {
             c = getReadableDatabase().rawQuery(
-                    "SELECT message_id,sender_peer_id,body,created_at_ms,state,retry_attempt_count FROM lan_outbox " +
-                    "WHERE state NOT IN ('delivered','expired','waiting_peers','retry_paused') " +
-                    "AND retry_attempt_count<? ORDER BY retry_attempt_count,created_at_ms LIMIT ?",
+                    "SELECT o.message_id,o.sender_peer_id,o.body,o.created_at_ms,o.state," +
+                    "COALESCE((SELECT MIN(t.attempt_count) FROM lan_outbox_targets t " +
+                    "WHERE t.message_id=o.message_id AND t.status!='acked' " +
+                    "AND t.attempt_count>0 AND t.attempt_count<?),o.retry_attempt_count) " +
+                    "FROM lan_outbox o WHERE o.state NOT IN ('delivered','expired','waiting_peers','retry_paused') " +
+                    "AND ((EXISTS (SELECT 1 FROM lan_outbox_targets t WHERE t.message_id=o.message_id " +
+                    "AND t.status!='acked' AND t.attempt_count<?)) " +
+                    "OR (NOT EXISTS (SELECT 1 FROM lan_outbox_targets t WHERE t.message_id=o.message_id) " +
+                    "AND o.retry_attempt_count<?)) " +
+                    "ORDER BY 6,o.created_at_ms LIMIT ?",
                     new String[]{String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS),
+                            String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS),
+                            String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS),
                             String.valueOf(Math.max(1, Math.min(50, limit)))});
             while (c.moveToNext()) result.add(new PendingMessage(
                     c.getString(0), c.getString(1), c.getString(2), c.getLong(3),
@@ -450,22 +463,34 @@ public final class LanChatStore extends SQLiteOpenHelper {
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
-            android.database.sqlite.SQLiteStatement update = db.compileStatement(
-                    "UPDATE lan_outbox SET retry_attempt_count=0,last_event_retry_at_ms=?,state=CASE WHEN state='discovery_pending' THEN 'discovery_pending' ELSE 'pending' END " +
-                    "WHERE retry_attempt_count>=? " +
-                    "AND state NOT IN ('delivered','expired','waiting_peers') " +
-                    "AND last_event_retry_at_ms<=? " +
-                    "AND EXISTS (SELECT 1 FROM lan_outbox_targets t " +
-                    "WHERE t.message_id=lan_outbox.message_id AND t.status!='acked')");
-            int changed;
-            try {
-                update.bindLong(1, now);
-                update.bindLong(2, MAX_AUTOMATIC_RETRY_ATTEMPTS);
-                update.bindLong(3, now - RETRY_RECOVERY_EVENT_COOLDOWN_MS);
-                changed = update.executeUpdateDelete();
-            } finally { update.close(); }
+            int resetTargets = db.update("lan_outbox_targets",
+                    valuesForRecoveryReset(now),
+                    "status!='acked' AND attempt_count>=? AND last_recovery_at_ms<=? " +
+                    "AND EXISTS (SELECT 1 FROM lan_outbox o WHERE o.message_id=lan_outbox_targets.message_id " +
+                    "AND o.state NOT IN ('delivered','expired','waiting_peers'))",
+                    new String[]{String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS),
+                            String.valueOf(now - RETRY_RECOVERY_EVENT_COOLDOWN_MS)});
+            ContentValues reopen = new ContentValues();
+            reopen.put("state", "pending");
+            reopen.put("retry_attempt_count", 0);
+            reopen.put("last_event_retry_at_ms", now);
+            int reopenedTargets = db.update("lan_outbox", reopen,
+                    "state='retry_paused' AND EXISTS (SELECT 1 FROM lan_outbox_targets t " +
+                    "WHERE t.message_id=lan_outbox.message_id AND t.status!='acked' " +
+                    "AND t.attempt_count<?)",
+                    new String[]{String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS)});
+            ContentValues reopenDiscovery = new ContentValues();
+            reopenDiscovery.put("state", "pending");
+            reopenDiscovery.put("retry_attempt_count", 0);
+            reopenDiscovery.put("last_event_retry_at_ms", now);
+            int reopenedDiscovery = db.update("lan_outbox", reopenDiscovery,
+                    "retry_attempt_count>=? AND state NOT IN ('delivered','expired','waiting_peers','discovery_pending') " +
+                    "AND last_event_retry_at_ms<=? AND NOT EXISTS (SELECT 1 FROM lan_outbox_targets t " +
+                    "WHERE t.message_id=lan_outbox.message_id)",
+                    new String[]{String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS),
+                            String.valueOf(now - RETRY_RECOVERY_EVENT_COOLDOWN_MS)});
             db.setTransactionSuccessful();
-            return changed;
+            return resetTargets + reopenedTargets + reopenedDiscovery;
         } catch (Exception e) {
             return 0;
         } finally {
@@ -473,19 +498,47 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
-    /** Persist one bounded delivery attempt for this message before network I/O. */
+    private ContentValues valuesForRecoveryReset(long now) {
+        ContentValues values = new ContentValues();
+        values.put("attempt_count", 0);
+        values.put("last_attempt_at", 0L);
+        values.put("last_error", "");
+        values.put("last_recovery_at_ms", now);
+        return values;
+    }
+
+    /** Persist the discovery-only attempt before UDP; fixed recipients use independent target budgets. */
     public int recordOutboxAttempt(String messageId) {
         if (messageId == null || messageId.length() == 0) return -1;
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         Cursor c = null;
         try {
+            c = db.rawQuery("SELECT COUNT(*),SUM(CASE WHEN status!='acked' AND attempt_count<? " +
+                    "THEN 1 ELSE 0 END),MIN(CASE WHEN status!='acked' AND attempt_count<? " +
+                    "THEN attempt_count END) FROM lan_outbox_targets WHERE message_id=?",
+                    new String[]{String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS),
+                            String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS), messageId});
+            int targetCount = 0, remainingTargets = 0, minimumAttempts = 0;
+            try {
+                if (c.moveToFirst()) {
+                    targetCount = c.getInt(0);
+                    remainingTargets = c.isNull(1) ? 0 : c.getInt(1);
+                    minimumAttempts = c.isNull(2) ? 0 : c.getInt(2);
+                }
+            } finally { c.close(); c = null; }
+            if (targetCount > 0) {
+                if (remainingTargets == 0) return -1;
+                db.setTransactionSuccessful();
+                return minimumAttempts;
+            }
             long now = System.currentTimeMillis();
             android.database.sqlite.SQLiteStatement update = db.compileStatement(
                     "UPDATE lan_outbox SET retry_attempt_count=retry_attempt_count+1,last_retry_at_ms=?," +
                     "state=CASE WHEN retry_attempt_count+1>=? AND state!='discovery_pending' THEN 'retry_paused' ELSE state END " +
                     "WHERE message_id=? AND state NOT IN ('delivered','expired','waiting_peers','retry_paused') " +
-                    "AND retry_attempt_count<?");
+                    "AND retry_attempt_count<? AND NOT EXISTS (SELECT 1 FROM lan_outbox_targets t " +
+                    "WHERE t.message_id=lan_outbox.message_id)");
             int changed;
             try {
                 update.bindLong(1, now);
@@ -493,9 +546,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 update.bindString(3, messageId);
                 update.bindLong(4, MAX_AUTOMATIC_RETRY_ATTEMPTS);
                 changed = update.executeUpdateDelete();
-            } finally {
-                update.close();
-            }
+            } finally { update.close(); }
             if (changed != 1) return -1;
             c = db.rawQuery("SELECT retry_attempt_count FROM lan_outbox WHERE message_id=?",
                     new String[]{messageId});
@@ -537,28 +588,47 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
-    /** Record an attempt only while both the recipient and parent outbox remain sendable. */
+    /** Atomically enforce the per-recipient attempt cap and persisted exponential backoff. */
     public boolean markAttempt(String messageId, String peerId, String error) {
         if (messageId == null || peerId == null) return false;
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
         try {
-            SQLiteDatabase db = getWritableDatabase();
+            long now = System.currentTimeMillis();
             android.database.sqlite.SQLiteStatement update = db.compileStatement(
                     "UPDATE lan_outbox_targets SET status='sent',attempt_count=attempt_count+1," +
                     "last_attempt_at=?,last_error=? WHERE message_id=? AND peer_id=? AND status!='acked' " +
-                    "AND EXISTS (SELECT 1 FROM lan_outbox o " +
-                    "WHERE o.message_id=lan_outbox_targets.message_id " +
+                    "AND attempt_count<? AND (attempt_count=0 OR last_attempt_at + " +
+                    "CASE attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000 WHEN 3 THEN 10000 " +
+                    "WHEN 4 THEN 20000 WHEN 5 THEN 40000 ELSE 60000 END <= ?) " +
+                    "AND EXISTS (SELECT 1 FROM lan_outbox o WHERE o.message_id=lan_outbox_targets.message_id " +
                     "AND o.state NOT IN ('delivered','expired','waiting_peers'))");
+            int changed;
             try {
-                update.bindLong(1, System.currentTimeMillis());
+                update.bindLong(1, now);
                 update.bindString(2, error == null ? "" : error);
                 update.bindString(3, messageId);
                 update.bindString(4, peerId);
-                return update.executeUpdateDelete() == 1;
-            } finally {
-                update.close();
-            }
+                update.bindLong(5, MAX_AUTOMATIC_RETRY_ATTEMPTS);
+                update.bindLong(6, now);
+                changed = update.executeUpdateDelete();
+            } finally { update.close(); }
+            if (changed != 1) return false;
+            ContentValues pause = new ContentValues();
+            pause.put("state", "retry_paused");
+            db.update("lan_outbox", pause,
+                    "message_id=? AND state NOT IN ('delivered','expired','waiting_peers','discovery_pending') " +
+                    "AND EXISTS (SELECT 1 FROM lan_outbox_targets t WHERE t.message_id=lan_outbox.message_id " +
+                    "AND t.status!='acked') " +
+                    "AND NOT EXISTS (SELECT 1 FROM lan_outbox_targets t WHERE t.message_id=lan_outbox.message_id " +
+                    "AND t.status!='acked' AND t.attempt_count<?)",
+                    new String[]{messageId, String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS)});
+            db.setTransactionSuccessful();
+            return true;
         } catch (Exception e) {
             return false;
+        } finally {
+            db.endTransaction();
         }
     }
 
@@ -685,8 +755,11 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     && deadline > 0 && now < deadline;
             if (!discoveryOpen) {
                 ContentValues next = new ContentValues();
+                boolean hasRetryBudget = rowExists(db, "lan_outbox_targets",
+                        "message_id=? AND status!='acked' AND attempt_count<?",
+                        new String[]{messageId, String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS)});
                 next.put("state", total > 0 && total == acked ? "delivered"
-                        : ("retry_paused".equals(state) ? "retry_paused" : "pending"));
+                        : (hasRetryBudget ? "pending" : "retry_paused"));
                 if (db.update("lan_outbox", next, "message_id=?", new String[]{messageId}) != 1) return false;
             }
             db.setTransactionSuccessful();
@@ -874,9 +947,13 @@ public final class LanChatStore extends SQLiteOpenHelper {
             if (retry.moveToFirst()) retryAttempts = retry.getInt(0);
         } finally { retry.close(); }
         ContentValues next = new ContentValues();
+        boolean hasRetryBudget = rowExists(db, "lan_outbox_targets",
+                "message_id=? AND status!='acked' AND attempt_count<?",
+                new String[]{messageId, String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS)});
         String settledState = total == 0 ? "waiting_peers"
                 : (total == acked ? "delivered"
-                : (retryAttempts >= MAX_AUTOMATIC_RETRY_ATTEMPTS ? "retry_paused" : "pending"));
+                : (hasRetryBudget ? "pending"
+                : (retryAttempts >= MAX_AUTOMATIC_RETRY_ATTEMPTS ? "retry_paused" : "pending")));
         next.put("state", settledState);
         return db.update("lan_outbox", next, "message_id=?", new String[]{messageId}) == 1;
     }
