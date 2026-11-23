@@ -2570,6 +2570,15 @@ class LanP2PCoreTests(unittest.TestCase):
 
 
 
+    def test_python_and_android_share_the_same_first_discovery_window(self):
+        from lan_p2p_core import FIRST_DISCOVERY_WINDOW_MS
+        self.assertEqual(10_000, FIRST_DISCOVERY_WINDOW_MS)
+        repo_root = Path(__file__).resolve().parents[1]
+        store_source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn("FIRST_DISCOVERY_WINDOW_MS = 10_000L", store_source)
+
     def test_peer_discovery_before_first_dispatch_does_not_start_or_join_window(self):
         from lan_p2p_core import (
             persist_outgoing_message, add_discovery_targets_for_peer,
@@ -2603,7 +2612,7 @@ class LanP2PCoreTests(unittest.TestCase):
                 "JOIN lan_outbox_targets t ON t.message_id=o.message_id "
                 "WHERE o.message_id='m-pre-discovery'"
             ).fetchone()
-        self.assertEqual(1015000, deadline)
+        self.assertEqual(1020000, deadline)
         self.assertEqual("android-during", peer)
 
         repo_root = Path(__file__).resolve().parents[1]
@@ -2653,7 +2662,7 @@ class LanP2PCoreTests(unittest.TestCase):
                 "AND peer_id='android-during'"
             ).fetchone()[0]
         self.assertEqual("discovery_pending", state)
-        self.assertEqual(2015000, deadline)
+        self.assertEqual(2020000, deadline)
         self.assertEqual("acked", status)
 
         repo_root = Path(__file__).resolve().parents[1]
