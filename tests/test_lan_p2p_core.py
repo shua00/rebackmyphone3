@@ -2420,6 +2420,8 @@ class LanP2PCoreTests(unittest.TestCase):
                         method.index("selected.bindSocket(socket)"))
 
     def test_outbox_queries_still_return_empty_for_a_valid_empty_ledger(self):
+        from lan_p2p_core import ensure_outbox_retry_schema
+        self.assertTrue(ensure_outbox_retry_schema(self.db_path))
         conn = sqlite3.connect(self.db_path)
         try:
             conn.executescript("""
@@ -2512,7 +2514,8 @@ class LanP2PCoreTests(unittest.TestCase):
             self.assertIn("_V2_RECOVERY_RETRY_PEERS = set()", source, filename)
             self.assertIn("_V2_RECOVERY_INFLIGHT = set()", source, filename)
             self.assertIn("def _retry_deferred_v2_peer_recoveries():", source, filename)
-            self.assertIn("time.sleep(10)", source, filename)
+            self.assertIn("time.sleep(1)", source, filename)
+            self.assertIn("list_due_outgoing_peers(", source, filename)
             self.assertIn("list_known_peers(", source, filename)
             self.assertIn("def _start_v2_recovery_retry_worker():", source, filename)
             self.assertIn("if _V2_RECOVERY_WORKER_STARTED:", source, filename)

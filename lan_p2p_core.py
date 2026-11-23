@@ -304,8 +304,18 @@ def ensure_outbox_retry_schema(db_path):
             last_recovery_at_ms INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(message_id, peer_id))""")
         columns = {row[1] for row in conn.execute("PRAGMA table_info(lan_outbox_targets)")}
-        if "last_recovery_at_ms" not in columns:
-            conn.execute("ALTER TABLE lan_outbox_targets ADD COLUMN last_recovery_at_ms INTEGER NOT NULL DEFAULT 0")
+        migrations = {
+            "status": "TEXT NOT NULL DEFAULT 'pending'",
+            "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+            "last_attempt_at": "INTEGER NOT NULL DEFAULT 0",
+            "last_ack_at": "INTEGER NOT NULL DEFAULT 0",
+            "last_endpoint": "TEXT NOT NULL DEFAULT ''",
+            "last_error": "TEXT NOT NULL DEFAULT ''",
+            "last_recovery_at_ms": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for column, declaration in migrations.items():
+            if column not in columns:
+                conn.execute("ALTER TABLE lan_outbox_targets ADD COLUMN " + column + " " + declaration)
         conn.commit()
         return True
     except Exception as exc:
@@ -584,29 +594,6 @@ def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_po
         if conn is not None:
             _safe_close(conn)
 
-
-def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_port):
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path, timeout=10)
-        conn.execute("PRAGMA busy_timeout=10000")
-        cur = conn.execute("""UPDATE lan_outbox_targets SET status='sent',
-            attempt_count=attempt_count+1,last_attempt_at=?,last_endpoint=?,last_error=''
-            WHERE message_id=? AND peer_id=? AND status!='acked'
-              AND EXISTS (SELECT 1 FROM lan_outbox o
-                          WHERE o.message_id=lan_outbox_targets.message_id
-                            AND o.state NOT IN ('delivered','expired','waiting_peers'))""",
-            (int(time.time() * 1000), str(endpoint_ip) + ":" + str(endpoint_port),
-             message_id, peer_id))
-        conn.commit()
-        return cur.rowcount > 0
-    except Exception as exc:
-        if conn is not None:
-            _safe_rollback(conn)
-        raise LanP2PStorageError("failed to persist LAN outbox send attempt") from exc
-    finally:
-        if conn is not None:
-            _safe_close(conn)
 
 
 def list_known_peers(db_path, receiver_scope, limit=100):
