@@ -3117,5 +3117,20 @@ class AndroidLanSchedulingAndAckProgressTests(unittest.TestCase):
         self.assertIn("status='acked'", progress)
         self.assertIn("new AckProgress(total, acked)", progress)
 
+
+class AndroidLanAckDiscoveryRaceTests(unittest.TestCase):
+    def test_unverified_discovery_ack_gets_one_bounded_route_recheck_without_bypassing_identity(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        helper = extract_java_method(source, "private void processAuthenticatedLanChatAck(")
+        self.assertIn("allowDiscoveryGrace && discoveryAck", helper)
+        self.assertIn('}, 200L)', helper)
+        self.assertIn("pendingChatAckRouteRechecks.add(recheckKey)", helper)
+        self.assertIn("processAuthenticatedLanChatAck(", helper)
+        self.assertIn("if (!routeMatches && !persistedEndpointMatch)", helper)
+        self.assertIn("reason=unverified_endpoint", helper)
+        self.assertIn("store.acknowledge(messageId, senderId)", helper)
+        self.assertIn("pendingChatAckRouteRechecks", source)
+
 if __name__ == "__main__":
     unittest.main()
