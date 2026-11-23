@@ -4259,7 +4259,11 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.log(this, "CHAT", "LAN 自动补发预算已耗尽，SQLite 消息及未 ACK 目标继续保留，等待网络/peer 恢复事件: "
                         + messageId + " attempts=" + attemptNumber);
             }
-            requestLanChatRetryPlan();
+            // The ACK observation window owns retry planning. Scheduling here would
+            // arm a stale 1.5s wake before the 250ms fast-retry burst has settled.
+            if (!lanChatAckGraceInFlight.contains(messageId)) {
+                requestLanChatRetryPlan();
+            }
         }
     }
 
@@ -4828,6 +4832,15 @@ public class TrackingService extends Service implements LocationListener {
                             + "保留消息并等待逐设备目标建立: " + messageId);
                 } else {
                     FileLogger.log(this, "CHAT", "⚠️ P2P 广播暂未收到 ACK，消息保留待确认队列: " + messageId);
+                    // Empty-recipient first discovery has no per-peer attempt row. Re-send
+                    // the same durable message at 250ms intervals for a short initial burst,
+                    // then return to the normal persisted exponential retry schedule.
+                    int discoveryAttempts = store == null ? -1
+                            : store.getOutboxRetryAttemptCount(messageId);
+                    if (hadUdpDispatchAttempt && discoveryAttempts > 0 && discoveryAttempts < 3) {
+                        lastPeerDiscoveryAt = 0L;
+                        requestRouteRefresh = true;
+                    }
                 }
             } else if (persistedAllTargetsAcked) {
                 removePendingLanChat(messageId);
@@ -4863,6 +4876,10 @@ public class TrackingService extends Service implements LocationListener {
         if (requestRouteRefresh && !serviceDestroyed) {
             lanChatRouteRefreshPending.set(true);
             retryPendingLanChatMessages(false);
+        } else if (!serviceDestroyed) {
+            // Arm the durable backoff only after the short ACK/fast-retry decision has
+            // completed; this prevents an early timer from bypassing the intended 10s tier.
+            requestLanChatRetryPlan();
         }
     }
 

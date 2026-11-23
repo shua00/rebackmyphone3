@@ -832,7 +832,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     "UPDATE lan_outbox_targets SET status='sent',attempt_count=attempt_count+1," +
                     "last_attempt_endpoint=?,last_attempt_at=?,last_error=? WHERE message_id=? AND peer_id=? AND status!='acked' " +
                     "AND attempt_count<? AND (attempt_count=0 OR last_attempt_endpoint<>? " +
-                    "OR last_attempt_at + CASE attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000 " +
+                    "OR last_attempt_at + CASE attempt_count WHEN 1 THEN 250 WHEN 2 THEN 250 " +
                     "WHEN 3 THEN 10000 WHEN 4 THEN 20000 WHEN 5 THEN 40000 ELSE 60000 END <= ?) " +
                     "AND EXISTS (SELECT 1 FROM lan_outbox o WHERE o.message_id=lan_outbox_targets.message_id " +
                     "AND o.state NOT IN ('delivered','expired','waiting_peers'))");
@@ -864,6 +864,22 @@ public final class LanChatStore extends SQLiteOpenHelper {
             return false;
         } finally {
             db.endTransaction();
+        }
+    }
+
+    /** Read the number of discovery-broadcast dispatch epochs already charged to this message. */
+    public int getOutboxRetryAttemptCount(String messageId) {
+        if (messageId == null || messageId.isEmpty()) return -1;
+        Cursor c = null;
+        try {
+            c = getReadableDatabase().rawQuery(
+                    "SELECT retry_attempt_count FROM lan_outbox WHERE message_id=?",
+                    new String[]{messageId});
+            return c.moveToFirst() ? c.getInt(0) : -1;
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to read LAN outbox retry attempt count", e);
+        } finally {
+            if (c != null) c.close();
         }
     }
 

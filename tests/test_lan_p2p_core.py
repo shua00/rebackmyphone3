@@ -3479,6 +3479,38 @@ class AndroidLanImmediateSendIsolationTests(unittest.TestCase):
 
 
 
+
+class AndroidLanFastRetryBurstTests(unittest.TestCase):
+    def test_fixed_target_attempts_allow_two_short_retries_then_backoff(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        mark = extract_java_method(store, "public boolean markAttempt(")
+        self.assertIn("WHEN 1 THEN 250 WHEN 2 THEN 250", mark)
+        self.assertIn("WHEN 3 THEN 10000 WHEN 4 THEN 20000", mark)
+        self.assertIn("attempt_count=attempt_count+1", mark)
+
+    def test_empty_discovery_messages_get_three_fast_dispatch_epochs(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        service = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        getter = extract_java_method(store, "public int getOutboxRetryAttemptCount(")
+        self.assertIn("SELECT retry_attempt_count FROM lan_outbox", getter)
+        complete = extract_java_method(service, "private void completeLanChatAckWindow(")
+        self.assertIn("discoveryAttempts > 0 && discoveryAttempts < 3", complete)
+        self.assertIn("requestRouteRefresh = true", complete)
+        self.assertIn("Math.min(5_000L, sendRetryDelayMs)", extract_java_method(service, "private void scheduleLanChatRetryFromOutbox("))
+
+    def test_retry_timer_is_armed_after_ack_grace_not_before_fast_retry(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        service = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        transmit = extract_java_method(service, "private void transmitLocalUdpMessage(")
+        self.assertIn("if (!lanChatAckGraceInFlight.contains(messageId))", transmit)
+        self.assertIn("requestLanChatRetryPlan()", transmit)
+        complete = extract_java_method(service, "private void completeLanChatAckWindow(")
+        self.assertIn("requestLanChatRetryPlan();", complete)
+        self.assertIn("short ACK/fast-retry decision has completed", complete)
+
+
 class AndroidLanProbeIsolationTests(unittest.TestCase):
     def test_route_challenges_and_discovery_run_outside_fifo_transmit_lock(self):
         repo_root = Path(__file__).resolve().parents[1]
