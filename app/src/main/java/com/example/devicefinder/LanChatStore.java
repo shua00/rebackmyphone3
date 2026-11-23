@@ -253,7 +253,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
             // A previously frozen or expired message must never acquire new recipients.
             // Treat this as an idempotent no-op rather than a retryable storage failure.
             if (!"discovery_pending".equals(messageState)
-                    || (discoveryDeadline > 0 && now > discoveryDeadline)) {
+                    || (discoveryDeadline > 0 && now >= discoveryDeadline)) {
                 db.setTransactionSuccessful();
                 return true;
             }
