@@ -2666,5 +2666,21 @@ class LanP2PCoreTests(unittest.TestCase):
 
 
 
+    def test_android_inbox_presentation_read_failure_is_not_treated_as_undisplayed(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store_source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        method = extract_java_method(
+            store_source, "public boolean isIncomingDisplayed("
+        )
+        self.assertIn("return c.moveToFirst() && c.getInt(0) != 0;", method)
+        self.assertIn(
+            'throw new IllegalStateException("Failed to read LAN inbox presentation state", e);',
+            method,
+        )
+        self.assertNotIn("catch (Exception e) {\\n            return false;", method)
+
+
 if __name__ == "__main__":
     unittest.main()
