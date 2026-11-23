@@ -984,11 +984,12 @@ def load_active_pending_targets(db_path, sender_scope, message_id, limit=500):
             JOIN lan_outbox_targets t ON t.message_id=o.message_id
             JOIN lan_peers p ON p.receiver_scope=? AND p.peer_id=t.peer_id
             WHERE o.sender_scope=? AND o.message_id=?
-              AND o.state NOT IN ('delivered','expired')
-              AND t.status!='acked' AND p.status='active' AND p.lease_expires_at>?
+              AND o.state NOT IN ('delivered','expired','waiting_peers')
+              AND t.status!='acked' AND t.attempt_count<?
+              AND p.status='active' AND p.lease_expires_at>?
             ORDER BY t.peer_id LIMIT ?""",
-            (sender_scope, sender_scope, message_id, time.time(),
-             max(1, min(1000, int(limit))))).fetchall()
+            (sender_scope, sender_scope, message_id, MAX_OUTBOX_TARGET_ATTEMPTS,
+             time.time(), max(1, min(1000, int(limit))))).fetchall()
         return [{"peer_id": row[0], "endpoint_ip": row[1],
                  "endpoint_port": row[2]} for row in rows]
     except Exception as exc:

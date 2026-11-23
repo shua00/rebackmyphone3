@@ -338,3 +338,5 @@ IP 地址永远不能作为设备身份。网络变化时应使旧端点路由�
 - Outbox 重试 worker 不再因服务启动时 SQLite 暂时锁定、schema 迁移失败而永久不启动。worker 始终只启动一个；schema 未就绪时按低频间隔重试迁移，成功后再进入 ACK 超时扫描。
 - 数据库迁移失败期间不伪装为空队列、不执行依赖新列的重试扫描；现有 UDP listener 生命周期不被迁移线程阻塞。
 - 新增三服务静态回归检查，确保 schema 初始化失败不会提前 return 并丢失唯一恢复 worker。
+
+- 初次快速发送查询也排除 waiting_peers 和已耗尽目标，避免对不可发送行重复做无效 SQLite 更新；实际网络 I/O 仍以原子 mark attempt 结果为准。

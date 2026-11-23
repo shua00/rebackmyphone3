@@ -2819,6 +2819,34 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertEqual(1, prepare_outgoing_peer_recovery(
             self.db_path, "server2", "android-a", now_ms=160_001))
 
+    def test_active_outbox_target_query_excludes_terminal_and_exhausted_targets(self):
+        from lan_p2p_core import (
+            MAX_OUTBOX_TARGET_ATTEMPTS, persist_outgoing_message,
+            record_peer, load_active_pending_targets,
+        )
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-active-filter", "hello", ["android-a"]))
+        record_peer(self.db_path, "server2", "android-a", "android", "android-main",
+                    "192.168.1.10", 8888, "active")
+        self.assertEqual(["android-a"], [
+            row["peer_id"] for row in load_active_pending_targets(
+                self.db_path, "server2", "m-active-filter")])
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE lan_outbox_targets SET attempt_count=? "
+                         "WHERE message_id='m-active-filter' AND peer_id='android-a'",
+                         (MAX_OUTBOX_TARGET_ATTEMPTS,))
+            conn.commit()
+        self.assertEqual([], load_active_pending_targets(
+            self.db_path, "server2", "m-active-filter"))
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE lan_outbox_targets SET attempt_count=0 "
+                         "WHERE message_id='m-active-filter' AND peer_id='android-a'")
+            conn.execute("UPDATE lan_outbox SET state='waiting_peers' "
+                         "WHERE message_id='m-active-filter'")
+            conn.commit()
+        self.assertEqual([], load_active_pending_targets(
+            self.db_path, "server2", "m-active-filter"))
+
     def test_python_due_retry_scan_is_per_target_and_excludes_acked_or_exhausted(self):
         from lan_p2p_core import (
             MAX_OUTBOX_TARGET_ATTEMPTS, persist_outgoing_message, record_peer,
