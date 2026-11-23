@@ -347,7 +347,7 @@ def prepare_outgoing_peer_recovery(db_path, sender_scope, peer_id, now_ms=None):
                 last_attempt_at=CASE WHEN attempt_count>=? THEN 0 ELSE last_attempt_at END,
                 last_error=CASE WHEN attempt_count>=? THEN '' ELSE last_error END,
                 last_recovery_at_ms=?
-            WHERE peer_id=? AND last_recovery_at_ms<=?
+            WHERE peer_id=? AND status!='acked' AND last_recovery_at_ms<=?
               AND EXISTS (SELECT 1 FROM lan_outbox o
                           WHERE o.message_id=lan_outbox_targets.message_id
                             AND o.sender_scope=?

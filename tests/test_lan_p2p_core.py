@@ -2818,6 +2818,33 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertEqual(1, prepare_outgoing_peer_recovery(
             self.db_path, "server2", "android-a", now_ms=160_001))
 
+    def test_python_due_retry_scan_is_per_target_and_excludes_acked_or_exhausted(self):
+        from lan_p2p_core import (
+            MAX_OUTBOX_TARGET_ATTEMPTS, persist_outgoing_message, record_peer,
+            acknowledge_outgoing_message, mark_outgoing_attempt, list_due_outgoing_peers,
+        )
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-target-budget", "hello",
+            ["android-a", "android-b"]))
+        for peer, ip in (("android-a", "192.168.1.10"), ("android-b", "192.168.1.11")):
+            record_peer(self.db_path, "server2", peer, "android", "android-main",
+                        ip, 8888, "active")
+        self.assertTrue(acknowledge_outgoing_message(
+            self.db_path, "server2", "m-target-budget", "android-a"))
+        self.assertEqual(["android-b"], list_due_outgoing_peers(
+            self.db_path, "server2", now_ms=int(time.time() * 1000)))
+        for _ in range(MAX_OUTBOX_TARGET_ATTEMPTS):
+            self.assertTrue(mark_outgoing_attempt(
+                self.db_path, "m-target-budget", "android-b", "192.168.1.11", 8888))
+        self.assertFalse(mark_outgoing_attempt(
+            self.db_path, "m-target-budget", "android-b", "192.168.1.11", 8888))
+        self.assertEqual([], list_due_outgoing_peers(
+            self.db_path, "server2", now_ms=int(time.time() * 1000)))
+        self.assertTrue(acknowledge_outgoing_message(
+            self.db_path, "server2", "m-target-budget", "android-b"))
+        self.assertEqual([], list_due_outgoing_peers(
+            self.db_path, "server2", now_ms=int(time.time() * 1000)))
+
     def test_python_retry_schema_migrates_existing_target_ledger(self):
         from lan_p2p_core import ensure_outbox_retry_schema
         with sqlite3.connect(self.db_path) as conn:
