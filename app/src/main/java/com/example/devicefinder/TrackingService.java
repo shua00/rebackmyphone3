@@ -286,7 +286,9 @@ public class TrackingService extends Service implements LocationListener {
             java.util.Collections.newSetFromMap(
                     new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
     // Preserve FIFO send order while discovery/ACK state is shared across messages.
-    private final Object lanChatTransmitLock = new Object();
+    // Fair admission prevents a long retry batch from repeatedly barging ahead of fresh user sends.
+    private final java.util.concurrent.locks.ReentrantLock lanChatTransmitLock =
+            new java.util.concurrent.locks.ReentrantLock(true);
     // 仅缓存经本机 challenge/response 验证的 LAN peer；网络变化时必须清空。
     private final java.util.concurrent.ConcurrentHashMap<String, java.net.InetSocketAddress> verifiedChatPeers =
             new java.util.concurrent.ConcurrentHashMap<>();
@@ -4077,13 +4079,16 @@ public class TrackingService extends Service implements LocationListener {
             attemptRecorded = true;
             // Preserve FIFO dispatch order; ACK retries are bounded and persisted in the outbox.
             long lockRequestedAt = android.os.SystemClock.elapsedRealtime();
-            synchronized (lanChatTransmitLock) {
+            lanChatTransmitLock.lock();
+            try {
                 long lockWaitMs = android.os.SystemClock.elapsedRealtime() - lockRequestedAt;
                 if (lockWaitMs >= 150L) {
                     FileLogger.log(this, "CHAT", "P2P 发送串行锁等待 message="
                             + messageId + " waitMs=" + lockWaitMs);
                 }
                 if (!serviceDestroyed) transmitLocalUdpMessageInternal(message, messageId);
+            } finally {
+                lanChatTransmitLock.unlock();
             }
         } catch (Exception e) {
             FileLogger.log(this, "CHAT", "⚠️ LAN 对讲发送/恢复异常: " + e.getClass().getSimpleName());
