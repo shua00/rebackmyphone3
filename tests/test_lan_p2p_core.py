@@ -1833,7 +1833,7 @@ class LanP2PCoreTests(unittest.TestCase):
         start = source.index("private boolean handleAuthenticatedLanPacket(")
         end = source.index("private void processAuthenticatedLanChatAck(", start)
         handler = source[start:end]
-        self.assertEqual(handler.count("lanChatControlExecutor.execute(() -> {"), 1)
+        self.assertEqual(handler.count("lanChatControlExecutor.execute(() -> {"), 2)
         self.assertEqual(handler.count("lanChatIoExecutor.execute(() -> {"), 1)
         self.assertIn("lanChatControlExecutor.execute(() -> processAuthenticatedLanChatAck(", handler)
         self.assertNotIn("reportExecutor.execute(", handler)
