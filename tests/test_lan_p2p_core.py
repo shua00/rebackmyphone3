@@ -2106,6 +2106,21 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertNotIn("private final Object rescueLock = new Object();", source)
 
 
+    def test_android_target_attempt_cannot_mutate_terminal_outbox_messages(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store_source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        method = extract_java_method(store_source, "public boolean markAttempt(")
+        self.assertIn("attempt_count=attempt_count+1", method)
+        self.assertIn("status!='acked'", method)
+        self.assertIn("EXISTS (SELECT 1 FROM lan_outbox o", method)
+        self.assertIn("o.message_id=lan_outbox_targets.message_id", method)
+        self.assertIn("o.state NOT IN ('delivered','expired','waiting_peers')", method)
+        self.assertIn("return update.executeUpdateDelete() == 1;", method)
+        self.assertNotIn("SELECT status FROM lan_outbox_targets", method)
+
+
     def test_android_exhausted_retry_epoch_has_persisted_recovery_cooldown(self):
         repo_root = Path(__file__).resolve().parents[1]
         store = (
