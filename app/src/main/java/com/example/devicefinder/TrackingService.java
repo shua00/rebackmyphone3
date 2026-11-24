@@ -4603,6 +4603,7 @@ public class TrackingService extends Service implements LocationListener {
             }
             try {
                 lanChatSendExecutor.execute(() -> {
+                    boolean finalizationFailed = false;
                     try {
                         List<String> finalizedIds =
                                 store.finalizeExpiredDiscoveryWindowIds(System.currentTimeMillis());
@@ -4616,19 +4617,26 @@ public class TrackingService extends Service implements LocationListener {
                             }
                         }
                     } catch (Exception storageFailure) {
+                        finalizationFailed = true;
                         FileLogger.log(this, "CHAT", "LAN discovery finalization deferred: "
                                 + storageFailure.getClass().getSimpleName());
                     } finally {
                         lanChatDiscoveryFinalizerScheduled.set(false);
                         if (!serviceDestroyed) {
-                            try {
-                                long nextDeadline = store.getNextDiscoveryDeadlineMs();
-                                if (nextDeadline > 0L) {
-                                    scheduleLanChatDiscoveryFinalizer(store,
-                                            Math.max(0L, nextDeadline - System.currentTimeMillis() + 100L));
-                                }
-                            } catch (Exception storageFailure) {
+                            if (finalizationFailed) {
+                                // The deadline is already elapsed. Re-arming from it would
+                                // schedule an immediate DB retry loop while SQLite is failing.
                                 scheduleLanChatDiscoveryFinalizer(store, 500L);
+                            } else {
+                                try {
+                                    long nextDeadline = store.getNextDiscoveryDeadlineMs();
+                                    if (nextDeadline > 0L) {
+                                        scheduleLanChatDiscoveryFinalizer(store,
+                                                Math.max(0L, nextDeadline - System.currentTimeMillis() + 100L));
+                                    }
+                                } catch (Exception storageFailure) {
+                                    scheduleLanChatDiscoveryFinalizer(store, 500L);
+                                }
                             }
                         }
                     }
