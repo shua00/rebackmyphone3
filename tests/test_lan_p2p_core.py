@@ -75,6 +75,30 @@ def extract_java_method(source, signature):
 
 class LanP2PCoreTests(unittest.TestCase):
 
+    def test_outbox_retry_wake_and_batch_policy_is_centralized(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        policy = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatRetryPolicy.java"
+        ).read_text(encoding="utf-8")
+        service = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        scheduler = extract_java_method(service, "private void scheduleLanChatRetryFromOutbox(")
+        retry = extract_java_method(service, "private void retryPendingLanChatMessages(boolean recoveryEvent)")
+        self.assertIn("OUTBOX_RETRY_FIRST_DELAY_MS = 1_500L", policy)
+        self.assertIn("OUTBOX_RETRY_SECOND_DELAY_MS = 4_000L", policy)
+        self.assertIn("OUTBOX_RETRY_BACKOFF_BASE_MS = 10_000L", policy)
+        self.assertIn("OUTBOX_RETRY_MAX_DELAY_MS = 60_000L", policy)
+        self.assertIn("UNATTEMPTED_ROUTE_PROBE_MAX_DELAY_MS = 5_000L", policy)
+        self.assertIn("outboxRetryWakeDelayMs(minimumAttempts, hasUnattemptedRouteTargets)", scheduler)
+        self.assertIn("RETRY_BATCH_SIZE = 3", policy)
+        self.assertIn("MAX_RETRY_BATCHES_PER_WAKE = 3", policy)
+        self.assertIn("LanChatRetryPolicy.RETRY_BATCH_SIZE", retry)
+        self.assertIn("LanChatRetryPolicy.MAX_RETRY_BATCHES_PER_WAKE", retry)
+        self.assertNotIn("minimumAttempts <= 1 ? 1_500L", scheduler)
+
+
+
     def test_all_targets_ack_reconciliation_is_one_sqlite_transaction(self):
         repo_root = Path(__file__).resolve().parents[1]
         store = (
