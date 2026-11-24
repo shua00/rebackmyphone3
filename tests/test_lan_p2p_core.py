@@ -2276,9 +2276,9 @@ class LanP2PCoreTests(unittest.TestCase):
         service = (
             repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
         ).read_text(encoding="utf-8")
-        start = service.index("private void transmitLocalUdpMessageInternal(")
-        end = service.index("private void sendLanUdpPacket(", start)
-        send = service[start:end]
+        send = extract_java_method(
+            service, "private void transmitLocalUdpMessageInternal("
+        )
         self.assertIn("if (pendingTargetIds.isEmpty()) {", send)
         self.assertIn("store.beginOrReadDiscoveryWindow(messageId)", send)
         self.assertIn("discoveryWindowState == LanChatStore.DISCOVERY_WINDOW_WAITING", send)
