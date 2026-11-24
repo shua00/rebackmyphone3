@@ -4439,6 +4439,13 @@ class AndroidLanStoreLifecycleTests(unittest.TestCase):
         self.assertIn("lanChatPeerExecutor.shutdown()", destroy)
         self.assertIn("lanChatProbeExecutor.shutdown()", destroy)
         self.assertIn("lanChatIoExecutor.shutdown()", destroy)
+        self.assertIn("closeLanChatIngressSocket()", destroy)
+        self.assertLess(destroy.index("closeLanChatIngressSocket()"),
+                        destroy.index("lanChatPersistExecutor.shutdown()"))
+        ingress_close = extract_java_method(source, "private void closeLanChatIngressSocket()")
+        self.assertIn("synchronized (rescueLock)", ingress_close)
+        self.assertIn("rescueSocketRef = null", ingress_close)
+        self.assertIn("socketToClose.close()", ingress_close)
         self.assertIn("LanChatStore storeToClose = lanChatStore", destroy)
         self.assertIn("closeLanChatStoreAfterExecutors(storeToClose)", destroy)
         self.assertNotIn("lanChatStore.closeStore()", destroy)

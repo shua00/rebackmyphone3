@@ -7037,6 +7037,28 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     /**
+     * Close the UDP producer before shutting down LAN executors. The listener publishes
+     * its socket under rescueLock only after checking serviceDestroyed, so this lock
+     * also closes the bind-vs-destroy publication race.
+     */
+    private void closeLanChatIngressSocket() {
+        DatagramSocket socketToClose;
+        synchronized (rescueLock) {
+            socketToClose = rescueSocketRef;
+            rescueSocketRef = null;
+            lanChatBoundWifiNetwork = null;
+        }
+        if (socketToClose != null) {
+            try {
+                socketToClose.close();
+            } catch (Exception e) {
+                FileLogger.log(this, "SERVICE", "⚠️ close rescueSocket 失败: "
+                        + e.getClass().getSimpleName());
+            }
+        }
+    }
+
+    /**
      * SQLite must outlive every in-flight LAN task. Executor shutdown is asynchronous,
      * so close the shared helper only after all producers/consumers have drained.
      */
@@ -7087,6 +7109,10 @@ public class TrackingService extends Service implements LocationListener {
         logLifecycle("SERVICE_DESTROY", "isForegroundStarted=" + isForegroundStarted);
         FileLogger.log(this, "SERVICE", "🛑 服务销毁");
         serviceDestroyed = true;
+        // Stop UDP ingress before shutting down its consumers. A packet already being
+        // handled may still be rejected during teardown; its sender will retry because
+        // no ACK can be sent on the closed socket. Accepted IO tasks are drained below.
+        closeLanChatIngressSocket();
         // These peer-scoped events are process-local permissions, not durable message state.
         // The Outbox survives; a recreated service establishes fresh authenticated routes.
         lanChatPeerRecoveryEvents.clear();
@@ -7120,10 +7146,6 @@ public class TrackingService extends Service implements LocationListener {
         // tasks still need this handle while the executor queues are draining.
         LanChatStore storeToClose = lanChatStore;
         closeLanChatStoreAfterExecutors(storeToClose);
-        if (rescueSocketRef != null) {
-            try { rescueSocketRef.close(); } catch (Exception e) { FileLogger.log(this, "SERVICE", "⚠️ close rescueSocket 失败: " + e.getMessage()); }
-            rescueSocketRef = null;
-        }
         if (locationManager != null) {
             try { locationManager.removeUpdates(this); } catch (Exception e) { FileLogger.log(this, "SERVICE", "⚠️ removeUpdates 失败: " + e.getMessage()); }
         }
