@@ -4678,5 +4678,38 @@ class LanChatAdmissionFeedbackTests(unittest.TestCase):
         self.assertNotIn("ChatActivity.java", source)
 
 
+class LanP2PCanonicalNumberParityTests(unittest.TestCase):
+    def test_python_encoder_rejects_fractional_and_out_of_range_numbers(self):
+        from lan_p2p_core import encode_packet
+        base = {"type": "chat.message", "sender_peer_id": "android-a",
+                "message_id": "m-1", "target_peer_id": "android-b",
+                "created_at_ms": 123, "body": "hello"}
+        for invalid in (1.5, float("nan"), float("inf"), 1 << 63, -(1 << 63) - 1):
+            packet = dict(base)
+            packet["created_at_ms"] = invalid
+            with self.subTest(value=invalid), self.assertRaises(ValueError):
+                encode_packet(packet, "test-secret")
+
+    def test_python_decoder_rejects_fractional_version_before_hmac(self):
+        import json
+        from lan_p2p_core import decode_packet
+        packet = {"v": 2.0, "type": "chat.message",
+                  "sender_peer_id": "android-a", "message_id": "m-1",
+                  "target_peer_id": "android-b", "created_at_ms": 123,
+                  "body": "hello", "auth": "invalid"}
+        with self.assertRaises(ValueError):
+            decode_packet(json.dumps(packet, separators=(",", ":")).encode("utf-8"),
+                          "test-secret")
+
+    def test_android_codec_enforces_the_same_integer_only_canonical_boundary(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        protocol = (repo_root / "app/src/main/java/com/example/devicefinder/LanP2pProtocol.java").read_text(encoding="utf-8")
+        self.assertGreaterEqual(protocol.count("validateCanonicalNumbers("), 3)
+        self.assertIn("value instanceof Integer || value instanceof Long", protocol)
+        self.assertIn("value instanceof Byte || value instanceof Short", protocol)
+        self.assertIn("version instanceof Integer || version instanceof Long", protocol)
+        self.assertIn("Non-integer JSON numbers are unsupported", protocol)
+
+
 if __name__ == "__main__":
     unittest.main()
