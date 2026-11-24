@@ -1462,7 +1462,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("item.messageId", recovery)
         self.assertIn("item.body", recovery)
         self.assertIn("store.allTargetsAcked(id)", recovery)
-        self.assertIn("removePendingLanChat(id)", recovery)
+        self.assertIn("scheduleLanChatMirrorCleanup(id)", recovery)
+        self.assertNotIn("removePendingLanChat(id)", recovery)
 
     def test_android_sqlite_pending_read_fails_closed_on_query_error(self):
         repo_root = Path(__file__).resolve().parents[1]
