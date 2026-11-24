@@ -5112,10 +5112,9 @@ public class TrackingService extends Service implements LocationListener {
                             final String successfulEndpoint = peer.getAddress().getHostAddress() + ":" + peer.getPort();
                             final LanChatStore endpointStore = store;
                             try {
-                                // markAttempt() already durably recorded this exact endpoint before
-                                // UDP dispatch, so ACK validation is safe immediately. Updating the
-                                // reusable last-successful endpoint is secondary bookkeeping and must
-                                // not hold the FIFO sender lock after the packet has left.
+                                // markAttempt() durably records only the attempted endpoint before
+                                // UDP dispatch. ACK validation still requires this post-send success
+                                // record (or a live verified route); keep the write off the FIFO lock.
                                 lanChatPeerExecutor.execute(() -> {
                                     long endpointPersistStartedAt = android.os.SystemClock.elapsedRealtime();
                                     boolean endpointPersisted = endpointStore != null
