@@ -1500,7 +1500,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("lanChatRetryInFlight.set(false);", block)
         self.assertIn('scheduleLanChatTask("outbox-retry-admission-fallback"', block)
         self.assertIn("() -> retryPendingLanChatMessages(recoveryEvent)", block)
-        self.assertIn("}, 500L);", block)
+        self.assertIn("retryPendingLanChatMessages(recoveryEvent), 500L);", block)
         self.assertIn("if (!serviceDestroyed)", block)
         self.assertNotIn("retryPendingLanChatMessages(true)", block)
 
