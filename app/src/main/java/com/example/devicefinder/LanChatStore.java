@@ -607,6 +607,15 @@ public final class LanChatStore extends SQLiteOpenHelper {
     }
 
     public int finalizeExpiredDiscoveryWindows(long now) {
+        return finalizeExpiredDiscoveryWindowIds(now).size();
+    }
+
+    /**
+     * Atomically settle all elapsed discovery windows and return only the message IDs
+     * transitioned by this transaction, allowing callers to reconcile compatibility
+     * mirrors without rescanning or waking the entire Outbox.
+     */
+    public List<String> finalizeExpiredDiscoveryWindowIds(long now) {
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         Cursor c = null;
@@ -619,12 +628,12 @@ public final class LanChatStore extends SQLiteOpenHelper {
             while (c.moveToNext()) expired.add(c.getString(0));
             c.close();
             c = null;
-            int finalized = 0;
+            ArrayList<String> finalized = new ArrayList<>();
             for (String messageId : expired) {
                 if (!finalizeDiscoveryMessage(db, messageId)) {
                     throw new IllegalStateException("Unable to settle expired discovery row");
                 }
-                finalized++;
+                finalized.add(messageId);
             }
             db.setTransactionSuccessful();
             return finalized;

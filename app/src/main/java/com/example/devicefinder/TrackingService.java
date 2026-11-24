@@ -4604,11 +4604,16 @@ public class TrackingService extends Service implements LocationListener {
             try {
                 lanChatSendExecutor.execute(() -> {
                     try {
-                        int finalized = store.finalizeExpiredDiscoveryWindows(System.currentTimeMillis());
-                        if (finalized > 0) {
-                            // Reconcile the legacy SharedPreferences mirror for rows that
-                            // just transitioned to waiting_peers; SQLite remains authoritative.
-                            retryPendingLanChatMessages(false);
+                        List<String> finalizedIds =
+                                store.finalizeExpiredDiscoveryWindowIds(System.currentTimeMillis());
+                        if (!finalizedIds.isEmpty()) {
+                            FileLogger.log(this, "CHAT", "LAN discovery finalization settled messages="
+                                    + finalizedIds.size());
+                            // Reclaim only mirrors for rows settled by this transaction. Do not
+                            // wake the full Outbox planner merely to perform compatibility cleanup.
+                            for (String finalizedId : finalizedIds) {
+                                scheduleLanChatMirrorCleanup(finalizedId);
+                            }
                         }
                     } catch (Exception storageFailure) {
                         FileLogger.log(this, "CHAT", "LAN discovery finalization deferred: "
@@ -4681,7 +4686,9 @@ public class TrackingService extends Service implements LocationListener {
             if (discoveryWindowState == LanChatStore.DISCOVERY_WINDOW_WAITING) {
                 FileLogger.log(this, "CHAT", "P2P 空目标消息已结算为 waiting_peers，不向晚加入设备广播: "
                         + messageId);
-                removePendingLanChat(messageId);
+                // This method runs under the FIFO transmit lock. SharedPreferences commit
+                // is synchronous, so move terminal mirror cleanup to the peer maintenance lane.
+                scheduleLanChatMirrorCleanup(messageId);
                 return;
             }
             final boolean discoveryWindowOpen =
