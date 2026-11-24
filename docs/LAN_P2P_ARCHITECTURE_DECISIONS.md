@@ -75,6 +75,14 @@
 - 多跳转发、存储转发 custody、BLE/Wi-Fi Aware 并非当前 LAN 单跳场景的必要条件。
 - 只有在产品明确要求离开同一 LAN 仍可通信时，才重新评估这些机制。
 
+### D5：UDP 接收循环只做轻量认证与有界分发
+
+- 接收循环不直接执行 SQLite、ACK 落账或消息展示工作。
+- chat.ack 进入独立 ACK 队列；peer.hello/peer.ack 进入独立 FIFO 握手队列；chat.message 进入独立 FIFO 消息队列。
+- 每个队列有明确容量和固定 worker；队列满时拒绝当前数据报，由原 message_id 重试、重复 ACK 和 nonce challenge 恢复。
+- 不允许无限队列，也不以丢弃持久化账本或提前 ACK 换取吞吐。
+- Android 已使用独立 IO 执行器；本轮将同一原则用于三个 Python 服务，并保持各自端口、身份、数据库 scope 和业务处理函数不变。
+
 ## 验收边界
 
 外部项目的 README、架构文档和源码只能提供设计参考，不构成本项目的验收证据。本项目仍以自身 CI、SQLite 故障测试、Android/PC 实际互通、网络切换和连续时延/送达率测试为准。

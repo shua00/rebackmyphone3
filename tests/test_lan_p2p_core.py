@@ -3932,6 +3932,73 @@ class PythonFixedTargetImmediateDispatchTests(unittest.TestCase):
                 self.assertNotIn(
                     'sock.sendto(raw, (pending["endpoint_ip"], target_port))', source)
 
+    def test_bounded_packet_dispatcher_keeps_ack_lane_live_during_peer_and_message_work(self):
+        from lan_p2p_core import BoundedPacketDispatcher
+        message_started = threading.Event()
+        peer_started = threading.Event()
+        release_message = threading.Event()
+        release_peer = threading.Event()
+        ack_finished = threading.Event()
+
+        def handler(envelope, sock, addr):
+            packet_type = envelope.get("type")
+            if packet_type == "chat.message":
+                message_started.set()
+                release_message.wait(2)
+            elif packet_type == "peer.hello":
+                peer_started.set()
+                release_peer.wait(2)
+            elif packet_type == "chat.ack":
+                ack_finished.set()
+
+        dispatcher = BoundedPacketDispatcher(
+            handler, "test-ack-priority", ack_capacity=2,
+            peer_capacity=2, message_capacity=2)
+        try:
+            self.assertTrue(dispatcher.submit({"type": "chat.message"}, None, None))
+            self.assertTrue(dispatcher.submit({"type": "peer.hello"}, None, None))
+            self.assertTrue(message_started.wait(1))
+            self.assertTrue(peer_started.wait(1))
+            self.assertTrue(dispatcher.submit({"type": "chat.ack"}, None, None))
+            self.assertTrue(ack_finished.wait(1))
+        finally:
+            release_message.set()
+            release_peer.set()
+            dispatcher.close()
+
+    def test_bounded_packet_dispatcher_rejects_overflow_without_unbounded_queueing(self):
+        from lan_p2p_core import BoundedPacketDispatcher
+        message_started = threading.Event()
+        release_message = threading.Event()
+
+        def handler(envelope, sock, addr):
+            message_started.set()
+            release_message.wait(2)
+
+        dispatcher = BoundedPacketDispatcher(
+            handler, "test-bounded", ack_capacity=1,
+            peer_capacity=1, message_capacity=1)
+        try:
+            self.assertTrue(dispatcher.submit({"type": "chat.message", "n": 1}, None, None))
+            self.assertTrue(message_started.wait(1))
+            self.assertTrue(dispatcher.submit({"type": "chat.message", "n": 2}, None, None))
+            self.assertFalse(dispatcher.submit({"type": "chat.message", "n": 3}, None, None))
+        finally:
+            release_message.set()
+            dispatcher.close()
+
+    def test_all_python_udp_listeners_dispatch_authenticated_packets_off_receive_loop(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        for filename in ("rescue2.py", "chat.py", "server2.py"):
+            with self.subTest(service=filename):
+                source = (repo_root / filename).read_text(encoding="utf-8")
+                self.assertIn("BoundedPacketDispatcher(", source)
+                self.assertIn("_V2_PACKET_DISPATCHER.submit(envelope", source)
+                listener = source[source.index("def udp_listener():"):]
+                listener = listener.split("\ndef ", 1)[0]
+                self.assertNotIn("_handle_authenticated_v2_packet(envelope,", listener)
+                self.assertIn('data[:1] == b"{"', listener)
+
     def test_peer_ack_recovery_is_woken_off_udp_receive_loop(self):
         repo_root = Path(__file__).resolve().parents[1]
         for filename in ("server2.py", "rescue2.py", "chat.py"):

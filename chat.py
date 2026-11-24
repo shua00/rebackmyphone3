@@ -39,7 +39,7 @@ _V2_RECOVERY_SCHEMA_READY = False
 
 
 RESCUE_SECRET = "your_private_secret_key"  # ⚠️ 必须与手机端一致
-from lan_p2p_core import LanP2PStorageError, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, list_known_peers, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, load_active_pending_targets, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, list_due_outgoing_peers
+from lan_p2p_core import LanP2PStorageError, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, BoundedPacketDispatcher, list_known_peers, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, load_active_pending_targets, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, list_due_outgoing_peers
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.sqlite3"), "chat.py")
 SERVER2_URL = "http://127.0.0.1:8080"      # server2.py 的地址
 # ==========================================
@@ -481,6 +481,13 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
         if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
 
 
+_V2_PACKET_DISPATCHER = BoundedPacketDispatcher(
+    _handle_authenticated_v2_packet,
+    "chat.py",
+    on_error=lambda exc, lane: print(
+        "LAN packet handler failed (chat.py/" + lane + "): " + type(exc).__name__))
+
+
 def udp_listener():
     global UDP_LISTENER_SOCKET
     while True:
@@ -505,12 +512,12 @@ def udp_listener():
             while True:
                 # [B2] 1024 → 4096，避免长消息被 UDP 层截断
                 data, addr = udp_sock.recvfrom(4096)
-                msg = data.decode('utf-8', errors='ignore')
-                if msg.startswith("{"):
+                if data[:1] == b"{":
                     try: envelope = decode_packet(data, RESCUE_SECRET)
                     except ValueError: envelope = None
                     if envelope is not None:
-                        _handle_authenticated_v2_packet(envelope, udp_sock, addr)
+                        if not _V2_PACKET_DISPATCHER.submit(envelope, udp_sock, addr):
+                            print("⚠️ chat.py LAN packet queue full; sender retry required: " + str(envelope.get("type")))
                         continue
         except OSError as e:
             if e.errno in (98, 10048) or "Address already in use" in str(e):

@@ -1,4 +1,5 @@
 """Shared, dependency-free persistence primitives for LAN P2P services."""
+import queue
 import sqlite3
 import threading
 import time
@@ -17,6 +18,90 @@ OUTBOX_RETRY_RECOVERY_COOLDOWN_MS = 60_000
 class LanP2PStorageError(RuntimeError):
     """A durable LAN P2P ledger operation failed; callers must not treat it as empty state."""
 
+
+class BoundedPacketDispatcher:
+    """Bounded ACK, peer-control, and chat-message lanes for authenticated LAN packets.
+
+    ACK work cannot queue behind peer discovery or durable chat-message writes.
+    Peer hello/ack retain FIFO ordering in their own lane. Full queues reject the
+    datagram; existing message IDs, duplicate ACKs, and nonce challenges recover it.
+    """
+    PEER_PACKET_TYPES = frozenset(("peer.hello", "peer.ack"))
+
+    def __init__(self, handler, name, on_error=None, ack_capacity=64,
+                 peer_capacity=64, message_capacity=128):
+        if not callable(handler):
+            raise ValueError("packet handler must be callable")
+        if min(int(ack_capacity), int(peer_capacity), int(message_capacity)) < 1:
+            raise ValueError("packet dispatcher capacities must be positive")
+        self._handler = handler
+        self._name = str(name or "lan")
+        self._on_error = on_error
+        self._ack_queue = queue.Queue(maxsize=int(ack_capacity))
+        self._peer_queue = queue.Queue(maxsize=int(peer_capacity))
+        self._message_queue = queue.Queue(maxsize=int(message_capacity))
+        self._start_lock = threading.Lock()
+        self._workers = []
+        self._closed = threading.Event()
+
+    def _start_workers(self):
+        with self._start_lock:
+            if self._closed.is_set():
+                return False
+            if not self._workers:
+                for lane, target_queue in (
+                        ("ack", self._ack_queue),
+                        ("peer", self._peer_queue),
+                        ("message", self._message_queue)):
+                    worker = threading.Thread(
+                        target=self._run_lane,
+                        args=(target_queue, lane),
+                        daemon=True,
+                        name="lan-p2p-" + self._name + "-" + lane)
+                    self._workers.append(worker)
+                    worker.start()
+            return True
+
+    def submit(self, envelope, sock, addr):
+        if not isinstance(envelope, dict) or self._closed.is_set():
+            return False
+        if not self._start_workers():
+            return False
+        packet_type = envelope.get("type")
+        if packet_type == "chat.ack":
+            target_queue = self._ack_queue
+        elif packet_type in self.PEER_PACKET_TYPES:
+            target_queue = self._peer_queue
+        else:
+            target_queue = self._message_queue
+        try:
+            target_queue.put_nowait((envelope, sock, addr))
+            return True
+        except queue.Full:
+            return False
+
+    def _run_lane(self, target_queue, lane):
+        while not self._closed.is_set() or not target_queue.empty():
+            try:
+                item = target_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                envelope, sock, addr = item
+                self._handler(envelope, sock, addr)
+            except Exception as exc:
+                if self._on_error is not None:
+                    try:
+                        self._on_error(exc, lane)
+                    except Exception:
+                        pass
+            finally:
+                target_queue.task_done()
+
+    def close(self, timeout_seconds=1.0):
+        self._closed.set()
+        for worker in self._workers:
+            worker.join(max(0.0, float(timeout_seconds)))
 
 def _safe_rollback(conn):
     """Best-effort rollback that never masks the original storage failure."""
