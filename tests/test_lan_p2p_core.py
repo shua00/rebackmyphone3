@@ -142,6 +142,7 @@ class LanP2PCoreTests(unittest.TestCase):
             repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
         ).read_text(encoding="utf-8")
         listener = extract_java_method(source, "private void startRescueListener()")
+        finally_block = listener[listener.index("finally {"):]
         admission = listener[:listener.index("Thread listenerThread = new Thread")]
         self.assertLess(admission.index("if (serviceDestroyed) return;"),
                         admission.index("multicastLock.acquire()"))
