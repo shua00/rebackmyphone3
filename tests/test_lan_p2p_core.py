@@ -145,6 +145,19 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("lanChatRetryInFlight.set(false)", retry)
 
 
+    def test_outbox_retry_failure_wake_policy_is_shared_and_has_handler_fallback(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        policy = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatRetryPolicy.java").read_text(encoding="utf-8")
+        helper = extract_java_method(source, "private void scheduleLanChatRetryAfterFailure(")
+        self.assertIn("RECOVERY_FAILURE_RETRY_DELAY_MS = 500L", policy)
+        self.assertIn("recoveryEvent || lanChatRecoveryEventPending.get()", helper)
+        self.assertIn("scheduleLanChatTask(taskName, retry,", helper)
+        self.assertIn("handler.postDelayed(retry, LanChatRetryPolicy.RECOVERY_FAILURE_RETRY_DELAY_MS)", helper)
+        retry = extract_java_method(source, "private void retryPendingLanChatMessages(boolean recoveryEvent)")
+        self.assertIn('scheduleLanChatRetryAfterFailure(\\n                                    "outbox-retry-after-failure"', retry)
+
+
     def test_outbox_retry_failure_uses_delayed_wake_not_immediate_spin(self):
         repo_root = Path(__file__).resolve().parents[1]
         service = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
@@ -1719,8 +1732,7 @@ class LanP2PCoreTests(unittest.TestCase):
         block = retry[rejected:]
         self.assertIn("lanChatRetryInFlight.set(false);", block)
         self.assertIn('scheduleLanChatTask("outbox-retry-admission-fallback"', block)
-        self.assertIn("() -> retryPendingLanChatMessages(recoveryEvent)", block)
-        self.assertIn("retryPendingLanChatMessages(recoveryEvent), 500L);", block)
+        self.assertIn('scheduleLanChatRetryAfterFailure("outbox-retry-admission-fallback", recoveryEvent)', block)
         self.assertIn("if (!serviceDestroyed)", block)
         self.assertNotIn("retryPendingLanChatMessages(true)", block)
 

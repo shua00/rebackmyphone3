@@ -4169,6 +4169,20 @@ public class TrackingService extends Service implements LocationListener {
      * 单次最多推进 3 批，避免离线成员导致无限重试/长时间占用线程。
      * 沿用原 message_id，接收端会 ACK 但不会重复显示。
      */
+    private void scheduleLanChatRetryAfterFailure(final String taskName,
+                                                   final boolean recoveryEvent) {
+        if (serviceDestroyed) return;
+        final Runnable retry = () -> {
+            if (!serviceDestroyed) {
+                retryPendingLanChatMessages(recoveryEvent || lanChatRecoveryEventPending.get());
+            }
+        };
+        if (!scheduleLanChatTask(taskName, retry,
+                LanChatRetryPolicy.RECOVERY_FAILURE_RETRY_DELAY_MS)) {
+            handler.postDelayed(retry, LanChatRetryPolicy.RECOVERY_FAILURE_RETRY_DELAY_MS);
+        }
+    }
+
     private void retryPendingLanChatMessages() {
         retryPendingLanChatMessages(false);
     }
@@ -4282,15 +4296,8 @@ public class TrackingService extends Service implements LocationListener {
                     // immediately resubmitting a still-failing SQLite operation would spin.
                     if (lanChatRecoveryEventPending.get() || lanChatRouteRefreshPending.get()) {
                         if (!retryBatchCompleted) {
-                            final Runnable retryAfterFailure = () -> {
-                                if (!serviceDestroyed) {
-                                    retryPendingLanChatMessages(lanChatRecoveryEventPending.get());
-                                }
-                            };
-                            if (!scheduleLanChatTask("outbox-retry-after-failure",
-                                    retryAfterFailure, LanChatRetryPolicy.RECOVERY_FAILURE_RETRY_DELAY_MS)) {
-                                handler.postDelayed(retryAfterFailure, LanChatRetryPolicy.RECOVERY_FAILURE_RETRY_DELAY_MS);
-                            }
+                            scheduleLanChatRetryAfterFailure(
+                                    "outbox-retry-after-failure", lanChatRecoveryEventPending.get());
                         } else if (lanChatRecoveryEventPending.get()) {
                             retryPendingLanChatMessages(true);
                         } else {
@@ -4310,17 +4317,7 @@ public class TrackingService extends Service implements LocationListener {
             FileLogger.log(this, "CHAT", "⚠️ LAN 补发队列暂时已满，安排延迟重试");
             // Queue saturation is not a network-recovery event. Preserve the pending
             // recovery flag above and retry admission after the current queue drains.
-            if (!serviceDestroyed) {
-                final Runnable retryAfterAdmission = () -> {
-                    if (!serviceDestroyed) {
-                        retryPendingLanChatMessages(recoveryEvent || lanChatRecoveryEventPending.get());
-                    }
-                };
-                if (!scheduleLanChatTask("outbox-retry-admission-fallback",
-                        retryAfterAdmission, LanChatRetryPolicy.RECOVERY_FAILURE_RETRY_DELAY_MS)) {
-                    handler.postDelayed(retryAfterAdmission, LanChatRetryPolicy.RECOVERY_FAILURE_RETRY_DELAY_MS);
-                }
-            }
+            scheduleLanChatRetryAfterFailure("outbox-retry-admission-fallback", recoveryEvent);
         }
     }
 
