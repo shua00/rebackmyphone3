@@ -3967,11 +3967,17 @@ class AndroidLanDiscoveryWindowAtomicityTests(unittest.TestCase):
         self.assertIn("state='discovery_pending'", operation)
         self.assertIn("store.beginOrReadDiscoveryWindow(messageId)", sender)
         self.assertNotIn("store.beginDiscoveryWindow(messageId)", sender)
-        self.assertNotIn("store.isDiscoveryPending(messageId)", sender)
+        # Keep the later send-time deadline recheck: the combined transaction replaces
+        # only the initial begin/read/read sequence, not the final fail-closed guard.
+        self.assertEqual(sender.count("store.isDiscoveryPending(messageId)"), 1)
         self.assertNotIn("store.isWaitingForPeers(messageId)", sender)
         self.assertLess(
             sender.index("store.beginOrReadDiscoveryWindow(messageId)"),
             sender.index("if (firstDispatch)"),
+        )
+        self.assertGreater(
+            sender.index("store.isDiscoveryPending(messageId)"),
+            sender.index("// Revalidate persisted endpoints off the FIFO transmit lock."),
         )
         self.assertIn("scheduleLanChatTask(\"discovery-window-close\"", sender)
 
