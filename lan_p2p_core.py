@@ -785,8 +785,8 @@ def _finalize_expired_discovery_windows(conn, sender_scope, now_ms):
         (sender_scope, now_ms))
 
 
-def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10, force=False):
-    """Load due unacked targets; verified recovery may bypass backoff, never the attempt cap."""
+def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10):
+    """Load only due unacked targets; recovery resets exhausted budgets before this query."""
     conn = None
     try:
         conn = sqlite3.connect(db_path, timeout=10)
@@ -802,7 +802,7 @@ def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10, for
             WHERE o.sender_scope=? AND t.peer_id=? AND t.status!='acked'
               AND o.state NOT IN ('delivered','expired','waiting_peers')
               AND t.attempt_count<?
-              AND (?=1 OR t.attempt_count=0
+              AND (t.attempt_count=0
                    OR t.last_endpoint != (p.endpoint_ip || ':' || p.endpoint_port)
                    OR t.last_attempt_at +
                       CASE t.attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000
@@ -810,7 +810,7 @@ def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10, for
                         ELSE 60000 END <= ?)
             ORDER BY o.created_at_ms LIMIT ?""",
             (sender_scope, sender_scope, peer_id, MAX_OUTBOX_TARGET_ATTEMPTS,
-             1 if force else 0, now_ms, max(1, min(50, int(limit))))).fetchall()
+             now_ms, max(1, min(50, int(limit))))).fetchall()
         return [{"message_id": r[0], "sender_peer_id": r[1], "body": r[2],
                  "created_at_ms": r[3], "endpoint_ip": r[4], "endpoint_port": r[5]}
                 for r in rows]

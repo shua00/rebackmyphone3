@@ -1395,7 +1395,7 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
             if recovery_event:
                 prepare_outgoing_peer_recovery(CHAT_DEDUP_DB, "server2", peer_id)
             pending_rows = load_pending_outgoing_for_peer(
-                CHAT_DEDUP_DB, "server2", peer_id, limit=10, force=recovery_event)
+                CHAT_DEDUP_DB, "server2", peer_id, limit=10)
             if recovery_event:
                 next_eligible_at = next_peer_recovery_eligible_at_ms(CHAT_DEDUP_DB, "server2", peer_id)
                 if next_eligible_at is not None:

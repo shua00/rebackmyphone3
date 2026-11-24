@@ -3472,6 +3472,29 @@ class LanP2PCoreTests(unittest.TestCase):
             self.assertNotIn("7 * 86400", claim, filename)
             self.assertNotIn("OFFSET 10000", claim, filename)
 
+    def test_recovery_query_cannot_starve_new_due_messages_behind_old_backoff_rows(self):
+        from lan_p2p_core import (
+            persist_outgoing_message, record_peer, mark_outgoing_attempt,
+            load_pending_outgoing_for_peer,
+        )
+        self.assertTrue(record_peer(
+            self.db_path, "server2", "android-a", "android", "android-main",
+            "192.168.1.10", 8888, "active"))
+        for index in range(12):
+            self.assertTrue(persist_outgoing_message(
+                self.db_path, "server2", "server2-id", f"m-fair-{index:02d}",
+                "hello", ["android-a"], created_at_ms=1_000_000 + index))
+        with patch("lan_p2p_core.time.time", return_value=1000.0):
+            for index in range(10):
+                self.assertTrue(mark_outgoing_attempt(
+                    self.db_path, f"m-fair-{index:02d}", "android-a",
+                    "192.168.1.10", 8888))
+        with patch("lan_p2p_core.time.time", return_value=1001.0):
+            due = load_pending_outgoing_for_peer(
+                self.db_path, "server2", "android-a", limit=10)
+        self.assertEqual(["m-fair-10", "m-fair-11"],
+                         [row["message_id"] for row in due])
+
     def test_python_outbox_retries_use_persisted_backoff_and_active_peer_scan(self):
         from lan_p2p_core import (
             persist_outgoing_message, record_peer, load_pending_outgoing_for_peer,
@@ -3491,9 +3514,10 @@ class LanP2PCoreTests(unittest.TestCase):
                 self.db_path, "server2", "android-a"))
             self.assertEqual([], list_due_outgoing_peers(
                 self.db_path, "server2", now_ms=1_001_000))
-            self.assertEqual(["m-backoff"], [
-                row["message_id"] for row in load_pending_outgoing_for_peer(
-                    self.db_path, "server2", "android-a", force=True)])
+            # Recovery cannot bypass a normal target backoff. Exhausted targets
+            # are reset explicitly by prepare_outgoing_peer_recovery().
+            self.assertEqual([], load_pending_outgoing_for_peer(
+                self.db_path, "server2", "android-a"))
         with patch("lan_p2p_core.time.time", return_value=1001.6):
             self.assertEqual(["m-backoff"], [
                 row["message_id"] for row in load_pending_outgoing_for_peer(
@@ -4845,6 +4869,14 @@ if __name__ == "__main__":
 
 
 class LanPeerScopedRecoveryRegressionTests(unittest.TestCase):
+    def test_android_peer_recovery_cooldown_timer_entries_are_reclaimed_safely(self):
+        root = Path(__file__).resolve().parents[1]
+        service = (root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        helper = extract_java_method(service, "private void scheduleLanChatPeerRecoveryCooldownWake(")
+        self.assertIn("synchronized (lanChatPeerRecoveryCooldownWakeAtMs)", helper)
+        self.assertIn("lanChatPeerRecoveryCooldownWakeAtMs.remove(peerId, deadline)", helper)
+        self.assertIn("deadline.compareAndSet(requestedWakeAtMs, Long.MAX_VALUE)", helper)
+
     def test_android_peer_recovery_does_not_trigger_global_budget_reset(self):
         root = Path(__file__).resolve().parents[1]
         service = (root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")

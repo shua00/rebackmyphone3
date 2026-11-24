@@ -4232,23 +4232,32 @@ public class TrackingService extends Service implements LocationListener {
      */
     private void scheduleLanChatPeerRecoveryCooldownWake(String peerId, long delayMs) {
         if (peerId == null || peerId.isEmpty() || serviceDestroyed) return;
-        java.util.concurrent.atomic.AtomicLong deadline =
-                lanChatPeerRecoveryCooldownWakeAtMs.computeIfAbsent(
-                        peerId, ignored -> new java.util.concurrent.atomic.AtomicLong(Long.MAX_VALUE));
-        long requestedWakeAtMs = System.currentTimeMillis() + Math.max(1L, delayMs);
-        while (true) {
-            long current = deadline.get();
-            if (current <= requestedWakeAtMs) return;
-            if (deadline.compareAndSet(current, requestedWakeAtMs)) break;
+        final java.util.concurrent.atomic.AtomicLong deadline;
+        final long requestedWakeAtMs = System.currentTimeMillis() + Math.max(1L, delayMs);
+        synchronized (lanChatPeerRecoveryCooldownWakeAtMs) {
+            deadline = lanChatPeerRecoveryCooldownWakeAtMs.computeIfAbsent(
+                    peerId, ignored -> new java.util.concurrent.atomic.AtomicLong(Long.MAX_VALUE));
+            while (true) {
+                long current = deadline.get();
+                if (current <= requestedWakeAtMs) return;
+                if (deadline.compareAndSet(current, requestedWakeAtMs)) break;
+            }
         }
         final Runnable wake = () -> {
-            if (deadline.compareAndSet(requestedWakeAtMs, Long.MAX_VALUE) && !serviceDestroyed) {
-                retryPendingLanChatMessagesForPeer(peerId);
+            synchronized (lanChatPeerRecoveryCooldownWakeAtMs) {
+                if (!deadline.compareAndSet(requestedWakeAtMs, Long.MAX_VALUE)) return;
+                lanChatPeerRecoveryCooldownWakeAtMs.remove(peerId, deadline);
             }
+            if (!serviceDestroyed) retryPendingLanChatMessagesForPeer(peerId);
         };
         long remaining = Math.max(1L, requestedWakeAtMs - System.currentTimeMillis());
         if (!handler.postDelayed(wake, remaining)) {
-            deadline.compareAndSet(requestedWakeAtMs, Long.MAX_VALUE);
+            synchronized (lanChatPeerRecoveryCooldownWakeAtMs) {
+                deadline.compareAndSet(requestedWakeAtMs, Long.MAX_VALUE);
+                if (deadline.get() == Long.MAX_VALUE) {
+                    lanChatPeerRecoveryCooldownWakeAtMs.remove(peerId, deadline);
+                }
+            }
             lanChatPeerRecoveryEvents.add(peerId);
             scheduleLanChatRetryAfterFailure("peer-recovery-cooldown-admission", false);
         }
