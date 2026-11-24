@@ -531,6 +531,44 @@ class TransferTcpSessionTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual([], errors)
 
+
+
+    def test_terminal_cancel_reports_actual_state_and_duplicate_complete_is_idempotent(self):
+        import socket
+        import threading
+        from lan_p2p_transfer_tcp import send_frame, recv_frame
+        from lan_p2p_transfer_session import serve_transfer_session
+        for index in range(2):
+            payload = self.payload[index * 4096:(index + 1) * 4096]
+            self.files.write_chunk(
+                ChunkDescriptor(self.offer.transfer_id, index, payload,
+                                hashlib.sha256(payload).hexdigest()), 50 + index)
+        self.files.assemble_and_verify(self.offer.transfer_id, 52)
+        server, client = socket.socketpair()
+        errors = []
+        def serve():
+            try:
+                serve_transfer_session(server, self.store, self.files,
+                    local_peer_id="receiver", authenticated_peer_id="sender",
+                    session_secret=self.SECRET, now_ms=lambda: 60, max_frames=2)
+            except Exception as exc:
+                errors.append(exc)
+        worker = threading.Thread(target=serve)
+        worker.start()
+        try:
+            send_frame(client, self._frame("complete"), self.SECRET)
+            done = recv_frame(client, self.SECRET)
+            self.assertEqual({"state": "completed"}, done.metadata)
+            send_frame(client, self._frame("cancel"), self.SECRET)
+            cancelled = recv_frame(client, self.SECRET)
+            self.assertEqual({"state": "completed"}, cancelled.metadata)
+        finally:
+            client.close()
+            server.close()
+            worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual([], errors)
+
     def test_tcp_session_rejects_wrong_fixed_recipient_without_writing(self):
         import socket
         import threading

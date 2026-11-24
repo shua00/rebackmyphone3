@@ -82,23 +82,33 @@ def serve_transfer_session(
         elif frame.kind == "complete":
             if frame.payload or frame.index is not None:
                 raise TransferValidationError("invalid completion request")
-            missing = filesystem.reconcile(frame.transfer_id, timestamp)
-            if missing:
-                response_kind = "missing"
-                response_metadata = {"indexes": list(missing)}
-            else:
-                filesystem.assemble_and_verify(frame.transfer_id, timestamp)
+            if record.state == TransferState.COMPLETED:
                 response_kind = "complete"
                 response_metadata = {"state": TransferState.COMPLETED.value}
+            elif record.state in (TransferState.TRANSFERRING, TransferState.VERIFYING):
+                missing = filesystem.reconcile(frame.transfer_id, timestamp)
+                if missing:
+                    response_kind = "missing"
+                    response_metadata = {"indexes": list(missing)}
+                else:
+                    filesystem.assemble_and_verify(frame.transfer_id, timestamp)
+                    response_kind = "complete"
+                    response_metadata = {"state": TransferState.COMPLETED.value}
+            else:
+                raise TransferTransitionError("transfer is not ready to complete")
         elif frame.kind == "cancel":
             if frame.payload or frame.index is not None:
                 raise TransferValidationError("invalid cancellation request")
-            if record.state not in (TransferState.COMPLETED, TransferState.REJECTED,
-                                    TransferState.CANCELLED, TransferState.FAILED,
-                                    TransferState.EXPIRED):
+            terminal = (TransferState.COMPLETED, TransferState.REJECTED,
+                        TransferState.CANCELLED, TransferState.FAILED,
+                        TransferState.EXPIRED)
+            if record.state not in terminal:
                 store.transition(frame.transfer_id, TransferState.CANCELLED, timestamp)
+                response_state = TransferState.CANCELLED
+            else:
+                response_state = record.state
             response_kind = "cancel"
-            response_metadata = {"state": TransferState.CANCELLED.value}
+            response_metadata = {"state": response_state.value}
         else:
             raise TransferValidationError("unexpected client frame kind")
 
