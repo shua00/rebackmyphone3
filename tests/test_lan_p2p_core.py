@@ -3794,8 +3794,9 @@ class AndroidLanFastRetryBurstTests(unittest.TestCase):
         mark = extract_java_method(store, "public boolean markAttempt(")
         policy = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatRetryPolicy.java").read_text(encoding="utf-8")
         self.assertIn("LanChatRetryPolicy.TARGET_RETRY_DELAY_CASE_SQL", mark)
-        self.assertIn("WHEN 1 THEN 250 WHEN 2 THEN 250", policy)
-        self.assertIn("WHEN 3 THEN 10000 WHEN 4 THEN 20000", policy)
+        self.assertIn("{250L, 250L, 10_000L, 20_000L, 40_000L}", policy)
+        self.assertIn('new StringBuilder("CASE attempt_count ")', policy)
+        self.assertIn('append("WHEN ").append(i + 1).append(" THEN ")', policy)
         self.assertIn("attempt_count=attempt_count+1", mark)
 
     def test_empty_discovery_messages_get_three_fast_dispatch_epochs(self):
