@@ -34,8 +34,15 @@ android {
     buildFeatures {
         buildConfig true
     }
+
+    // Robolectric runs against the Android framework in the local JVM test task.
+    testOptions {
+        unitTests.includeAndroidResources = true
+    }
 }
 
 dependencies {
-    // 纯原生零第三方依赖，保持百 KB 极致体积
+    // Test-only dependencies: never packaged into the production APK.
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.12.2'
 }
