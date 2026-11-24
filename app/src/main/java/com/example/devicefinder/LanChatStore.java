@@ -751,6 +751,40 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
+    /**
+     * Return the earliest persisted cooldown deadline for exhausted, deliverable rows.
+     * Long.MAX_VALUE means no deferred recovery event is currently needed.
+     */
+    public long nextRecoveryEventEligibleAtMs(long now) {
+        Cursor c = null;
+        try {
+            c = getReadableDatabase().rawQuery(
+                    "SELECT MIN(eligible_at_ms) FROM (" +
+                    "SELECT t.last_recovery_at_ms + ? AS eligible_at_ms " +
+                    "FROM lan_outbox_targets t JOIN lan_outbox o ON o.message_id=t.message_id " +
+                    "WHERE t.status!='acked' AND t.attempt_count>=? AND t.last_recovery_at_ms>? " +
+                    "AND o.state NOT IN ('delivered','expired','waiting_peers') " +
+                    "UNION ALL " +
+                    "SELECT o.last_event_retry_at_ms + ? AS eligible_at_ms FROM lan_outbox o " +
+                    "WHERE o.retry_attempt_count>=? AND o.last_event_retry_at_ms>? " +
+                    "AND o.state NOT IN ('delivered','expired','waiting_peers','discovery_pending') " +
+                    "AND NOT EXISTS (SELECT 1 FROM lan_outbox_targets t WHERE t.message_id=o.message_id)" +
+                    ")",
+                    new String[]{String.valueOf(RETRY_RECOVERY_EVENT_COOLDOWN_MS),
+                            String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS),
+                            String.valueOf(now - RETRY_RECOVERY_EVENT_COOLDOWN_MS),
+                            String.valueOf(RETRY_RECOVERY_EVENT_COOLDOWN_MS),
+                            String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS),
+                            String.valueOf(now - RETRY_RECOVERY_EVENT_COOLDOWN_MS)});
+            if (!c.moveToFirst() || c.isNull(0)) return Long.MAX_VALUE;
+            return c.getLong(0);
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to read next LAN recovery cooldown deadline", e);
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
     private ContentValues valuesForRecoveryReset(long now) {
         ContentValues values = new ContentValues();
         values.put("attempt_count", 0);

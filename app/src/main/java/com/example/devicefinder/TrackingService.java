@@ -285,6 +285,9 @@ public class TrackingService extends Service implements LocationListener {
     // Coalesce a recovery event that arrives while a retry batch is already in flight.
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRecoveryEventPending =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+    // One deferred wake preserves a real recovery event until its durable cooldown expires.
+    private final java.util.concurrent.atomic.AtomicBoolean lanChatRecoveryCooldownWakeScheduled =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
     // A route refresh is an ordinary retry wake, not permission to reopen an exhausted epoch.
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRouteRefreshPending =
             new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -4183,6 +4186,24 @@ public class TrackingService extends Service implements LocationListener {
         }
     }
 
+    /**
+     * Defer a concrete recovery event until the persisted per-target cooldown expires.
+     * This carries forward the event already observed; it does not invent a new signal.
+     */
+    private void scheduleLanChatRecoveryCooldownWake(long delayMs) {
+        if (serviceDestroyed
+                || !lanChatRecoveryCooldownWakeScheduled.compareAndSet(false, true)) return;
+        final Runnable wake = () -> {
+            lanChatRecoveryCooldownWakeScheduled.set(false);
+            if (!serviceDestroyed) retryPendingLanChatMessages(true);
+        };
+        if (!scheduleLanChatTask("outbox-recovery-cooldown", wake, delayMs)
+                && !handler.postDelayed(wake, delayMs)) {
+            lanChatRecoveryCooldownWakeScheduled.set(false);
+            lanChatRecoveryEventPending.set(true);
+        }
+    }
+
     private void retryPendingLanChatMessages() {
         retryPendingLanChatMessages(false);
     }
@@ -4241,6 +4262,12 @@ public class TrackingService extends Service implements LocationListener {
                         int resumed = store.resumeExhaustedRetriesForRecoveryEvent(System.currentTimeMillis());
                         if (resumed > 0) {
                             FileLogger.log(this, "CHAT", "LAN 恢复事件重新开启有限补发预算 messages=" + resumed);
+                        } else {
+                            long nextEligibleAt = store.nextRecoveryEventEligibleAtMs(System.currentTimeMillis());
+                            if (nextEligibleAt != Long.MAX_VALUE) {
+                                scheduleLanChatRecoveryCooldownWake(
+                                        Math.max(1L, nextEligibleAt - System.currentTimeMillis()));
+                            }
                         }
                     }
                     final int batchSize = LanChatRetryPolicy.RETRY_BATCH_SIZE;

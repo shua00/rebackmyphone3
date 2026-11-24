@@ -2673,6 +2673,11 @@ class LanP2PCoreTests(unittest.TestCase):
         values = extract_java_method(store, "private ContentValues valuesForRecoveryReset(")
         self.assertIn('values.put("attempt_count", 0)', values)
         self.assertIn('values.put("last_recovery_at_ms", now)', values)
+        deadline = extract_java_method(store, "public long nextRecoveryEventEligibleAtMs(")
+        self.assertIn("MIN(eligible_at_ms)", deadline)
+        self.assertIn("last_recovery_at_ms + ?", deadline)
+        self.assertIn("last_event_retry_at_ms + ?", deadline)
+        self.assertIn("Long.MAX_VALUE", deadline)
         service = (
             repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
         ).read_text(encoding="utf-8")
@@ -2684,6 +2689,11 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("lanChatRecoveryEventPending.getAndSet(false)", retry)
         self.assertIn("if (lanChatRecoveryEventPending.get())", retry)
         self.assertIn("retryPendingLanChatMessages(true)", retry)
+        cooldown_wake = extract_java_method(service, "private void scheduleLanChatRecoveryCooldownWake(")
+        self.assertIn("lanChatRecoveryCooldownWakeScheduled.compareAndSet(false, true)", cooldown_wake)
+        self.assertIn('scheduleLanChatTask("outbox-recovery-cooldown"', cooldown_wake)
+        self.assertIn("handler.postDelayed(wake, delayMs)", cooldown_wake)
+        self.assertIn("store.nextRecoveryEventEligibleAtMs", retry)
 
     def test_server2_udp_ack_requires_verified_route_and_durable_outbox_ack_before_fallback_cleanup(self):
         repo_root = Path(__file__).resolve().parents[1]
