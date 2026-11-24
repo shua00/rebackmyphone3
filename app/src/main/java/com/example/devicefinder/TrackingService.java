@@ -4268,6 +4268,26 @@ public class TrackingService extends Service implements LocationListener {
                 return;
             }
             final long targetLoadMs = android.os.SystemClock.elapsedRealtime() - targetLoadStartedAt;
+            // Fixed-recipient attempt progress is a read-only aggregate. Resolve it before
+            // FIFO admission; markAttempt() remains the transactional per-peer send gate.
+            final boolean hasFixedTargetSnapshot = !preparedTargets.isEmpty();
+            final int preparedAttemptNumber;
+            if (hasFixedTargetSnapshot) {
+                try {
+                    preparedAttemptNumber = store.readFixedTargetAttemptProgress(messageId);
+                } catch (Exception attemptReadFailure) {
+                    FileLogger.log(this, "CHAT", "⚠️ LAN 固定目标发送预算读取失败，消息保留待重试: "
+                            + attemptReadFailure.getClass().getSimpleName());
+                    return;
+                }
+                if (preparedAttemptNumber < 0) {
+                    FileLogger.log(this, "CHAT", "ℹ️ LAN 固定目标均已确认或发送预算耗尽，跳过本轮: "
+                            + messageId);
+                    return;
+                }
+            } else {
+                preparedAttemptNumber = -1;
+            }
             // Build immutable authenticated datagrams before FIFO admission. Packet contents depend
             // only on the durable message/peer snapshot, not on the selected route. This keeps JSON
             // canonicalization and HMAC work out of the shared sender lock and before attempt charging.
@@ -4364,14 +4384,20 @@ public class TrackingService extends Service implements LocationListener {
                             + messageId);
                     return;
                 }
-                long outboxAttemptDbStartedAt = android.os.SystemClock.elapsedRealtime();
-                try {
-                    attemptNumber = store.recordOutboxAttempt(messageId);
-                } finally {
-                    long outboxAttemptDbMs = android.os.SystemClock.elapsedRealtime() - outboxAttemptDbStartedAt;
-                    if (outboxAttemptDbMs >= 50L) {
-                        FileLogger.log(this, "CHAT", "P2P SQLite outbox attempt message="
-                                + messageId + " dbMs=" + outboxAttemptDbMs);
+                if (hasFixedTargetSnapshot) {
+                    // This was a read-only pre-lock snapshot. Every real target dispatch
+                    // still revalidates ACK and retry budget in markAttempt() below.
+                    attemptNumber = preparedAttemptNumber;
+                } else {
+                    long outboxAttemptDbStartedAt = android.os.SystemClock.elapsedRealtime();
+                    try {
+                        attemptNumber = store.recordOutboxAttempt(messageId);
+                    } finally {
+                        long outboxAttemptDbMs = android.os.SystemClock.elapsedRealtime() - outboxAttemptDbStartedAt;
+                        if (outboxAttemptDbMs >= 50L) {
+                            FileLogger.log(this, "CHAT", "P2P SQLite outbox attempt message="
+                                    + messageId + " dbMs=" + outboxAttemptDbMs);
+                        }
                     }
                 }
                 if (attemptNumber < 0) {
