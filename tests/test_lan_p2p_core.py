@@ -75,6 +75,22 @@ def extract_java_method(source, signature):
 
 class LanP2PCoreTests(unittest.TestCase):
 
+    def test_service_depends_on_policy_not_store_compatibility_aliases(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        service = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        store = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn("LanChatRetryPolicy.MAX_AUTOMATIC_RETRY_ATTEMPTS", service)
+        self.assertIn("LanChatRetryPolicy.FIRST_DISCOVERY_WINDOW_MS", service)
+        self.assertNotIn("LanChatStore.MAX_AUTOMATIC_RETRY_ATTEMPTS", service)
+        self.assertNotIn("LanChatStore.FIRST_DISCOVERY_WINDOW_MS", service)
+        self.assertIn("FIRST_DISCOVERY_WINDOW_MS = LanChatRetryPolicy.FIRST_DISCOVERY_WINDOW_MS", store)
+        self.assertIn("MAX_AUTOMATIC_RETRY_ATTEMPTS = LanChatRetryPolicy.MAX_AUTOMATIC_RETRY_ATTEMPTS", store)
+
+
     def test_outbox_pending_snapshot_limit_uses_shared_capacity_policy(self):
         repo_root = Path(__file__).resolve().parents[1]
         service = (
