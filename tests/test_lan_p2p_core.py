@@ -2028,7 +2028,7 @@ class LanP2PCoreTests(unittest.TestCase):
             end = source.index("\ndef _handle_authenticated_v2_packet", start)
             replay = source[start:end]
             record = replay.index("if not mark_outgoing_attempt(")
-            send = replay.index("sock.sendto(raw, (pending[\"endpoint_ip\"], target_port))")
+            send = replay.index("send_outgoing_packet(")
             self.assertLess(record, send, filename)
             self.assertIn("continue", replay[record:send], filename)
 
