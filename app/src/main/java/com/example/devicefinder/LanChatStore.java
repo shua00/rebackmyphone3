@@ -521,7 +521,9 @@ public final class LanChatStore extends SQLiteOpenHelper {
     }
 
     public boolean allTargetsAcked(String messageId) {
+        if (messageId == null || messageId.length() == 0) return false;
         SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
         Cursor c = null;
         try {
             c = db.rawQuery(
@@ -533,13 +535,15 @@ public final class LanChatStore extends SQLiteOpenHelper {
             if (!c.moveToFirst()) return false;
             String state = c.getString(0);
             // Expired is terminal: reconciliation must never resurrect it as delivered.
-            if ("expired".equals(state)) return false;
+            if (LanChatDeliveryState.EXPIRED.equals(state)) return false;
             long deadline = c.getLong(1);
             int total = c.getInt(2);
             int acked = c.isNull(3) ? 0 : c.getInt(3);
             long now = System.currentTimeMillis();
-            boolean discoveryOpen = "discovery_pending".equals(state) && deadline > now;
+            boolean discoveryOpen = LanChatDeliveryState.DISCOVERY_PENDING.equals(state)
+                    && deadline > now;
             if (discoveryOpen || total == 0) return false;
+
             if (total != acked) {
                 if (LanChatDeliveryState.DISCOVERY_PENDING.equals(state)) {
                     boolean hasRetryBudget = rowExists(db, "lan_outbox_targets",
@@ -547,22 +551,26 @@ public final class LanChatStore extends SQLiteOpenHelper {
                             new String[]{messageId, String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS)});
                     ContentValues next = new ContentValues();
                     next.put("state", LanChatDeliveryState.settleAfterAck(total, acked, hasRetryBudget));
-                    if (db.update("lan_outbox", next, "message_id=?", new String[]{messageId}) != 1) {
-                        return false;
-                    }
+                    if (db.update("lan_outbox", next, "message_id=?",
+                            new String[]{messageId}) != 1) return false;
+                    db.setTransactionSuccessful();
                 }
                 return false;
             }
+
             if (!LanChatDeliveryState.DELIVERED.equals(state)) {
                 ContentValues next = new ContentValues();
                 next.put("state", LanChatDeliveryState.DELIVERED);
-                if (db.update("lan_outbox", next, "message_id=?", new String[]{messageId}) != 1) return false;
+                if (db.update("lan_outbox", next, "message_id=?",
+                        new String[]{messageId}) != 1) return false;
             }
+            db.setTransactionSuccessful();
             return true;
         } catch (Exception e) {
             return false;
         } finally {
             if (c != null) c.close();
+            db.endTransaction();
         }
     }
 
