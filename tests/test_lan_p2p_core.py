@@ -1498,15 +1498,30 @@ class LanP2PCoreTests(unittest.TestCase):
         send = extract_java_method(source, "private void transmitLocalUdpMessage(final String message, final String messageId)")
         target_read = send[send.index("catch (Exception targetReadFailure)"):send.index("final long targetLoadMs")]
         attempt_read = send[send.index("catch (Exception attemptReadFailure)"):send.index("if (preparedAttemptNumber < 0)")]
-        self.assertIn('scheduleLanChatTask("outbox-preflight-retry-" + messageId', target_read)
-        self.assertIn("this::requestLanChatRetryPlan, 500L", target_read)
-        self.assertIn('scheduleLanChatTask("outbox-preflight-retry-" + messageId', attempt_read)
-        self.assertIn("this::requestLanChatRetryPlan, 500L", attempt_read)
+        self.assertIn("scheduleLanChatRetryPlan(500L)", target_read)
+        self.assertIn("scheduleLanChatRetryPlan(500L)", attempt_read)
         self.assertIn("if (!attemptAdmitted && !serviceDestroyed)", send)
-        self.assertIn("this::requestLanChatRetryPlan, 500L", send)
+        self.assertIn("scheduleLanChatRetryPlan(500L)", send)
+        self.assertIn("private void scheduleLanChatRetryPlan(long delayMs)", source)
+        self.assertIn("lanChatRetryPlanPending.compareAndSet(false, true)", source)
+        self.assertIn('scheduleLanChatTask("outbox-retry-plan"', source)
+        self.assertNotIn("outbox-preflight-retry-", source)
         self.assertIn("if (preparedAttemptNumber < 0)", send)
         budget_exit = send[send.index("if (preparedAttemptNumber < 0)"):send.index("// Build immutable authenticated datagrams")]
         self.assertNotIn("outbox-preflight-retry", budget_exit)
+
+    def test_outbox_retry_planning_wakeups_are_globally_coalesced(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        plan = extract_java_method(source, "private void scheduleLanChatRetryPlan(long delayMs)")
+        self.assertIn("lanChatRetryPlanPending.compareAndSet(false, true)", plan)
+        self.assertIn('scheduleLanChatTask("outbox-retry-plan"', plan)
+        self.assertIn("lanChatSendExecutor.execute", plan)
+        self.assertIn("scheduleLanChatRetryFromOutbox()", plan)
+        self.assertIn("finally", plan)
+        self.assertIn("lanChatRetryPlanPending.set(false)", plan)
+        self.assertNotIn("messageId", plan)
+        self.assertIn("scheduleLanChatRetryPlan(500L)", plan)
 
     def test_outbox_retry_executor_rejection_rearms_admission_without_network_event(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -3686,9 +3701,11 @@ class AndroidLanImmediateSendIsolationTests(unittest.TestCase):
         self.assertIn("requestLanChatRetryPlan()", transmit)
         self.assertNotIn("scheduleLanChatRetryFromOutbox()", transmit)
         planner = extract_java_method(source, "private void requestLanChatRetryPlan(")
-        self.assertIn("lanChatSendExecutor.execute(this::scheduleLanChatRetryFromOutbox)", planner)
-        self.assertIn("if (serviceDestroyed || lanChatRetryInFlight.get()) return", planner)
-        self.assertIn('"outbox-retry-plan-fallback"', planner)
+        self.assertIn("scheduleLanChatRetryPlan(0L)", planner)
+        plan = extract_java_method(source, "private void scheduleLanChatRetryPlan(long delayMs)")
+        self.assertIn("lanChatRetryPlanPending.compareAndSet(false, true)", plan)
+        self.assertIn("lanChatRetryPlanPending.set(false)", plan)
+        self.assertIn("scheduleLanChatRetryPlan(500L)", plan)
 
 
 

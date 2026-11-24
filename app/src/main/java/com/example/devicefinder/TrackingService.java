@@ -290,6 +290,9 @@ public class TrackingService extends Service implements LocationListener {
             new java.util.concurrent.atomic.AtomicBoolean(false);
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRetryWakeScheduled =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+    // Coalesce delayed/outstanding Outbox planning requests across all message IDs.
+    private final java.util.concurrent.atomic.AtomicBoolean lanChatRetryPlanPending =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
     private final java.util.Set<String> activeLanChatTransmissions =
             java.util.Collections.newSetFromMap(
                     new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
@@ -4301,8 +4304,7 @@ public class TrackingService extends Service implements LocationListener {
             } catch (Exception targetReadFailure) {
                 FileLogger.log(this, "CHAT", "⚠️ LAN 目标账本读取失败，消息保留待重试: "
                         + targetReadFailure.getClass().getSimpleName());
-                scheduleLanChatTask("outbox-preflight-retry-" + messageId,
-                        this::requestLanChatRetryPlan, 500L);
+                scheduleLanChatRetryPlan(500L);
                 return;
             }
             final long targetLoadMs = android.os.SystemClock.elapsedRealtime() - targetLoadStartedAt;
@@ -4316,8 +4318,7 @@ public class TrackingService extends Service implements LocationListener {
                 } catch (Exception attemptReadFailure) {
                     FileLogger.log(this, "CHAT", "⚠️ LAN 固定目标发送预算读取失败，消息保留待重试: "
                             + attemptReadFailure.getClass().getSimpleName());
-                    scheduleLanChatTask("outbox-preflight-retry-" + messageId,
-                            this::requestLanChatRetryPlan, 500L);
+                    scheduleLanChatRetryPlan(500L);
                     return;
                 }
                 if (preparedAttemptNumber < 0) {
@@ -4466,8 +4467,7 @@ public class TrackingService extends Service implements LocationListener {
             if (!attemptAdmitted && !serviceDestroyed) {
                 // Unexpected pre-admission failures have not armed the normal ACK/backoff
                 // path yet. Re-scan the durable outbox once after a short settling delay.
-                scheduleLanChatTask("outbox-preflight-retry-" + messageId,
-                        this::requestLanChatRetryPlan, 500L);
+                scheduleLanChatRetryPlan(500L);
             }
         } finally {
             if (!lanChatAckGraceInFlight.contains(messageId)) {
@@ -4494,13 +4494,39 @@ public class TrackingService extends Service implements LocationListener {
      * single-flight guard; immediate sends hand planning to the retry executor.
      */
     private void requestLanChatRetryPlan() {
-        if (serviceDestroyed || lanChatRetryInFlight.get()) return;
-        try {
-            lanChatSendExecutor.execute(this::scheduleLanChatRetryFromOutbox);
-        } catch (java.util.concurrent.RejectedExecutionException rejected) {
-            // Rare queue saturation fallback: defer planning rather than block the immediate lane.
-            scheduleLanChatTask("outbox-retry-plan-fallback",
-                    this::scheduleLanChatRetryFromOutbox, 500L);
+        scheduleLanChatRetryPlan(0L);
+    }
+
+    /**
+     * Coalesce delayed preflight/queue-saturation wakeups into one Outbox planning task.
+     * The planner scans the durable ledger, so a per-message timer is neither necessary
+     * nor useful. The pending flag covers both the delay and executor admission.
+     */
+    private void scheduleLanChatRetryPlan(long delayMs) {
+        if (serviceDestroyed || lanChatRetryInFlight.get()
+                || !lanChatRetryPlanPending.compareAndSet(false, true)) return;
+        Runnable submitPlan = () -> {
+            if (serviceDestroyed) {
+                lanChatRetryPlanPending.set(false);
+                return;
+            }
+            try {
+                lanChatSendExecutor.execute(() -> {
+                    try {
+                        scheduleLanChatRetryFromOutbox();
+                    } finally {
+                        lanChatRetryPlanPending.set(false);
+                    }
+                });
+            } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                lanChatRetryPlanPending.set(false);
+                if (!serviceDestroyed) scheduleLanChatRetryPlan(500L);
+            }
+        };
+        if (delayMs <= 0L) {
+            submitPlan.run();
+        } else if (!scheduleLanChatTask("outbox-retry-plan", submitPlan, delayMs)) {
+            lanChatRetryPlanPending.set(false);
         }
     }
 
