@@ -135,3 +135,11 @@
 - 若 attempt admission 本身因存储错误失败，发送尝试尚未被可靠登记，原恢复事件必须保留并延迟重试。
 - Python 三服务恢复入口默认普通补发（`recovery_event=False`）；只有经过认证的 peer recovery worker 显式传递恢复许可。
 - 这一区分既防止 SQLite 暂时故障丢失恢复事件，也避免将一次发送失败误判为新的网络恢复事件而反复重置预算。
+
+
+### D9：API 21-22 的 LAN 路径必须保守绑定默认 Wi-Fi
+
+- API 23 之前不能使用当前实现的 Network.bindSocket(DatagramSocket) 方式绑定次级 Wi-Fi 网络，因此不能仅凭设备存在 Wi-Fi 接口就认为默认 socket 可用于 LAN。
+- API 21-22 的 LAN 快路径只在系统默认网络确实为 Wi-Fi、且可取得有效子网广播地址时放行；默认路由切换时撤销旧 peer 路由并重绑 listener。
+- 旧系统网络代数加入 Wi-Fi BSSID、Network ID 与 DHCP 地址/掩码/网关，覆盖同子网重连但 AP 或 DHCP 路径变化的场景。
+- API 23+ 继续以实际 socket-bound Wi-Fi Network 的 LinkProperties 指纹为 LAN 路径权威；单纯 cellular/default Internet route 切换不得误撤销仍可用的 Wi-Fi LAN peer。

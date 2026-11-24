@@ -359,10 +359,28 @@ public class TrackingService extends Service implements LocationListener {
             long previous = lastPeerRouteGeneration;
             lastPeerRouteGeneration = generation;
             if (previous >= 0L && generation >= 0L && generation != previous) {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+                    // API 21-22 cannot bind this DatagramSocket to a secondary Network.
+                    // Their LAN transport is safe only while Wi-Fi remains the default route.
+                    final DatagramSocket oldSocket;
+                    synchronized (rescueLock) {
+                        lanSocketGeneration.incrementAndGet();
+                        oldSocket = rescueSocketRef;
+                    }
+                    invalidateVerifiedChatPeers("Pre-M default LAN route changed: " + reason);
+                    lastPeerDiscoveryAt = 0L;
+                    FileLogger.log(this, "NETWORK", "Pre-M 默认网络变化，撤销旧 LAN peer 并重绑 UDP listener");
+                    if (oldSocket != null && !oldSocket.isClosed()) {
+                        oldSocket.close();
+                    } else {
+                        triggerRescueListener();
+                    }
+                    return;
+                }
                 // The default Internet route can switch between cellular and Wi-Fi while
-                // the underlying Wi-Fi LAN remains reachable. Do not revoke UDP peers
-                // from this signal; refreshWifiLanTransport compares the actual Wi-Fi
-                // interface/address/routes and owns LAN route invalidation and socket rebind.
+                // the underlying Wi-Fi LAN remains reachable. On API 23+, refreshWifiLanTransport
+                // compares the actual socket-bound Wi-Fi interface/address/routes and owns
+                // LAN route invalidation and socket rebind.
                 FileLogger.logD("CHAT", "默认网络路径变化但保留 LAN peer；等待 Wi-Fi LAN 指纹判断，generation="
                         + previous + "->" + generation + "，回调=" + reason);
             } else {
@@ -2295,6 +2313,13 @@ public class TrackingService extends Service implements LocationListener {
      */
     private boolean hasUsableWifiLanPath() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            // Pre-M cannot bind a DatagramSocket to a non-default Wi-Fi Network.
+            // Require Wi-Fi to be the actual default route; a secondary Wi-Fi interface
+            // must never make a cellular-bound socket look LAN-capable.
+            ConnectivityManager legacyCm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            NetworkInfo active = legacyCm != null ? legacyCm.getActiveNetworkInfo() : null;
+            if (active == null || !active.isConnected()
+                    || active.getType() != ConnectivityManager.TYPE_WIFI) return false;
             String broadcast = getWifiBroadcastAddress();
             return broadcast != null && !broadcast.isEmpty()
                     && !"255.255.255.255".equals(broadcast);
@@ -2531,6 +2556,27 @@ public class TrackingService extends Service implements LocationListener {
      * LAN P2P 的按需 UDP challenge/response 在聊天发送路径中独立执行，不在网络快照构建时探测。
      * 本快照仅记录系统提供的当前默认网络信息；不扫描 Wi-Fi、不将网段指纹作为可达证明。
      */
+    /**
+     * API 21-22 lack the Network-bound DatagramSocket path used on API 23+.
+     * Include the connected AP and DHCP tuple in the local-only network generation so
+     * same-subnet Wi-Fi changes still invalidate stale peer endpoints.
+     */
+    private String buildLegacyWifiRouteIdentity() {
+        try {
+            android.net.wifi.WifiManager wifiManager =
+                    (android.net.wifi.WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wifiManager == null) return "";
+            android.net.wifi.WifiInfo info = wifiManager.getConnectionInfo();
+            android.net.DhcpInfo dhcp = wifiManager.getDhcpInfo();
+            if (info == null || dhcp == null || dhcp.ipAddress == 0) return "";
+            String bssid = info.getBSSID() != null ? info.getBSSID() : "";
+            return "legacy-wifi|" + info.getNetworkId() + "|" + bssid + "|"
+                    + dhcp.ipAddress + "|" + dhcp.netmask + "|" + dhcp.gateway;
+        } catch (Exception unavailable) {
+            return "";
+        }
+    }
+
     private JSONObject buildNetworkSnapshot() {
         JSONObject out = new JSONObject();
         try {
@@ -2605,6 +2651,10 @@ public class TrackingService extends Service implements LocationListener {
             out.put("validated", validated ? 1 : 0);
             out.put("network_subtype", "MOBILE".equals(transport) ? "cellular" : transport.toLowerCase(java.util.Locale.US));
             String networkIdentity = active != null ? active.toString() : "";
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M && "WIFI".equals(transport)) {
+                String legacyWifiIdentity = buildLegacyWifiRouteIdentity();
+                if (!legacyWifiIdentity.isEmpty()) networkIdentity = legacyWifiIdentity;
+            }
             String signature = networkIdentity + "|" + transport + "|" + localIp + "|" + subnetPrefix + "|" + interfaceName
                     + "|" + gatewayIp + "|" + hasInternet + "|" + validated;
             synchronized (NETWORK_STATE_LOCK) {

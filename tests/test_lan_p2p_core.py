@@ -2962,14 +2962,39 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertNotIn("resumeExhaustedRetriesForRecoveryEvent", wrapper)
 
 
+    def test_android_pre_m_lan_chat_requires_default_wifi_and_tracks_dhcp_route_identity(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        usable = extract_java_method(source, "private boolean hasUsableWifiLanPath(")
+        marker = "if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M)"
+        pre_m = usable[usable.index(marker):usable.index("ConnectivityManager cm =", usable.index(marker))]
+        self.assertIn("getActiveNetworkInfo()", pre_m)
+        self.assertIn("active.getType() != ConnectivityManager.TYPE_WIFI", pre_m)
+        self.assertIn('!"255.255.255.255".equals(broadcast)', pre_m)
+        snapshot = extract_java_method(source, "private JSONObject buildNetworkSnapshot()")
+        self.assertIn("buildLegacyWifiRouteIdentity()", snapshot)
+        identity = extract_java_method(source, "private String buildLegacyWifiRouteIdentity()")
+        self.assertIn("getBSSID()", identity)
+        self.assertIn("getNetworkId()", identity)
+        self.assertIn("getDhcpInfo()", identity)
+
     def test_android_default_network_switch_does_not_revoke_unchanged_wifi_lan_peers(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
         start = source.index("private void refreshPeerRoutesForNetworkChange(")
         end = source.index("/** 网络路径变化立即撤销旧 LAN endpoint", start)
         refresh = source[start:end]
-        self.assertIn("默认网络路径变化但保留 LAN peer", refresh)
-        self.assertNotIn("invalidateVerifiedChatPeers(", refresh)
+        self.assertIn("if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M)", refresh)
+        pre_m_start = refresh.index("if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M)")
+        modern_start = refresh.index("// The default Internet route can switch", pre_m_start)
+        pre_m = refresh[pre_m_start:modern_start]
+        modern = refresh[modern_start:]
+        self.assertIn("invalidateVerifiedChatPeers(", pre_m)
+        self.assertIn("lanSocketGeneration.incrementAndGet()", pre_m)
+        self.assertIn("oldSocket.close()", pre_m)
+        self.assertIn("triggerRescueListener()", pre_m)
+        self.assertIn("默认网络路径变化但保留 LAN peer", modern)
+        self.assertNotIn("invalidateVerifiedChatPeers(", modern)
         self.assertNotIn("broadcastLanPeerHello", refresh)
         wifi_start = source.index("private void refreshWifiLanTransport(")
         wifi_end = source.index("private void registerNetworkCallback()", wifi_start)
