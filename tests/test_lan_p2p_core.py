@@ -338,8 +338,9 @@ class LanP2PCoreTests(unittest.TestCase):
         ack = extract_java_method(service, "private void processAuthenticatedLanChatAck(")
         self.assertIn("boolean discoveryAck = false;", ack)
         self.assertIn("catch (Exception storageFailure)", ack)
-        self.assertIn("拒绝释放发现观察槽", ack)
-        self.assertIn("allowDiscoveryGrace && discoveryAck", ack)
+        self.assertIn("拒绝立即确认", ack)
+        self.assertIn("allowDiscoveryGrace && (discoveryAck || attemptedEndpointPending)", ack)
+        self.assertIn("store.matchesAttemptedAckEndpoint(messageId, senderId", ack)
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -1306,7 +1307,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("boolean discoveryAck", ack_handler)
         self.assertIn("if (!routeMatches && !persistedEndpointMatch)", ack_handler)
         self.assertNotIn("if (!routeMatches && !persistedEndpointMatch && !discoveryAck)", ack_handler)
-        self.assertIn("allowDiscoveryGrace && discoveryAck", ack_handler)
+        self.assertIn("allowDiscoveryGrace && (discoveryAck || attemptedEndpointPending)", ack_handler)
+        self.assertIn("store.matchesAttemptedAckEndpoint(messageId, senderId", ack_handler)
         self.assertLess(ack_handler.index("if (!routeMatches && !persistedEndpointMatch)"),
                         ack_handler.index("store.acknowledge(messageId, senderId)"))
         self.assertIn("if (routeMatches) {", ack_handler)
@@ -3784,7 +3786,8 @@ class AndroidLanAckDiscoveryRaceTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
         helper = extract_java_method(source, "private void processAuthenticatedLanChatAck(")
-        self.assertIn("allowDiscoveryGrace && discoveryAck", helper)
+        self.assertIn("allowDiscoveryGrace && (discoveryAck || attemptedEndpointPending)", helper)
+        self.assertIn("store.matchesAttemptedAckEndpoint(messageId, senderId", helper)
         self.assertIn('}, 200L)', helper)
         self.assertIn("pendingChatAckRouteRechecks.add(recheckKey)", helper)
         self.assertIn("processAuthenticatedLanChatAck(", helper)
@@ -3932,7 +3935,9 @@ class AndroidLanInstantRouteRecoveryTests(unittest.TestCase):
         self.assertLess(udp, persist)
         self.assertNotIn("lanChatControlExecutor.execute(", send)
         self.assertNotIn("store.recordSuccessfulSendEndpoint(", send)
-        self.assertIn("markAttempt() already durably recorded this exact endpoint", send)
+        self.assertIn("markAttempt() durably records only the attempted endpoint", send)
+        self.assertIn("endpointStore.recordSuccessfulSendEndpoint(", send)
+        self.assertIn("if (!endpointPersisted)", send)
 
 
 
