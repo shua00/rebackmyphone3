@@ -1859,8 +1859,16 @@ class LanP2PCoreTests(unittest.TestCase):
 
         ack_endpoint_start = store.index("public boolean matchesExpectedAckEndpoint(")
         ack_endpoint_method = store[ack_endpoint_start:ack_endpoint_start + 1000]
-        self.assertIn("last_attempt_endpoint=? OR last_sent_endpoint=?", ack_endpoint_method)
+        self.assertIn("last_sent_endpoint=? LIMIT 1", ack_endpoint_method)
+        self.assertNotIn("last_attempt_endpoint", ack_endpoint_method)
         self.assertNotIn("last_endpoint=?", ack_endpoint_method)
+        attempted_endpoint = extract_java_method(store, "public boolean matchesAttemptedAckEndpoint(")
+        self.assertIn("last_attempt_endpoint=?", attempted_endpoint)
+        self.assertNotIn("last_sent_endpoint=? LIMIT 1", attempted_endpoint)
+        ack_handler = extract_java_method(tracking, "private void processAuthenticatedLanChatAck(")
+        self.assertIn("store.matchesAttemptedAckEndpoint(messageId, senderId", ack_handler)
+        self.assertIn("allowDiscoveryGrace && (discoveryAck || attemptedEndpointPending)", ack_handler)
+        self.assertIn("processAuthenticatedLanChatAck(", ack_handler)
 
         endpoint_start = store.index("public boolean recordSuccessfulSendEndpoint(")
         endpoint_method = store[endpoint_start:endpoint_start + 1100]
@@ -3849,8 +3857,16 @@ class AndroidFixedTargetImmediateDispatchTests(unittest.TestCase):
         match = extract_java_method(store, "public boolean matchesExpectedAckEndpoint(")
         self.assertIn("last_attempt_endpoint=?", attempt)
         self.assertIn("update.bindString(1, endpoint)", attempt)
-        self.assertIn("last_attempt_endpoint=? OR last_sent_endpoint=?", match)
-        self.assertNotIn("last_endpoint=?", match)
+        self.assertIn("last_sent_endpoint=? LIMIT 1", match)
+        self.assertNotIn("last_attempt_endpoint", match)
+        attempted_match = extract_java_method(store, "public boolean matchesAttemptedAckEndpoint(")
+        self.assertIn("last_attempt_endpoint=?", attempted_match)
+        ack_handler = extract_java_method(
+            (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8"),
+            "private void processAuthenticatedLanChatAck("
+        )
+        self.assertIn("attemptedEndpointPending", ack_handler)
+        self.assertIn("allowDiscoveryGrace && (discoveryAck || attemptedEndpointPending)", ack_handler)
 
 
 
