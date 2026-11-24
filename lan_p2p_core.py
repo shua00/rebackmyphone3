@@ -145,17 +145,24 @@ def max_peer_id_budget_probe():
     return '"' * MAX_PEER_ID_BYTES
 
 
+def is_valid_peer_id(peer_id):
+    """Shared identity predicate for packet codecs and durable recipient snapshots."""
+    if not isinstance(peer_id, str) or not peer_id:
+        return False
+    try:
+        if len(peer_id.encode("utf-8")) > MAX_PEER_ID_BYTES:
+            return False
+    except UnicodeError:
+        return False
+    return not any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in peer_id)
+
+
 def _validate_peer_id_fields(packet):
     for field in ("sender_peer_id", "target_peer_id"):
         if field not in packet and field == "target_peer_id":
             continue
-        peer_id = packet.get(field)
-        if not isinstance(peer_id, str) or not peer_id:
-            raise ValueError("missing or invalid " + field)
-        if len(peer_id.encode("utf-8")) > MAX_PEER_ID_BYTES:
-            raise ValueError("invalid " + field + " length")
-        if any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in peer_id):
-            raise ValueError("invalid control character in " + field)
+        if not is_valid_peer_id(packet.get(field)):
+            raise ValueError("invalid " + field)
 
 
 def encode_packet(fields, secret, max_bytes=1200):
@@ -227,11 +234,13 @@ def validate_incoming_message_claim(conn, insert_rowcount, receiver_scope,
 def persist_outgoing_message(db_path, sender_scope, sender_peer_id, message_id,
                              body, target_peer_ids, created_at_ms=None):
     """Atomically persist a Python-originated chat message and its fixed recipient snapshot."""
-    if not sender_scope or not sender_peer_id or not message_id or body is None:
+    if not sender_scope or not is_valid_peer_id(sender_peer_id) or not message_id or body is None:
         return False
     persisted_at_ms = int(time.time() * 1000)
     now_ms = int(created_at_ms if created_at_ms is not None else persisted_at_ms)
     targets = sorted(set(str(peer) for peer in (target_peer_ids or []) if peer))
+    if any(not is_valid_peer_id(peer) for peer in targets):
+        return False
     conn = sqlite3.connect(db_path, timeout=10)
     try:
         conn.execute("PRAGMA busy_timeout=10000")

@@ -264,7 +264,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
             String body, long createdAtMs,
             java.util.Map<String, java.net.InetSocketAddress> verifiedRoutes) {
         if (messageId == null || messageId.isEmpty()
-                || senderPeerId == null || senderPeerId.isEmpty() || body == null) return false;
+                || !LanP2pProtocol.isValidPeerId(senderPeerId) || body == null) return false;
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         Cursor cursor = null;
@@ -318,6 +318,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
             while (cursor.moveToNext()) {
                 String peerId = cursor.getString(0);
                 if (peerId == null || peerId.isEmpty() || senderPeerId.equals(peerId)) continue;
+                if (!LanP2pProtocol.isValidPeerId(peerId)) return false;
                 recipients.put(peerId, new Target(peerId, "pending", 0,
                         cursor.getString(1), cursor.getInt(2)));
             }
@@ -329,6 +330,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     java.net.InetSocketAddress endpoint = entry.getValue();
                     if (peerId == null || peerId.isEmpty() || senderPeerId.equals(peerId)
                             || endpoint == null || endpoint.getAddress() == null) continue;
+                    if (!LanP2pProtocol.isValidPeerId(peerId)) return false;
                     recipients.put(peerId, new Target(peerId, "pending", 0,
                             endpoint.getAddress().getHostAddress(), endpoint.getPort()));
                 }
@@ -419,6 +421,9 @@ public final class LanChatStore extends SQLiteOpenHelper {
     /** Add the fixed recipient snapshot for a message. Empty snapshots remain pending, never delivered. */
     public boolean setTargets(String messageId, List<Target> targets) {
         if (messageId == null || targets == null || targets.isEmpty()) return false;
+        for (Target target : targets) {
+            if (target != null && !LanP2pProtocol.isValidPeerId(target.peerId)) return false;
+        }
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {

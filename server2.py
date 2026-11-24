@@ -898,11 +898,17 @@ def _build_version_aware_commands(target_devs, action_name, payload, message_id=
                   "created_at_ms": created_at_ms,
                   "display_name": "Web_Console", "body": str(payload)}
         try:
-            # A discovery broadcast may later become per-peer unicast. Validate against
-            # the maximum allowed recipient ID before persisting the fixed target snapshot.
-            budget_packet = dict(packet)
-            budget_packet["target_peer_id"] = max_peer_id_budget_probe()
-            encode_packet(budget_packet, RESCUE_SECRET)
+            if target_devs:
+                # Fixed targets are immutable: validate every actual ID before the Outbox commit.
+                for peer_id in target_devs:
+                    targeted_packet = dict(packet)
+                    targeted_packet["target_peer_id"] = str(peer_id)
+                    encode_packet(targeted_packet, RESCUE_SECRET)
+            else:
+                # Empty discovery may learn a recipient later, so reserve the maximum ID budget.
+                budget_packet = dict(packet)
+                budget_packet["target_peer_id"] = max_peer_id_budget_probe()
+                encode_packet(budget_packet, RESCUE_SECRET)
             encoded = encode_packet(packet, RESCUE_SECRET)
         except ValueError as e:
             with print_lock:

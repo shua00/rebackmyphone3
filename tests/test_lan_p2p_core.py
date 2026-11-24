@@ -423,6 +423,16 @@ class LanP2PCoreTests(unittest.TestCase):
 
 
 
+    def test_python_outbox_rejects_invalid_peer_ids_before_persisting(self):
+        from lan_p2p_core import persist_outgoing_message
+        invalid_id = "x" * 129
+        self.assertFalse(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-invalid-target",
+            "hello", [invalid_id]))
+        self.assertFalse(persist_outgoing_message(
+            self.db_path, "server2", invalid_id, "m-invalid-sender",
+            "hello", ["android-a"]))
+
     def test_python_outbox_requires_every_fixed_recipient_ack(self):
         from lan_p2p_core import persist_outgoing_message, acknowledge_outgoing_message
         self.assertTrue(persist_outgoing_message(self.db_path, "server2", "server2-id",
@@ -4338,6 +4348,15 @@ class AndroidLanDiscoveryWindowAtomicityTests(unittest.TestCase):
         self.assertIn("store.markAttempt(messageId, peerId, attemptedEndpoint, \"\");", internal)
 
 class LanP2PEnvelopeBudgetParityTests(unittest.TestCase):
+    def test_android_store_validates_historical_and_live_targets_before_commit(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        enqueue = extract_java_method(store, "public boolean enqueueWithRecipientSnapshot(")
+        set_targets = extract_java_method(store, "public boolean setTargets(")
+        self.assertIn("LanP2pProtocol.isValidPeerId(senderPeerId)", enqueue)
+        self.assertGreaterEqual(enqueue.count("LanP2pProtocol.isValidPeerId(peerId)"), 2)
+        self.assertIn("LanP2pProtocol.isValidPeerId(target.peerId)", set_targets)
+
     def test_android_and_python_share_worst_case_recipient_preflight(self):
         repo_root = Path(__file__).resolve().parents[1]
         protocol = (repo_root / "app/src/main/java/com/example/devicefinder/LanP2pProtocol.java").read_text(encoding="utf-8")

@@ -80,15 +80,19 @@ public final class LanP2pProtocol {
             throw new IllegalArgumentException("Missing or invalid " + field);
         }
         String peerId = packet.getString(field);
-        if (peerId.isEmpty()
-                || peerId.getBytes(StandardCharsets.UTF_8).length > MAX_PEER_ID_BYTES) {
-            throw new IllegalArgumentException("Invalid " + field + " length");
+        if (!isValidPeerId(peerId)) {
+            throw new IllegalArgumentException("Invalid " + field);
         }
+    }
+
+    /** Shared validation for wire packets and durable recipient snapshots. */
+    public static boolean isValidPeerId(String peerId) {
+        if (peerId == null || peerId.isEmpty()
+                || peerId.getBytes(StandardCharsets.UTF_8).length > MAX_PEER_ID_BYTES) return false;
         for (int i = 0; i < peerId.length(); i++) {
-            if (Character.isISOControl(peerId.charAt(i))) {
-                throw new IllegalArgumentException("Invalid control character in " + field);
-            }
+            if (Character.isISOControl(peerId.charAt(i))) return false;
         }
+        return true;
     }
 
     /**
