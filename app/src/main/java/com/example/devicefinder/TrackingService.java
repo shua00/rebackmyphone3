@@ -4301,6 +4301,8 @@ public class TrackingService extends Service implements LocationListener {
             } catch (Exception targetReadFailure) {
                 FileLogger.log(this, "CHAT", "⚠️ LAN 目标账本读取失败，消息保留待重试: "
                         + targetReadFailure.getClass().getSimpleName());
+                scheduleLanChatTask("outbox-preflight-retry-" + messageId,
+                        this::requestLanChatRetryPlan, 500L);
                 return;
             }
             final long targetLoadMs = android.os.SystemClock.elapsedRealtime() - targetLoadStartedAt;
@@ -4314,6 +4316,8 @@ public class TrackingService extends Service implements LocationListener {
                 } catch (Exception attemptReadFailure) {
                     FileLogger.log(this, "CHAT", "⚠️ LAN 固定目标发送预算读取失败，消息保留待重试: "
                             + attemptReadFailure.getClass().getSimpleName());
+                    scheduleLanChatTask("outbox-preflight-retry-" + messageId,
+                            this::requestLanChatRetryPlan, 500L);
                     return;
                 }
                 if (preparedAttemptNumber < 0) {
@@ -4459,6 +4463,12 @@ public class TrackingService extends Service implements LocationListener {
             }
         } catch (Exception e) {
             FileLogger.log(this, "CHAT", "⚠️ LAN 对讲发送/恢复异常: " + e.getClass().getSimpleName());
+            if (!attemptAdmitted && !serviceDestroyed) {
+                // Unexpected pre-admission failures have not armed the normal ACK/backoff
+                // path yet. Re-scan the durable outbox once after a short settling delay.
+                scheduleLanChatTask("outbox-preflight-retry-" + messageId,
+                        this::requestLanChatRetryPlan, 500L);
+            }
         } finally {
             if (!lanChatAckGraceInFlight.contains(messageId)) {
                 activeLanChatTransmissions.remove(messageId);
