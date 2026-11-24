@@ -207,7 +207,9 @@ public class TrackingService extends Service implements LocationListener {
             new java.util.concurrent.atomic.AtomicBoolean(false);
     private static final Object reportLock = new Object();
     private static volatile int consecutiveFailures = 0;
-    private static volatile boolean isListeningForRescue = false;
+    // Listener ownership is per Service instance; an old instance must not block a recreated one.
+    private volatile boolean isListeningForRescue = false;
+    private volatile Thread rescueListenerThread = null;
 
     private static long lastNotificationClickTime = 0;
     private static int notificationClickCount = 0;
@@ -6182,7 +6184,7 @@ public class TrackingService extends Service implements LocationListener {
             }
         }
 
-        new Thread(() -> {
+        Thread listenerThread = new Thread(() -> {
             DatagramSocket rescueSocket = null;
             try {
                 rescueSocket = new DatagramSocket(null);
@@ -6473,21 +6475,26 @@ public class TrackingService extends Service implements LocationListener {
                         // The published Network is valid only while its owning listener socket is current.
                         lanChatBoundWifiNetwork = null;
                     }
-                    isListeningForRescue = false;
+                    boolean ownsListener = rescueListenerThread == Thread.currentThread();
+                    if (ownsListener) {
+                        rescueListenerThread = null;
+                        isListeningForRescue = false;
+                    }
                     // A deliberate Wi-Fi path replacement is not a socket failure. Its old
                     // listener must hand off immediately instead of entering the 5s+ backoff.
-                    networkGenerationChanged = listenerGeneration != lanSocketGeneration.get();
+                    networkGenerationChanged = ownsListener
+                            && listenerGeneration != lanSocketGeneration.get();
                 }
 
                 if (multicastLock != null && multicastLock.isHeld()) {
                     try { multicastLock.release(); } catch (Exception ignored) {}
                 }
 
-                if (!serviceDestroyed && networkGenerationChanged) {
+                if (rescueListenerThread == null && !serviceDestroyed && networkGenerationChanged) {
                     FileLogger.log(this, "NETWORK", "旧 UDP listener 代际已失效，立即重建 Wi-Fi LAN socket oldGeneration="
                             + listenerGeneration + " newGeneration=" + lanSocketGeneration.get());
                     triggerRescueListener();
-                } else if (!serviceDestroyed) {
+                } else if (rescueListenerThread == null && !serviceDestroyed) {
                     // Genuine bind/receive failures retain exponential backoff; intentional
                     // network-generation handoff above never waits on this failure policy.
                     long retryDelayMs = (long) Math.min(300000, 5000 * Math.pow(3, Math.min(udpBindFailCount, 4)));
@@ -6504,7 +6511,25 @@ public class TrackingService extends Service implements LocationListener {
                     }, retryDelayMs);
                 }
             }
-        }).start();
+        }, "LAN-UDP-Listener-" + serviceInstanceId);
+        synchronized (rescueLock) {
+            if (serviceDestroyed) {
+                isListeningForRescue = false;
+                return;
+            }
+            rescueListenerThread = listenerThread;
+        }
+        try {
+            listenerThread.start();
+        } catch (RuntimeException startFailure) {
+            synchronized (rescueLock) {
+                if (rescueListenerThread == listenerThread) {
+                    rescueListenerThread = null;
+                    isListeningForRescue = false;
+                }
+            }
+            throw startFailure;
+        }
     }
 
     private void parseResponse(JSONObject res) {
@@ -7131,6 +7156,8 @@ public class TrackingService extends Service implements LocationListener {
         // handled may still be rejected during teardown; its sender will retry because
         // no ACK can be sent on the closed socket. Accepted IO tasks are drained below.
         closeLanChatIngressSocket();
+        Thread listenerToStop = rescueListenerThread;
+        if (listenerToStop != null) listenerToStop.interrupt();
         // These peer-scoped events are process-local permissions, not durable message state.
         // The Outbox survives; a recreated service establishes fresh authenticated routes.
         lanChatPeerRecoveryEvents.clear();

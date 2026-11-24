@@ -120,6 +120,22 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertLess(realtime_dispatch, legacy_guard)
         self.assertLess(legacy_guard, legacy_decode)
 
+
+    def test_android_udp_listener_cleanup_is_scoped_to_owning_service_thread(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        listener = extract_java_method(source, "private void startRescueListener()")
+        finally_block = listener[listener.index("finally {"):]
+        self.assertIn("rescueListenerThread == Thread.currentThread()", finally_block)
+        self.assertIn("if (ownsListener)", finally_block)
+        self.assertIn("rescueListenerThread = null;", finally_block)
+        self.assertIn("isListeningForRescue = false;", finally_block)
+        self.assertNotIn("private static volatile boolean isListeningForRescue", source)
+        self.assertIn("listenerToStop.interrupt()", extract_java_method(
+            source, "public void onDestroy()"))
+
     def test_service_depends_on_policy_not_store_compatibility_aliases(self):
         repo_root = Path(__file__).resolve().parents[1]
         service = (
@@ -2732,8 +2748,12 @@ class LanP2PCoreTests(unittest.TestCase):
             Path(__file__).resolve().parents[1]
             / "app/src/main/java/com/example/devicefinder/TrackingService.java"
         ).read_text(encoding="utf-8")
-        self.assertIn("private static volatile boolean isListeningForRescue = false;", source)
+        self.assertIn("private volatile boolean isListeningForRescue = false;", source)
         self.assertIn("private static final Object rescueLock = new Object();", source)
+        self.assertIn("private volatile Thread rescueListenerThread = null;", source)
+        self.assertIn("if (rescueListenerThread == Thread.currentThread())", source)
+        self.assertIn("if (listenerToStop != null) listenerToStop.interrupt();", source)
+        self.assertIn('"LAN-UDP-Listener-" + serviceInstanceId', source)
         self.assertNotIn("private final Object rescueLock = new Object();", source)
 
 
