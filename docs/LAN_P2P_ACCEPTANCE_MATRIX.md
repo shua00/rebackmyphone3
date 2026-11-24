@@ -338,3 +338,16 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 
 | 共享密钥安全边界 | 当前 Android APK 和 Python 服务使用编译/默认共享密钥；HMAC 提供完整性与持钥证明，但不提供机密性，也不构成设备级唯一身份认证 | 源码核查确认；server2 注释明确说明出厂值已写入存量 APK，服务端单边轮换会使旧设备 UDP/HTTP 失联 | 本轮不轮换，避免破坏兼容；后续需独立安全迁移设计、配对与密钥轮换验收 |
 
+
+
+## 15. Android 原始 UDP 字节严格 UTF-8 边界修复（2026-11-24）
+
+| 项目 | 结果 | 证据与限制 |
+|---|---|---|
+| 缺口定位 | 发现 Android v2 解码器虽然启用 CharsetDecoder REPORT，但调用链此前先将 DatagramPacket 转为 String，再重新编码为 UTF-8；上游替换字符可能掩盖原始非法字节 | 静态核查 TrackingService UDP receive loop 与 handleLanRealtimePacket 调用链 |
+| 原始字节修复 | 新增带 offset/length 的 LanP2pProtocol.decode；v2 分支在 legacy String 转换之前直接解析 DatagramPacket 原始 buffer 切片；旧控制命令仍走原字符串路径 | commits 90092cc、3d87bc4；方法边界说明 commit 9412843 |
+| 回归守卫 | 检查原始字节切片进入严格 decoder、v2 处理先于 legacy String 转换，并更新旧接收时延守卫的方法签名 | test commits 80c064c、57fe278 |
+| CI | Python 224 项测试全部通过；Android Debug APK build 与 artifact upload 成功 | Actions #711：https://github.com/shua00/rebackmyphone3/actions/runs/45344665870；HEAD 94128434824b8012de50ac32a36e16d6f396880d；artifact app-debug ID 14897264060，202626 bytes（压缩包大小） |
+| 实机状态 | 未验收 | 仍需在真实 Android 设备/协议测试中发送非法 UTF-8 数据报确认拒绝，并验证正常 Android↔Python 消息、ACK 与时延不退化 |
+
+**本项是协议解析边界修复，不改变 v2 信封字段、HMAC、1200 字节上限、消息状态机或旧控制命令语义。CI 通过不代表真实网络协议行为已实机验收。**
