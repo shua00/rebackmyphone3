@@ -103,3 +103,11 @@
 - Android 在 UTF-8 长度计算前显式校验 surrogate pair；合法 supplementary 字符继续允许，孤立高/低 surrogate 必须拒绝。
 - 两端还必须一致拒绝 C0/C1 控制字符，并按 UTF-8 字节数而非 UTF-16 字符数执行 128 字节上限。
 - 该规则仅用于身份字符串；不对用户消息正文做字符集限制，不改变既有合法身份的格式。
+
+
+### D8：HMAC 规范化前递归验证全部 JSON 字符串
+
+- 只校验 peer ID 不足以保证跨端规范化一致；孤立 UTF-16 surrogate 也可能出现在消息正文、显示元数据、数组元素或 JSON 对象键中。
+- Python 和 Android 必须在 HMAC 规范化前递归检查所有字符串值与对象键，拒绝不能严格编码为 UTF-8 的孤立 surrogate。
+- 合法 supplementary Unicode 字符（例如 emoji）继续支持；不对合法正文字符做额外限制。
+- Python 编码端与解码端、Android 编码端与解码端必须使用同一边界，避免仅一侧拒绝或替换后继续认证。
