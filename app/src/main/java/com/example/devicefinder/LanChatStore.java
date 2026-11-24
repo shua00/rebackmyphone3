@@ -738,6 +738,20 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
+    /**
+     * Read-only admission check for an already-frozen recipient snapshot.
+     * Fixed-target sends have no message-level retry counter to mutate; their durable
+     * attempt budget lives on each target and is rechecked transactionally by markAttempt().
+     * Keeping this aggregate read outside the global UDP sender lock avoids a SQLite query
+     * delaying the next interactive message.
+     */
+    public int readFixedTargetAttemptProgress(String messageId) {
+        if (messageId == null || messageId.length() == 0) return -1;
+        int[] progress = readOutboxTargetAttemptProgress(getReadableDatabase(), messageId);
+        if (progress[0] <= 0 || progress[1] <= 0) return -1;
+        return progress[2];
+    }
+
     public int recordOutboxAttempt(String messageId) {
         if (messageId == null || messageId.length() == 0) return -1;
 
