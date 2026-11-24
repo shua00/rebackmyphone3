@@ -1896,6 +1896,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertLess(skip_pos, udp_pos)
         self.assertLess(udp_pos, endpoint_pos)
         self.assertNotIn("store.recordSuccessfulSendEndpoint(", send_method)
+        self.assertIn("endpointStore.recordSuccessfulSendEndpoint(", send_method)
+        self.assertIn("if (!endpointPersisted)", send_method)
         self.assertIn("last_attempt_endpoint", send_method)
         self.assertIn("recordTargetSendError(", send_method)
         self.assertEqual(
