@@ -6,7 +6,7 @@ v2.8.92 — 2026-11-24 · 首次发现窗口状态操作合并为单事务
 --------------------------------------------------------------------------------
 - 新增 beginOrReadDiscoveryWindow()，在同一 SQLite 事务内完成窗口首次开启、已开启状态判定、超时结算及 waiting_peers 结果识别。
 - 即时发送路径不再连续执行 beginDiscoveryWindow()、isDiscoveryPending()、isWaitingForPeers() 三次独立数据库操作；避免多次连接/事务往返及中间状态竞态。
-- 固定收件人路径的 outbox 发送预算汇总查询移到 FIFO 锁前；锁内仍保留逐目标 markAttempt() 事务性 ACK/预算复核，空收件人首次发现仍在获得 FIFO 发送权后执行 message 级预算记账。
+- 固定收件人路径的 outbox 发送预算汇总查询移到 FIFO 锁前；锁内仍保留逐目标 markAttempt() 事务性 ACK/预算复核，空收件人首次发现仍在获得 FIFO 发送权后执行 message 级预算记账。发送流程标志改名为 attemptAdmitted，准确表达固定目标只读准入与空目标事务记账两种情况。
 - 保留发现窗口只开启一次、不延长截止时间、超时空快照结算为 waiting_peers、存储异常时 fail-closed 的语义。
 - 保留 beginDiscoveryWindow() 兼容包装方法；其他 ACK 和收件人快照路径的独立状态查询不变。
 
