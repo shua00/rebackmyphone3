@@ -5081,6 +5081,85 @@ class LanP2POutboxProcessRestartTests(unittest.TestCase):
                 "subprocess failed: " + result.stderr + "\\nstdout: " + result.stdout)
         return result
 
+    def test_failed_discovery_dispatch_rearms_after_process_restart(self):
+        create = """
+import sys
+from unittest.mock import patch
+from lan_p2p_core import persist_outgoing_message
+db = sys.argv[1]
+with patch('lan_p2p_core.time.time', return_value=1000.0):
+    assert persist_outgoing_message(db, 'server2', 'server2-id',
+                                    'restart-rearm', 'durable body', [])
+"""
+        self._run_python(create)
+        fail = """
+import sqlite3, sys
+from unittest.mock import patch
+from lan_p2p_core import send_discovery_broadcast_with_retries
+class FailingSocket:
+    def sendto(self, payload, destination):
+        raise OSError('offline')
+db = sys.argv[1]
+with patch('lan_p2p_core.time.time', return_value=1000.0):
+    assert send_discovery_broadcast_with_retries(
+        FailingSocket(), db, 'server2', 'restart-rearm', b'frame',
+        [('192.0.2.1', 8888)], attempts=1, retry_delay_seconds=0) == 0
+with sqlite3.connect(db) as conn:
+    assert conn.execute('SELECT delivery_deadline_ms FROM lan_outbox '
+                        'WHERE message_id=?', ('restart-rearm',)).fetchone()[0] == 0
+"""
+        self._run_python(fail)
+        resume = """
+import sqlite3, sys
+from unittest.mock import patch
+from lan_p2p_core import send_discovery_broadcast_with_retries
+class SuccessfulSocket:
+    def sendto(self, payload, destination):
+        return len(payload)
+db = sys.argv[1]
+with patch('lan_p2p_core.time.time', return_value=2000.0):
+    assert send_discovery_broadcast_with_retries(
+        SuccessfulSocket(), db, 'server2', 'restart-rearm', b'frame',
+        [('192.0.2.1', 8888)], attempts=1, retry_delay_seconds=0) == 1
+with sqlite3.connect(db) as conn:
+    deadline = conn.execute('SELECT delivery_deadline_ms FROM lan_outbox '
+                            'WHERE message_id=?', ('restart-rearm',)).fetchone()[0]
+assert deadline == 2010000, deadline
+"""
+        self._run_python(resume)
+
+    def test_expired_empty_discovery_snapshot_stays_frozen_after_process_restart(self):
+        create = """
+import sys
+from unittest.mock import patch
+from lan_p2p_core import persist_outgoing_message, begin_outgoing_discovery_window
+db = sys.argv[1]
+with patch('lan_p2p_core.time.time', return_value=1000.0):
+    assert persist_outgoing_message(db, 'server2', 'server2-id',
+                                    'restart-frozen', 'durable body', [])
+    assert begin_outgoing_discovery_window(db, 'server2', 'restart-frozen')
+"""
+        self._run_python(create)
+        verify = """
+import sqlite3, sys
+from unittest.mock import patch
+from lan_p2p_core import record_peer, add_discovery_targets_for_peer, load_pending_outgoing_for_peer
+db = sys.argv[1]
+with patch('lan_p2p_core.time.time', return_value=1010.0):
+    assert record_peer(db, 'server2', 'android-late', 'android', 'android-main',
+                       '192.0.2.11', 8888, 'active')
+    assert add_discovery_targets_for_peer(db, 'server2', 'android-late') == 0
+    assert load_pending_outgoing_for_peer(db, 'server2', 'android-late') == []
+with sqlite3.connect(db) as conn:
+    state = conn.execute('SELECT state FROM lan_outbox WHERE message_id=?',
+                         ('restart-frozen',)).fetchone()[0]
+    targets = conn.execute('SELECT COUNT(*) FROM lan_outbox_targets WHERE message_id=?',
+                           ('restart-frozen',)).fetchone()[0]
+assert state == 'waiting_peers', state
+assert targets == 0, targets
+"""
+        self._run_python(verify)
+
     def test_fixed_target_outbox_and_ack_survive_real_process_restart(self):
         create = """
 import sys
