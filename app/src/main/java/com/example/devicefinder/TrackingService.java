@@ -5739,11 +5739,16 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private boolean handleLanRealtimePacket(DatagramSocket socket, DatagramPacket packet,
-                                              String message, long packetReceivedAtElapsedMs) {
+                                              long packetReceivedAtElapsedMs) {
         try {
-            if (message.startsWith("{")) {
+            byte[] data = packet == null ? null : packet.getData();
+            int offset = packet == null ? 0 : packet.getOffset();
+            int length = packet == null ? 0 : packet.getLength();
+            if (data != null && length > 0 && offset >= 0
+                    && offset < data.length && data[offset] == '{') {
                 try {
-                    JSONObject envelope = LanP2pProtocol.decode(message.getBytes("UTF-8"), RESCUE_SECRET);
+                    JSONObject envelope = LanP2pProtocol.decode(
+                            data, offset, length, RESCUE_SECRET);
                     return handleAuthenticatedLanPacket(socket, packet, envelope, packetReceivedAtElapsedMs);
                 } catch (Exception invalid) {
                     FileLogger.logD("UDP", "invalid authenticated LAN JSON frame: "
@@ -6079,11 +6084,12 @@ public class TrackingService extends Service implements LocationListener {
                         continue;
                     }
                     long udpReceiveElapsedMs = android.os.SystemClock.elapsedRealtime();
-                    String message = new String(packet.getData(), 0, packet.getLength());
-                    // ACK/握手优先快路径：不经过普通命令分发和完整包日志，尽快释放发送端等待。
-                    if (handleLanRealtimePacket(rescueSocket, packet, message, udpReceiveElapsedMs)) {
+                    // Parse authenticated v2 frames from the original datagram bytes before
+                    // any legacy String decoding can replace malformed UTF-8 sequences.
+                    if (handleLanRealtimePacket(rescueSocket, packet, udpReceiveElapsedMs)) {
                         continue;
                     }
+                    String message = new String(packet.getData(), 0, packet.getLength());
                     // 只记录命令前缀与来源，不记录认证字段、聊天正文或完整协议包。
                     int typeEnd = message.indexOf(':');
                     String packetType = typeEnd > 0 ? message.substring(0, typeEnd) : "UNKNOWN";
