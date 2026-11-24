@@ -1491,6 +1491,19 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("lanChatRecoveryEventPending.getAndSet(false)", retry)
         self.assertIn("resumeExhaustedRetriesForRecoveryEvent(System.currentTimeMillis())", retry)
 
+    def test_outbox_retry_executor_rejection_rearms_admission_without_network_event(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        retry = extract_java_method(source, "private void retryPendingLanChatMessages(boolean recoveryEvent)")
+        rejected = retry.index("catch (java.util.concurrent.RejectedExecutionException e)")
+        block = retry[rejected:]
+        self.assertIn("lanChatRetryInFlight.set(false);", block)
+        self.assertIn('scheduleLanChatTask("outbox-retry-admission-fallback"', block)
+        self.assertIn("() -> retryPendingLanChatMessages(recoveryEvent)", block)
+        self.assertIn("}, 500L);", block)
+        self.assertIn("if (!serviceDestroyed)", block)
+        self.assertNotIn("retryPendingLanChatMessages(true)", block)
+
     def test_android_outbox_retry_attempt_ledger_is_persistent_and_migrated(self):
         repo_root = Path(__file__).resolve().parents[1]
         store = (
