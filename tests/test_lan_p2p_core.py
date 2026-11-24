@@ -2690,9 +2690,12 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("if (lanChatRecoveryEventPending.get())", retry)
         self.assertIn("retryPendingLanChatMessages(true)", retry)
         cooldown_wake = extract_java_method(service, "private void scheduleLanChatRecoveryCooldownWake(")
-        self.assertIn("lanChatRecoveryCooldownWakeScheduled.compareAndSet(false, true)", cooldown_wake)
+        self.assertIn("AtomicLong lanChatRecoveryCooldownWakeAtMs", service)
+        self.assertIn("currentWakeAtMs <= requestedWakeAtMs", cooldown_wake)
+        self.assertIn("compareAndSet(scheduledWakeAtMs, Long.MAX_VALUE)", cooldown_wake)
         self.assertIn('scheduleLanChatTask("outbox-recovery-cooldown"', cooldown_wake)
-        self.assertIn("handler.postDelayed(wake, delayMs)", cooldown_wake)
+        self.assertIn("handler.postDelayed(wake, remainingDelayMs)", cooldown_wake)
+        self.assertNotIn("lanChatRecoveryCooldownWakeScheduled", service)
         self.assertIn("store.nextRecoveryEventEligibleAtMs", retry)
         self.assertIn(
             'if (resumed > 0) {\n                            FileLogger.log(this, "CHAT", "LAN 恢复事件重新开启有限补发预算 messages=" + resumed);\n                        }\n                        // Schedule the next cooldown',
