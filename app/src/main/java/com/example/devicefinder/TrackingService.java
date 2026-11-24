@@ -208,6 +208,7 @@ public class TrackingService extends Service implements LocationListener {
     private static final Object reportLock = new Object();
     private static volatile int consecutiveFailures = 0;
     // Listener ownership is per Service instance; an old instance must not block a recreated one.
+    // rescueLock remains process-wide only to serialize socket publication/revocation across instances.
     private volatile boolean isListeningForRescue = false;
     private volatile Thread rescueListenerThread = null;
 
