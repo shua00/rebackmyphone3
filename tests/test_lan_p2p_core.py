@@ -2243,10 +2243,14 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("store.finalizeExpiredDiscoveryWindowIds(System.currentTimeMillis())", finalizer)
         self.assertIn("scheduleLanChatMirrorCleanup(finalizedId)", finalizer)
         self.assertNotIn("retryPendingLanChatMessages(false)", finalizer)
-        self.assertIn("removePendingLanChat(id);", service[
-            service.index("private void retryPendingLanChatMessages(boolean recoveryEvent)"):
-            service.index("private void sendLocalUdpMessage(", service.index("private void retryPendingLanChatMessages(boolean recoveryEvent)"))
-        ])
+        retry_start = service.index("private void retryPendingLanChatMessages(boolean recoveryEvent)")
+        retry_end = service.index("private void sendLocalUdpMessage(", retry_start)
+        retry = service[retry_start:retry_end]
+        self.assertNotIn("removePendingLanChat(id);", retry)
+        self.assertEqual(3, retry.count("scheduleLanChatMirrorCleanup(id)"))
+        cleanup = extract_java_method(service, "private void scheduleLanChatMirrorCleanup(")
+        self.assertIn("lanChatPeerExecutor.execute", cleanup)
+        self.assertIn("removePendingLanChat(messageId)", cleanup)
         sender = extract_java_method(service, "private void transmitLocalUdpMessageInternal(")
         self.assertIn("scheduleLanChatMirrorCleanup(messageId)", sender)
         self.assertNotIn("removePendingLanChat(messageId)", sender)
@@ -2311,7 +2315,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("if (store.isTerminalForLegacyMirror(id))", retry)
         terminal = extract_java_method(store_source, "public boolean isTerminalForLegacyMirror(")
         self.assertIn("state IN ('delivered','waiting_peers')", terminal)
-        self.assertIn("removePendingLanChat(id);", retry)
+        self.assertNotIn("removePendingLanChat(id);", retry)
+        self.assertEqual(3, retry.count("scheduleLanChatMirrorCleanup(id)"))
 
 
     def test_android_peer_ack_is_durable_before_route_activation_and_discovery_snapshot(self):
