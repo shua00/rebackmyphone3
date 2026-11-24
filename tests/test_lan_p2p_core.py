@@ -2743,7 +2743,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("triggerRescueListener()", listener)
 
 
-    def test_android_udp_listener_guard_matches_process_wide_listener_state(self):
+    def test_android_udp_listener_guard_is_scoped_to_service_instance(self):
         source = (
             Path(__file__).resolve().parents[1]
             / "app/src/main/java/com/example/devicefinder/TrackingService.java"
@@ -4584,11 +4584,11 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         self.assertIn("if (rescueSocketRef == rescueSocket) {", listener)
         self.assertIn("rescueSocketRef = null;", listener)
         self.assertIn("lanChatBoundWifiNetwork = null;", listener)
-        self.assertIn("networkGenerationChanged = listenerGeneration != lanSocketGeneration.get();", listener)
+        self.assertIn("networkGenerationChanged = ownsListener", listener)
         finally_block = listener[listener.index("} finally {"):]
-        self.assertIn("if (!serviceDestroyed && networkGenerationChanged)", finally_block)
+        self.assertIn("if (rescueListenerThread == null && !serviceDestroyed && networkGenerationChanged)", finally_block)
         self.assertIn("triggerRescueListener();", finally_block)
-        self.assertIn("else if (!serviceDestroyed)", finally_block)
+        self.assertIn("else if (rescueListenerThread == null && !serviceDestroyed)", finally_block)
         self.assertIn("long retryDelayMs =", finally_block)
         self.assertLess(finally_block.index("networkGenerationChanged"), finally_block.index("long retryDelayMs ="))
         send = extract_java_method(source, "private void transmitLocalUdpMessage(")
