@@ -451,6 +451,6 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 断点续传 | 根据已持久化的 chunk index 集合计算有序缺块清单；重复索引幂等 | 尚未实现持久化 chunk ledger、断点恢复与磁盘内容复核 |
 | 资源上限 | 默认单文件 2 GiB、并行块 4、活动任务 4；均由独立 limits 参数约束 | 仍需在发送端和接收端执行总配额、剩余磁盘空间和并发 admission |
 | 文字消息隔离 | 文件传输模型不复用 chat.message/chat.ack，不改变现有 1200-byte UDP 文字消息路径 | 后续控制面可复用 peer 身份/发现，文件数据面应使用独立流式连接 |
-| 自动化 | 新增 Offer、chunk、resume-index、state transition 单元测试 | Actions 待验证；真实 TCP/流式数据、重启续传、损坏块和取消清理尚未验收 |
+| 自动化 | 新增 Offer、chunk、resume-index、state transition 单元测试；Python 全量 264 项通过 | Actions [#766](https://github.com/shua00/rebackmyphone3/actions/runs/45504746611)，HEAD `9928c78`；Android build 因无 Android 输入变更按规则跳过。真实 TCP/流式数据、重启续传、损坏块和取消清理尚未验收 |
 
 **本节仅完成文件传输第一阶段领域契约，不代表 LAN 文件传输已可用。后续实现必须保持独立 transfer_id、接收端显式 Accept、分块幂等、分块持久化、整文件 SHA-256、断点续传与安全临时文件/原子落盘。**
