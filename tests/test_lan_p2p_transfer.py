@@ -442,7 +442,7 @@ class TransferTcpFrameTests(unittest.TestCase):
         from lan_p2p_transfer_tcp import TransferFrameError, recv_frame
         left, right = socket.socketpair()
         try:
-            left.sendall(b"LNP2\\x00")
+            left.sendall(b"LNP2\x00")
             left.shutdown(socket.SHUT_WR)
             with self.assertRaises(EOFError):
                 recv_frame(right, self.SECRET)

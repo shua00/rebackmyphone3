@@ -63,7 +63,7 @@ def _validate_frame(frame: TransferFrame, secret: bytes, max_payload_bytes: int)
         raise TransferFrameError("session secret must contain at least 16 bytes")
     if isinstance(max_payload_bytes, bool) or not isinstance(max_payload_bytes, int) or max_payload_bytes < 1:
         raise TransferFrameError("invalid payload limit")
-    if frame.kind not in _KINDS:
+    if not isinstance(frame.kind, str) or frame.kind not in _KINDS:
         raise TransferFrameError("unsupported frame kind")
     _validate_id(frame.transfer_id, "transfer_id")
     _validate_id(frame.sender_peer_id, "sender_peer_id")
@@ -141,6 +141,8 @@ def recv_frame(sock: socket.socket, secret: bytes,
         raise TransferFrameError("invalid transfer header JSON") from exc
     if not isinstance(header, dict) or set(header) != _HEADER_KEYS:
         raise TransferFrameError("transfer header fields do not match schema")
+    if _canonical(header) != raw_header:
+        raise TransferFrameError("transfer header is not canonical JSON")
     if header.get("v") != _VERSION or isinstance(header.get("v"), bool):
         raise TransferFrameError("unsupported transfer frame version")
     payload_size = header.get("payload_size")
