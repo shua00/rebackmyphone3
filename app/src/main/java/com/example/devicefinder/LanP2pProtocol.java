@@ -60,7 +60,10 @@ public final class LanP2pProtocol {
         return decode(bytes, 0, bytes.length, secret);
     }
 
-    /** Decode the original datagram slice without a lossy byte-to-String round trip. */
+    /**
+     * Decode only the original datagram slice. Callers must not round-trip through String:
+     * replacement decoding upstream would hide malformed UTF-8 before this strict boundary.
+     */
     public static JSONObject decode(byte[] bytes, int offset, int length, String secret) throws Exception {
         if (bytes == null || offset < 0 || length <= 0
                 || length > MAX_DATAGRAM_BYTES || offset > bytes.length - length) {
