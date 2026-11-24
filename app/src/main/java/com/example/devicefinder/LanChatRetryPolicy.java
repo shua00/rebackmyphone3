@@ -18,6 +18,27 @@ final class LanChatRetryPolicy {
     static final long PEER_DISCOVERY_COOLDOWN_MS = 1_500L;
     static final long PEER_CHALLENGE_TIMEOUT_MS = 2_500L;
 
+    // Outbox wake cadence and bounded work per wake. Keep these separate from per-target
+    // dispatch backoff: a scheduler wake is not itself a delivery attempt.
+    static final long OUTBOX_RETRY_FIRST_DELAY_MS = 1_500L;
+    static final long OUTBOX_RETRY_SECOND_DELAY_MS = 4_000L;
+    static final long OUTBOX_RETRY_BACKOFF_BASE_MS = 10_000L;
+    static final long OUTBOX_RETRY_MAX_DELAY_MS = 60_000L;
+    static final long UNATTEMPTED_ROUTE_PROBE_MAX_DELAY_MS = 5_000L;
+    static final int RETRY_BATCH_SIZE = 3;
+    static final int MAX_RETRY_BATCHES_PER_WAKE = 3;
+
+    static long outboxRetryWakeDelayMs(int minimumAttempts, boolean hasUnattemptedRouteTargets) {
+        long sendRetryDelayMs = minimumAttempts == Integer.MAX_VALUE ? Long.MAX_VALUE
+                : (minimumAttempts <= 1 ? OUTBOX_RETRY_FIRST_DELAY_MS
+                : (minimumAttempts == 2 ? OUTBOX_RETRY_SECOND_DELAY_MS
+                : Math.min(OUTBOX_RETRY_MAX_DELAY_MS,
+                        OUTBOX_RETRY_BACKOFF_BASE_MS << Math.min(3, minimumAttempts - 3))));
+        return hasUnattemptedRouteTargets
+                ? Math.min(UNATTEMPTED_ROUTE_PROBE_MAX_DELAY_MS, sendRetryDelayMs)
+                : sendRetryDelayMs;
+    }
+
     /** Retry delays after completed attempts 1..5; later attempts use the ceiling below. */
     private static final long[] RETRY_DELAY_AFTER_ATTEMPT_MS =
             {250L, 250L, 10_000L, 20_000L, 40_000L};
