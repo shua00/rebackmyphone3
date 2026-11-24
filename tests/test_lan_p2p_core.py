@@ -2257,7 +2257,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("lanChatDiscoveryFinalizerScheduled.compareAndSet(false, true)", finalizer)
         self.assertIn('scheduleLanChatTask("discovery-window-finalizer"', finalizer)
         self.assertIn("lanChatSendExecutor.execute", finalizer)
-        self.assertIn("store.finalizeExpiredDiscoveryWindows(System.currentTimeMillis())", finalizer)
+        self.assertIn("store.finalizeExpiredDiscoveryWindowIds(System.currentTimeMillis())", finalizer)
         self.assertIn("catch (java.util.concurrent.RejectedExecutionException rejected)", finalizer)
         self.assertIn("scheduleLanChatDiscoveryFinalizer(store, 500L)", finalizer)
         self.assertIn("store.getNextDiscoveryDeadlineMs()", finalizer)
@@ -2291,7 +2291,7 @@ class LanP2PCoreTests(unittest.TestCase):
         store_source = (
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         ).read_text(encoding="utf-8")
-        finalize = extract_java_method(store_source, "public int finalizeExpiredDiscoveryWindows(")
+        finalize = extract_java_method(store_source, "public List<String> finalizeExpiredDiscoveryWindowIds(")
         self.assertIn("delivery_deadline_ms<=?", finalize)
         self.assertIn("finalizeDiscoveryMessage(db, messageId)", finalize)
 
