@@ -418,3 +418,16 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 实机状态 | 未验收 | 需要三服务真实进程在 SQLite 短时锁、UDP send 错误、服务重启与路由恢复组合下验证；CI 源码守卫不等同动态测试 |
 
 **B4/B5 仅完成代码与自动化门槛，不代表 LAN P2P 总体验收通过。A01–A10、S01–S26、M-A–M-C、F01–F20、G01–G14 既有门槛不变；双端即时性、异常恢复和真实网络切换仍必须实测。**
+
+
+## 9. 本轮继续推进记录（2026-11-24）
+
+| 项目 | 代码/CI 结果 | 未完成边界 |
+|---|---|---|
+| B4 按设备恢复隔离与事件保留 | Android peer-scoped 恢复、Python 三服务恢复事件保留；全量 Python 检查与 Debug APK 构建通过，commit `f3a6723702f530802b870e6428fa24c89dc670aa`，Actions [#736](https://github.com/shua00/rebackmyphone3/actions/runs/45369701203) | Android SQLite 并发/故障注入、三服务真实进程恢复仍待验收 |
+| B5 三服务重试查询公平性 | 移除恢复事件对普通目标退避的查询绕过；12 条积压、前 10 条退避时后续 due 消息可进入批次；包含在 Actions #736 | 真实多目标积压与高负载时延仍待实测 |
+| Android API 21-22 网络恢复 | 默认路由非 Wi-Fi 时 LAN 快路径 fail-closed；默认网络变化撤销旧 peer 并重绑；AP/DHCP 元组进入旧系统网络代数；Debug APK 构建通过，commit `c37be937269c63617cbb7bbc2f9f766a55ec075d`，Actions [#737](https://github.com/shua00/rebackmyphone3/actions/runs/45371247699) | 尚无 API 21/22 真机或模拟器网络切换验证 |
+| Android API 23+ 与 Python listener 网络恢复 | 源码审查确认 socket-bound Wi-Fi 指纹、代际重绑、Python listener 关闭后释放 socket 并重绑定 | Wi-Fi/蜂窝切换、断网恢复、路由器重启等动态故障注入未完成 |
+| LAN v2 文件传输 | 当前协议仍仅包含 peer hello/ack 与 chat message/ack；文字消息保持小型 UDP 数据报 | 尚未实现文件 offer/chunk/校验/断点续传；按独立数据通道设计，不混入文字消息 UDP |
+
+本节所列 CI 只证明对应 commit 的自动检查与 APK 构建；不替代多设备、真实网络切换和 SQLite 故障注入。
