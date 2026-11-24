@@ -208,6 +208,51 @@ class TransferStore:
             raise TransferValidationError("unknown transfer_id")
         return missing_chunk_indexes(record.total_chunks,self.received_chunk_indexes(transfer_id))
 
+
+    def remove_chunk_receipt(self, transfer_id: str, chunk_index: int, now_ms: int) -> bool:
+        """Invalidate a receipt when restart reconciliation finds its file missing/corrupt."""
+        self._check_time(now_ms)
+        if isinstance(chunk_index, bool) or not isinstance(chunk_index, int) or chunk_index < 0:
+            raise TransferValidationError("chunk index must be a non-negative integer")
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT state FROM lan_transfer_tasks WHERE transfer_id=?",
+                               (transfer_id,)).fetchone()
+            if row is None:
+                raise TransferValidationError("unknown transfer_id")
+            state = TransferState(row["state"])
+            if state in (TransferState.COMPLETED, TransferState.REJECTED,
+                         TransferState.CANCELLED, TransferState.FAILED, TransferState.EXPIRED):
+                raise TransferTransitionError("cannot invalidate chunks for a terminal transfer")
+            deleted = conn.execute(
+                "DELETE FROM lan_transfer_chunks WHERE transfer_id=? AND chunk_index=?",
+                (transfer_id, chunk_index)).rowcount
+            if deleted and state == TransferState.VERIFYING:
+                conn.execute("UPDATE lan_transfer_tasks SET state=?,updated_at_ms=? WHERE transfer_id=?",
+                             (TransferState.TRANSFERRING.value, now_ms, transfer_id))
+            else:
+                conn.execute("UPDATE lan_transfer_tasks SET updated_at_ms=? WHERE transfer_id=?",
+                             (now_ms, transfer_id))
+            conn.commit()
+            return deleted > 0
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def get_chunk_receipt(self, transfer_id: str, chunk_index: int):
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT payload_size,chunk_sha256 FROM lan_transfer_chunks "
+                "WHERE transfer_id=? AND chunk_index=?", (transfer_id, chunk_index)
+            ).fetchone()
+            return dict(row) if row is not None else None
+        finally:
+            conn.close()
+
     def complete_after_verification(self, transfer_id: str, verified_whole_sha256: str, now_ms: int):
         """Complete only after caller hashes the assembled temporary file."""
         self._check_time(now_ms)

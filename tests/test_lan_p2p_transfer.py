@@ -17,6 +17,7 @@ from lan_p2p_transfer import (
     validate_offer,
 )
 from lan_p2p_transfer_store import TransferStore
+from lan_p2p_transfer_files import TransferFilesystem
 import tempfile
 from pathlib import Path
 import subprocess
@@ -140,9 +141,6 @@ class TransferStateMachineTests(unittest.TestCase):
             transition_state("offered", TransferState.ACCEPTED)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TransferStorePersistenceTests(unittest.TestCase):
     def setUp(self):
@@ -240,6 +238,93 @@ assert store.record_verified_chunk(chunk,14)
         self.assertEqual(TransferState.TRANSFERRING,record.state)
         self.assertEqual((0,),reopened.received_chunk_indexes("process-restart"))
         self.assertEqual((),reopened.missing_chunks("process-restart"))
+
+
+
+class TransferFilesystemTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        root = Path(self.temp_dir.name)
+        self.db = str(root / "ledger.sqlite3")
+        self.staging = str(root / "staging")
+        self.received = str(root / "received")
+        self.limits = TransferLimits(chunk_size_bytes=4096, max_active_transfers=2)
+        self.store = TransferStore(self.db, self.limits)
+        self.files = TransferFilesystem(self.store, self.staging, self.received,
+                                        max_staging_bytes=16 * 1024)
+        self.payload = b"a" * 4096 + b"tail"
+        self.offer = TransferOffer("fs-stage-01", "sender", "receiver", "photo.jpg",
+            len(self.payload), hashlib.sha256(self.payload).hexdigest(), 100)
+        self.store.create_offer(self.offer, 100)
+        self.store.transition(self.offer.transfer_id, TransferState.ACCEPTED, 101)
+        self.store.transition(self.offer.transfer_id, TransferState.TRANSFERRING, 102)
+
+    def _chunk(self, index):
+        payload = self.payload[index * 4096:(index + 1) * 4096]
+        return ChunkDescriptor(self.offer.transfer_id, index, payload,
+                               hashlib.sha256(payload).hexdigest())
+
+    def test_chunk_is_fsynced_before_receipt_and_assembled_atomically(self):
+        for index in range(2):
+            self.assertTrue(self.files.write_chunk(self._chunk(index), 103 + index))
+        result = self.files.assemble_and_verify(self.offer.transfer_id, 106)
+        self.assertEqual(self.payload, result.read_bytes())
+        self.assertEqual(TransferState.COMPLETED,
+                         self.store.get_transfer(self.offer.transfer_id).state)
+        self.assertEqual((), self.store.missing_chunks(self.offer.transfer_id))
+
+    def test_resume_revalidates_and_invalidates_missing_or_corrupt_chunk(self):
+        self.files.write_chunk(self._chunk(0), 103)
+        self.files.write_chunk(self._chunk(1), 104)
+        chunk_path = Path(self.staging) / self.files._key(self.offer.transfer_id) / "chunk-00000000.part"
+        chunk_path.write_bytes(b"x" * 4096)
+        self.assertEqual((0,), self.files.reconcile(self.offer.transfer_id, 105))
+        self.assertEqual((1,), self.store.received_chunk_indexes(self.offer.transfer_id))
+
+    def test_quota_rejects_before_persisting_receipt(self):
+        constrained = TransferFilesystem(self.store, self.staging, self.received,
+                                         max_staging_bytes=4096)
+        with self.assertRaises(TransferValidationError):
+            constrained.write_chunk(self._chunk(0), 103)
+        self.assertEqual((), self.store.received_chunk_indexes(self.offer.transfer_id))
+
+    def test_symlink_chunk_is_never_followed_or_accepted(self):
+        task = Path(self.staging) / self.files._key(self.offer.transfer_id)
+        task.mkdir(mode=0o700)
+        target = Path(self.temp_dir.name) / "outside"
+        target.write_bytes(self._chunk(0).payload)
+        (task / "chunk-00000000.part").symlink_to(target)
+        with self.assertRaises(TransferValidationError):
+            self.files.write_chunk(self._chunk(0), 103)
+        self.assertEqual((), self.store.received_chunk_indexes(self.offer.transfer_id))
+
+    def test_empty_file_is_verified_and_published(self):
+        offer = TransferOffer("fs-empty", "sender", "receiver", "empty.bin", 0,
+                              hashlib.sha256(b"").hexdigest(), 200)
+        self.store.create_offer(offer, 200)
+        self.store.transition(offer.transfer_id, TransferState.ACCEPTED, 201)
+        self.store.transition(offer.transfer_id, TransferState.TRANSFERRING, 202)
+        result = self.files.assemble_and_verify(offer.transfer_id, 203)
+        self.assertEqual(b"", result.read_bytes())
+        self.assertEqual(TransferState.COMPLETED,
+                         self.store.get_transfer(offer.transfer_id).state)
+
+    def test_durable_orphan_chunk_after_crash_can_be_reconciled_on_retry(self):
+        chunk = self._chunk(0)
+        task = Path(self.staging) / self.files._key(self.offer.transfer_id)
+        task.mkdir(mode=0o700)
+        (task / "chunk-00000000.part").write_bytes(chunk.payload)
+        self.assertEqual((0, 1), self.store.missing_chunks(self.offer.transfer_id))
+        self.assertTrue(self.files.write_chunk(chunk, 103))
+        self.assertEqual((1,), self.store.missing_chunks(self.offer.transfer_id))
+
+    def test_terminal_cleanup_removes_only_owned_staging_tree(self):
+        self.files.write_chunk(self._chunk(0), 103)
+        task = Path(self.staging) / self.files._key(self.offer.transfer_id)
+        self.store.transition(self.offer.transfer_id, TransferState.CANCELLED, 104)
+        self.files.cleanup(self.offer.transfer_id)
+        self.assertFalse(task.exists())
 
 
 if __name__ == "__main__":

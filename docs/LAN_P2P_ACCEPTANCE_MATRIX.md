@@ -478,3 +478,16 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | Service 重建 | 同进程创建第二实例，校验 instance ID 更新且 destroyed 状态不继承 | 真实系统重启/进程回收仍需真机验收 |
 | CI | 本测试触发 Android unit test + Debug APK build | 以本提交 Actions 结果为准 |
 
+
+## 24. 文件系统适配层（2026-11-25）
+
+| 验收点 | 本批实现 | 验收边界 |
+|---|---|---|
+| 安全临时分块 | 同目录临时文件、fsync、无覆盖发布、目录 fsync；限制 staging 实际占用字节 | 依赖应用私有目录；Android SAF 尚未接入 |
+| 路径安全 | transfer_id 哈希目录、输出文件名安全化、拒绝 symlink/非普通文件 | Android/Windows 特定文件系统仍需适配验证 |
+| 收据一致性 | 磁盘块 durable 后才写 SQLite 收据；相同块重放幂等 | 磁盘与 SQLite 不能跨资源原子提交，崩溃窗口由 reconcile 收敛 |
+| 重启恢复 | 逐块复核存在性、长度、SHA-256；损坏块撤销收据并重新列为 missing | 网络缺块请求尚未接入 |
+| 组装与完成 | 全块齐备后组装、fsync、整文件摘要校验、原子发布后完成 | Android UI、媒体库登记和覆盖策略尚未接入 |
+| 清理 | 仅允许终态任务删除其哈希专属 staging 目录 | 自动清理调度和保留期限后续实现 |
+
+**阶段判定：** Python 文件系统适配层的 staging、reconcile、assemble/verify、atomic publish 和终态清理具备自动化测试；TCP 网络数据面与 Android 文件 API 集成仍属后续阶段，不得据此宣布端到端文件传输完成。

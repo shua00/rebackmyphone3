@@ -71,7 +71,7 @@ jobs:
         uses: actions/checkout@v4
       - name: Validate Python communication services
         run: |
-          python3 -m py_compile server2.py rescue2.py chat.py lan_p2p_core.py lan_p2p_transfer.py lan_p2p_transfer_store.py
+          python3 -m py_compile server2.py rescue2.py chat.py lan_p2p_core.py lan_p2p_transfer.py lan_p2p_transfer_store.py lan_p2p_transfer_files.py
           python3 -m unittest discover -s tests -v
 
   build:
