@@ -470,7 +470,21 @@ public class TrackingService extends Service implements LocationListener {
                     new ThreadPoolExecutor.AbortPolicy()
             );
 
-    // Fresh user messages use a separate bounded lane so a backlog of durable retries
+    // Persist newly accepted messages independently from potentially slow UDP dispatch.
+    // A blocked send must not keep later messages out of the durable SQLite outbox.
+    private final java.util.concurrent.ExecutorService lanChatPersistExecutor =
+            new ThreadPoolExecutor(
+                    1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(100),
+                    runnable -> {
+                        Thread thread = new Thread(runnable, "LanChat-Persist");
+                        thread.setPriority(Thread.NORM_PRIORITY);
+                        return thread;
+                    },
+                    new ThreadPoolExecutor.AbortPolicy()
+            );
+
+    // Fresh user messages use a separate bounded transmit lane so durable retries
     // cannot delay interactive sends. The shared transmit lock still serializes UDP writes.
     private final java.util.concurrent.ExecutorService lanChatImmediateExecutor =
             new ThreadPoolExecutor(
@@ -3989,7 +4003,7 @@ public class TrackingService extends Service implements LocationListener {
         startRescueListener();
     }
 
-    /** 新消息在独立有界即时队列中按顺序完成持久化和发送，UI 入口保持原样。 */
+    /** 新消息先进入独立持久化队列，再进入即时发送队列；UI 入口保持原样。 */
     private void sendLocalUdpMessage(final String message) {
         final String messageId = java.util.UUID.randomUUID().toString();
         try {
@@ -4002,8 +4016,8 @@ public class TrackingService extends Service implements LocationListener {
         }
         final long enqueueAt = android.os.SystemClock.elapsedRealtime();
         try {
-            lanChatImmediateExecutor.execute(() -> {
-                if (serviceDestroyed) return;
+            lanChatPersistExecutor.execute(() -> {
+                // Do not abandon an accepted persistence task during graceful service teardown.
                 long queueWaitMs = android.os.SystemClock.elapsedRealtime() - enqueueAt;
                 long persistStarted = android.os.SystemClock.elapsedRealtime();
                 if (!persistPendingLanChat(messageId, message)) {
@@ -4011,12 +4025,28 @@ public class TrackingService extends Service implements LocationListener {
                     return;
                 }
                 long persistMs = android.os.SystemClock.elapsedRealtime() - persistStarted;
-                FileLogger.log(this, "CHAT", "⏱️ P2P 排队耗时 " + queueWaitMs
-                        + "ms，持久化耗时 " + persistMs + "ms，开始发送 " + messageId);
-                sendLocalUdpMessage(message, messageId);
+                if (serviceDestroyed) {
+                    FileLogger.log(this, "CHAT", "LAN 消息已落账，服务正在退出，等待下次恢复发送: " + messageId);
+                    return;
+                }
+                final long sendQueuedAt = android.os.SystemClock.elapsedRealtime();
+                try {
+                    lanChatImmediateExecutor.execute(() -> {
+                        if (serviceDestroyed) return;
+                        long sendQueueWaitMs = android.os.SystemClock.elapsedRealtime() - sendQueuedAt;
+                        FileLogger.log(this, "CHAT", "⏱️ P2P 持久化排队耗时 " + queueWaitMs
+                                + "ms，落账耗时 " + persistMs + "ms，即时发送排队耗时 "
+                                + sendQueueWaitMs + "ms，开始发送 " + messageId);
+                        sendLocalUdpMessage(message, messageId);
+                    });
+                } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                    // The message is already durable; let the existing outbox planner retry it.
+                    FileLogger.log(this, "CHAT", "⚠️ 即时发送队列已满，消息已落账并转入持久化补发: " + messageId);
+                    requestLanChatRetryPlan();
+                }
             });
         } catch (java.util.concurrent.RejectedExecutionException e) {
-            FileLogger.log(this, "CHAT", "⚠️ LAN 发送队列已满，未接受新消息: " + messageId);
+            FileLogger.log(this, "CHAT", "⚠️ LAN 持久化入口队列已满，消息未接受: " + messageId);
         }
     }
 
@@ -6662,6 +6692,7 @@ public class TrackingService extends Service implements LocationListener {
         if (storeToClose == null) return;
         Thread closer = new Thread(() -> {
             awaitLanExecutorTermination(lanChatScheduler);
+            awaitLanExecutorTermination(lanChatPersistExecutor);
             awaitLanExecutorTermination(lanChatImmediateExecutor);
             awaitLanExecutorTermination(lanChatSendExecutor);
             awaitLanExecutorTermination(lanChatControlExecutor);
@@ -6714,6 +6745,7 @@ public class TrackingService extends Service implements LocationListener {
         cancelFastPoll();
 
         if (reportExecutor != null) reportExecutor.shutdown();
+        if (lanChatPersistExecutor != null) lanChatPersistExecutor.shutdown();
         if (lanChatImmediateExecutor != null) lanChatImmediateExecutor.shutdown();
         if (lanChatSendExecutor != null) lanChatSendExecutor.shutdown();
         if (lanChatControlExecutor != null) lanChatControlExecutor.shutdown();
