@@ -3,6 +3,9 @@ package com.example.devicefinder;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
@@ -56,7 +59,15 @@ public final class LanP2pProtocol {
         if (bytes == null || bytes.length == 0 || bytes.length > MAX_DATAGRAM_BYTES) {
             throw new IllegalArgumentException("Invalid LAN P2P datagram size");
         }
-        String raw = new String(bytes, StandardCharsets.UTF_8);
+        final String raw;
+        try {
+            raw = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(bytes)).toString();
+        } catch (CharacterCodingException malformedUtf8) {
+            throw new IllegalArgumentException("Invalid LAN P2P UTF-8", malformedUtf8);
+        }
         JSONObject packet = new JSONObject(raw);
         if (packet.optInt("v", -1) != VERSION) throw new IllegalArgumentException("Unsupported protocol version");
         if (!isSupportedType(packet.optString("type", ""))) {

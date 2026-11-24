@@ -423,6 +423,20 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertEqual(count, 2)
 
 
+    def test_android_and_python_protocol_decoders_reject_malformed_utf8(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        protocol = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanP2pProtocol.java"
+        ).read_text(encoding="utf-8")
+        decoder = extract_java_method(protocol, "public static JSONObject decode(")
+        self.assertIn("StandardCharsets.UTF_8.newDecoder()", decoder)
+        self.assertIn("CodingErrorAction.REPORT", decoder)
+        self.assertIn("ByteBuffer.wrap(bytes)", decoder)
+        self.assertIn("Invalid LAN P2P UTF-8", decoder)
+
+        python_core = (repo_root / "lan_p2p_core.py").read_text(encoding="utf-8")
+        self.assertIn('decode("utf-8", errors="strict")', python_core)
+
     def test_authenticated_v2_packet_round_trip_and_tamper_rejection(self):
         from lan_p2p_core import encode_packet, decode_packet
         packet = {
