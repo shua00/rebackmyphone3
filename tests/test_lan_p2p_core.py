@@ -3387,6 +3387,30 @@ class AndroidLanSchedulingAndAckProgressTests(unittest.TestCase):
             source.index("lanChatImmediateExecutor.shutdown()"),
         )
 
+    def test_lan_store_reference_survives_until_accepted_persistence_tasks_drain(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        destroy = extract_java_method(source, "public void onDestroy()")
+        closer = extract_java_method(source, "private void closeLanChatStoreAfterExecutors(")
+        self.assertIn("LanChatStore storeToClose = lanChatStore;", destroy)
+        self.assertIn("closeLanChatStoreAfterExecutors(storeToClose)", destroy)
+        self.assertNotIn("lanChatStore = null", destroy)
+        self.assertLess(
+            closer.index("awaitLanExecutorTermination(lanChatPersistExecutor)"),
+            closer.index("if (lanChatStore == storeToClose) lanChatStore = null;"),
+        )
+        self.assertLess(
+            closer.index("awaitLanExecutorTermination(lanChatIoExecutor)"),
+            closer.index("if (lanChatStore == storeToClose) lanChatStore = null;"),
+        )
+        self.assertLess(
+            closer.index("if (lanChatStore == storeToClose) lanChatStore = null;"),
+            closer.index("storeToClose.closeStore()"),
+        )
+        persist = extract_java_method(source, "private boolean persistPendingLanChat(")
+        self.assertIn("LanChatStore store = lanChatStore;", persist)
+        self.assertIn("store.enqueueWithRecipientSnapshot(", persist)
+
     def test_ack_completion_reports_sqlite_target_counts_not_window_latch_counts(self):
         repo_root = Path(__file__).resolve().parents[1]
         tracking = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
