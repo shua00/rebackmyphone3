@@ -4046,7 +4046,7 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         self.assertIn("LanChatRetryPolicy.outboxRetryWakeDelayMs(", scheduler)
         self.assertIn("if (minimumAttempts == Integer.MAX_VALUE && !hasUnattemptedRouteTargets) return", scheduler)
         self.assertIn("markAttempt()", scheduler)
-        self.assertIn("does not increment attempt_count", scheduler)
+        self.assertIn("has correctly not consumed a delivery attempt", scheduler)
 
     def test_android_lan_chat_requires_current_wifi_socket_before_charging_attempt(self):
         repo_root = Path(__file__).resolve().parents[1]
