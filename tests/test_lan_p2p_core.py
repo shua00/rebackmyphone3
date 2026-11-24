@@ -1726,6 +1726,14 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("lanChatRetryPlanPending.set(false)", plan)
         self.assertNotIn("messageId", plan)
         self.assertIn("scheduleLanChatRetryPlan(500L)", plan)
+        self.assertIn("if (!handler.postDelayed(submitPlan, delayMs))", plan)
+
+    def test_outbox_retry_planner_storage_failure_rearms_durable_wakeup(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        planner = extract_java_method(source, "private void scheduleLanChatRetryFromOutbox(")
+        self.assertIn("catch (Exception e)", planner)
+        self.assertIn('scheduleLanChatRetryAfterFailure("outbox-plan-read-failure", false)', planner)
 
     def test_outbox_retry_executor_rejection_rearms_admission_without_network_event(self):
         repo_root = Path(__file__).resolve().parents[1]

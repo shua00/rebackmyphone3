@@ -4581,7 +4581,10 @@ public class TrackingService extends Service implements LocationListener {
         if (delayMs <= 0L) {
             submitPlan.run();
         } else if (!scheduleLanChatTask("outbox-retry-plan", submitPlan, delayMs)) {
-            lanChatRetryPlanPending.set(false);
+            // Keep the coalesced planning request alive when the service scheduler rejects it.
+            if (!handler.postDelayed(submitPlan, delayMs)) {
+                lanChatRetryPlanPending.set(false);
+            }
         }
     }
 
@@ -4628,6 +4631,8 @@ public class TrackingService extends Service implements LocationListener {
             if (!scheduled) lanChatRetryWakeScheduled.set(false);
         } catch (Exception e) {
             FileLogger.log(this, "CHAT", "⚠️ 无法安排 LAN 持久化补发: " + e.getClass().getSimpleName());
+            // A transient SQLite read failure must not silently disarm the durable Outbox.
+            scheduleLanChatRetryAfterFailure("outbox-plan-read-failure", false);
         }
     }
 
