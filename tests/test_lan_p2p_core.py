@@ -3651,7 +3651,7 @@ class AndroidLanFixedTargetFastPathTests(unittest.TestCase):
         self.assertLess(lookup, lock)
         self.assertIn("pendingSnapshotTargets == 0", send)
         self.assertIn("preLockBroadcastLookupMs", send)
-        self.assertRegex(send, r"preparedBroadcastAddress,\\s*preLockBroadcastLookupMs")
+        self.assertRegex(send, r"preparedBroadcastAddress,\s*preLockBroadcastLookupMs")
         self.assertIn("final String[] broadcasts = pendingTargetIds.isEmpty()", internal)
         self.assertIn("new String[]{preparedBroadcastAddress}", internal)
         self.assertEqual(internal.count("getWifiBroadcastAddress()"), 1)
