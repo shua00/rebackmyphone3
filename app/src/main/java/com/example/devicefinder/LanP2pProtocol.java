@@ -43,6 +43,7 @@ public final class LanP2pProtocol {
     public static byte[] encode(JSONObject fields, String secret) throws Exception {
         JSONObject packet = copyWithoutAuth(fields);
         packet.put("v", VERSION);
+        validateCanonicalNumbers(packet);
         String type = packet.optString("type", "");
         if (!isSupportedType(type)) throw new IllegalArgumentException("Unsupported LAN P2P packet type");
         validatePeerId(packet, "sender_peer_id");
@@ -79,7 +80,12 @@ public final class LanP2pProtocol {
             throw new IllegalArgumentException("Invalid LAN P2P UTF-8", malformedUtf8);
         }
         JSONObject packet = new JSONObject(raw);
-        if (packet.optInt("v", -1) != VERSION) throw new IllegalArgumentException("Unsupported protocol version");
+        validateCanonicalNumbers(packet);
+        Object version = packet.opt("v");
+        if (!(version instanceof Integer || version instanceof Long)
+                || ((Number) version).longValue() != VERSION) {
+            throw new IllegalArgumentException("Unsupported protocol version");
+        }
         if (!isSupportedType(packet.optString("type", ""))) {
             throw new IllegalArgumentException("Unsupported LAN P2P packet type");
         }
@@ -94,6 +100,33 @@ public final class LanP2pProtocol {
             throw new SecurityException("Invalid LAN P2P authentication");
         }
         return packet;
+    }
+
+    /**
+     * JSON floating-point and out-of-range integers do not have a guaranteed identical
+     * canonical text representation across org.json and Python's json module.
+     * The v2 wire schema uses integer timestamps only, so reject all fractional numbers.
+     */
+    private static void validateCanonicalNumbers(Object value) throws Exception {
+        if (value == null || value == JSONObject.NULL || value instanceof String
+                || value instanceof Boolean) return;
+        if (value instanceof Number) {
+            if (!(value instanceof Byte || value instanceof Short
+                    || value instanceof Integer || value instanceof Long)) {
+                throw new IllegalArgumentException("Non-integer JSON numbers are unsupported");
+            }
+            return;
+        }
+        if (value instanceof JSONObject) {
+            JSONObject object = (JSONObject) value;
+            Iterator<String> keys = object.keys();
+            while (keys.hasNext()) validateCanonicalNumbers(object.get(keys.next()));
+            return;
+        }
+        if (value instanceof JSONArray) {
+            JSONArray array = (JSONArray) value;
+            for (int i = 0; i < array.length(); i++) validateCanonicalNumbers(array.get(i));
+        }
     }
 
     private static void validatePeerId(JSONObject packet, String field) throws Exception {
