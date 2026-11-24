@@ -4253,7 +4253,13 @@ public class TrackingService extends Service implements LocationListener {
             });
         } catch (java.util.concurrent.RejectedExecutionException e) {
             lanChatRetryInFlight.set(false);
-            FileLogger.log(this, "CHAT", "⚠️ LAN 补发队列已满，等待下次网络恢复触发");
+            FileLogger.log(this, "CHAT", "⚠️ LAN 补发队列暂时已满，安排延迟重试");
+            // Queue saturation is not a network-recovery event. Preserve the pending
+            // recovery flag above and retry admission after the current queue drains.
+            if (!serviceDestroyed) {
+                scheduleLanChatTask("outbox-retry-admission-fallback",
+                        () -> retryPendingLanChatMessages(recoveryEvent), 500L);
+            }
         }
     }
 
