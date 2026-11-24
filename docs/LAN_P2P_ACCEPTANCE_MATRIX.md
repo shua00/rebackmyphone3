@@ -467,3 +467,14 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 自动化 | Store reopen、真实子进程重启、块幂等/冲突、状态门禁、全文件摘要门禁 | Actions 待本轮确认；Android/PC 真机传输仍未验收 |
 
 **持久化边界：** 数据库收据不是磁盘文件存在性的证明。重启恢复必须检查临时块文件存在、长度和 SHA-256；缺失/损坏即从缺块集合移除并重新请求，不能仅凭数据库记录宣布块已接收。
+
+## 23. Android Service 生命周期行为测试（2026-11-25）
+
+| 场景 | 验证方式 | 边界 |
+|---|---|---|
+| Service 创建/销毁 | Robolectric ServiceController 执行真实 `onCreate/onDestroy` 回调 | 非设备真实系统进程 |
+| UDP ingress 撤销 | 销毁后引用必须清空；若销毁前已有 socket，必须已关闭 | 不覆盖真实 Wi-Fi Network socket 行为 |
+| Worker 停止 | 捕获 startup/listener Thread，销毁后必须中断或终止 | 不声称 interrupt 可取消正在执行的不可中断系统 IPC |
+| Service 重建 | 同进程创建第二实例，校验 instance ID 更新且 destroyed 状态不继承 | 真实系统重启/进程回收仍需真机验收 |
+| CI | 本测试触发 Android unit test + Debug APK build | 以本提交 Actions 结果为准 |
+
