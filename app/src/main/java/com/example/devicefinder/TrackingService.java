@@ -4208,8 +4208,9 @@ public class TrackingService extends Service implements LocationListener {
                     }
                     final int batchSize = LanChatRetryPolicy.RETRY_BATCH_SIZE;
                     final int maxBatchesPerWake = LanChatRetryPolicy.MAX_RETRY_BATCHES_PER_WAKE;
-                    // Take one stable snapshot for this wake. An unacknowledged first batch
-                    // must not prevent later queued messages from receiving their first attempt.
+                    // Store owns durable rows and per-target attempt budgets; this service only
+                    // snapshots a bounded work set and dispatches it through the FIFO send lane.
+                    // One stable snapshot per wake prevents a stalled first batch from hiding later rows.
                     List<LanChatStore.PendingMessage> pending = store.loadPending(LanChatRetryPolicy.MAX_PENDING_MESSAGES);
                     int queuedBefore = pending.size();
                     for (int batchNo = 0; batchNo < maxBatchesPerWake && !serviceDestroyed; batchNo++) {
