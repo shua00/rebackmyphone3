@@ -3981,5 +3981,35 @@ class AndroidLanDiscoveryWindowAtomicityTests(unittest.TestCase):
         )
         self.assertIn("scheduleLanChatTask(\"discovery-window-close\"", sender)
 
+
+    def test_fixed_target_attempt_progress_is_read_before_fifo_lock(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store_source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        service_source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        progress = extract_java_method(
+            store_source, "public int readFixedTargetAttemptProgress("
+        )
+        sender = extract_java_method(
+            service_source, "private void transmitLocalUdpMessage("
+        )
+        internal = extract_java_method(
+            service_source, "private void transmitLocalUdpMessageInternal("
+        )
+        self.assertIn("getReadableDatabase()", progress)
+        self.assertIn("readOutboxTargetAttemptProgress(", progress)
+        self.assertNotIn("beginTransaction()", progress)
+        self.assertLess(
+            sender.index("store.readFixedTargetAttemptProgress(messageId)"),
+            sender.index("lanChatTransmitLock.lock()"),
+        )
+        self.assertIn("hasFixedTargetSnapshot", sender)
+        self.assertIn("attemptNumber = preparedAttemptNumber;", sender)
+        self.assertIn("store.recordOutboxAttempt(messageId)", sender)
+        self.assertIn("store.markAttempt(messageId, peerId, attemptedEndpoint, \"\");", internal)
+
 if __name__ == "__main__":
     unittest.main()
