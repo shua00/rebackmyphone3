@@ -142,7 +142,9 @@ class LanP2PCoreTests(unittest.TestCase):
             repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
         ).read_text(encoding="utf-8")
         listener = extract_java_method(source, "private void startRescueListener()")
-        finally_block = listener[listener.index("finally {"):]
+        finally_start = listener.index("finally {")
+        finally_end = listener.index('}, "LAN-UDP-Listener-', finally_start)
+        finally_block = listener[finally_start:finally_end]
         admission = listener[:listener.index("Thread listenerThread = new Thread")]
         self.assertLess(admission.index("if (serviceDestroyed) return;"),
                         admission.index("multicastLock.acquire()"))
@@ -150,7 +152,7 @@ class LanP2PCoreTests(unittest.TestCase):
                         admission.index("multicastLock.acquire()"))
         owner_cleanup = finally_block[finally_block.index("if (ownsListener)"):finally_block.index("// A deliberate Wi-Fi path replacement")]
         self.assertIn("releaseLanMulticastLock();", owner_cleanup)
-        self.assertNotIn("releaseLanMulticastLock();", finally_block[finally_block.index("}", finally_block.index("if (ownsListener)")) + 1:])
+        self.assertEqual(1, finally_block.count("releaseLanMulticastLock();"))
         release = extract_java_method(source, "private void releaseLanMulticastLock()")
         self.assertIn("synchronized (rescueLock)", release)
         self.assertIn("multicastLock.release()", release)
