@@ -254,6 +254,54 @@ def _validate_peer_id_fields(packet):
             raise ValueError("invalid " + field)
 
 
+def _require_packet_string(packet, field, allow_empty=False):
+    value = packet.get(field)
+    if not isinstance(value, str) or (not allow_empty and not value):
+        raise ValueError("invalid or missing " + field)
+
+
+def _require_packet_integer(packet, field, minimum=0, maximum=(1 << 63) - 1):
+    value = packet.get(field)
+    if type(value) is not int or value < minimum or value > maximum:
+        raise ValueError("invalid " + field)
+
+
+def _validate_packet_schema(packet):
+    """Enforce the v2 message-type contract before authentication on both peers."""
+    for field in ("sender_peer_type", "service_id", "network_scope", "display_name"):
+        if field in packet and not isinstance(packet[field], str):
+            raise ValueError("invalid " + field)
+
+    packet_type = packet.get("type")
+    if packet_type == "peer.hello":
+        _require_packet_string(packet, "nonce")
+        if "challenge_only" in packet and type(packet["challenge_only"]) is not bool:
+            raise ValueError("invalid challenge_only")
+        if "listen_port" in packet:
+            _require_packet_integer(packet, "listen_port", 1, 65535)
+        if "capabilities" in packet:
+            capabilities = packet["capabilities"]
+            if not isinstance(capabilities, list) or any(not isinstance(x, str) for x in capabilities):
+                raise ValueError("invalid capabilities")
+    elif packet_type == "peer.ack":
+        _require_packet_string(packet, "reply_nonce")
+        if "listen_port" in packet:
+            _require_packet_integer(packet, "listen_port", 1, 65535)
+    elif packet_type == "chat.message":
+        _require_packet_string(packet, "message_id")
+        _require_packet_string(packet, "target_peer_id")
+        _require_packet_string(packet, "body", allow_empty=True)
+        if "created_at_ms" in packet:
+            _require_packet_integer(packet, "created_at_ms")
+    elif packet_type == "chat.ack":
+        _require_packet_string(packet, "message_id")
+        _require_packet_string(packet, "target_peer_id")
+        if packet.get("status") != "stored":
+            raise ValueError("invalid chat ACK status")
+    else:
+        raise ValueError("unsupported LAN P2P packet type")
+
+
 def _validate_unicode_scalars(value):
     """Reject strings that cannot be encoded as strict UTF-8 on every platform."""
     if isinstance(value, str):
@@ -308,6 +356,7 @@ def encode_packet(fields, secret, max_bytes=1200):
     if packet_type not in ("peer.hello", "peer.ack", "chat.message", "chat.ack"):
         raise ValueError("unsupported LAN P2P packet type")
     _validate_peer_id_fields(packet)
+    _validate_packet_schema(packet)
     unsigned = _canonical_envelope_bytes(packet)
     packet["auth"] = hmac.new(_envelope_key(secret), unsigned, hashlib.sha256).hexdigest()
     raw = _canonical_envelope_bytes(packet)
@@ -338,6 +387,7 @@ def decode_packet(data, secret, max_bytes=1200):
     if packet.get("type") not in ("peer.hello", "peer.ack", "chat.message", "chat.ack"):
         raise ValueError("unsupported LAN P2P packet type")
     _validate_peer_id_fields(packet)
+    _validate_packet_schema(packet)
     supplied = packet.get("auth")
     if not isinstance(supplied, str):
         raise ValueError("missing packet authentication")
