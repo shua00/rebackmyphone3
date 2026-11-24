@@ -49,6 +49,7 @@ public final class LanP2pProtocol {
         if (!isSupportedType(type)) throw new IllegalArgumentException("Unsupported LAN P2P packet type");
         validatePeerId(packet, "sender_peer_id");
         if (packet.has("target_peer_id")) validatePeerId(packet, "target_peer_id");
+        validatePacketSchema(packet);
         packet.put("auth", hmac(canonical(packet), secret));
         byte[] bytes = canonical(packet).getBytes(StandardCharsets.UTF_8);
         if (bytes.length == 0 || bytes.length > MAX_DATAGRAM_BYTES) {
@@ -93,6 +94,7 @@ public final class LanP2pProtocol {
         }
         validatePeerId(packet, "sender_peer_id");
         if (packet.has("target_peer_id")) validatePeerId(packet, "target_peer_id");
+        validatePacketSchema(packet);
         String supplied = packet.optString("auth", "");
         if (supplied.isEmpty()) throw new IllegalArgumentException("Missing packet authentication");
         JSONObject unsigned = copyWithoutAuth(packet);
@@ -201,6 +203,74 @@ public final class LanP2pProtocol {
         StringBuilder probe = new StringBuilder(MAX_PEER_ID_BYTES);
         for (int i = 0; i < MAX_PEER_ID_BYTES; i++) probe.append('"');
         return probe.toString();
+    }
+
+
+    private static void requirePacketString(JSONObject packet, String field,
+                                            boolean allowEmpty) throws Exception {
+        if (!packet.has(field) || !(packet.get(field) instanceof String)
+                || (!allowEmpty && ((String) packet.get(field)).isEmpty())) {
+            throw new IllegalArgumentException("Missing or invalid " + field);
+        }
+    }
+
+    private static long requirePacketInteger(JSONObject packet, String field,
+                                             long minimum, long maximum) throws Exception {
+        if (!packet.has(field)) throw new IllegalArgumentException("Missing " + field);
+        Object value = packet.get(field);
+        if (!(value instanceof Byte || value instanceof Short
+                || value instanceof Integer || value instanceof Long)) {
+            throw new IllegalArgumentException("Invalid " + field);
+        }
+        long number = ((Number) value).longValue();
+        if (number < minimum || number > maximum) {
+            throw new IllegalArgumentException("Invalid " + field);
+        }
+        return number;
+    }
+
+    /** Type-specific v2 fields are validated identically by the Python codec. */
+    private static void validatePacketSchema(JSONObject packet) throws Exception {
+        for (String field : new String[]{"sender_peer_type", "service_id", "network_scope", "display_name"}) {
+            if (packet.has(field) && !(packet.get(field) instanceof String)) {
+                throw new IllegalArgumentException("Invalid " + field);
+            }
+        }
+        String type = packet.getString("type");
+        if ("peer.hello".equals(type)) {
+            requirePacketString(packet, "nonce", false);
+            if (packet.has("challenge_only") && !(packet.get("challenge_only") instanceof Boolean)) {
+                throw new IllegalArgumentException("Invalid challenge_only");
+            }
+            if (packet.has("listen_port")) requirePacketInteger(packet, "listen_port", 1, 65535);
+            if (packet.has("capabilities")) {
+                Object value = packet.get("capabilities");
+                if (!(value instanceof JSONArray)) throw new IllegalArgumentException("Invalid capabilities");
+                JSONArray capabilities = (JSONArray) value;
+                for (int i = 0; i < capabilities.length(); i++) {
+                    if (!(capabilities.get(i) instanceof String)) {
+                        throw new IllegalArgumentException("Invalid capabilities");
+                    }
+                }
+            }
+        } else if ("peer.ack".equals(type)) {
+            requirePacketString(packet, "reply_nonce", false);
+            if (packet.has("listen_port")) requirePacketInteger(packet, "listen_port", 1, 65535);
+        } else if ("chat.message".equals(type)) {
+            requirePacketString(packet, "message_id", false);
+            requirePacketString(packet, "target_peer_id", false);
+            requirePacketString(packet, "body", true);
+            if (packet.has("created_at_ms")) requirePacketInteger(packet, "created_at_ms", 0, Long.MAX_VALUE);
+        } else if ("chat.ack".equals(type)) {
+            requirePacketString(packet, "message_id", false);
+            requirePacketString(packet, "target_peer_id", false);
+            if (!packet.has("status") || !(packet.get("status") instanceof String)
+                    || !"stored".equals(packet.getString("status"))) {
+                throw new IllegalArgumentException("Invalid chat ACK status");
+            }
+        } else {
+            throw new IllegalArgumentException("Unsupported LAN P2P packet type");
+        }
     }
 
     private static boolean isSupportedType(String type) {
