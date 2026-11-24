@@ -5577,8 +5577,21 @@ public class TrackingService extends Service implements LocationListener {
                     }
                 }
             }
-            boolean discoveryBroadcastAck = discoveryAck && expected != null
-                    && expected.isEmpty() && latch != null && latch.getCount() > 0;
+            boolean discoveryBroadcastAck = expected != null && expected.isEmpty()
+                    && latch != null && latch.getCount() > 0;
+            if (discoveryBroadcastAck && !discoveryAck) {
+                // A first-discovery peer may already have a verified live route because
+                // peer.ack was processed before this chat.ack. In that case routeMatches
+                // skips the earlier discovery-state read, so recheck the still-open
+                // discovery window here instead of leaving its ACK latch stranded.
+                try {
+                    discoveryBroadcastAck = store.isDiscoveryPending(messageId);
+                } catch (Exception storageFailure) {
+                    discoveryBroadcastAck = false;
+                    FileLogger.log(this, "CHAT", "⚠️ LAN ACK 发现窗口复核失败，暂不释放等待计数: "
+                            + storageFailure.getClass().getSimpleName());
+                }
+            }
             if (latch != null && (wasExpected || discoveryBroadcastAck)) latch.countDown();
             if (store.allTargetsAcked(messageId)) {
                 scheduleLanChatMirrorCleanup(messageId);
