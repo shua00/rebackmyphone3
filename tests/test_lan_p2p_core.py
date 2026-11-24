@@ -84,7 +84,7 @@ class LanP2PCoreTests(unittest.TestCase):
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatRetryPolicy.java"
         ).read_text(encoding="utf-8")
         self.assertIn("store.loadPending(LanChatRetryPolicy.MAX_PENDING_MESSAGES)", service)
-        self.assertNotIn("store.loadPending(50)", service)
+        self.assertNotIn("store.loadPending(LanChatRetryPolicy.MAX_PENDING_MESSAGES)", service)
         self.assertIn("MAX_PENDING_MESSAGES = 50", policy)
 
 
@@ -1541,7 +1541,7 @@ class LanP2PCoreTests(unittest.TestCase):
 
         # SharedPreferences remains a compatibility import only. Retry enumeration
         # must come from SQLite so a missing/stale mirror cannot strand durable rows.
-        self.assertIn("store.loadPending(50)", recovery)
+        self.assertIn("store.loadPending(LanChatRetryPolicy.MAX_PENDING_MESSAGES)", recovery)
         self.assertIn("List<LanChatStore.PendingMessage> pending", recovery)
         self.assertIn("item.messageId", recovery)
         self.assertIn("item.body", recovery)
@@ -2427,7 +2427,7 @@ class LanP2PCoreTests(unittest.TestCase):
         retry = extract_java_method(service, "private void retryPendingLanChatMessages(boolean recoveryEvent)")
         self.assertLess(
             retry.index("store.finalizeExpiredDiscoveryWindows("),
-            retry.index("store.loadPending(50)"),
+            retry.index("store.loadPending(LanChatRetryPolicy.MAX_PENDING_MESSAGES)"),
         )
         self.assertIn("if (store.isTerminalForLegacyMirror(id))", retry)
         terminal = extract_java_method(store_source, "public boolean isTerminalForLegacyMirror(")
