@@ -150,7 +150,7 @@ class LanP2PCoreTests(unittest.TestCase):
         store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
         method = extract_java_method(store, "public int resumeExhaustedRetriesForRecoveryEvent(")
         self.assertIn("throw new IllegalStateException(\"Failed to resume LAN Outbox retry epoch\", e)", method)
-        self.assertNotIn("catch (Exception e) {\\n            return 0;", method)
+        self.assertNotIn("return 0;", method)
         self.assertIn("db.endTransaction()", method)
 
 
