@@ -75,6 +75,17 @@ def extract_java_method(source, signature):
 
 class LanP2PCoreTests(unittest.TestCase):
 
+    def test_all_targets_ack_reconciliation_is_one_sqlite_transaction(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        method = extract_java_method(store, "public boolean allTargetsAcked(")
+        self.assertLess(method.index("db.beginTransaction();"), method.index("db.rawQuery("))
+        self.assertLess(method.index("db.rawQuery("), method.index("db.setTransactionSuccessful();"))
+        self.assertIn("db.endTransaction();", method)
+
+
     def test_lan_delivery_state_settlement_matrix_is_explicit(self):
         repo_root = Path(__file__).resolve().parents[1]
         state = (
@@ -1330,12 +1341,14 @@ class LanP2PCoreTests(unittest.TestCase):
         start = source.index("public boolean allTargetsAcked(")
         end = source.index("public List<Target> loadKnownPeers(", start)
         method = source[start:end]
-        expired_guard = method.index('if ("expired".equals(state)) return false;')
+        expired_guard = method.index("LanChatDeliveryState.EXPIRED.equals(state)")
         delivered_mutation = method.index("LanChatDeliveryState.DELIVERED")
         self.assertLess(expired_guard, delivered_mutation)
+        self.assertIn("db.beginTransaction();", method)
+        self.assertIn("db.setTransactionSuccessful();", method)
+        self.assertIn("db.endTransaction();", method)
         self.assertIn('state = c.getString(0);', method)
         self.assertIn('if (discoveryOpen || total == 0) return false;', method)
-
 
     def test_record_peer_fails_closed_when_database_cannot_be_opened(self):
         from lan_p2p_core import record_peer
