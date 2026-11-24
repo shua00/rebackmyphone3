@@ -5176,7 +5176,7 @@ with patch('lan_p2p_core.time.time', return_value=1000.0):
 """
         self._run_python(create)
         fail = """
-import sqlite3, sys
+import contextlib, sqlite3, sys
 from unittest.mock import patch
 from lan_p2p_core import send_discovery_broadcast_with_retries
 class FailingSocket:
@@ -5187,13 +5187,13 @@ with patch('lan_p2p_core.time.time', return_value=1000.0):
     assert send_discovery_broadcast_with_retries(
         FailingSocket(), db, 'server2', 'restart-rearm', b'frame',
         [('192.0.2.1', 8888)], attempts=1, retry_delay_seconds=0) == 0
-with _sqlite_connection(db) as conn:
+with contextlib.closing(sqlite3.connect(db)) as conn:
     assert conn.execute('SELECT delivery_deadline_ms FROM lan_outbox '
                         'WHERE message_id=?', ('restart-rearm',)).fetchone()[0] == 0
 """
         self._run_python(fail)
         resume = """
-import sqlite3, sys
+import contextlib, sqlite3, sys
 from unittest.mock import patch
 from lan_p2p_core import send_discovery_broadcast_with_retries
 class SuccessfulSocket:
@@ -5204,7 +5204,7 @@ with patch('lan_p2p_core.time.time', return_value=2000.0):
     assert send_discovery_broadcast_with_retries(
         SuccessfulSocket(), db, 'server2', 'restart-rearm', b'frame',
         [('192.0.2.1', 8888)], attempts=1, retry_delay_seconds=0) == 1
-with _sqlite_connection(db) as conn:
+with contextlib.closing(sqlite3.connect(db)) as conn:
     deadline = conn.execute('SELECT delivery_deadline_ms FROM lan_outbox '
                             'WHERE message_id=?', ('restart-rearm',)).fetchone()[0]
 assert deadline == 2010000, deadline
@@ -5224,7 +5224,7 @@ with patch('lan_p2p_core.time.time', return_value=1000.0):
 """
         self._run_python(create)
         verify = """
-import sqlite3, sys
+import contextlib, sqlite3, sys
 from unittest.mock import patch
 from lan_p2p_core import record_peer, add_discovery_targets_for_peer, load_pending_outgoing_for_peer
 db = sys.argv[1]
@@ -5233,7 +5233,7 @@ with patch('lan_p2p_core.time.time', return_value=1010.0):
                        '192.0.2.11', 8888, 'active')
     assert add_discovery_targets_for_peer(db, 'server2', 'android-late') == 0
     assert load_pending_outgoing_for_peer(db, 'server2', 'android-late') == []
-with _sqlite_connection(db) as conn:
+with contextlib.closing(sqlite3.connect(db)) as conn:
     state = conn.execute('SELECT state FROM lan_outbox WHERE message_id=?',
                          ('restart-frozen',)).fetchone()[0]
     targets = conn.execute('SELECT COUNT(*) FROM lan_outbox_targets WHERE message_id=?',
@@ -5260,10 +5260,10 @@ assert acknowledge_outgoing_message(db, 'server2', 'restart-msg', 'android-a')
 """
         self._run_python(create)
         verify = """
-import sqlite3, sys
+import contextlib, sqlite3, sys
 from lan_p2p_core import load_pending_outgoing_for_peer
 db = sys.argv[1]
-with _sqlite_connection(db) as conn:
+with contextlib.closing(sqlite3.connect(db)) as conn:
     outbox = conn.execute('SELECT sender_scope,body,state FROM lan_outbox WHERE message_id=?',
                           ('restart-msg',)).fetchone()
     target = conn.execute('SELECT status,attempt_count,last_attempt_endpoint,last_sent_endpoint '
