@@ -56,7 +56,14 @@ public final class LanP2pProtocol {
     }
 
     public static JSONObject decode(byte[] bytes, String secret) throws Exception {
-        if (bytes == null || bytes.length == 0 || bytes.length > MAX_DATAGRAM_BYTES) {
+        if (bytes == null) throw new IllegalArgumentException("Invalid LAN P2P datagram size");
+        return decode(bytes, 0, bytes.length, secret);
+    }
+
+    /** Decode the original datagram slice without a lossy byte-to-String round trip. */
+    public static JSONObject decode(byte[] bytes, int offset, int length, String secret) throws Exception {
+        if (bytes == null || offset < 0 || length <= 0
+                || length > MAX_DATAGRAM_BYTES || offset > bytes.length - length) {
             throw new IllegalArgumentException("Invalid LAN P2P datagram size");
         }
         final String raw;
@@ -64,7 +71,7 @@ public final class LanP2pProtocol {
             raw = StandardCharsets.UTF_8.newDecoder()
                     .onMalformedInput(CodingErrorAction.REPORT)
                     .onUnmappableCharacter(CodingErrorAction.REPORT)
-                    .decode(ByteBuffer.wrap(bytes)).toString();
+                    .decode(ByteBuffer.wrap(bytes, offset, length)).toString();
         } catch (CharacterCodingException malformedUtf8) {
             throw new IllegalArgumentException("Invalid LAN P2P UTF-8", malformedUtf8);
         }
