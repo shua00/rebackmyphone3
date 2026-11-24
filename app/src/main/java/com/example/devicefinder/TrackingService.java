@@ -6192,6 +6192,9 @@ public class TrackingService extends Service implements LocationListener {
         Thread listenerThread = new Thread(() -> {
             DatagramSocket rescueSocket = null;
             try {
+                // Thread.start() may race onDestroy() after the owner reference is published.
+                // Exit before opening/binding a socket when teardown already won that race.
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 rescueSocket = new DatagramSocket(null);
                 rescueSocket.setReuseAddress(true);
                 rescueSocket.setBroadcast(true);

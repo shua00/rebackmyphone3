@@ -146,6 +146,9 @@ class LanP2PCoreTests(unittest.TestCase):
         finally_end = listener.index('}, "LAN-UDP-Listener-', finally_start)
         finally_block = listener[finally_start:finally_end]
         admission = listener[:listener.index("Thread listenerThread = new Thread")]
+        runnable_start = listener[listener.index("Thread listenerThread = new Thread"):]
+        self.assertLess(runnable_start.index("if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;"),
+                        runnable_start.index("new DatagramSocket(null)"))
         self.assertLess(admission.index("if (serviceDestroyed) return;"),
                         admission.index("multicastLock.acquire()"))
         self.assertLess(admission.index("synchronized (rescueLock)"),
