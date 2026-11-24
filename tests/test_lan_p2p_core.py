@@ -5058,8 +5058,10 @@ class LanP2POutboxProcessRestartTests(unittest.TestCase):
         create = """
 import sys
 from lan_p2p_core import (persist_outgoing_message, mark_outgoing_attempt,
-    record_successful_send_endpoint, acknowledge_outgoing_message)
+    record_successful_send_endpoint, acknowledge_outgoing_message, record_peer)
 db = sys.argv[1]
+assert record_peer(db, 'server2', 'android-a', 'android', 'android-main',
+                   '192.0.2.10', 8888, 'active')
 assert persist_outgoing_message(db, 'server2', 'server2-id', 'restart-msg',
                                 'durable body', ['android-a'])
 assert mark_outgoing_attempt(db, 'restart-msg', 'android-a', '192.0.2.10', 8888)
