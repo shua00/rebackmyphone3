@@ -141,12 +141,21 @@ public final class LanP2pProtocol {
 
     /** Shared validation for wire packets and durable recipient snapshots. */
     public static boolean isValidPeerId(String peerId) {
-        if (peerId == null || peerId.isEmpty()
-                || peerId.getBytes(StandardCharsets.UTF_8).length > MAX_PEER_ID_BYTES) return false;
+        if (peerId == null || peerId.isEmpty()) return false;
+        // Python's strict UTF-8 encoder rejects unpaired UTF-16 surrogates. Java's
+        // String.getBytes() replaces them, which would otherwise admit an ID Python rejects.
         for (int i = 0; i < peerId.length(); i++) {
-            if (Character.isISOControl(peerId.charAt(i))) return false;
+            char ch = peerId.charAt(i);
+            if (Character.isISOControl(ch)) return false;
+            if (Character.isHighSurrogate(ch)) {
+                if (i + 1 >= peerId.length()
+                        || !Character.isLowSurrogate(peerId.charAt(i + 1))) return false;
+                i++; // A valid supplementary Unicode code point is one UTF-8 sequence.
+            } else if (Character.isLowSurrogate(ch)) {
+                return false;
+            }
         }
-        return true;
+        return peerId.getBytes(StandardCharsets.UTF_8).length <= MAX_PEER_ID_BYTES;
     }
 
     /**
