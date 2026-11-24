@@ -4199,9 +4199,9 @@ public class TrackingService extends Service implements LocationListener {
                                     return;
                                 }
                                 if (store.isTerminalForLegacyMirror(id)) {
-                                    // Recover either terminal state if the process stopped after
-                                    // SQLite committed but before asynchronous mirror cleanup ran.
-                                    removePendingLanChat(id);
+                                    // Recover either terminal state without blocking the Outbox lane
+                                    // on synchronous SharedPreferences compatibility-file I/O.
+                                    scheduleLanChatMirrorCleanup(id);
                                 }
                             }
                         }
@@ -4223,14 +4223,16 @@ public class TrackingService extends Service implements LocationListener {
                             String content = item.body;
                             if (id == null || id.isEmpty() || content == null || content.isEmpty()) continue;
                             if (store.allTargetsAcked(id)) {
-                                // Recover the crash window between SQLite delivery commit and legacy queue cleanup.
-                                removePendingLanChat(id);
+                                // Recover the crash window without doing compatibility-file I/O
+                                // on the serialized Outbox retry lane.
+                                scheduleLanChatMirrorCleanup(id);
                                 continue;
                             }
                             transmitLocalUdpMessage(content, id);
                             if (store.allTargetsAcked(id)) {
-                                // Reclaim the compatibility mirror only after every fixed target is ACKed.
-                                removePendingLanChat(id);
+                                // Reclaim only after every fixed target is ACKed; keep the
+                                // serialized transmit/retry lane free of synchronous file commits.
+                                scheduleLanChatMirrorCleanup(id);
                             }
                         }
 
