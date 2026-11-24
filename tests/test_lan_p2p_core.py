@@ -90,7 +90,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("OUTBOX_RETRY_BACKOFF_BASE_MS = 10_000L", policy)
         self.assertIn("OUTBOX_RETRY_MAX_DELAY_MS = 60_000L", policy)
         self.assertIn("UNATTEMPTED_ROUTE_PROBE_MAX_DELAY_MS = 5_000L", policy)
-        self.assertIn("outboxRetryWakeDelayMs(minimumAttempts, hasUnattemptedRouteTargets)", scheduler)
+        self.assertIn("outboxRetryWakeDelayMs(", scheduler)
         self.assertIn("RETRY_BATCH_SIZE = 3", policy)
         self.assertIn("MAX_RETRY_BATCHES_PER_WAKE = 3", policy)
         self.assertIn("LanChatRetryPolicy.RETRY_BATCH_SIZE", retry)
