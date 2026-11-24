@@ -48,6 +48,8 @@ class TransferOfferValidationTests(unittest.TestCase):
             TransferOffer("x", "a", "b", "x", -1, "a" * 64, 1),
             TransferOffer("x", "a", "b", "x", 1, "a" * 63, 1),
             TransferOffer("x", "a", "b", "x", True, "a" * 64, 1),
+            TransferOffer(None, "a", "b", "x", 1, "a" * 64, 1),
+            TransferOffer("x", None, "b", "x", 1, "a" * 64, 1),
         )
         for offer in bad_offers:
             with self.subTest(offer=offer):

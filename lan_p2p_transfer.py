@@ -115,15 +115,17 @@ def validate_offer(offer: TransferOffer, limits: TransferLimits = TransferLimits
     """Validate metadata only; filename is display metadata, never a path."""
     if not isinstance(offer, TransferOffer):
         raise TransferValidationError("offer has an invalid type")
-    if not _TRANSFER_ID_RE.fullmatch(offer.transfer_id):
+    if not isinstance(offer.transfer_id, str) or not _TRANSFER_ID_RE.fullmatch(offer.transfer_id):
         raise TransferValidationError("transfer_id is invalid")
+    if not isinstance(offer.sender_peer_id, str) or not isinstance(offer.target_peer_id, str):
+        raise TransferValidationError("sender and target peer IDs must be strings")
     if not offer.sender_peer_id or not offer.target_peer_id:
         raise TransferValidationError("sender and target peer IDs are required")
     if offer.sender_peer_id == offer.target_peer_id:
         raise TransferValidationError("sender and target must differ")
     if not isinstance(offer.filename, str) or not offer.filename:
         raise TransferValidationError("filename is required")
-    if offer.filename in {".", ".."} or "/" in offer.filename or "\\\\" in offer.filename:
+    if offer.filename in {".", ".."} or "/" in offer.filename or "\\" in offer.filename:
         raise TransferValidationError("filename must be a display name, not a path")
     if any(ord(char) < 32 or ord(char) == 127 for char in offer.filename):
         raise TransferValidationError("filename contains control characters")
