@@ -1270,6 +1270,23 @@ def send_discovery_broadcast_with_retries(
     lock_index = hash((str(db_path), str(sender_scope), str(message_id))) % len(
         _DISCOVERY_DISPATCH_LOCKS)
     with _DISCOVERY_DISPATCH_LOCKS[lock_index]:
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path, timeout=10)
+            conn.execute("PRAGMA busy_timeout=10000")
+            row = conn.execute(
+                "SELECT state,delivery_deadline_ms FROM lan_outbox "
+                "WHERE sender_scope=? AND message_id=?",
+                (sender_scope, message_id),
+            ).fetchone()
+            if row is None or row[0] != "discovery_pending":
+                return 0
+            opened_by_this_dispatch = int(row[1] or 0) <= 0
+        except Exception as exc:
+            raise LanP2PStorageError("failed to inspect LAN discovery dispatch state") from exc
+        finally:
+            if conn is not None:
+                _safe_close(conn)
         if not begin_outgoing_discovery_window(db_path, sender_scope, message_id):
             return 0
         if not is_outgoing_discovery_pending(db_path, sender_scope, message_id):
@@ -1279,7 +1296,9 @@ def send_discovery_broadcast_with_retries(
             attempts=attempts, retry_delay_seconds=retry_delay_seconds,
             should_continue=lambda: is_outgoing_discovery_pending(
                 db_path, sender_scope, message_id))
-        if sent == 0:
+        # Only the dispatch that opened this deadline may undo it. A later
+        # duplicate dispatch that fails must not erase an earlier successful send.
+        if sent == 0 and opened_by_this_dispatch:
             _reset_unsent_discovery_window(db_path, sender_scope, message_id)
         return sent
 
