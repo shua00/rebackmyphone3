@@ -1,6 +1,7 @@
 package com.example.devicefinder;
 
 import android.content.Context;
+import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 
 import org.junit.After;
@@ -108,6 +109,52 @@ public class LanChatStorePersistenceTest {
         assertTrue(store.isIncomingDisplayed(
                 "android-main", "desktop-peer", "android-inbox-restart"));
         assertEquals(0, store.loadUndisplayedIncoming("android-main", 20).size());
+    }
+
+    @Test
+    public void versionEightTargetLedgerMigratesAttemptEndpointWithoutLosingSentEndpoint() {
+        SQLiteDatabase legacy = context.openOrCreateDatabase(DB_NAME, Context.MODE_PRIVATE, null);
+        legacy.execSQL("CREATE TABLE lan_outbox_targets (" +
+                "message_id TEXT NOT NULL, peer_id TEXT NOT NULL, " +
+                "status TEXT NOT NULL DEFAULT 'pending', attempt_count INTEGER NOT NULL DEFAULT 0, " +
+                "last_attempt_at INTEGER NOT NULL DEFAULT 0, last_ack_at INTEGER NOT NULL DEFAULT 0, " +
+                "last_endpoint TEXT NOT NULL DEFAULT '', last_sent_endpoint TEXT NOT NULL DEFAULT '', " +
+                "last_error TEXT NOT NULL DEFAULT '', last_recovery_at_ms INTEGER NOT NULL DEFAULT 0, " +
+                "PRIMARY KEY(message_id,peer_id))");
+        legacy.execSQL("INSERT INTO lan_outbox_targets " +
+                "(message_id,peer_id,last_endpoint,last_sent_endpoint) VALUES(?,?,?,?)",
+                new Object[]{"legacy-message", "android-a", "192.0.2.10:8888", "192.0.2.10:8888"});
+        legacy.setVersion(8);
+        legacy.close();
+
+        store = new LanChatStore(context);
+        SQLiteDatabase migrated = store.getReadableDatabase();
+        boolean hasAttemptEndpoint = false;
+        Cursor columns = migrated.rawQuery("PRAGMA table_info(lan_outbox_targets)", null);
+        try {
+            int nameColumn = columns.getColumnIndex("name");
+            while (columns.moveToNext()) {
+                if ("last_attempt_endpoint".equals(columns.getString(nameColumn))) {
+                    hasAttemptEndpoint = true;
+                    break;
+                }
+            }
+        } finally {
+            columns.close();
+        }
+        assertTrue(hasAttemptEndpoint);
+
+        Cursor row = migrated.rawQuery(
+                "SELECT last_sent_endpoint,last_attempt_endpoint FROM lan_outbox_targets " +
+                        "WHERE message_id=? AND peer_id=?",
+                new String[]{"legacy-message", "android-a"});
+        try {
+            assertTrue(row.moveToFirst());
+            assertEquals("192.0.2.10:8888", row.getString(0));
+            assertEquals("", row.getString(1));
+        } finally {
+            row.close();
+        }
     }
 
     @Test
