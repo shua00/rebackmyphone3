@@ -4239,7 +4239,7 @@ public class TrackingService extends Service implements LocationListener {
             FileLogger.log(this, "CHAT", "ℹ️ 同一 message_id 已在发送/补发，跳过并发副本: " + messageId);
             return;
         }
-        boolean attemptRecorded = false;
+        boolean attemptAdmitted = false;
         int attemptNumber = -1;
         LanChatStore store = lanChatStore;
         try {
@@ -4404,7 +4404,7 @@ public class TrackingService extends Service implements LocationListener {
                     FileLogger.log(this, "CHAT", "⚠️ LAN SQLite 发送尝试记账失败或本轮预算已耗尽，停止发送");
                     return;
                 }
-                attemptRecorded = true;
+                attemptAdmitted = true;
                 if (!serviceDestroyed) {
                     transmitLocalUdpMessageInternal(message, messageId, socket, socketGeneration,
                             preparedTargets, targetLoadMs, senderPeerId, preparedPeerPackets,
@@ -4428,7 +4428,7 @@ public class TrackingService extends Service implements LocationListener {
                 activeLanChatTransmissions.remove(messageId);
             }
         }
-        if (attemptRecorded) {
+        if (attemptAdmitted) {
             if (attemptNumber >= LanChatStore.MAX_AUTOMATIC_RETRY_ATTEMPTS
                     && !store.allTargetsAcked(messageId)) {
                 FileLogger.log(this, "CHAT", "LAN 自动补发预算已耗尽，SQLite 消息及未 ACK 目标继续保留，等待网络/peer 恢复事件: "
