@@ -3347,6 +3347,7 @@ class AndroidLanSchedulingAndAckProgressTests(unittest.TestCase):
     def test_new_user_messages_bypass_the_durable_retry_backlog(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        self.assertIn("lanChatPersistExecutor", source)
         self.assertIn("lanChatImmediateExecutor", source)
         start = source.index("private void sendLocalUdpMessage(final String message)")
         end = source.index("private boolean persistPendingLanChat(", start)
@@ -3362,7 +3363,29 @@ class AndroidLanSchedulingAndAckProgressTests(unittest.TestCase):
         self.assertIn("lanChatTransmitLock.unlock()", source)
         self.assertNotIn("synchronized (lanChatTransmitLock)", source)
         self.assertIn("if (!activeLanChatTransmissions.add(messageId))", source)
+        self.assertIn("lanChatPersistExecutor.shutdown()", source)
         self.assertIn("lanChatImmediateExecutor.shutdown()", source)
+
+    def test_new_messages_are_durably_persisted_before_immediate_transmit_admission(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        entry = extract_java_method(source, "private void sendLocalUdpMessage(final String message)")
+        persist_pos = entry.index("persistPendingLanChat(messageId, message)")
+        transmit_queue_pos = entry.index("lanChatImmediateExecutor.execute(")
+        self.assertIn("lanChatPersistExecutor.execute(", entry)
+        self.assertLess(persist_pos, transmit_queue_pos)
+        self.assertLess(persist_pos, entry.index("if (serviceDestroyed)", persist_pos))
+        self.assertIn("requestLanChatRetryPlan()", entry)
+        self.assertIn("消息已落账并转入持久化补发", entry)
+        self.assertIn("lanChatPersistExecutor.shutdown()", source)
+        self.assertLess(
+            source.index("awaitLanExecutorTermination(lanChatPersistExecutor)"),
+            source.index("awaitLanExecutorTermination(lanChatImmediateExecutor)"),
+        )
+        self.assertLess(
+            source.index("lanChatPersistExecutor.shutdown()"),
+            source.index("lanChatImmediateExecutor.shutdown()"),
+        )
 
     def test_ack_completion_reports_sqlite_target_counts_not_window_latch_counts(self):
         repo_root = Path(__file__).resolve().parents[1]
