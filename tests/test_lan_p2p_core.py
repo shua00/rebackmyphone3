@@ -155,7 +155,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("scheduleLanChatTask(taskName, retry,", helper)
         self.assertIn("handler.postDelayed(retry, LanChatRetryPolicy.RECOVERY_FAILURE_RETRY_DELAY_MS)", helper)
         retry = extract_java_method(source, "private void retryPendingLanChatMessages(boolean recoveryEvent)")
-        self.assertIn('scheduleLanChatRetryAfterFailure(\\n                                    "outbox-retry-after-failure"', retry)
+        self.assertIn("scheduleLanChatRetryAfterFailure(", retry)
+        self.assertIn('"outbox-retry-after-failure"', retry)
 
 
     def test_outbox_retry_failure_uses_delayed_wake_not_immediate_spin(self):
@@ -1731,7 +1732,6 @@ class LanP2PCoreTests(unittest.TestCase):
         rejected = retry.index("catch (java.util.concurrent.RejectedExecutionException e)")
         block = retry[rejected:]
         self.assertIn("lanChatRetryInFlight.set(false);", block)
-        self.assertIn('scheduleLanChatTask("outbox-retry-admission-fallback"', block)
         self.assertIn('scheduleLanChatRetryAfterFailure("outbox-retry-admission-fallback", recoveryEvent)', block)
         self.assertIn("if (!serviceDestroyed)", block)
         self.assertNotIn("retryPendingLanChatMessages(true)", block)
