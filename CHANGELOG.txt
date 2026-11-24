@@ -5,7 +5,7 @@ v8.3 — 2026-11-24 · Android SQLite 行为测试基线
 【测试】app/build.gradle / app/src/test/java/com/example/devicefinder/LanChatStorePersistenceTest.java
 --------------------------------------------------------------------------------
 - 增加仅供 JVM 测试使用的 JUnit + Robolectric 依赖；不进入正式 APK runtime classpath，保持生产包依赖不变。启用 Gradle AndroidX 构建开关以满足 Robolectric 测试运行时的传递依赖要求。
-- 增加真实 SQLiteOpenHelper close/reopen 行为测试：固定收件 Outbox/ACK 恢复、Inbox 去重与展示标记恢复、首次发现窗口过期后拒绝迟到设备。
+- 增加真实 SQLiteOpenHelper close/reopen 行为测试：固定收件 Outbox/ACK 恢复、Inbox 去重与展示标记恢复、首次发现窗口过期后拒绝迟到设备；增加 SQLite trigger 注入写失败测试，验证 Inbox/attempt/ACK 事务回滚且后续重试可成功。
 - Robolectric 使用 Android framework SQLite 数据库，不用 mock 或源码正则代替持久化行为；补充 v8→v9 旧账本迁移验证，确保历史 last_sent_endpoint 保留且新增 last_attempt_endpoint 正确初始化。
 
 【CI】.github/workflows/build.yml

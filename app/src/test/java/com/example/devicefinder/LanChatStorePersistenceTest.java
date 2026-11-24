@@ -158,6 +158,43 @@ public class LanChatStorePersistenceTest {
     }
 
     @Test
+    public void sqliteWriteFailuresRollbackAndRemainRetryable() {
+        SQLiteDatabase db = store.getWritableDatabase();
+        db.execSQL("CREATE TRIGGER reject_inbox_insert BEFORE INSERT ON lan_inbox " +
+                "BEGIN SELECT RAISE(ABORT, 'injected inbox write failure'); END");
+        assertFalse(store.storeIncoming(
+                "android-main", "desktop-peer", "android-inbox-failure",
+                "must not ACK before durable commit", "Desktop", 1234L, "12:34:56"));
+        assertEquals(0, store.loadUndisplayedIncoming("android-main", 20).size());
+        db.execSQL("DROP TRIGGER reject_inbox_insert");
+        assertTrue(store.storeIncoming(
+                "android-main", "desktop-peer", "android-inbox-failure",
+                "must not ACK before durable commit", "Desktop", 1234L, "12:34:56"));
+
+        Map<String, InetSocketAddress> routes = Collections.singletonMap(
+                "android-a", new InetSocketAddress("192.0.2.10", 8888));
+        assertTrue(store.enqueueWithRecipientSnapshot(
+                "android-write-failure", "desktop-peer", "retry after rollback", 1234L, routes));
+        db.execSQL("CREATE TRIGGER reject_target_update BEFORE UPDATE ON lan_outbox_targets " +
+                "BEGIN SELECT RAISE(ABORT, 'injected target write failure'); END");
+        assertFalse(store.markAttempt(
+                "android-write-failure", "android-a", "192.0.2.10:8888", ""));
+        assertEquals(0, store.loadTargets("android-write-failure").get(0).attemptCount);
+        db.execSQL("DROP TRIGGER reject_target_update");
+
+        assertTrue(store.markAttempt(
+                "android-write-failure", "android-a", "192.0.2.10:8888", ""));
+        db.execSQL("CREATE TRIGGER reject_ack_update BEFORE UPDATE OF status ON lan_outbox_targets " +
+                "BEGIN SELECT RAISE(ABORT, 'injected ACK write failure'); END");
+        assertFalse(store.acknowledge("android-write-failure", "android-a"));
+        assertFalse(store.allTargetsAcked("android-write-failure"));
+        db.execSQL("DROP TRIGGER reject_ack_update");
+
+        assertTrue(store.acknowledge("android-write-failure", "android-a"));
+        assertTrue(store.allTargetsAcked("android-write-failure"));
+    }
+
+    @Test
     public void expiredDiscoveryWindowRemainsFrozenAfterCloseAndReopen() {
         assertTrue(store.enqueue(
                 "android-restart-discovery", "desktop-peer", "discovery body", 1234L));
