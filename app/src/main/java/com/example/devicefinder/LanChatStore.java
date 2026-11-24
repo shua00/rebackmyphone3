@@ -1039,8 +1039,21 @@ public final class LanChatStore extends SQLiteOpenHelper {
      * send begins, not while a message is merely waiting in the sender executor.
      * Repeated calls never extend an already-started window.
      */
-    public boolean beginDiscoveryWindow(String messageId) {
-        if (messageId == null || messageId.length() == 0) return false;
+    /**
+     * Atomically starts or observes the first-recipient window.
+     * Returns ERROR on storage failure/missing rows, CLOSED for a non-discovery terminal state,
+     * OPEN for an existing live window, STARTED for the first dispatch, and WAITING when the
+     * empty discovery snapshot has been durably settled. One transaction owns the state decision,
+     * so callers do not need a second query that can race an ACK or deadline transition.
+     */
+    public static final int DISCOVERY_WINDOW_ERROR = -1;
+    public static final int DISCOVERY_WINDOW_CLOSED = 0;
+    public static final int DISCOVERY_WINDOW_OPEN = 1;
+    public static final int DISCOVERY_WINDOW_STARTED = 2;
+    public static final int DISCOVERY_WINDOW_WAITING = 3;
+
+    public int beginOrReadDiscoveryWindow(String messageId) {
+        if (messageId == null || messageId.length() == 0) return DISCOVERY_WINDOW_ERROR;
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         Cursor c = null;
@@ -1048,38 +1061,60 @@ public final class LanChatStore extends SQLiteOpenHelper {
             c = db.rawQuery(
                     "SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id=?",
                     new String[]{messageId});
-            if (!c.moveToFirst()) return false;
+            if (!c.moveToFirst()) return DISCOVERY_WINDOW_ERROR;
             String state = c.getString(0);
             long deadline = c.getLong(1);
             c.close();
             c = null;
+
+            if ("waiting_peers".equals(state)) {
+                db.setTransactionSuccessful();
+                return DISCOVERY_WINDOW_WAITING;
+            }
             if (!"discovery_pending".equals(state)) {
                 db.setTransactionSuccessful();
-                return false;
+                return DISCOVERY_WINDOW_CLOSED;
             }
+
             long now = System.currentTimeMillis();
             if (deadline > 0L) {
-                if (now >= deadline) {
-                    // Preserve an empty expired snapshot for diagnostics without retrying forever.
-                    finalizeDiscoveryMessage(db, messageId);
+                if (now < deadline) {
                     db.setTransactionSuccessful();
-                    return false;
+                    return DISCOVERY_WINDOW_OPEN;
                 }
+                // Settle an expired empty snapshot in this same transaction. The state
+                // read below is intentionally in-transaction, not a second caller query.
+                if (!finalizeDiscoveryMessage(db, messageId)) return DISCOVERY_WINDOW_ERROR;
+                c = db.rawQuery("SELECT state FROM lan_outbox WHERE message_id=?",
+                        new String[]{messageId});
+                String settledState = null;
+                if (c.moveToFirst()) settledState = c.getString(0);
+                c.close();
+                c = null;
                 db.setTransactionSuccessful();
-                return false; // Already started: open, but never extend or re-arm.
+                return "waiting_peers".equals(settledState)
+                        ? DISCOVERY_WINDOW_WAITING : DISCOVERY_WINDOW_CLOSED;
             }
+
             ContentValues window = new ContentValues();
             window.put("delivery_deadline_ms", now + FIRST_DISCOVERY_WINDOW_MS);
-            if (db.update("lan_outbox", window, "message_id=?",
-                    new String[]{messageId}) != 1) return false;
+            int changed = db.update("lan_outbox", window,
+                    "message_id=? AND state='discovery_pending' AND delivery_deadline_ms<=0",
+                    new String[]{messageId});
+            if (changed != 1) return DISCOVERY_WINDOW_ERROR;
             db.setTransactionSuccessful();
-            return true;
+            return DISCOVERY_WINDOW_STARTED;
         } catch (Exception e) {
-            return false;
+            return DISCOVERY_WINDOW_ERROR;
         } finally {
             if (c != null) c.close();
             db.endTransaction();
         }
+    }
+
+    /** Compatibility wrapper for callers that only need to know whether this call opened it. */
+    public boolean beginDiscoveryWindow(String messageId) {
+        return beginOrReadDiscoveryWindow(messageId) == DISCOVERY_WINDOW_STARTED;
     }
 
 
