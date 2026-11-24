@@ -3966,6 +3966,15 @@ class AndroidLanAckFastPathTests(unittest.TestCase):
         self.assertIn("if (!routeMatches && !persistedEndpointMatch)", ack)
         self.assertIn("discoveryAck = store.isDiscoveryPending(messageId)", ack)
 
+    def test_verified_first_discovery_ack_releases_empty_recipient_latch(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        ack = extract_java_method(source, "private void processAuthenticatedLanChatAck(")
+        self.assertIn("expected != null && expected.isEmpty()", ack)
+        self.assertIn("if (discoveryBroadcastAck && !discoveryAck)", ack)
+        self.assertIn("discoveryBroadcastAck = store.isDiscoveryPending(messageId);", ack)
+        self.assertIn("if (latch != null && (wasExpected || discoveryBroadcastAck)) latch.countDown();", ack)
+
 
 class AndroidLanControlQueueDiagnosticsTests(unittest.TestCase):
     def test_ack_rejections_and_peer_handshakes_report_control_queue_delay(self):
