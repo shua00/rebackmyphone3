@@ -16,6 +16,11 @@ from lan_p2p_transfer import (
     validate_chunk,
     validate_offer,
 )
+from lan_p2p_transfer_store import TransferStore
+import tempfile
+from pathlib import Path
+import subprocess
+import sys
 
 
 def make_offer(size=9, filename="photo.jpg", transfer_id="transfer-001"):
@@ -133,6 +138,108 @@ class TransferStateMachineTests(unittest.TestCase):
             transition_state(TransferState.OFFERED, TransferState.COMPLETED)
         with self.assertRaises(TransferTransitionError):
             transition_state("offered", TransferState.ACCEPTED)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class TransferStorePersistenceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir=tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.db_path=str(Path(self.temp_dir.name)/"transfers.sqlite3")
+        self.limits=TransferLimits(chunk_size_bytes=4096,max_active_transfers=2)
+        self.store=TransferStore(self.db_path,self.limits)
+        self.offer=make_offer(size=4097,transfer_id="persist-001")
+
+    def _start_transfer(self):
+        self.store.create_offer(self.offer,100)
+        self.store.transition(self.offer.transfer_id,TransferState.ACCEPTED,101)
+        self.store.transition(self.offer.transfer_id,TransferState.TRANSFERRING,102)
+
+    def test_offer_and_partial_chunk_ledger_survive_store_reopen(self):
+        self._start_transfer()
+        payload=b"a"*4096
+        chunk=ChunkDescriptor(self.offer.transfer_id,0,payload,hashlib.sha256(payload).hexdigest())
+        self.assertTrue(self.store.record_verified_chunk(chunk,103))
+        self.assertFalse(self.store.record_verified_chunk(chunk,104))
+        self.store=TransferStore(self.db_path,self.limits)
+        record=self.store.get_transfer(self.offer.transfer_id)
+        self.assertEqual(TransferState.TRANSFERRING,record.state)
+        self.assertEqual((0,),self.store.received_chunk_indexes(self.offer.transfer_id))
+        self.assertEqual((1,),self.store.missing_chunks(self.offer.transfer_id))
+
+    def test_conflicting_chunk_replay_is_rejected_without_overwriting_ledger(self):
+        self._start_transfer()
+        payload=b"a"*4096
+        first=ChunkDescriptor(self.offer.transfer_id,0,payload,hashlib.sha256(payload).hexdigest())
+        self.store.record_verified_chunk(first,103)
+        changed=b"b"*4096
+        replay=ChunkDescriptor(self.offer.transfer_id,0,changed,hashlib.sha256(changed).hexdigest())
+        with self.assertRaises(TransferValidationError):
+            self.store.record_verified_chunk(replay,104)
+        self.assertEqual((0,),self.store.received_chunk_indexes(self.offer.transfer_id))
+
+    def test_verification_requires_all_chunks_and_matching_whole_file_hash(self):
+        first,last=b"a"*4096,b"b"
+        whole=hashlib.sha256(first+last).hexdigest()
+        self.offer=TransferOffer(self.offer.transfer_id,self.offer.sender_peer_id,
+            self.offer.target_peer_id,self.offer.filename,len(first+last),whole,
+            self.offer.created_at_ms,self.offer.mime_type)
+        self._start_transfer()
+        with self.assertRaises(TransferTransitionError):
+            self.store.transition(self.offer.transfer_id,TransferState.VERIFYING,103)
+        for index,payload in enumerate((first,last)):
+            self.store.record_verified_chunk(ChunkDescriptor(self.offer.transfer_id,index,
+                payload,hashlib.sha256(payload).hexdigest()),104+index)
+        self.store.transition(self.offer.transfer_id,TransferState.VERIFYING,106)
+        with self.assertRaises(TransferValidationError):
+            self.store.complete_after_verification(self.offer.transfer_id,"0"*64,107)
+        self.assertEqual(TransferState.VERIFYING,self.store.get_transfer(self.offer.transfer_id).state)
+        self.assertEqual(TransferState.COMPLETED,
+            self.store.complete_after_verification(self.offer.transfer_id,whole,108))
+
+    def test_transfer_id_reuse_with_different_offer_is_rejected(self):
+        self.store.create_offer(self.offer,100)
+        altered=TransferOffer(self.offer.transfer_id,self.offer.sender_peer_id,
+            self.offer.target_peer_id,"different.jpg",self.offer.size_bytes,
+            self.offer.sha256,self.offer.created_at_ms,self.offer.mime_type)
+        with self.assertRaises(TransferValidationError):
+            self.store.create_offer(altered,101)
+
+    def test_terminal_task_does_not_reopen(self):
+        self.store.create_offer(self.offer,100)
+        self.store.transition(self.offer.transfer_id,TransferState.REJECTED,101)
+        with self.assertRaises(TransferTransitionError):
+            self.store.transition(self.offer.transfer_id,TransferState.ACCEPTED,102)
+
+    def test_chunk_ledger_survives_a_real_python_process_restart(self):
+        code = """
+import hashlib,sys
+from lan_p2p_transfer import ChunkDescriptor,TransferLimits,TransferOffer,TransferState
+from lan_p2p_transfer_store import TransferStore
+path=sys.argv[1]
+limits=TransferLimits(chunk_size_bytes=4096)
+payload=b'z'*4096
+offer=TransferOffer('process-restart','sender','receiver','payload.bin',
+    len(payload),hashlib.sha256(b'whole').hexdigest(),10)
+store=TransferStore(path,limits)
+assert store.create_offer(offer,11)
+store.transition(offer.transfer_id,TransferState.ACCEPTED,12)
+store.transition(offer.transfer_id,TransferState.TRANSFERRING,13)
+chunk=ChunkDescriptor(offer.transfer_id,0,payload,hashlib.sha256(payload).hexdigest())
+assert store.record_verified_chunk(chunk,14)
+"""
+        result=subprocess.run([sys.executable,"-c",code,self.db_path],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            capture_output=True,text=True,timeout=20)
+        self.assertEqual(0,result.returncode,result.stderr)
+        reopened=TransferStore(self.db_path,self.limits)
+        record=reopened.get_transfer("process-restart")
+        self.assertEqual(TransferState.TRANSFERRING,record.state)
+        self.assertEqual((0,),reopened.received_chunk_indexes("process-restart"))
+        self.assertEqual((),reopened.missing_chunks("process-restart"))
 
 
 if __name__ == "__main__":

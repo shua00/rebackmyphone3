@@ -454,3 +454,16 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 自动化 | 新增 Offer、chunk、resume-index、state transition 单元测试；Python 全量 264 项通过 | Actions [#766](https://github.com/shua00/rebackmyphone3/actions/runs/45504746611)，HEAD `9928c78`；Android build 因无 Android 输入变更按规则跳过。真实 TCP/流式数据、重启续传、损坏块和取消清理尚未验收 |
 
 **本节仅完成文件传输第一阶段领域契约，不代表 LAN 文件传输已可用。后续实现必须保持独立 transfer_id、接收端显式 Accept、分块幂等、分块持久化、整文件 SHA-256、断点续传与安全临时文件/原子落盘。**
+
+## 22. 文件传输 SQLite 账本（2026-11-25）
+
+| 项目 | 当前实现 | 验收边界 |
+|---|---|---|
+| 独立任务持久化 | `lan_p2p_transfer_store.py`：SQLite task/chunk receipt 表、WAL、外键、事务；transfer_id 与 message_id 独立 | 只持久化元数据和块收据，不保存文件 payload |
+| Offer 幂等 | 相同 ID + 相同元数据幂等；相同 ID 不同元数据拒绝；活动任务数受 limits 限制 | 尚未接入 peer 控制帧、发送 UI 或接收端 Accept 流程 |
+| 块收据 | 只允许 transferring 状态写入；校验 transfer_id/index/长度/SHA-256；重复幂等、冲突拒绝 | 调用方必须先安全写块并 fsync，再登记收据；重启后必须重验磁盘块文件 |
+| 续传账本 | 持久化块序号和摘要，重开 Store 后计算缺块列表 | 尚未实现 chunk 文件落盘、缺块网络请求和进度推送 |
+| 完成门禁 | 全部块收据齐备才能进入 verifying；整文件 SHA-256 匹配才允许 completed | 组装、哈希计算、原子落盘由后续文件系统适配层实现 |
+| 自动化 | Store reopen、真实子进程重启、块幂等/冲突、状态门禁、全文件摘要门禁 | Actions 待本轮确认；Android/PC 真机传输仍未验收 |
+
+**持久化边界：** 数据库收据不是磁盘文件存在性的证明。重启恢复必须检查临时块文件存在、长度和 SHA-256；缺失/损坏即从缺块集合移除并重新请求，不能仅凭数据库记录宣布块已接收。
