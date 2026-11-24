@@ -75,6 +75,19 @@ def extract_java_method(source, signature):
 
 class LanP2PCoreTests(unittest.TestCase):
 
+    def test_outbox_pending_snapshot_limit_uses_shared_capacity_policy(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        service = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        policy = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatRetryPolicy.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn("store.loadPending(LanChatRetryPolicy.MAX_PENDING_MESSAGES)", service)
+        self.assertNotIn("store.loadPending(50)", service)
+        self.assertIn("MAX_PENDING_MESSAGES = 50", policy)
+
+
     def test_outbox_retry_wake_and_batch_policy_is_centralized(self):
         repo_root = Path(__file__).resolve().parents[1]
         policy = (
