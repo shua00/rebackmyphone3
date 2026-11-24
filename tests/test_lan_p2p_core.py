@@ -3939,5 +3939,40 @@ class AndroidLanExplicitSocketRestartTests(unittest.TestCase):
         self.assertNotIn('if (rescueSocketRef != null) { try { rescueSocketRef.close(); } catch (Exception ignored) {} }', source)
         self.assertNotIn('if (rescueSocketRef != null) {\n                        try { rescueSocketRef.close(); } catch (Exception ignored) {}\n                    }', source)
 
+
+class AndroidLanDiscoveryWindowAtomicityTests(unittest.TestCase):
+    def test_first_discovery_window_is_started_checked_and_settled_in_one_store_transaction(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store_source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        service_source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        operation = extract_java_method(
+            store_source, "public int beginOrReadDiscoveryWindow("
+        )
+        sender = extract_java_method(
+            service_source, "private void transmitLocalUdpMessageInternal("
+        )
+        self.assertIn("db.beginTransaction();", operation)
+        self.assertIn("db.endTransaction();", operation)
+        self.assertIn("finalizeDiscoveryMessage(db, messageId)", operation)
+        self.assertIn("DISCOVERY_WINDOW_STARTED", operation)
+        self.assertIn("DISCOVERY_WINDOW_OPEN", operation)
+        self.assertIn("DISCOVERY_WINDOW_WAITING", operation)
+        self.assertIn("DISCOVERY_WINDOW_ERROR", operation)
+        self.assertIn("delivery_deadline_ms<=0", operation)
+        self.assertIn("state='discovery_pending'", operation)
+        self.assertIn("store.beginOrReadDiscoveryWindow(messageId)", sender)
+        self.assertNotIn("store.beginDiscoveryWindow(messageId)", sender)
+        self.assertNotIn("store.isDiscoveryPending(messageId)", sender)
+        self.assertNotIn("store.isWaitingForPeers(messageId)", sender)
+        self.assertLess(
+            sender.index("store.beginOrReadDiscoveryWindow(messageId)"),
+            sender.index("if (firstDispatch)"),
+        )
+        self.assertIn("scheduleLanChatTask(\"discovery-window-close\"", sender)
+
 if __name__ == "__main__":
     unittest.main()
