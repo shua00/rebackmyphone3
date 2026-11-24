@@ -504,3 +504,16 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 控制面隔离 | chunk 与 missing/ack/complete/cancel 分帧；控制帧拒绝 payload | 控制消息尚未与 TransferStore/TransferFilesystem 调度联通 |
 
 **阶段判定：** TCP framing 与认证边界具备单元/SocketPair 测试，但尚不能称为 TCP 文件传输端到端完成。下一步需实现已认证 peer session 的 listener/client、缺块协商与文件系统适配层联动，再补 Android 同协议实现。
+
+## 26. TCP 接收会话闭环（2026-11-25）
+
+| 验收点 | 本批实现 | 当前边界 |
+|---|---|---|
+| 身份/任务绑定 | TCP 帧 sender/target 必须与已认证 peer 和持久化 Offer 固定参与者一致 | peer challenge/session secret 建立由上层连接管理器负责 |
+| 分块接收 | chunk frame 进入文件系统 staging，durable 后登记 SQLite receipt，再回 ACK | 发送端文件读取/窗口调度尚未实现 |
+| 缺块协商 | missing 请求执行 reconcile，返回磁盘复核后的缺块序号 | 多轮请求与并行发送由发送端调度器负责 |
+| 完成门禁 | complete 请求重新核对缺块，全部齐备才组装、整文件 hash、原子发布 | Android 接收 UI/系统文件 API 尚未实现 |
+| 取消 | cancel 仅影响当前 transfer_id | 终态临时文件保留策略与自动清理仍待接入 |
+| 资源边界 | 每连接最多处理 64 帧（可配置上限 256） | socket timeout、listener admission、并发连接数由上层负责 |
+
+**阶段判定：** Python TCP 接收侧会话已通过 SocketPair 集成测试串联 framing、身份约束、缺块查询、落盘、校验和完成；尚未具备发送侧与 Android 互通，不能视为端到端 LAN 文件传输完成。

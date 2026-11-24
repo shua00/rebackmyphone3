@@ -457,5 +457,115 @@ class TransferTcpFrameTests(unittest.TestCase):
                                        payload=b"unexpected"), self.SECRET)
 
 
+
+class TransferTcpSessionTests(unittest.TestCase):
+    SECRET = b"session-integration-secret-32-bytes"
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        root = Path(self.temp_dir.name)
+        self.store = TransferStore(str(root / "session.sqlite3"),
+                                   TransferLimits(chunk_size_bytes=4096))
+        self.files = TransferFilesystem(self.store, str(root / "stage"),
+                                        str(root / "received"))
+        self.payload = b"b" * 4096 + b"tail"
+        self.offer = TransferOffer("session-transfer-1", "sender", "receiver",
+            "clip.bin", len(self.payload), hashlib.sha256(self.payload).hexdigest(), 10)
+        self.store.create_offer(self.offer, 10)
+        self.store.transition(self.offer.transfer_id, TransferState.ACCEPTED, 11)
+        self.store.transition(self.offer.transfer_id, TransferState.TRANSFERRING, 12)
+
+    def _frame(self, kind, index=None, payload=b"", metadata=None):
+        from lan_p2p_transfer_tcp import TransferFrame
+        return TransferFrame(kind, self.offer.transfer_id, "sender", "receiver",
+                             index=index, payload=payload, metadata=metadata)
+
+    def test_tcp_session_writes_chunks_negotiates_missing_and_completes(self):
+        import socket
+        import threading
+        from lan_p2p_transfer_tcp import send_frame, recv_frame
+        from lan_p2p_transfer_session import serve_transfer_session
+        server, client = socket.socketpair()
+        errors = []
+        def serve():
+            try:
+                serve_transfer_session(server, self.store, self.files,
+                    local_peer_id="receiver", authenticated_peer_id="sender",
+                    session_secret=self.SECRET, now_ms=lambda: 20, max_frames=4)
+            except Exception as exc:
+                errors.append(exc)
+        worker = threading.Thread(target=serve)
+        worker.start()
+        try:
+            first = self.payload[:4096]
+            send_frame(client, self._frame("chunk", 0, first), self.SECRET)
+            ack = recv_frame(client, self.SECRET, expected_sender_peer_id="receiver",
+                             expected_target_peer_id="sender")
+            self.assertEqual("chunk_ack", ack.kind)
+            self.assertEqual({"index": 0, "new_receipt": True}, ack.metadata)
+
+            send_frame(client, self._frame("missing"), self.SECRET)
+            missing = recv_frame(client, self.SECRET, expected_sender_peer_id="receiver",
+                                 expected_target_peer_id="sender")
+            self.assertEqual("missing", missing.kind)
+            self.assertEqual([1], missing.metadata["indexes"])
+
+            last = self.payload[4096:]
+            send_frame(client, self._frame("chunk", 1, last), self.SECRET)
+            ack = recv_frame(client, self.SECRET, expected_sender_peer_id="receiver",
+                             expected_target_peer_id="sender")
+            self.assertEqual("chunk_ack", ack.kind)
+
+            send_frame(client, self._frame("complete"), self.SECRET)
+            complete = recv_frame(client, self.SECRET, expected_sender_peer_id="receiver",
+                                  expected_target_peer_id="sender")
+            self.assertEqual("complete", complete.kind)
+            self.assertEqual("completed", complete.metadata["state"])
+            self.assertEqual(TransferState.COMPLETED,
+                             self.store.get_transfer(self.offer.transfer_id).state)
+        finally:
+            client.close()
+            server.close()
+            worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual([], errors)
+
+    def test_tcp_session_rejects_wrong_fixed_recipient_without_writing(self):
+        import socket
+        import threading
+        from lan_p2p_transfer_tcp import send_frame
+        from lan_p2p_transfer_session import serve_transfer_session
+        server, client = socket.socketpair()
+        other = TransferOffer("wrong-target-transfer", "sender", "other-peer",
+            "clip.bin", len(self.payload), hashlib.sha256(self.payload).hexdigest(), 30)
+        self.store.create_offer(other, 30)
+        self.store.transition(other.transfer_id, TransferState.ACCEPTED, 31)
+        self.store.transition(other.transfer_id, TransferState.TRANSFERRING, 32)
+        errors = []
+        def serve():
+            try:
+                serve_transfer_session(server, self.store, self.files,
+                    local_peer_id="receiver", authenticated_peer_id="sender",
+                    session_secret=self.SECRET, now_ms=lambda: 40, max_frames=1)
+            except Exception as exc:
+                errors.append(exc)
+        worker = threading.Thread(target=serve)
+        worker.start()
+        try:
+            from lan_p2p_transfer_tcp import TransferFrame
+            send_frame(client, TransferFrame("chunk", other.transfer_id, "sender",
+                "receiver", index=0, payload=self.payload[:4096]), self.SECRET)
+            client.shutdown(socket.SHUT_WR)
+        finally:
+            client.close()
+            server.close()
+            worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(1, len(errors))
+        self.assertIsInstance(errors[0], TransferValidationError)
+        self.assertEqual((), self.store.received_chunk_indexes(other.transfer_id))
+
+
 if __name__ == "__main__":
     unittest.main()
