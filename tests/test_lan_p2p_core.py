@@ -1981,7 +1981,9 @@ class LanP2PCoreTests(unittest.TestCase):
         source = (
             repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
         ).read_text(encoding="utf-8")
-        self.assertIn("LAN_PEER_CHALLENGE_TIMEOUT_MS = 2_500L", source)
+        policy = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatRetryPolicy.java").read_text(encoding="utf-8")
+        self.assertIn("PEER_CHALLENGE_TIMEOUT_MS = 2_500L", policy)
+        self.assertIn("LAN_PEER_CHALLENGE_TIMEOUT_MS = LanChatRetryPolicy.PEER_CHALLENGE_TIMEOUT_MS", source)
         start = source.index("private void transmitLocalUdpMessageInternal(")
         end = source.index("private void sendLanUdpPacket(", start)
         method = source[start:end]
@@ -2202,7 +2204,9 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("if (deadline > 0L)", begin)
         self.assertIn("delivery_deadline_ms<=0", begin)
 
-        self.assertIn("FIRST_DISCOVERY_WINDOW_MS = 10_000L", store)
+        policy = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatRetryPolicy.java").read_text(encoding="utf-8")
+        self.assertIn("FIRST_DISCOVERY_WINDOW_MS = 10_000L", policy)
+        self.assertIn("FIRST_DISCOVERY_WINDOW_MS = LanChatRetryPolicy.FIRST_DISCOVERY_WINDOW_MS", store)
         self.assertIn("store.beginOrReadDiscoveryWindow(messageId)", service)
         self.assertIn("DISCOVERY_WINDOW_STARTED", service)
         self.assertIn("首次发现窗口开始", service)
@@ -3049,7 +3053,9 @@ class LanP2PCoreTests(unittest.TestCase):
         store_source = (
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         ).read_text(encoding="utf-8")
-        self.assertIn("FIRST_DISCOVERY_WINDOW_MS = 10_000L", store_source)
+        policy_source = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatRetryPolicy.java").read_text(encoding="utf-8")
+        self.assertIn("FIRST_DISCOVERY_WINDOW_MS = 10_000L", policy_source)
+        self.assertIn("FIRST_DISCOVERY_WINDOW_MS = LanChatRetryPolicy.FIRST_DISCOVERY_WINDOW_MS", store_source)
 
     def test_peer_discovery_before_first_dispatch_does_not_start_or_join_window(self):
         from lan_p2p_core import (
@@ -3645,7 +3651,8 @@ class AndroidLanInstantRouteRecoveryTests(unittest.TestCase):
         source = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
         attempt = extract_java_method(source, "public boolean markAttempt(")
         self.assertIn("last_attempt_endpoint<>?", attempt)
-        self.assertIn("last_attempt_endpoint + CASE", attempt) if "last_attempt_endpoint + CASE" in attempt else self.assertIn("last_attempt_at + CASE", attempt)
+        self.assertIn("last_attempt_at + ", attempt)
+        self.assertIn("LanChatRetryPolicy.TARGET_RETRY_DELAY_CASE_SQL", attempt)
         self.assertIn("update.bindString(7, endpoint)", attempt)
         self.assertIn("update.bindLong(8, now)", attempt)
 
@@ -3654,7 +3661,9 @@ class AndroidLanInstantRouteRecoveryTests(unittest.TestCase):
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
         send = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
         complete = extract_java_method(source, "private void completeLanChatAckWindow(")
-        self.assertIn("LAN_PEER_DISCOVERY_COOLDOWN_MS = 1_500L", source)
+        policy = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatRetryPolicy.java").read_text(encoding="utf-8")
+        self.assertIn("PEER_DISCOVERY_COOLDOWN_MS = 1_500L", policy)
+        self.assertIn("LAN_PEER_DISCOVERY_COOLDOWN_MS = LanChatRetryPolicy.PEER_DISCOVERY_COOLDOWN_MS", source)
         self.assertIn("target.attemptCount > 0", send)
         self.assertIn("hadUdpDispatchAttempt.set(true)", send)
         self.assertIn("lastPeerDiscoveryAt = 0L", complete)
@@ -3782,8 +3791,10 @@ class AndroidLanFastRetryBurstTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
         mark = extract_java_method(store, "public boolean markAttempt(")
-        self.assertIn("WHEN 1 THEN 250 WHEN 2 THEN 250", mark)
-        self.assertIn("WHEN 3 THEN 10000 WHEN 4 THEN 20000", mark)
+        policy = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatRetryPolicy.java").read_text(encoding="utf-8")
+        self.assertIn("LanChatRetryPolicy.TARGET_RETRY_DELAY_CASE_SQL", mark)
+        self.assertIn("WHEN 1 THEN 250 WHEN 2 THEN 250", policy)
+        self.assertIn("WHEN 3 THEN 10000 WHEN 4 THEN 20000", policy)
         self.assertIn("attempt_count=attempt_count+1", mark)
 
     def test_empty_discovery_messages_get_three_fast_dispatch_epochs(self):
