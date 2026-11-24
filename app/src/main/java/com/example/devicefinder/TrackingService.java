@@ -285,9 +285,10 @@ public class TrackingService extends Service implements LocationListener {
     // Coalesce a recovery event that arrives while a retry batch is already in flight.
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRecoveryEventPending =
             new java.util.concurrent.atomic.AtomicBoolean(false);
-    // One deferred wake preserves a real recovery event until its durable cooldown expires.
-    private final java.util.concurrent.atomic.AtomicBoolean lanChatRecoveryCooldownWakeScheduled =
-            new java.util.concurrent.atomic.AtomicBoolean(false);
+    // One earliest-deadline wake preserves recovery events across independently cooling targets.
+    // A newly discovered earlier deadline supersedes (but does not need to cancel) an older timer.
+    private final java.util.concurrent.atomic.AtomicLong lanChatRecoveryCooldownWakeAtMs =
+            new java.util.concurrent.atomic.AtomicLong(Long.MAX_VALUE);
     // A route refresh is an ordinary retry wake, not permission to reopen an exhausted epoch.
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRouteRefreshPending =
             new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -4191,15 +4192,28 @@ public class TrackingService extends Service implements LocationListener {
      * This carries forward the event already observed; it does not invent a new signal.
      */
     private void scheduleLanChatRecoveryCooldownWake(long delayMs) {
-        if (serviceDestroyed
-                || !lanChatRecoveryCooldownWakeScheduled.compareAndSet(false, true)) return;
+        if (serviceDestroyed) return;
+        final long requestedWakeAtMs = System.currentTimeMillis() + Math.max(1L, delayMs);
+        while (true) {
+            long currentWakeAtMs = lanChatRecoveryCooldownWakeAtMs.get();
+            // An existing timer already fires no later than this deadline.
+            if (currentWakeAtMs <= requestedWakeAtMs) return;
+            if (lanChatRecoveryCooldownWakeAtMs.compareAndSet(
+                    currentWakeAtMs, requestedWakeAtMs)) break;
+        }
+
+        // Timers are intentionally generation-bound by their deadline. If a later request
+        // supersedes this one with an earlier deadline, this stale callback becomes a no-op.
+        final long scheduledWakeAtMs = requestedWakeAtMs;
         final Runnable wake = () -> {
-            lanChatRecoveryCooldownWakeScheduled.set(false);
+            if (!lanChatRecoveryCooldownWakeAtMs.compareAndSet(
+                    scheduledWakeAtMs, Long.MAX_VALUE)) return;
             if (!serviceDestroyed) retryPendingLanChatMessages(true);
         };
-        if (!scheduleLanChatTask("outbox-recovery-cooldown", wake, delayMs)
-                && !handler.postDelayed(wake, delayMs)) {
-            lanChatRecoveryCooldownWakeScheduled.set(false);
+        long remainingDelayMs = Math.max(1L, scheduledWakeAtMs - System.currentTimeMillis());
+        if (!scheduleLanChatTask("outbox-recovery-cooldown", wake, remainingDelayMs)
+                && !handler.postDelayed(wake, remainingDelayMs)) {
+            lanChatRecoveryCooldownWakeAtMs.compareAndSet(scheduledWakeAtMs, Long.MAX_VALUE);
             lanChatRecoveryEventPending.set(true);
         }
     }
