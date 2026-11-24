@@ -304,3 +304,17 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 实机状态 | 未验收 | 首次发现多设备真实时序、ACK 丢失/重发和双手机即时性仍需真机日志；不得用 CI 代替 |
 
 **本记录不改变 A01–A10、S01–S26、M-A–M-C、F01–F20、G01–G14 的既有门槛，也不构成 LAN 整体验收通过。**
+
+
+## 12. ACK 来源与多目标恢复冷却收尾复核（2026-11-24）
+
+| 项目 | 结果 | 证据与限制 |
+|---|---|---|
+| 多目标恢复冷却混合批次 | 代码修复：同一恢复事件即使重开部分目标预算，也继续安排其余耗尽目标的最早冷却截止唤醒；更早截止可替换较晚定时器，旧 callback 通过 generation/CAS 校验失效 | commits `4a68816e3c92dc4e50813818b8f23d3b0f709f90`、`3a9bfbef2c9acbb6a9ad837edbaae9b3510e393f`、`dff2217a50061d354954b276fecb0999146ca0ea`；多目标不对称时序仍需行为级故障注入/实机 |
+| ACK 来源证据 | Android `matchesExpectedAckEndpoint` 仅认可成功 UDP send 后记录的 `last_sent_endpoint`；尝试端点只触发一次有界延迟复核；成功发送端点异步记账队列拒绝时有同步兜底 | commits `912f4cf8e9ba65f20108e204bfc8393f2481cdd1`、`ac14c461376859db9337582f533b762aa93cc5b1`、`004238e0063c26e929e4dfb660deabea056f4521`；快速 ACK/发送竞态仍需故障注入和真机 |
+| 回归测试 | 修正旧源码断言，使其验证新 ACK 证据边界、发现窗口延迟复核、存储读取失败和成功发送端点记账兜底 | 测试 commit `35734c33b0edfd06fa632be5ecb7b2be6c4f3c8c`；216 项 Python 测试通过 |
+| 对应 CI | Python validation、Android 变更检测、Android Debug APK build 和 artifact upload 全部成功 | Actions [#701](https://github.com/shua00/rebackmyphone3/actions/runs/45337733751)，HEAD `dff2217a50061d354954b276fecb0999146ca0ea`；artifact `app-debug` ID `14895185726`，202328 bytes（artifact 压缩包大小），未过期 |
+| PR 状态 | PR #1 最新 HEAD 与上述 CI HEAD 一致；开放、未合并，GitHub 标记 mergeable | https://github.com/shua00/rebackmyphone3/pull/1 |
+| 实机状态 | 未验收 | 双向消息与 ACK、ACK 丢失/重发、部分 ACK、多目标不对称冷却、断网/IP 变化恢复、进程重启、无 Python 服务运行模式仍必须实测 |
+
+**本记录仅证明当前 HEAD 的回归测试与 Android 构建通过。A01–A10、S01–S26、M-A–M-C、F01–F20、G01–G14 的总体验收门槛不变；任何实机要求均不得以 CI 替代。**
