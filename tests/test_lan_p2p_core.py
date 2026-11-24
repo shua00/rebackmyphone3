@@ -701,14 +701,15 @@ class LanP2PCoreTests(unittest.TestCase):
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         ).read_text(encoding="utf-8")
         ack = extract_java_method(store, "public boolean acknowledge(")
-        begin = extract_java_method(store, "public boolean beginDiscoveryWindow(")
+        discovery_window = extract_java_method(store, "public int beginOrReadDiscoveryWindow(")
         pending = extract_java_method(store, "public boolean isDiscoveryPending(")
         add_peer = extract_java_method(store, "private boolean addDiscoveryPeerToOpenMessages(SQLiteDatabase db,")
         set_targets = extract_java_method(store, "public boolean setTargets(")
         self.assertIn("now >= discoveryDeadline", set_targets)
         self.assertIn("now >= deadline", ack)
         self.assertIn("now < deadline", ack)
-        self.assertIn("now >= deadline", begin)
+        self.assertIn("if (now < deadline)", discovery_window)
+        self.assertIn("finalizeDiscoveryMessage(db, messageId)", discovery_window)
         self.assertIn("delivery_deadline_ms>?", pending)
         self.assertIn("now >= deadline", add_peer)
 
