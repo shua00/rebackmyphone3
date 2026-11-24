@@ -5609,20 +5609,25 @@ public class TrackingService extends Service implements LocationListener {
         boolean persistedEndpointMatch = !routeMatches
                 && store.matchesExpectedAckEndpoint(messageId, senderId,
                         sourceAddress.getHostAddress(), sourcePort);
+        boolean attemptedEndpointPending = false;
         boolean discoveryAck = false;
-        // A verified live route or the message's exact attempted/successful endpoint is
-        // already sufficient proof. Only the unverified first-discovery grace needs this
-        // additional SQLite state read.
+        // A successful-send endpoint or a live verified route is sufficient ACK provenance.
+        // A pre-send reservation is only a hint to wait once for the success record; it is
+        // never accepted as proof because DatagramSocket.send() may still fail.
         if (!routeMatches && !persistedEndpointMatch) {
             try {
-                discoveryAck = store.isDiscoveryPending(messageId);
+                attemptedEndpointPending = store.matchesAttemptedAckEndpoint(messageId, senderId,
+                        sourceAddress.getHostAddress(), sourcePort);
+                if (!attemptedEndpointPending) {
+                    discoveryAck = store.isDiscoveryPending(messageId);
+                }
             } catch (Exception storageFailure) {
-                FileLogger.log(this, "CHAT", "⚠️ LAN ACK 发现窗口读取失败，拒绝释放发现观察槽: "
+                FileLogger.log(this, "CHAT", "⚠️ LAN ACK 来源复核失败，拒绝立即确认: "
                         + storageFailure.getClass().getSimpleName());
             }
         }
         if (!routeMatches && !persistedEndpointMatch) {
-            if (allowDiscoveryGrace && discoveryAck) {
+            if (allowDiscoveryGrace && (discoveryAck || attemptedEndpointPending)) {
                 String recheckKey = messageId + ":" + senderId + ":"
                         + sourceAddress.getHostAddress() + ":" + sourcePort;
                 if (!pendingChatAckRouteRechecks.add(recheckKey)) return;
