@@ -291,8 +291,8 @@ class LanP2PCoreTests(unittest.TestCase):
             source = (repo_root / filename).read_text(encoding="utf-8")
             start = source.index("def udp_listener():")
             end_candidates = [
-                source.find("\\ndef ", start + 1),
-                source.find("\\nclass ", start + 1),
+                source.find("\ndef ", start + 1),
+                source.find("\nclass ", start + 1),
             ]
             ends = [value for value in end_candidates if value >= 0]
             listener = source[start:min(ends)] if ends else source[start:]
@@ -2046,7 +2046,7 @@ class LanP2PCoreTests(unittest.TestCase):
             "KeepAliveJobService.scheduleJob(this);",
         ):
             self.assertIn(operation, worker)
-        self.assertNotIn("handler.post(() -> {\\n            FileLogger.log(this, \"SERVICE\", \"🚀 追踪服务已启动", startup)
+        self.assertNotIn("handler.post(() -> {\n            FileLogger.log(this, \"SERVICE\", \"🚀 追踪服务已启动", startup)
 
     def test_android_location_callbacks_stay_on_main_looper_after_worker_registration(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -2085,7 +2085,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn('scheduleSelfHeal("accessibility");', method)
         self.assertIn('scheduleSelfHeal("component");', method)
         self.assertIn('executeMaintenance("keep-alive"', method)
-        self.assertNotIn('selfHeal();\\n            } else if ("ACTION_JOB_WAKE_UP"', method)
+        self.assertNotIn('selfHeal();\n            } else if ("ACTION_JOB_WAKE_UP"', method)
 
 
     def test_android_network_refresh_and_offline_flush_do_not_run_on_main_handler(self):
@@ -2695,7 +2695,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("handler.postDelayed(wake, delayMs)", cooldown_wake)
         self.assertIn("store.nextRecoveryEventEligibleAtMs", retry)
         self.assertIn(
-            'if (resumed > 0) {\\n                            FileLogger.log(this, "CHAT", "LAN 恢复事件重新开启有限补发预算 messages=" + resumed);\\n                        }\\n                        // Schedule the next cooldown',
+            'if (resumed > 0) {\n                            FileLogger.log(this, "CHAT", "LAN 恢复事件重新开启有限补发预算 messages=" + resumed);\n                        }\n                        // Schedule the next cooldown',
             retry,
         )
 
@@ -3384,7 +3384,7 @@ class LanP2PCoreTests(unittest.TestCase):
             'throw new IllegalStateException("Failed to read LAN inbox presentation state", e);',
             method,
         )
-        self.assertNotIn("catch (Exception e) {\\n            return false;", method)
+        self.assertNotIn("catch (Exception e) {\n            return false;", method)
 
     def test_python_receivers_never_prune_message_deduplication_records(self):
         repo_root = Path(__file__).resolve().parents[1]
