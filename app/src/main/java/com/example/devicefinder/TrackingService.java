@@ -6484,14 +6484,15 @@ public class TrackingService extends Service implements LocationListener {
                     if (ownsListener) {
                         rescueListenerThread = null;
                         isListeningForRescue = false;
+                        // Release before another start can acquire this Service's lock.
+                        // A stale/non-owner thread must never release a replacement owner's lease.
+                        releaseLanMulticastLock();
                     }
                     // A deliberate Wi-Fi path replacement is not a socket failure. Its old
                     // listener must hand off immediately instead of entering the 5s+ backoff.
                     networkGenerationChanged = ownsListener
                             && listenerGeneration != lanSocketGeneration.get();
                 }
-
-                releaseLanMulticastLock();
 
                 if (rescueListenerThread == null && !serviceDestroyed && networkGenerationChanged) {
                     FileLogger.log(this, "NETWORK", "旧 UDP listener 代际已失效，立即重建 Wi-Fi LAN socket oldGeneration="
@@ -6529,9 +6530,9 @@ public class TrackingService extends Service implements LocationListener {
                 if (rescueListenerThread == listenerThread) {
                     rescueListenerThread = null;
                     isListeningForRescue = false;
+                    releaseLanMulticastLock();
                 }
             }
-            releaseLanMulticastLock();
             throw startFailure;
         }
     }

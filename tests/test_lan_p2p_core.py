@@ -147,7 +147,9 @@ class LanP2PCoreTests(unittest.TestCase):
                         admission.index("multicastLock.acquire()"))
         self.assertLess(admission.index("synchronized (rescueLock)"),
                         admission.index("multicastLock.acquire()"))
-        self.assertIn("releaseLanMulticastLock();", listener)
+        owner_cleanup = finally_block[finally_block.index("if (ownsListener)"):finally_block.index("// A deliberate Wi-Fi path replacement")]
+        self.assertIn("releaseLanMulticastLock();", owner_cleanup)
+        self.assertNotIn("releaseLanMulticastLock();", finally_block[finally_block.index("}", finally_block.index("if (ownsListener)")) + 1:])
         release = extract_java_method(source, "private void releaseLanMulticastLock()")
         self.assertIn("synchronized (rescueLock)", release)
         self.assertIn("multicastLock.release()", release)
