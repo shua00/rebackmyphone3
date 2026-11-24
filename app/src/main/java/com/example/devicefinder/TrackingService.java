@@ -7040,7 +7040,9 @@ public class TrackingService extends Service implements LocationListener {
         // These peer-scoped events are process-local permissions, not durable message state.
         // The Outbox survives; a recreated service establishes fresh authenticated routes.
         lanChatPeerRecoveryEvents.clear();
-        lanChatPeerRecoveryCooldownWakeAtMs.clear();
+        synchronized (lanChatPeerRecoveryCooldownWakeAtMs) {
+            lanChatPeerRecoveryCooldownWakeAtMs.clear();
+        }
 
         // ★ 强力补丁 6：服务销毁时，拔掉所有定时和自愈消息，防幽灵唤醒
         handler.removeMessages(MSG_RETRY_RESCUE_LISTENER);

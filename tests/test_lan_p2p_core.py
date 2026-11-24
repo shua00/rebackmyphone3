@@ -3055,7 +3055,7 @@ class LanP2PCoreTests(unittest.TestCase):
         record_peer(self.db_path, "server2", "android-route-change", "android",
                     "android-main", "192.168.1.44", 8899, "active")
         pending = load_pending_outgoing_for_peer(
-            self.db_path, "server2", "android-route-change", force=False)
+            self.db_path, "server2", "android-route-change")
         self.assertEqual(1, len(pending))
         self.assertEqual(("192.168.1.44", 8899),
                          (pending[0]["endpoint_ip"], pending[0]["endpoint_port"]))
@@ -4876,6 +4876,13 @@ class LanPeerScopedRecoveryRegressionTests(unittest.TestCase):
         self.assertIn("synchronized (lanChatPeerRecoveryCooldownWakeAtMs)", helper)
         self.assertIn("lanChatPeerRecoveryCooldownWakeAtMs.remove(peerId, deadline)", helper)
         self.assertIn("deadline.compareAndSet(requestedWakeAtMs, Long.MAX_VALUE)", helper)
+
+    def test_android_peer_recovery_cooldown_map_is_cleared_under_its_lock_on_destroy(self):
+        root = Path(__file__).resolve().parents[1]
+        service = (root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        destroy = extract_java_method(service, "public void onDestroy()")
+        self.assertIn("synchronized (lanChatPeerRecoveryCooldownWakeAtMs)", destroy)
+        self.assertIn("lanChatPeerRecoveryCooldownWakeAtMs.clear()", destroy)
 
     def test_android_peer_recovery_does_not_trigger_global_budget_reset(self):
         root = Path(__file__).resolve().parents[1]
