@@ -42,6 +42,7 @@ public final class LanP2pProtocol {
 
     public static byte[] encode(JSONObject fields, String secret) throws Exception {
         JSONObject packet = copyWithoutAuth(fields);
+        validateUnicodeScalars(packet);
         packet.put("v", VERSION);
         validateCanonicalNumbers(packet);
         String type = packet.optString("type", "");
@@ -80,6 +81,7 @@ public final class LanP2pProtocol {
             throw new IllegalArgumentException("Invalid LAN P2P UTF-8", malformedUtf8);
         }
         JSONObject packet = new JSONObject(raw);
+        validateUnicodeScalars(packet);
         validateCanonicalNumbers(packet);
         Object version = packet.opt("v");
         if (!(version instanceof Integer || version instanceof Long)
@@ -140,20 +142,52 @@ public final class LanP2pProtocol {
     }
 
     /** Shared validation for wire packets and durable recipient snapshots. */
-    public static boolean isValidPeerId(String peerId) {
-        if (peerId == null || peerId.isEmpty()) return false;
-        // Python's strict UTF-8 encoder rejects unpaired UTF-16 surrogates. Java's
-        // String.getBytes() replaces them, which would otherwise admit an ID Python rejects.
-        for (int i = 0; i < peerId.length(); i++) {
-            char ch = peerId.charAt(i);
-            if (Character.isISOControl(ch)) return false;
+    private static boolean isValidUnicodeScalarString(String value) {
+        if (value == null) return false;
+        for (int i = 0; i < value.length(); i++) {
+            char ch = value.charAt(i);
             if (Character.isHighSurrogate(ch)) {
-                if (i + 1 >= peerId.length()
-                        || !Character.isLowSurrogate(peerId.charAt(i + 1))) return false;
-                i++; // A valid supplementary Unicode code point is one UTF-8 sequence.
+                if (i + 1 >= value.length()
+                        || !Character.isLowSurrogate(value.charAt(i + 1))) return false;
+                i++;
             } else if (Character.isLowSurrogate(ch)) {
                 return false;
             }
+        }
+        return true;
+    }
+
+    /** Recursively enforce the same strict UTF-8 string boundary as Python before HMAC. */
+    private static void validateUnicodeScalars(Object value) throws Exception {
+        if (value instanceof String) {
+            if (!isValidUnicodeScalarString((String) value)) {
+                throw new IllegalArgumentException("JSON string contains an unpaired surrogate");
+            }
+            return;
+        }
+        if (value instanceof JSONObject) {
+            JSONObject object = (JSONObject) value;
+            Iterator<String> keys = object.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                if (!isValidUnicodeScalarString(key)) {
+                    throw new IllegalArgumentException("JSON key contains an unpaired surrogate");
+                }
+                validateUnicodeScalars(object.get(key));
+            }
+            return;
+        }
+        if (value instanceof JSONArray) {
+            JSONArray array = (JSONArray) value;
+            for (int i = 0; i < array.length(); i++) validateUnicodeScalars(array.get(i));
+        }
+    }
+
+    public static boolean isValidPeerId(String peerId) {
+        if (peerId == null || peerId.isEmpty()
+                || !isValidUnicodeScalarString(peerId)) return false;
+        for (int i = 0; i < peerId.length(); i++) {
+            if (Character.isISOControl(peerId.charAt(i))) return false;
         }
         return peerId.getBytes(StandardCharsets.UTF_8).length <= MAX_PEER_ID_BYTES;
     }
