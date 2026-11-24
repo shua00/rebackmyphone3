@@ -1,8 +1,5 @@
 package com.example.devicefinder;
 
-import android.app.Service;
-import android.content.Context;
-
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
@@ -43,26 +40,21 @@ public class TrackingServiceLifecycleTest {
         Thread listener = (Thread) field(service, "rescueListenerThread");
         DatagramSocket ingress = (DatagramSocket) field(service, "rescueSocketRef");
 
-        try {
-            controller.destroy();
+        controller.destroy();
 
-            assertTrue("service must publish teardown before returning",
-                    booleanField(service, "serviceDestroyed"));
-            assertNull("UDP ingress reference must be revoked", field(service, "rescueSocketRef"));
-            if (ingress != null) {
-                assertTrue("published UDP ingress must be closed", ingress.isClosed());
-            }
-            if (startup != null) {
-                assertTrue("startup worker must be interrupted or already terminated",
-                        startup.isInterrupted() || !startup.isAlive());
-            }
-            if (listener != null) {
-                assertTrue("listener worker must be interrupted or already terminated",
-                        listener.isInterrupted() || !listener.isAlive());
-            }
-        } finally {
-            // Robolectric destroy is idempotent for an already destroyed controller.
-            controller.destroy();
+        assertTrue("service must publish teardown before returning",
+                booleanField(service, "serviceDestroyed"));
+        assertNull("UDP ingress reference must be revoked", field(service, "rescueSocketRef"));
+        if (ingress != null) {
+            assertTrue("published UDP ingress must be closed", ingress.isClosed());
+        }
+        if (startup != null) {
+            assertTrue("startup worker must be interrupted or already terminated",
+                    startup.isInterrupted() || !startup.isAlive());
+        }
+        if (listener != null) {
+            assertTrue("listener worker must be interrupted or already terminated",
+                    listener.isInterrupted() || !listener.isAlive());
         }
     }
 
