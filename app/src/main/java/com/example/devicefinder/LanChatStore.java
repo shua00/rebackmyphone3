@@ -882,7 +882,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
             // The first three LAN dispatches form a short reliability burst:
             // attempts 2 and 3 may follow after 250ms; later attempts use durable backoff.
             android.database.sqlite.SQLiteStatement update = db.compileStatement(
-                    "UPDATE lan_outbox_targets SET status='sent',attempt_count=attempt_count+1," +
+                    "UPDATE lan_outbox_targets SET status='" + LanChatDeliveryState.TARGET_ATTEMPT_RESERVED + "',attempt_count=attempt_count+1," +
                     "last_attempt_endpoint=?,last_attempt_at=?,last_error=? WHERE message_id=? AND peer_id=? AND status!='acked' " +
                     "AND attempt_count<? AND (attempt_count=0 OR last_attempt_endpoint<>? " +
                     "OR last_attempt_at + " + LanChatRetryPolicy.TARGET_RETRY_DELAY_CASE_SQL + " <= ?) " +
@@ -1014,7 +1014,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
             if (state.isEmpty() || "expired".equals(state)) return false;
 
             ContentValues ackValues = new ContentValues();
-            ackValues.put("status", "acked");
+            ackValues.put("status", LanChatDeliveryState.TARGET_ACKED);
             ackValues.put("last_ack_at", now);
             int changed = db.update("lan_outbox_targets", ackValues,
                     "message_id=? AND peer_id=?", new String[]{messageId, peerId});
@@ -1035,7 +1035,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     ContentValues targetValues = new ContentValues();
                     targetValues.put("message_id", messageId);
                     targetValues.put("peer_id", peerId);
-                    targetValues.put("status", "acked");
+                    targetValues.put("status", LanChatDeliveryState.TARGET_ACKED);
                     targetValues.put("last_ack_at", now);
                     long targetRow = db.insertWithOnConflict(
                             "lan_outbox_targets", null, targetValues, SQLiteDatabase.CONFLICT_IGNORE);
