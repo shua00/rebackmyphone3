@@ -111,3 +111,11 @@
 - Python 和 Android 必须在 HMAC 规范化前递归检查所有字符串值与对象键，拒绝不能严格编码为 UTF-8 的孤立 surrogate。
 - 合法 supplementary Unicode 字符（例如 emoji）继续支持；不对合法正文字符做额外限制。
 - Python 编码端与解码端、Android 编码端与解码端必须使用同一边界，避免仅一侧拒绝或替换后继续认证。
+
+
+### D9：四种 v2 消息类型必须在编解码边界统一字段语义
+
+- 通用 HMAC 信封校验不足以保证业务语义一致。若把错误 JSON 类型交给 Android `optString` 或 Python `str()`，对象/数组等值可能被转换成不同文本，形成跨端行为分叉。
+- `peer.hello` 必须携带非空 `nonce`；`peer.ack` 必须携带非空 `reply_nonce`；`chat.message` 必须携带非空 `message_id`、非空 `target_peer_id` 和字符串正文；`chat.ack` 必须携带对应消息/目标 ID 且状态为 `stored`。
+- 可选字段也必须约束类型：挑战标志为布尔、能力为字符串数组、端口为合法整数、时间戳为非负整数、展示/服务元数据为字符串。时间戳仍可选，避免把当前未依赖的字段升级成兼容性要求。
+- 两端编码和解码均在 HMAC 验证前执行同一类型级 schema；ACK 是否能落账仍由发送者、目标、message_id、接收人快照和成功发送 endpoint/已验证路由共同决定，schema 校验不能替代状态机证明。
