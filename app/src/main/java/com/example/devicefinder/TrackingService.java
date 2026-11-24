@@ -6169,19 +6169,23 @@ public class TrackingService extends Service implements LocationListener {
     private void startRescueListener() {
         final long listenerGeneration = lanSocketGeneration.get();
         synchronized (rescueLock) {
+            // Teardown may race a delayed listener-start callback. Never acquire a
+            // resource or publish a new owner after this Service has begun destruction.
+            if (serviceDestroyed) return;
             if (isListeningForRescue) {
                 FileLogger.log(this, "UDP", "⚠️ 监听已在运行，跳过重复启动");
                 return;
             }
             isListeningForRescue = true;
-        }
-
-        if (multicastLock != null && !multicastLock.isHeld()) {
-            try {
-                multicastLock.acquire();
-                FileLogger.log(this, "UDP", "🔓 MulticastLock 已获取");
-            } catch (Exception e) {
-                FileLogger.log(this, "UDP", "⚠️ MulticastLock 获取失败: " + e.getMessage());
+            // Acquire under the same lifecycle lock used by onDestroy. This closes the
+            // acquire-after-release window between listener admission and Thread.start().
+            if (multicastLock != null && !multicastLock.isHeld()) {
+                try {
+                    multicastLock.acquire();
+                    FileLogger.log(this, "UDP", "🔓 MulticastLock 已获取");
+                } catch (Exception e) {
+                    FileLogger.log(this, "UDP", "⚠️ MulticastLock 获取失败: " + e.getMessage());
+                }
             }
         }
 
@@ -6487,9 +6491,7 @@ public class TrackingService extends Service implements LocationListener {
                             && listenerGeneration != lanSocketGeneration.get();
                 }
 
-                if (multicastLock != null && multicastLock.isHeld()) {
-                    try { multicastLock.release(); } catch (Exception ignored) {}
-                }
+                releaseLanMulticastLock();
 
                 if (rescueListenerThread == null && !serviceDestroyed && networkGenerationChanged) {
                     FileLogger.log(this, "NETWORK", "旧 UDP listener 代际已失效，立即重建 Wi-Fi LAN socket oldGeneration="
@@ -6529,7 +6531,20 @@ public class TrackingService extends Service implements LocationListener {
                     isListeningForRescue = false;
                 }
             }
+            releaseLanMulticastLock();
             throw startFailure;
+        }
+    }
+
+    /**
+     * Serialize release with listener admission so onDestroy and listener finally
+     * cannot both release the same MulticastLock or race a late acquire.
+     */
+    private void releaseLanMulticastLock() {
+        synchronized (rescueLock) {
+            if (multicastLock != null && multicastLock.isHeld()) {
+                try { multicastLock.release(); } catch (RuntimeException ignored) {}
+            }
         }
     }
 
@@ -7209,7 +7224,7 @@ public class TrackingService extends Service implements LocationListener {
 
         if (batteryMonitor != null) { try { unregisterReceiver(batteryMonitor); } catch (Exception ignored) {} }
         if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
-        if (multicastLock != null && multicastLock.isHeld()) multicastLock.release();
+        releaseLanMulticastLock();
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         if (sensorManager != null && motionListener != null) sensorManager.cancelTriggerSensor(motionListener, motionSensor);
         handler.removeCallbacks(networkRefreshRunnable);

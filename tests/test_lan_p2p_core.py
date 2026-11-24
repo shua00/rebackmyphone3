@@ -136,6 +136,26 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("listenerToStop.interrupt()", extract_java_method(
             source, "public void onDestroy()"))
 
+    def test_android_listener_multicast_lock_admission_and_release_are_lifecycle_serialized(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        listener = extract_java_method(source, "private void startRescueListener()")
+        admission = listener[:listener.index("Thread listenerThread = new Thread")]
+        self.assertLess(admission.index("if (serviceDestroyed) return;"),
+                        admission.index("multicastLock.acquire()"))
+        self.assertLess(admission.index("synchronized (rescueLock)"),
+                        admission.index("multicastLock.acquire()"))
+        self.assertIn("releaseLanMulticastLock();", listener)
+        release = extract_java_method(source, "private void releaseLanMulticastLock()")
+        self.assertIn("synchronized (rescueLock)", release)
+        self.assertIn("multicastLock.release()", release)
+        destroy = extract_java_method(source, "public void onDestroy()")
+        self.assertIn("releaseLanMulticastLock();", destroy)
+        self.assertNotIn("multicastLock.release()", destroy)
+
+
     def test_service_depends_on_policy_not_store_compatibility_aliases(self):
         repo_root = Path(__file__).resolve().parents[1]
         service = (
