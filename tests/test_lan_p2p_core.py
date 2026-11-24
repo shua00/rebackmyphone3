@@ -1701,7 +1701,7 @@ class LanP2PCoreTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         for method_name, next_method in (
-            ("public List<Target> loadKnownPeers()", "public List<PendingMessage> loadPending"),
+            ("public List<Target> loadKnownPeers()", "public boolean hasUnattemptedTargets"),
             ("public List<Target> loadTargets(String messageId)", "public boolean markAttempt"),
         ):
             start = store.index(method_name)
@@ -2234,11 +2234,15 @@ class LanP2PCoreTests(unittest.TestCase):
         remove = service[remove_start:remove_end]
         self.assertIn("store.isWaitingForPeers(messageId)", remove)
         self.assertIn("SQLite 记录保留，停止自动重试", remove)
-        close_start = service.index("private void scheduleLanChatDiscoveryWindowClose(")
-        close_end = service.index("private void transmitLocalUdpMessageInternal(", close_start)
-        close = service[close_start:close_end]
-        self.assertIn("removePendingLanChat(messageId);", close)
-        self.assertIn("store.finalizeDiscoveryWindow(messageId)", close)
+        finalizer_start = service.index("private void scheduleLanChatDiscoveryFinalizer(")
+        finalizer_end = service.index("private void transmitLocalUdpMessageInternal(", finalizer_start)
+        finalizer = service[finalizer_start:finalizer_end]
+        self.assertIn("store.finalizeExpiredDiscoveryWindows(System.currentTimeMillis())", finalizer)
+        self.assertIn("retryPendingLanChatMessages(false)", finalizer)
+        self.assertIn("removePendingLanChat(id);", service[
+            service.index("private void retryPendingLanChatMessages(boolean recoveryEvent)"):
+            service.index("private void sendLocalUdpMessage(", service.index("private void retryPendingLanChatMessages(boolean recoveryEvent)"))
+        ])
 
 
     def test_discovery_window_finalization_uses_one_coalesced_deadline_timer(self):
@@ -4104,7 +4108,7 @@ class AndroidLanDiscoveryWindowAtomicityTests(unittest.TestCase):
             sender.index("store.isDiscoveryPending(messageId)"),
             sender.index("// Revalidate persisted endpoints off the FIFO transmit lock."),
         )
-        self.assertIn("scheduleLanChatDiscoveryWindowClose(", sender)
+        self.assertIn("scheduleLanChatDiscoveryFinalizer(", sender)
         self.assertIn("LAN_CHAT_DISCOVERY_WINDOW_MS + 100L", sender)
 
 

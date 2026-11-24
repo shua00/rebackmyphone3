@@ -4604,7 +4604,12 @@ public class TrackingService extends Service implements LocationListener {
             try {
                 lanChatSendExecutor.execute(() -> {
                     try {
-                        store.finalizeExpiredDiscoveryWindows(System.currentTimeMillis());
+                        int finalized = store.finalizeExpiredDiscoveryWindows(System.currentTimeMillis());
+                        if (finalized > 0) {
+                            // Reconcile the legacy SharedPreferences mirror for rows that
+                            // just transitioned to waiting_peers; SQLite remains authoritative.
+                            retryPendingLanChatMessages(false);
+                        }
                     } catch (Exception storageFailure) {
                         FileLogger.log(this, "CHAT", "LAN discovery finalization deferred: "
                                 + storageFailure.getClass().getSimpleName());
