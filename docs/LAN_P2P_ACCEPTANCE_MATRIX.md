@@ -394,3 +394,27 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | CI/实机 | 待本批提交 Actions；尚未完成 Android↔三个 Python 服务的实机互通 | 自动化与 CI 不替代实机验收 |
 
 **本节字段约束以当前仓库全部发送端构造和接收端消费路径为基准；可选时间戳不因本次校验而变为必需字段。**
+
+
+## 19. Android 与 Python 按设备恢复事件隔离（2026-11-24）
+
+| 项目 | 结果 | 证据与限制 |
+|---|---|---|
+| Android 恢复作用域 | 网络/监听器恢复保留全局事件；单个 peer 的 nonce challenge 完成后只重开该 peer 的耗尽目标，不影响其他 peer 的 attempt budget | commit `1c257a8`；`LanChatStore.resumeExhaustedRetriesForPeerRecoveryEvent` 按 `peer_id` 更新 |
+| Android 事件所有权 | 单设备恢复事件独立排队；批次失败、执行器繁忙和批次运行期间新事件均保留；peer cooldown 使用 peer-scoped timer，不转成全局事件 | commit `1c257a8`；源码回归守卫 |
+| Python 三服务事件保留 | socket 缺失/关闭、Outbox 扫描异常、peer 快照或 endpoint 暂缺、持久化读取失败时保留恢复事件；cooldown 未结束时保留到后续 worker 周期 | commit `1c257a8`；rescue2.py/chat.py/server2.py |
+| B4 自动化与 Android 构建 | 237 项 Python 测试通过；Android Debug APK 构建、artifact 上传成功 | Actions [#728](https://github.com/shua00/rebackmyphone3/actions/runs/45366343675)，代码树与最终 B4 提交 `1c257a8` 相同；artifact `app-debug` |
+| B4 最终提交 | B4 代码树压缩为单一提交；后续最终 squash 校验 Python 成功 | commit `1c257a8`；Actions [#729](https://github.com/shua00/rebackmyphone3/actions/runs/45366775467) |
+| 实机/故障注入 | 未验收 | 仍需 SQLite 写失败、socket 重建、peer A 恢复而 peer B 耗尽、多个 peer 冷却不同步、进程重启后恢复的行为级测试 |
+
+## 20. Python 三服务恢复入口与发送尝试边界一致性（2026-11-24）
+
+| 项目 | 结果 | 证据与限制 |
+|---|---|---|
+| 恢复入口默认值 | 三服务 `_resume_pending_v2_for_peer` 默认 `recovery_event=False`；只有 worker 显式传入经过认证的 peer 恢复事件才重开有限预算 | commit `e65430b` |
+| 发送尝试与网络发送 | `mark_outgoing_attempt` 失败且尚未登记尝试时保留恢复事件；尝试已登记后 UDP 发送失败则交由持久化退避，不 force 重开预算 | commit `e65430b`；三服务同一异常边界 |
+| 回归测试 | 237 项 Python 测试全部通过，覆盖三服务恢复队列、默认恢复语义、attempt admission 与 send 顺序/失败语义 | Actions [#733](https://github.com/shua00/rebackmyphone3/actions/runs/45368098986) |
+| Android 构建 | 本提交仅涉及 Python 服务、测试和文档；Android build 按路径规则跳过。Android 源码对应 B4 的完整 Debug APK build 已在 Actions #728 成功 | Actions #733、#728 |
+| 实机状态 | 未验收 | 需要三服务真实进程在 SQLite 短时锁、UDP send 错误、服务重启与路由恢复组合下验证；CI 源码守卫不等同动态测试 |
+
+**B4/B5 仅完成代码与自动化门槛，不代表 LAN P2P 总体验收通过。A01–A10、S01–S26、M-A–M-C、F01–F20、G01–G14 既有门槛不变；双端即时性、异常恢复和真实网络切换仍必须实测。**

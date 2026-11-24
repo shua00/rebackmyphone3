@@ -119,3 +119,19 @@
 - `peer.hello` 必须携带非空 `nonce`；`peer.ack` 必须携带非空 `reply_nonce`；`chat.message` 必须携带非空 `message_id`、非空 `target_peer_id` 和字符串正文；`chat.ack` 必须携带对应消息/目标 ID 且状态为 `stored`。
 - 可选字段也必须约束类型：挑战标志为布尔、能力为字符串数组、端口为合法整数、时间戳为非负整数、展示/服务元数据为字符串。时间戳仍可选，避免把当前未依赖的字段升级成兼容性要求。
 - 两端编码和解码均在 HMAC 验证前执行同一类型级 schema；ACK 是否能落账仍由发送者、目标、message_id、接收人快照和成功发送 endpoint/已验证路由共同决定，schema 校验不能替代状态机证明。
+
+
+### D10：恢复事件必须保留原始作用域
+
+- 网络/监听器重建是全局 LAN 路径事件，可以按全局策略重新开启所有符合冷却条件的耗尽目标。
+- 单个 peer 的 nonce challenge 成功只证明该 peer 的新路由，不得重开其他 peer 的重试预算。
+- Android 使用独立 peer event set、按 peer_id 的 SQLite 恢复更新和独立 cooldown timer；Python 三服务使用 peer-scoped recovery set 与相同的持久化冷却截止查询。
+- 事件在 socket 不可用、存储扫描失败、路由暂缺或执行器繁忙时必须保留；不能因“没有立即可发送的 endpoint”而静默丢弃。
+- 冷却 timer 必须携带原始 peer_id。peer-scoped event 不得复用会重开全部目标的 global recovery timer。
+
+### D11：发送尝试登记与 UDP send 错误必须分开处理
+
+- `mark_outgoing_attempt` 成功提交后，有限发送预算已经消耗；后续 UDP send 或成功 endpoint 落账失败，应交给持久化退避，不得再次 force 重开预算。
+- 若 attempt admission 本身因存储错误失败，发送尝试尚未被可靠登记，原恢复事件必须保留并延迟重试。
+- Python 三服务恢复入口默认普通补发（`recovery_event=False`）；只有经过认证的 peer recovery worker 显式传递恢复许可。
+- 这一区分既防止 SQLite 暂时故障丢失恢复事件，也避免将一次发送失败误判为新的网络恢复事件而反复重置预算。

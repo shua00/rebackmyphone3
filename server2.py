@@ -1377,7 +1377,7 @@ def cmd_cleaner():
 
 # ==================== UDP 监听 ====================
 
-def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=True):
+def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
     """Replay due durable rows; verified peer recovery is throttled and finite."""
     with _V2_RECOVERY_RETRY_LOCK:
         # Consume a queued event only when this invocation can own the work.
@@ -1417,16 +1417,34 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=True):
             try:
                 target_port = int(pending.get("endpoint_port") or addr[1])
                 raw = encode_packet(chat_packet, RESCUE_SECRET)
-                if not mark_outgoing_attempt(CHAT_DEDUP_DB, pending["message_id"], peer_id,
-                                              pending["endpoint_ip"], target_port, allow_fast_retry=False):
-                    continue
+            except Exception as e:
+                with print_lock:
+                    print(f"⚠️ server2 pending chat retry payload preparation failed peer={peer_id}: {type(e).__name__}")
+                return
+            try:
+                attempt_admitted = mark_outgoing_attempt(
+                    CHAT_DEDUP_DB, pending["message_id"], peer_id,
+                    pending["endpoint_ip"], target_port, allow_fast_retry=False)
+            except LanP2PStorageError as e:
+                # No durable attempt was admitted, so a recovery permission remains valid.
+                if recovery_event:
+                    with _V2_RECOVERY_RETRY_LOCK:
+                        _V2_RECOVERY_RETRY_PEERS.add(peer_id)
+                with print_lock:
+                    print(f"⚠️ server2 pending chat attempt admission failed; recovery retained: {type(e).__name__}")
+                return
+            if not attempt_admitted:
+                continue
+            try:
                 send_outgoing_packet(
                     sock, raw, (pending["endpoint_ip"], target_port),
                     CHAT_DEDUP_DB, "server2", pending["message_id"], peer_id,
                     send_lock=UDP_CHAT_SEND_LOCK)
             except LanP2PStorageError as e:
+                # The durable attempt is already consumed; let normal persisted backoff
+                # take over instead of force-reopening the same retry epoch.
                 with print_lock:
-                    print(f"⚠️ server2 pending chat retry stopped; durable ledger write failed: {type(e).__name__}")
+                    print(f"⚠️ server2 pending chat send stopped; backoff retained: {type(e).__name__}")
                 return
             except Exception as e:
                 with print_lock:

@@ -2078,9 +2078,10 @@ class LanP2PCoreTests(unittest.TestCase):
             start = source.index("def _resume_pending_v2_for_peer(")
             end = source.index("\ndef _handle_authenticated_v2_packet", start)
             replay = source[start:end]
-            record = replay.index("if not mark_outgoing_attempt(")
+            record = replay.index("attempt_admitted = mark_outgoing_attempt(")
             send = replay.index("send_outgoing_packet(")
             self.assertLess(record, send, filename)
+            self.assertIn("if not attempt_admitted:", replay[record:send], filename)
             self.assertIn("continue", replay[record:send], filename)
 
 
@@ -3161,12 +3162,18 @@ class LanP2PCoreTests(unittest.TestCase):
             start = source.index("def _resume_pending_v2_for_peer(")
             end = source.index("\ndef _handle_authenticated_v2_packet", start)
             recovery = source[start:end]
-            storage_catch = recovery.index("except LanP2PStorageError as e:")
-            generic_catch = recovery.index("except Exception as e:", storage_catch)
-            self.assertLess(storage_catch, generic_catch, filename)
-            storage_handler = recovery[storage_catch:generic_catch]
-            self.assertIn("durable ledger write failed", storage_handler, filename)
-            self.assertIn("return", storage_handler, filename)
+            admission = recovery.index("attempt_admitted = mark_outgoing_attempt(")
+            storage_catch = recovery.index("except LanP2PStorageError as e:", admission)
+            send_catch = recovery.index("except LanP2PStorageError as e:", storage_catch + 1)
+            generic_catch = recovery.index("except Exception as e:", send_catch)
+            admission_handler = recovery[storage_catch:recovery.index("if not attempt_admitted:", storage_catch)]
+            send_handler = recovery[send_catch:generic_catch]
+            self.assertIn("recovery retained", admission_handler, filename)
+            self.assertIn("_V2_RECOVERY_RETRY_PEERS.add(peer_id)", admission_handler, filename)
+            self.assertIn("backoff retained", send_handler, filename)
+            self.assertNotIn("_V2_RECOVERY_RETRY_PEERS.add(peer_id)", send_handler, filename)
+            self.assertIn("return", admission_handler, filename)
+            self.assertIn("return", send_handler, filename)
 
 
     def test_outbox_storage_error_is_not_masked_by_rollback_or_close_failure(self):
@@ -4866,3 +4873,9 @@ class LanPeerScopedRecoveryRegressionTests(unittest.TestCase):
             resume = extract_python_function(source, "_resume_pending_v2_for_peer")
             self.assertIn("_V2_RECOVERY_RETRY_PEERS.add(peer_id)", resume)
             self.assertIn("next_peer_recovery_eligible_at_ms", resume)
+            self.assertIn("recovery_event=False", resume.splitlines()[0])
+            self.assertEqual(resume.count("chat_packet ="), 1)
+            attempt_error = resume[resume.index("except LanP2PStorageError as e:", resume.index("attempt_admitted = mark_outgoing_attempt")):resume.index("if not attempt_admitted")]
+            self.assertIn("_V2_RECOVERY_RETRY_PEERS.add(peer_id)", attempt_error)
+            self.assertLess(resume.index("attempt_admitted = mark_outgoing_attempt"),
+                            resume.index("send_outgoing_packet("))
