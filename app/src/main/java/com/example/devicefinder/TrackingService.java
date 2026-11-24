@@ -4198,9 +4198,9 @@ public class TrackingService extends Service implements LocationListener {
                                     FileLogger.log(this, "CHAT", "⚠️ SQLite 旧队列收件人快照补偿失败，保留旧队列");
                                     return;
                                 }
-                                if (store.isWaitingForPeers(id)) {
-                                    // A previous process may have been stopped before its close callback
-                                    // reclaimed the compatibility mirror for this terminal empty snapshot.
+                                if (store.isTerminalForLegacyMirror(id)) {
+                                    // Recover either terminal state if the process stopped after
+                                    // SQLite committed but before asynchronous mirror cleanup ran.
                                     removePendingLanChat(id);
                                 }
                             }

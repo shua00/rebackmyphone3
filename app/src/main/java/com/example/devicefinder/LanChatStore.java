@@ -1204,6 +1204,23 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
+    /** True when SQLite has a terminal delivery/discovery result and the legacy mirror can be reclaimed. */
+    public boolean isTerminalForLegacyMirror(String messageId) {
+        if (messageId == null || messageId.length() == 0) return false;
+        Cursor c = null;
+        try {
+            c = getReadableDatabase().rawQuery(
+                    "SELECT 1 FROM lan_outbox WHERE message_id=? " +
+                            "AND state IN ('delivered','waiting_peers')",
+                    new String[]{messageId});
+            return c.moveToFirst();
+        } catch (Exception e) {
+            return false;
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
     public boolean isDiscoveryPending(String messageId) {
         Cursor c = null;
         try {

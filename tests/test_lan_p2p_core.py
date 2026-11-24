@@ -2304,7 +2304,9 @@ class LanP2PCoreTests(unittest.TestCase):
             retry.index("store.finalizeExpiredDiscoveryWindows("),
             retry.index("store.loadPending(50)"),
         )
-        self.assertIn("if (store.isWaitingForPeers(id))", retry)
+        self.assertIn("if (store.isTerminalForLegacyMirror(id))", retry)
+        terminal = extract_java_method(store_source, "public boolean isTerminalForLegacyMirror(")
+        self.assertIn("state IN ('delivered','waiting_peers')", terminal)
         self.assertIn("removePendingLanChat(id);", retry)
 
 
