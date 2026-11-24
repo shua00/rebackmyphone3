@@ -2233,11 +2233,27 @@ class LanP2PCoreTests(unittest.TestCase):
         remove = service[remove_start:remove_end]
         self.assertIn("store.isWaitingForPeers(messageId)", remove)
         self.assertIn("SQLite 记录保留，停止自动重试", remove)
-        self.assertIn("removePendingLanChat(messageId);", service[
-            service.index('scheduleLanChatTask("discovery-window-close"'):
-            service.index("private void sendLanUdpPacket(", service.index('scheduleLanChatTask("discovery-window-close"'))
-        ])
+        close_start = service.index("private void scheduleLanChatDiscoveryWindowClose(")
+        close_end = service.index("private void transmitLocalUdpMessageInternal(", close_start)
+        close = service[close_start:close_end]
+        self.assertIn("removePendingLanChat(messageId);", close)
+        self.assertIn("store.finalizeDiscoveryWindow(messageId)", close)
 
+
+    def test_discovery_window_close_rearms_after_executor_rejection_or_storage_failure(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        close = extract_java_method(source, "private void scheduleLanChatDiscoveryWindowClose(")
+        self.assertIn('scheduleLanChatTask("discovery-window-close"', close)
+        self.assertIn("lanChatSendExecutor.execute", close)
+        self.assertIn("catch (java.util.concurrent.RejectedExecutionException rejected)", close)
+        self.assertIn("catch (Exception storageFailure)", close)
+        self.assertGreaterEqual(close.count("scheduleLanChatDiscoveryWindowClose(messageId, store, 500L)"), 2)
+        self.assertIn("store.finalizeDiscoveryWindow(messageId)", close)
+        self.assertIn("store.isDiscoveryPending(messageId)", close)
+        sender = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
+        self.assertIn("scheduleLanChatDiscoveryWindowClose(", sender)
+        self.assertIn("LAN_CHAT_DISCOVERY_WINDOW_MS + 100L", sender)
 
     def test_android_expired_empty_discovery_rows_are_finalized_even_after_pending_window_closes(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -4080,7 +4096,8 @@ class AndroidLanDiscoveryWindowAtomicityTests(unittest.TestCase):
             sender.index("store.isDiscoveryPending(messageId)"),
             sender.index("// Revalidate persisted endpoints off the FIFO transmit lock."),
         )
-        self.assertIn("scheduleLanChatTask(\"discovery-window-close\"", sender)
+        self.assertIn("scheduleLanChatDiscoveryWindowClose(", sender)
+        self.assertIn("LAN_CHAT_DISCOVERY_WINDOW_MS + 100L", sender)
 
 
     def test_fixed_target_attempt_progress_is_read_before_fifo_lock(self):

@@ -4580,6 +4580,44 @@ public class TrackingService extends Service implements LocationListener {
         }
     }
 
+    /**
+     * Close the first-discovery ledger window even when the send executor is saturated.
+     * A rejected close task is retried independently; all-ACKed discovery rows are not
+     * present in loadPending(), so they cannot rely on a later ordinary Outbox retry.
+     */
+    private void scheduleLanChatDiscoveryWindowClose(final String messageId,
+            final LanChatStore store, long delayMs) {
+        if (serviceDestroyed || store == null || messageId == null || messageId.isEmpty()) return;
+        scheduleLanChatTask("discovery-window-close", () -> {
+            if (serviceDestroyed) return;
+            try {
+                lanChatSendExecutor.execute(() -> {
+                    if (serviceDestroyed) return;
+                    try {
+                        if (store.finalizeDiscoveryWindow(messageId)) {
+                            FileLogger.log(this, "CHAT", "P2P 首次发现窗口关闭，消息状态已结算: "
+                                    + messageId);
+                            removePendingLanChat(messageId);
+                        } else if (store.isDiscoveryPending(messageId)) {
+                            // The deadline may still be live after clock adjustment, or the
+                            // store may have transiently refused the first finalization.
+                            scheduleLanChatDiscoveryWindowClose(messageId, store, 500L);
+                        }
+                    } catch (Exception storageFailure) {
+                        if (!serviceDestroyed) {
+                            scheduleLanChatDiscoveryWindowClose(messageId, store, 500L);
+                        }
+                    }
+                });
+            } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                // Do not strand an expired discovery row when the bounded send queue is full.
+                if (!serviceDestroyed) {
+                    scheduleLanChatDiscoveryWindowClose(messageId, store, 500L);
+                }
+            }
+        }, delayMs);
+    }
+
     private void transmitLocalUdpMessageInternal(final String message, final String messageId,
             DatagramSocket socket, long socketGeneration,
             final List<LanChatStore.Target> savedTargets, long targetLoadMs,
@@ -4637,19 +4675,8 @@ public class TrackingService extends Service implements LocationListener {
             if (firstDispatch) {
                 FileLogger.log(this, "CHAT", "P2P 首次发现窗口开始，限时 "
                         + LAN_CHAT_DISCOVERY_WINDOW_MS + "ms，消息 " + messageId);
-                scheduleLanChatTask("discovery-window-close", () -> {
-                    try {
-                        lanChatSendExecutor.execute(() -> {
-                            if (store.finalizeDiscoveryWindow(messageId)) {
-                                FileLogger.log(this, "CHAT", "P2P 首次发现窗口关闭，消息状态已结算: "
-                                        + messageId);
-                                removePendingLanChat(messageId);
-                            }
-                        });
-                    } catch (java.util.concurrent.RejectedExecutionException ignored) {
-                        // A later retry or authenticated peer discovery will settle the durable row.
-                    }
-                }, LAN_CHAT_DISCOVERY_WINDOW_MS + 100L);
+                scheduleLanChatDiscoveryWindowClose(
+                        messageId, store, LAN_CHAT_DISCOVERY_WINDOW_MS + 100L);
             }
         }
 
