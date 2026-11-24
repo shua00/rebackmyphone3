@@ -1491,6 +1491,22 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("lanChatRecoveryEventPending.getAndSet(false)", retry)
         self.assertIn("resumeExhaustedRetriesForRecoveryEvent(System.currentTimeMillis())", retry)
 
+    def test_transient_preflight_failures_rearm_durable_outbox_planning(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        send = extract_java_method(source, "private void transmitLocalUdpMessage(final String message, final String messageId)")
+        target_read = send[send.index("catch (Exception targetReadFailure)"):send.index("final long targetLoadMs")]
+        attempt_read = send[send.index("catch (Exception attemptReadFailure)"):send.index("if (preparedAttemptNumber < 0)")]
+        self.assertIn('scheduleLanChatTask("outbox-preflight-retry-" + messageId', target_read)
+        self.assertIn("this::requestLanChatRetryPlan, 500L", target_read)
+        self.assertIn('scheduleLanChatTask("outbox-preflight-retry-" + messageId', attempt_read)
+        self.assertIn("this::requestLanChatRetryPlan, 500L", attempt_read)
+        self.assertIn("if (!attemptAdmitted && !serviceDestroyed)", send)
+        self.assertIn("this::requestLanChatRetryPlan, 500L", send)
+        self.assertIn("if (preparedAttemptNumber < 0)", send)
+        budget_exit = send[send.index("if (preparedAttemptNumber < 0)"):send.index("// Build immutable authenticated datagrams")]
+        self.assertNotIn("outbox-preflight-retry", budget_exit)
+
     def test_outbox_retry_executor_rejection_rearms_admission_without_network_event(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
