@@ -2239,7 +2239,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertNotIn(
             "pendingTargetIds.isEmpty() && store.isDiscoveryPending(messageId)", send
         )
-        self.assertIn("store.isWaitingForPeers(messageId)", send)
+        self.assertIn("removePendingLanChat(messageId)", send)
 
         store_source = (
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
@@ -3651,7 +3651,10 @@ class AndroidLanFixedTargetFastPathTests(unittest.TestCase):
         self.assertLess(lookup, lock)
         self.assertIn("pendingSnapshotTargets == 0", send)
         self.assertIn("preLockBroadcastLookupMs", send)
-        self.assertRegex(send, r"preparedBroadcastAddress,\s*preLockBroadcastLookupMs")
+        call_start = send.index("transmitLocalUdpMessageInternal(")
+        send_call = send[call_start:]
+        self.assertIn("preparedBroadcastAddress", send_call)
+        self.assertIn("preLockBroadcastLookupMs", send_call)
         self.assertIn("final String[] broadcasts = pendingTargetIds.isEmpty()", internal)
         self.assertIn("new String[]{preparedBroadcastAddress}", internal)
         self.assertEqual(internal.count("getWifiBroadcastAddress()"), 1)
