@@ -4428,6 +4428,21 @@ class AndroidLanAckLaneIsolationTests(unittest.TestCase):
 
 
 class AndroidLanStoreLifecycleTests(unittest.TestCase):
+    def test_service_destroy_interrupts_and_cancels_one_shot_startup_worker(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        create = extract_java_method(source, "public void onCreate()")
+        destroy = extract_java_method(source, "public void onDestroy()")
+        self.assertIn("private volatile Thread startupThread", source)
+        self.assertIn("startupThread = new Thread(", create)
+        self.assertIn("startupThread.start()", create)
+        self.assertIn("startupThread.interrupt()", destroy)
+        self.assertIn("startupThread = null", destroy)
+        self.assertGreaterEqual(
+            create.count("Thread.currentThread().isInterrupted()"), 8
+        )
+        self.assertIn("if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;", create)
+
     def test_service_destroy_drains_communication_executors_before_closing_sqlite(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")

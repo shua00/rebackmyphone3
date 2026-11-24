@@ -414,6 +414,8 @@ public class TrackingService extends Service implements LocationListener {
 
     // 看门狗线程
     private Thread watchdogThread;
+    // Retain the one-shot startup worker so Service teardown can cancel it.
+    private volatile Thread startupThread;
 
     // ★ [核心优化] 2026-11-04 全局同步锁与键值，用于持久化“上次成功上报时间”，解决冷启动看门狗失效问题
     private static final Object FILE_LOCK = new Object();
@@ -691,13 +693,13 @@ public class TrackingService extends Service implements LocationListener {
         // ran provider queries, network registration, package-manager changes and
         // scheduler IPC on the UI thread. Keep the UI responsive with one bounded,
         // one-shot worker. No periodic startup thread or polling is introduced.
-        Thread startupThread = new Thread(() -> {
+        startupThread = new Thread(() -> {
             long startupStartedAt = SystemClock.elapsedRealtime();
             try {
                 FileLogger.log(this, "SERVICE", "🚀 后台启动初始化开始");
                 logStartupSelfCheck();
 
-                if (serviceDestroyed) return;
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
 
                 PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
                 if (pm != null) {
@@ -705,6 +707,7 @@ public class TrackingService extends Service implements LocationListener {
                     wakeLock.setReferenceCounted(false);
                 }
 
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 WifiManager wifiManager = (WifiManager) getApplicationContext()
                         .getSystemService(Context.WIFI_SERVICE);
                 if (wifiManager != null) {
@@ -715,12 +718,14 @@ public class TrackingService extends Service implements LocationListener {
                     multicastLock.setReferenceCounted(false);
                 }
 
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 alarmManager = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
                 if (alarmManager != null) {
                     scheduleKeepAliveJob();
                     scheduleHeartbeatAlarm();
                 }
 
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 Intent reportIntent = new Intent(this, TrackingService.class);
                 reportIntent.setAction("ACTION_ALARM_TRIGGER");
                 int flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
@@ -733,12 +738,13 @@ public class TrackingService extends Service implements LocationListener {
                     alarmPendingIntent = PendingIntent.getService(this, 1001, reportIntent, flags);
                 }
 
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 sensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
                 if (sensorManager != null) {
                     motionSensor = sensorManager.getDefaultSensor(Sensor.TYPE_SIGNIFICANT_MOTION);
                 }
 
-                if (serviceDestroyed) return;
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 handleIconVisibility(true);
                 triggerRescueListener();
 
@@ -751,11 +757,14 @@ public class TrackingService extends Service implements LocationListener {
                 // Location registration and ConnectivityManager IPC run off the UI thread.
                 // Location callbacks are explicitly delivered on the main Looper.
                 requestSingleLocationAndReport();
-                if (serviceDestroyed) return;
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 registerNetworkCallback();
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 startLocationUpdates();
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 registerBatteryMonitor();
 
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 if (alarmManager == null) {
                     alarmManager = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
                     if (alarmManager != null) {
@@ -777,7 +786,9 @@ public class TrackingService extends Service implements LocationListener {
                     }
                 }, 5000L);
 
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 KeepAliveJobService.scheduleJob(this);
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 startWatchdog();
                 FileLogger.log(this, "SERVICE", "后台启动初始化完成 elapsedMs="
                         + (SystemClock.elapsedRealtime() - startupStartedAt));
@@ -7124,6 +7135,10 @@ public class TrackingService extends Service implements LocationListener {
         handler.removeMessages(MSG_RETRY_RESCUE_LISTENER);
         handler.removeCallbacksAndMessages(null);
 
+        if (startupThread != null) {
+            startupThread.interrupt();
+            startupThread = null;
+        }
         if (watchdogThread != null) {
             watchdogThread.interrupt();
             watchdogThread = null;
