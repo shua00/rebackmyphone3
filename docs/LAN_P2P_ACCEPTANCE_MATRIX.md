@@ -351,3 +351,15 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 实机状态 | 未验收 | 仍需在真实 Android 设备/协议测试中发送非法 UTF-8 数据报确认拒绝，并验证正常 Android↔Python 消息、ACK 与时延不退化 |
 
 **本项是协议解析边界修复，不改变 v2 信封字段、HMAC、1200 字节上限、消息状态机或旧控制命令语义。CI 通过不代表真实网络协议行为已实机验收。**
+
+
+## 16. Android/Python peer ID Unicode 标量一致性（2026-11-24）
+
+| 项目 | 结果 | 证据与限制 |
+|---|---|---|
+| 缺口定位 | Python 对 peer ID 执行严格 UTF-8 编码，拒绝孤立 UTF-16 surrogate；Java String.getBytes(UTF-8) 会以替代字节处理孤立 surrogate，导致同一身份在两端校验结果不一致 | 对照 lan_p2p_core.py is_valid_peer_id 与 LanP2pProtocol.isValidPeerId |
+| 修正 | Android 先显式校验高/低 surrogate 配对，再计算 UTF-8 字节长度；有效 supplementary Unicode 字符仍允许，C0/C1 控制字符及 128 字节上限保持一致 | LanP2pProtocol.isValidPeerId |
+| 回归 | 增加 Python 孤立高/低 surrogate、DEL/C1 控制字符拒绝测试；增加合法 supplementary 字符接受测试；增加 Android 源码守卫 | tests/test_lan_p2p_core.py |
+| CI/实机 | 待本提交 Actions；尚未进行 Android 真机跨端身份互通验证 | CI 结果不得替代实机验证 |
+
+**本项只统一 peer ID 的 Unicode 标量合法性，不改变身份生成格式、已有合法 UTF-8 peer ID、消息字段、ACK、端口或重试策略。**
