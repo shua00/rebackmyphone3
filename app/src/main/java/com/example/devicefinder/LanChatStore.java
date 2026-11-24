@@ -1022,7 +1022,31 @@ public final class LanChatStore extends SQLiteOpenHelper {
         try {
             c = getReadableDatabase().rawQuery(
                     "SELECT 1 FROM lan_outbox_targets WHERE message_id=? AND peer_id=? " +
-                            "AND (last_attempt_endpoint=? OR last_sent_endpoint=?) LIMIT 1",
+                            "AND last_sent_endpoint=? LIMIT 1",
+                    new String[]{messageId, peerId, endpointIp + ":" + endpointPort});
+            return c.moveToFirst();
+        } catch (Exception e) {
+            return false;
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
+    /**
+     * Detect an endpoint that has only been reserved for an in-progress UDP attempt.
+     * This is never ACK evidence; it only permits one delayed recheck for last_sent_endpoint
+     * after socket.send() and its success bookkeeping have had a chance to commit.
+     */
+    public boolean matchesAttemptedAckEndpoint(String messageId, String peerId,
+                                                String endpointIp, int endpointPort) {
+        if (messageId == null || messageId.length() == 0 || peerId == null || peerId.length() == 0
+                || endpointIp == null || endpointIp.length() == 0
+                || endpointPort <= 0 || endpointPort > 65535) return false;
+        Cursor c = null;
+        try {
+            c = getReadableDatabase().rawQuery(
+                    "SELECT 1 FROM lan_outbox_targets WHERE message_id=? AND peer_id=? " +
+                            "AND last_attempt_endpoint=? AND last_sent_endpoint!=? LIMIT 1",
                     new String[]{messageId, peerId, endpointIp + ":" + endpointPort,
                             endpointIp + ":" + endpointPort});
             return c.moveToFirst();
