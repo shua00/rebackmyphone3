@@ -2260,7 +2260,7 @@ class LanP2PCoreTests(unittest.TestCase):
         source = (
             repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
         ).read_text(encoding="utf-8")
-        self.assertIn("handleLanRealtimePacket(rescueSocket, packet, message, udpReceiveElapsedMs)", source)
+        self.assertIn("handleLanRealtimePacket(rescueSocket, packet, udpReceiveElapsedMs)", source)
         self.assertIn("P2P 接收耗时 message=", source)
         self.assertIn("queueMs=", source)
         self.assertIn("durableTotalMs=", source)
