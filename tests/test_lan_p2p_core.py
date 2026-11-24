@@ -483,6 +483,8 @@ class LanP2PCoreTests(unittest.TestCase):
         packet = {
             "type": "chat.message",
             "sender_peer_id": "android-a",
+            "target_peer_id": "android-b",
+            "message_id": "oversized-message",
             "body": "x" * 2000
         }
         with self.assertRaises(ValueError):
@@ -4760,6 +4762,59 @@ class LanP2PCanonicalNumberParityTests(unittest.TestCase):
         self.assertIn("value instanceof Byte || value instanceof Short", protocol)
         self.assertIn("version instanceof Integer || version instanceof Long", protocol)
         self.assertIn("Non-integer JSON numbers are unsupported", protocol)
+
+
+
+
+class LanP2PPacketSchemaTests(unittest.TestCase):
+    def test_all_four_v2_packet_types_round_trip_with_their_required_fields(self):
+        from lan_p2p_core import encode_packet, decode_packet
+        packets = [
+            {"type": "peer.hello", "sender_peer_id": "pc-a", "sender_peer_type": "pc",
+             "service_id": "pc-main", "nonce": "nonce-1", "listen_port": 8889,
+             "challenge_only": False, "capabilities": ["chat.text", "chat.ack"]},
+            {"type": "peer.ack", "sender_peer_id": "android-a", "sender_peer_type": "android",
+             "service_id": "android-main", "reply_nonce": "nonce-1", "listen_port": 8888},
+            {"type": "chat.message", "sender_peer_id": "pc-a", "sender_peer_type": "pc",
+             "service_id": "pc-main", "target_peer_id": "android-a", "message_id": "m-1",
+             "created_at_ms": 123, "body": "hello"},
+            {"type": "chat.ack", "sender_peer_id": "android-a", "sender_peer_type": "android",
+             "service_id": "android-main", "target_peer_id": "pc-a", "message_id": "m-1",
+             "status": "stored"},
+        ]
+        for packet in packets:
+            with self.subTest(packet_type=packet["type"]):
+                self.assertEqual(decode_packet(encode_packet(packet, "schema-secret"),
+                                                "schema-secret")["type"], packet["type"])
+
+    def test_type_specific_required_fields_and_types_are_rejected(self):
+        from lan_p2p_core import encode_packet
+        base = {"sender_peer_id": "peer-a"}
+        invalid_packets = [
+            dict(base, type="peer.hello"),
+            dict(base, type="peer.hello", nonce="n", challenge_only="false"),
+            dict(base, type="peer.hello", nonce="n", capabilities=["chat.text", 1]),
+            dict(base, type="peer.ack"),
+            dict(base, type="peer.ack", reply_nonce=123),
+            dict(base, type="chat.message", message_id="m", target_peer_id="peer-b", body={"text": "hello"}),
+            dict(base, type="chat.message", message_id=7, target_peer_id="peer-b", body="hello"),
+            dict(base, type="chat.message", message_id="m", target_peer_id=7, body="hello"),
+            dict(base, type="chat.ack", message_id="m", target_peer_id="peer-b", status="received"),
+            dict(base, type="chat.ack", message_id="m", target_peer_id="peer-b"),
+        ]
+        for packet in invalid_packets:
+            with self.subTest(packet=packet), self.assertRaises(ValueError):
+                encode_packet(packet, "schema-secret")
+
+    def test_android_codec_applies_packet_schema_before_hmac_on_both_paths(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        protocol = (repo_root / "app/src/main/java/com/example/devicefinder/LanP2pProtocol.java").read_text(encoding="utf-8")
+        self.assertEqual(protocol.count("validatePacketSchema(packet);"), 2)
+        for field in ("nonce", "reply_nonce", "message_id", "target_peer_id", "body", "status"):
+            self.assertIn('"' + field + '"', protocol)
+        self.assertIn("instanceof Boolean", protocol)
+        self.assertIn("instanceof JSONArray", protocol)
+        self.assertIn('"stored".equals(packet.getString("status"))', protocol)
 
 
 if __name__ == "__main__":
