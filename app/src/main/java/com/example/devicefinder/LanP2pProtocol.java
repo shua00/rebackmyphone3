@@ -17,6 +17,8 @@ import javax.crypto.spec.SecretKeySpec;
 public final class LanP2pProtocol {
     public static final int VERSION = 2;
     public static final int MAX_DATAGRAM_BYTES = 1200;
+    // Bound identity size so first-discovery packets can reserve worst-case target-ID space.
+    public static final int MAX_PEER_ID_BYTES = 128;
 
     private LanP2pProtocol() {}
 
@@ -40,6 +42,8 @@ public final class LanP2pProtocol {
         packet.put("v", VERSION);
         String type = packet.optString("type", "");
         if (!isSupportedType(type)) throw new IllegalArgumentException("Unsupported LAN P2P packet type");
+        validatePeerId(packet, "sender_peer_id");
+        if (packet.has("target_peer_id")) validatePeerId(packet, "target_peer_id");
         packet.put("auth", hmac(canonical(packet), secret));
         byte[] bytes = canonical(packet).getBytes(StandardCharsets.UTF_8);
         if (bytes.length == 0 || bytes.length > MAX_DATAGRAM_BYTES) {
@@ -58,9 +62,8 @@ public final class LanP2pProtocol {
         if (!isSupportedType(packet.optString("type", ""))) {
             throw new IllegalArgumentException("Unsupported LAN P2P packet type");
         }
-        if (packet.optString("sender_peer_id", "").isEmpty()) {
-            throw new IllegalArgumentException("Missing sender peer identity");
-        }
+        validatePeerId(packet, "sender_peer_id");
+        if (packet.has("target_peer_id")) validatePeerId(packet, "target_peer_id");
         String supplied = packet.optString("auth", "");
         if (supplied.isEmpty()) throw new IllegalArgumentException("Missing packet authentication");
         JSONObject unsigned = copyWithoutAuth(packet);
@@ -70,6 +73,33 @@ public final class LanP2pProtocol {
             throw new SecurityException("Invalid LAN P2P authentication");
         }
         return packet;
+    }
+
+    private static void validatePeerId(JSONObject packet, String field) throws Exception {
+        if (!packet.has(field) || !(packet.get(field) instanceof String)) {
+            throw new IllegalArgumentException("Missing or invalid " + field);
+        }
+        String peerId = packet.getString(field);
+        if (peerId.isEmpty()
+                || peerId.getBytes(StandardCharsets.UTF_8).length > MAX_PEER_ID_BYTES) {
+            throw new IllegalArgumentException("Invalid " + field + " length");
+        }
+        for (int i = 0; i < peerId.length(); i++) {
+            if (Character.isISOControl(peerId.charAt(i))) {
+                throw new IllegalArgumentException("Invalid control character in " + field);
+            }
+        }
+    }
+
+    /**
+     * A valid maximum-length ID whose quotes expand to two JSON bytes each.
+     * Preflight with this value so a later directed packet cannot exceed the envelope
+     * merely because its real recipient ID is longer than the broadcast wildcard.
+     */
+    public static String maxPeerIdBudgetProbe() {
+        StringBuilder probe = new StringBuilder(MAX_PEER_ID_BYTES);
+        for (int i = 0; i < MAX_PEER_ID_BYTES; i++) probe.append('"');
+        return probe.toString();
     }
 
     private static boolean isSupportedType(String type) {

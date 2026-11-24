@@ -397,6 +397,29 @@ class LanP2PCoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             encode_packet(packet, "test-secret")
 
+    def test_peer_id_limit_and_worst_case_json_budget_probe(self):
+        from lan_p2p_core import (MAX_PEER_ID_BYTES, max_peer_id_budget_probe,
+                                  encode_packet, decode_packet)
+        probe = max_peer_id_budget_probe()
+        self.assertEqual(len(probe.encode("utf-8")), MAX_PEER_ID_BYTES)
+        packet = {
+            "type": "chat.message",
+            "sender_peer_id": "android-a",
+            "target_peer_id": probe,
+            "message_id": "budget-boundary",
+            "body": "ok",
+        }
+        raw = encode_packet(packet, "test-secret")
+        self.assertLessEqual(len(raw), 1200)
+        self.assertEqual(decode_packet(raw, "test-secret")["target_peer_id"], probe)
+        packet["target_peer_id"] = "x" * (MAX_PEER_ID_BYTES + 1)
+        with self.assertRaises(ValueError):
+            encode_packet(packet, "test-secret")
+        packet["target_peer_id"] = "android-b"
+        packet["sender_peer_id"] = "x" * (MAX_PEER_ID_BYTES + 1)
+        with self.assertRaises(ValueError):
+            encode_packet(packet, "test-secret")
+
 
 
 
@@ -4313,6 +4336,21 @@ class AndroidLanDiscoveryWindowAtomicityTests(unittest.TestCase):
         self.assertIn("attemptNumber = preparedAttemptNumber;", sender)
         self.assertIn("store.recordOutboxAttempt(messageId)", sender)
         self.assertIn("store.markAttempt(messageId, peerId, attemptedEndpoint, \"\");", internal)
+
+class LanP2PEnvelopeBudgetParityTests(unittest.TestCase):
+    def test_android_and_python_share_worst_case_recipient_preflight(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        protocol = (repo_root / "app/src/main/java/com/example/devicefinder/LanP2pProtocol.java").read_text(encoding="utf-8")
+        service = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        python_core = (repo_root / "lan_p2p_core.py").read_text(encoding="utf-8")
+        server = (repo_root / "server2.py").read_text(encoding="utf-8")
+        self.assertIn("MAX_PEER_ID_BYTES = 128", protocol)
+        self.assertIn("MAX_PEER_ID_BYTES = 128", python_core)
+        self.assertIn("LanP2pProtocol.maxPeerIdBudgetProbe()", service)
+        self.assertIn('budget_packet["target_peer_id"] = max_peer_id_budget_probe()', server)
+        self.assertIn("validatePeerId(packet, \"target_peer_id\")", protocol)
+        self.assertIn("_validate_peer_id_fields(packet)", python_core)
+
 
 if __name__ == "__main__":
     unittest.main()

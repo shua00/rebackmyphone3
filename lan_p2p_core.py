@@ -5,6 +5,7 @@ import time
 
 # Must match Android LanChatStore.FIRST_DISCOVERY_WINDOW_MS.
 FIRST_DISCOVERY_WINDOW_MS = 10_000
+MAX_PEER_ID_BYTES = 128
 MAX_OUTBOX_TARGET_ATTEMPTS = 8
 OUTBOX_RETRY_RECOVERY_COOLDOWN_MS = 60_000
 
@@ -139,6 +140,24 @@ def _envelope_key(secret):
     return hashlib.sha256(b"lan-p2p-v2\x00" + secret.encode("utf-8")).digest()
 
 
+def max_peer_id_budget_probe():
+    """Return a valid maximum-length ID with worst-case JSON quote escaping."""
+    return '"' * MAX_PEER_ID_BYTES
+
+
+def _validate_peer_id_fields(packet):
+    for field in ("sender_peer_id", "target_peer_id"):
+        if field not in packet and field == "target_peer_id":
+            continue
+        peer_id = packet.get(field)
+        if not isinstance(peer_id, str) or not peer_id:
+            raise ValueError("missing or invalid " + field)
+        if len(peer_id.encode("utf-8")) > MAX_PEER_ID_BYTES:
+            raise ValueError("invalid " + field + " length")
+        if any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in peer_id):
+            raise ValueError("invalid control character in " + field)
+
+
 def encode_packet(fields, secret, max_bytes=1200):
     """Encode and authenticate a bounded v2 JSON datagram."""
     import hashlib
@@ -151,6 +170,7 @@ def encode_packet(fields, secret, max_bytes=1200):
     packet_type = packet.get("type")
     if packet_type not in ("peer.hello", "peer.ack", "chat.message", "chat.ack"):
         raise ValueError("unsupported LAN P2P packet type")
+    _validate_peer_id_fields(packet)
     unsigned = _canonical_envelope_bytes(packet)
     packet["auth"] = hmac.new(_envelope_key(secret), unsigned, hashlib.sha256).hexdigest()
     raw = _canonical_envelope_bytes(packet)
@@ -176,8 +196,7 @@ def decode_packet(data, secret, max_bytes=1200):
         raise ValueError("unsupported LAN P2P protocol version")
     if packet.get("type") not in ("peer.hello", "peer.ack", "chat.message", "chat.ack"):
         raise ValueError("unsupported LAN P2P packet type")
-    if not isinstance(packet.get("sender_peer_id"), str) or not packet["sender_peer_id"]:
-        raise ValueError("missing sender peer identity")
+    _validate_peer_id_fields(packet)
     supplied = packet.get("auth")
     if not isinstance(supplied, str):
         raise ValueError("missing packet authentication")
