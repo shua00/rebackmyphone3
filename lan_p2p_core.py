@@ -254,6 +254,26 @@ def _validate_peer_id_fields(packet):
             raise ValueError("invalid " + field)
 
 
+def _validate_unicode_scalars(value):
+    """Reject strings that cannot be encoded as strict UTF-8 on every platform."""
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise ValueError("JSON string contains an unpaired surrogate") from exc
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError("JSON object keys must be strings")
+            _validate_unicode_scalars(key)
+            _validate_unicode_scalars(item)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _validate_unicode_scalars(item)
+
+
 def _validate_canonical_numbers(value):
     """Reject JSON numbers whose textual form can diverge across Python/Android."""
     if isinstance(value, bool) or value is None or isinstance(value, str):
@@ -281,6 +301,7 @@ def encode_packet(fields, secret, max_bytes=1200):
         raise ValueError("packet fields must be a dict")
     packet = dict(fields)
     packet.pop("auth", None)
+    _validate_unicode_scalars(packet)
     _validate_canonical_numbers(packet)
     packet["v"] = 2
     packet_type = packet.get("type")
@@ -310,6 +331,7 @@ def decode_packet(data, secret, max_bytes=1200):
         raise ValueError("invalid LAN P2P JSON") from exc
     if not isinstance(packet, dict):
         raise ValueError("invalid LAN P2P envelope")
+    _validate_unicode_scalars(packet)
     _validate_canonical_numbers(packet)
     if type(packet.get("v")) is not int or packet.get("v") != 2:
         raise ValueError("unsupported LAN P2P protocol version")
