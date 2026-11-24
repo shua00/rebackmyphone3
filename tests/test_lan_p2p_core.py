@@ -302,7 +302,7 @@ class LanP2PCoreTests(unittest.TestCase):
             self.assertIn(f"{socket_name}.bind(", listener, filename)
             if filename == "server2.py":
                 recv_start = listener.index("except Exception as recv_err:")
-                recv_end = listener.index("msg = data.decode", recv_start)
+                recv_end = listener.index('if data[:1] == b"{"', recv_start)
                 recv_handler = listener[recv_start:recv_end]
                 self.assertIn("raise", recv_handler)
                 self.assertNotIn("continue", recv_handler)
