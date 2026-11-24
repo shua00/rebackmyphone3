@@ -272,12 +272,12 @@ public class TrackingService extends Service implements LocationListener {
     private static final String PREF_LAN_CHAT_RECEIVED_IDS = "lan_chat_received_message_ids";
     // 本地 LAN 聊天待确认队列：SharedPreferences 同步 commit，最多保留 50 条。
     private static final String PREF_LAN_CHAT_QUEUE = "lan_p2p_pending_messages";
-    private static final int LAN_CHAT_QUEUE_MAX = 50;
+    private static final int LAN_CHAT_QUEUE_MAX = LanChatRetryPolicy.MAX_PENDING_MESSAGES;
     private static final long LAN_CHAT_DISCOVERY_WINDOW_MS = LanChatStore.FIRST_DISCOVERY_WINDOW_MS;
     // Keep route refresh responsive without broadcasting once per keystroke/message.
-    private static final long LAN_PEER_DISCOVERY_COOLDOWN_MS = 1_500L;
+    private static final long LAN_PEER_DISCOVERY_COOLDOWN_MS = LanChatRetryPolicy.PEER_DISCOVERY_COOLDOWN_MS;
     // Keep discovery nonces valid long enough for bounded persistence/ACK work to finish.
-    private static final long LAN_PEER_CHALLENGE_TIMEOUT_MS = 2_500L;
+    private static final long LAN_PEER_CHALLENGE_TIMEOUT_MS = LanChatRetryPolicy.PEER_CHALLENGE_TIMEOUT_MS;
     private final Object lanChatQueueLock = new Object();
     private volatile LanChatStore lanChatStore;
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRetryInFlight =
