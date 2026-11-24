@@ -293,6 +293,9 @@ public class TrackingService extends Service implements LocationListener {
     // Coalesce delayed/outstanding Outbox planning requests across all message IDs.
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRetryPlanPending =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+    // One timer services every durable first-discovery deadline; never one timer per message.
+    private final java.util.concurrent.atomic.AtomicBoolean lanChatDiscoveryFinalizerScheduled =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
     private final java.util.Set<String> activeLanChatTransmissions =
             java.util.Collections.newSetFromMap(
                     new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
@@ -4585,37 +4588,47 @@ public class TrackingService extends Service implements LocationListener {
      * A rejected close task is retried independently; all-ACKed discovery rows are not
      * present in loadPending(), so they cannot rely on a later ordinary Outbox retry.
      */
-    private void scheduleLanChatDiscoveryWindowClose(final String messageId,
-            final LanChatStore store, long delayMs) {
-        if (serviceDestroyed || store == null || messageId == null || messageId.isEmpty()) return;
-        scheduleLanChatTask("discovery-window-close", () -> {
-            if (serviceDestroyed) return;
+    /**
+     * One coalesced timer finalizes all expired discovery rows in one SQLite transaction.
+     * It is re-armed for the earliest remaining deadline and recovers from send-queue
+     * saturation or transient storage failures without allocating per-message timers.
+     */
+    private void scheduleLanChatDiscoveryFinalizer(final LanChatStore store, long delayMs) {
+        if (serviceDestroyed || store == null
+                || !lanChatDiscoveryFinalizerScheduled.compareAndSet(false, true)) return;
+        boolean scheduled = scheduleLanChatTask("discovery-window-finalizer", () -> {
+            if (serviceDestroyed) {
+                lanChatDiscoveryFinalizerScheduled.set(false);
+                return;
+            }
             try {
                 lanChatSendExecutor.execute(() -> {
-                    if (serviceDestroyed) return;
                     try {
-                        if (store.finalizeDiscoveryWindow(messageId)) {
-                            FileLogger.log(this, "CHAT", "P2P 首次发现窗口关闭，消息状态已结算: "
-                                    + messageId);
-                            removePendingLanChat(messageId);
-                        } else if (store.isDiscoveryPending(messageId)) {
-                            // The deadline may still be live after clock adjustment, or the
-                            // store may have transiently refused the first finalization.
-                            scheduleLanChatDiscoveryWindowClose(messageId, store, 500L);
-                        }
+                        store.finalizeExpiredDiscoveryWindows(System.currentTimeMillis());
                     } catch (Exception storageFailure) {
+                        FileLogger.log(this, "CHAT", "LAN discovery finalization deferred: "
+                                + storageFailure.getClass().getSimpleName());
+                    } finally {
+                        lanChatDiscoveryFinalizerScheduled.set(false);
                         if (!serviceDestroyed) {
-                            scheduleLanChatDiscoveryWindowClose(messageId, store, 500L);
+                            try {
+                                long nextDeadline = store.getNextDiscoveryDeadlineMs();
+                                if (nextDeadline > 0L) {
+                                    scheduleLanChatDiscoveryFinalizer(store,
+                                            Math.max(0L, nextDeadline - System.currentTimeMillis() + 100L));
+                                }
+                            } catch (Exception storageFailure) {
+                                scheduleLanChatDiscoveryFinalizer(store, 500L);
+                            }
                         }
                     }
                 });
             } catch (java.util.concurrent.RejectedExecutionException rejected) {
-                // Do not strand an expired discovery row when the bounded send queue is full.
-                if (!serviceDestroyed) {
-                    scheduleLanChatDiscoveryWindowClose(messageId, store, 500L);
-                }
+                lanChatDiscoveryFinalizerScheduled.set(false);
+                if (!serviceDestroyed) scheduleLanChatDiscoveryFinalizer(store, 500L);
             }
         }, delayMs);
+        if (!scheduled) lanChatDiscoveryFinalizerScheduled.set(false);
     }
 
     private void transmitLocalUdpMessageInternal(final String message, final String messageId,
@@ -4675,8 +4688,7 @@ public class TrackingService extends Service implements LocationListener {
             if (firstDispatch) {
                 FileLogger.log(this, "CHAT", "P2P 首次发现窗口开始，限时 "
                         + LAN_CHAT_DISCOVERY_WINDOW_MS + "ms，消息 " + messageId);
-                scheduleLanChatDiscoveryWindowClose(
-                        messageId, store, LAN_CHAT_DISCOVERY_WINDOW_MS + 100L);
+                scheduleLanChatDiscoveryFinalizer(store, LAN_CHAT_DISCOVERY_WINDOW_MS + 100L);
             }
         }
 

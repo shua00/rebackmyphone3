@@ -2202,7 +2202,8 @@ class LanP2PCoreTests(unittest.TestCase):
         tracking = (
             repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
         ).read_text(encoding="utf-8")
-        self.assertIn("store.finalizeDiscoveryWindow(messageId)", tracking)
+        self.assertIn("scheduleLanChatDiscoveryFinalizer(", tracking)
+        self.assertIn("store.finalizeExpiredDiscoveryWindows(System.currentTimeMillis())", tracking)
 
 
     def test_android_discovery_finalization_respects_exhausted_retry_budget(self):
@@ -2240,20 +2241,27 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("store.finalizeDiscoveryWindow(messageId)", close)
 
 
-    def test_discovery_window_close_rearms_after_executor_rejection_or_storage_failure(self):
+    def test_discovery_window_finalization_uses_one_coalesced_deadline_timer(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
-        close = extract_java_method(source, "private void scheduleLanChatDiscoveryWindowClose(")
-        self.assertIn('scheduleLanChatTask("discovery-window-close"', close)
-        self.assertIn("lanChatSendExecutor.execute", close)
-        self.assertIn("catch (java.util.concurrent.RejectedExecutionException rejected)", close)
-        self.assertIn("catch (Exception storageFailure)", close)
-        self.assertGreaterEqual(close.count("scheduleLanChatDiscoveryWindowClose(messageId, store, 500L)"), 2)
-        self.assertIn("store.finalizeDiscoveryWindow(messageId)", close)
-        self.assertIn("store.isDiscoveryPending(messageId)", close)
+        store_source = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        finalizer = extract_java_method(source, "private void scheduleLanChatDiscoveryFinalizer(")
+        self.assertIn("lanChatDiscoveryFinalizerScheduled.compareAndSet(false, true)", finalizer)
+        self.assertIn('scheduleLanChatTask("discovery-window-finalizer"', finalizer)
+        self.assertIn("lanChatSendExecutor.execute", finalizer)
+        self.assertIn("store.finalizeExpiredDiscoveryWindows(System.currentTimeMillis())", finalizer)
+        self.assertIn("catch (java.util.concurrent.RejectedExecutionException rejected)", finalizer)
+        self.assertIn("scheduleLanChatDiscoveryFinalizer(store, 500L)", finalizer)
+        self.assertIn("store.getNextDiscoveryDeadlineMs()", finalizer)
+        self.assertNotIn("messageId", finalizer)
+        next_deadline = extract_java_method(store_source, "public long getNextDiscoveryDeadlineMs(")
+        self.assertIn("MIN(delivery_deadline_ms)", next_deadline)
+        self.assertIn("state='discovery_pending'", next_deadline)
+        self.assertIn("return -1L", next_deadline)
         sender = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
-        self.assertIn("scheduleLanChatDiscoveryWindowClose(", sender)
+        self.assertIn("scheduleLanChatDiscoveryFinalizer(", sender)
         self.assertIn("LAN_CHAT_DISCOVERY_WINDOW_MS + 100L", sender)
+        self.assertNotIn("scheduleLanChatDiscoveryWindowClose(", source)
 
     def test_android_expired_empty_discovery_rows_are_finalized_even_after_pending_window_closes(self):
         repo_root = Path(__file__).resolve().parents[1]

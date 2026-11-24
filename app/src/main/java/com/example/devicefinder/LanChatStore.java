@@ -635,6 +635,22 @@ public final class LanChatStore extends SQLiteOpenHelper {
     }
 
 
+    /** Earliest active discovery deadline, or -1 when no window is currently open. */
+    public long getNextDiscoveryDeadlineMs() {
+        Cursor c = null;
+        try {
+            c = getReadableDatabase().rawQuery(
+                    "SELECT MIN(delivery_deadline_ms) FROM lan_outbox " +
+                    "WHERE state='discovery_pending' AND delivery_deadline_ms>0", null);
+            if (!c.moveToFirst() || c.isNull(0)) return -1L;
+            return c.getLong(0);
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to read next LAN discovery deadline", e);
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
     public List<PendingMessage> loadPending(int limit) {
         ArrayList<PendingMessage> result = new ArrayList<>();
         Cursor c = null;
