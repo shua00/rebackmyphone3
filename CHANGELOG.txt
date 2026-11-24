@@ -11,6 +11,8 @@ v2.8.111 — 2026-11-24 · 明确 Outbox 状态结算，修复发现窗口关闭
   现在以每个 Target 的持久化 attempt_count 为准，耗尽后进入 retry_paused。
 - 修复 allTargetsAcked 在发现窗口已关闭但仍有未 ACK 目标时的相同遗漏，
   结算时同步检查目标级重试预算，避免遗留一个不可再发送的 pending 状态。
+- allTargetsAcked 的读取、预算判断与状态更新统一放入 SQLite 事务，避免两个 Peer 的并发 ACK
+  交错时，较旧的未完成快照覆盖较新的 delivered 终态。
 - 不改变协议、数据库 schema、重试次数和默认退避参数；空目标仍结算为 waiting_peers，
   全部目标 ACK 才能结算为 delivered。
 
