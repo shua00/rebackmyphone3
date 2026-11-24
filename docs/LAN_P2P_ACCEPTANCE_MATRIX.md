@@ -292,3 +292,15 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 ### v2.8.23 验证边界
 
 本条目由 2026-11-23 双手机日志中的 `LAN peer beacon creation failed: IllegalArgumentException` 与 `LAN P2P datagram exceeds size limit` 触发。修复不放宽数据报大小限制、不改变 nonce challenge、peer 身份、ACK 来源校验或消息账本。CI 通过后仍须在 Android 11 与 Android 15 双机上确认发现握手和双向 ACK 闭环。
+
+
+## 11. Android 首次发现 ACK 等待计数闭环修正（2026-11-24）
+
+| 项目 | 结果 | 证据与限制 |
+|---|---|---|
+| 已验证路由的首次发现 ACK | 修复 peer.ack 先于 chat.ack 到达时，chat.ack 因走 verified-route 快路径而未释放空目标发现等待计数的问题；ACK 持久化成功后，只有非预期 peer 且空目标发现窗口仍开放时才复核并释放一次等待计数；SQLite 复核失败保持等待 | 生产代码 commit `22c7df161baccf1380b1b4bf908af4fa0f13f9c9`；回归测试 commit `ce8aa1d5294dc4df62c859330380cbeb6711e55e` |
+| 自动化 | 206 项 Python 回归全部通过 | Actions [#673](https://github.com/shua00/rebackmyphone3/actions/runs/45326992913)；测试提交 `ce8aa1d5294dc4df62c859330380cbeb6711e55e` |
+| Android 构建 | Python validation、Android 变更检测、Gradle Debug APK 构建及 artifact 上传全部成功 | Actions [#672](https://github.com/shua00/rebackmyphone3/actions/runs/45326981438)；生产代码提交 `22c7df161baccf1380b1b4bf908af4fa0f13f9c9`；artifact `app-debug` ID `14890361498` |
+| 实机状态 | 未验收 | 首次发现多设备真实时序、ACK 丢失/重发和双手机即时性仍需真机日志；不得用 CI 代替 |
+
+**本记录不改变 A01–A10、S01–S26、M-A–M-C、F01–F20、G01–G14 的既有门槛，也不构成 LAN 整体验收通过。**
