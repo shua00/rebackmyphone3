@@ -5126,7 +5126,9 @@ public class TrackingService extends Service implements LocationListener {
                     }
                 }
             } else if (persistedAllTargetsAcked) {
-                removePendingLanChat(messageId);
+                // ACK completion runs on the IO lane; keep synchronous compatibility-file
+                // commits on the dedicated peer maintenance lane instead.
+                scheduleLanChatMirrorCleanup(messageId);
                 FileLogger.log(this, "CHAT", "✅ P2P 固定目标全部持久化 ACK: "
                         + durableAckProgress + "，消息 " + messageId);
             } else {
