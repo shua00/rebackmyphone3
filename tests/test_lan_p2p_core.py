@@ -2286,7 +2286,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertNotIn(
             "pendingTargetIds.isEmpty() && store.isDiscoveryPending(messageId)", send
         )
-        self.assertIn("removePendingLanChat(messageId)", send)
+        self.assertIn("scheduleLanChatMirrorCleanup(messageId)", send)
+        self.assertNotIn("removePendingLanChat(messageId)", send)
 
         store_source = (
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
