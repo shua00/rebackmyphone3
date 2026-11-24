@@ -4683,6 +4683,37 @@ class LanP2PPeerIdentityUnicodeParityTests(unittest.TestCase):
         self.assertIn("peerId.getBytes(StandardCharsets.UTF_8).length <= MAX_PEER_ID_BYTES", validator)
 
 
+class LanP2PUnicodeEnvelopeParityTests(unittest.TestCase):
+    def test_python_encoder_rejects_unpaired_surrogates_in_values_and_object_keys(self):
+        from lan_p2p_core import encode_packet
+        base = {"type": "chat.message", "sender_peer_id": "android-a",
+                "message_id": "m-unicode", "target_peer_id": "android-b",
+                "created_at_ms": 123, "body": "hello"}
+        invalid_value = dict(base, body="bad-\\ud800")
+        invalid_key = dict(base)
+        invalid_key["bad-\\udfff"] = "value"
+        for packet in (invalid_value, invalid_key):
+            with self.subTest(packet=packet), self.assertRaises(ValueError):
+                encode_packet(packet, "test-secret")
+
+    def test_python_decoder_rejects_escaped_unpaired_surrogate_before_authentication(self):
+        from lan_p2p_core import decode_packet
+        raw = (b'{"v":2,"type":"chat.message","sender_peer_id":"android-a",'
+               b'"target_peer_id":"android-b","message_id":"m-unicode",'
+               b'"created_at_ms":123,"body":"\\ud800","auth":"invalid"}')
+        with self.assertRaises(ValueError):
+            decode_packet(raw, "test-secret")
+
+    def test_android_codec_recursively_validates_string_values_and_object_keys(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        protocol = (repo_root / "app/src/main/java/com/example/devicefinder/LanP2pProtocol.java").read_text(encoding="utf-8")
+        self.assertGreaterEqual(protocol.count("validateUnicodeScalars("), 4)
+        self.assertIn("isValidUnicodeScalarString((String) value)", protocol)
+        self.assertIn("isValidUnicodeScalarString(key)", protocol)
+        self.assertIn("validateUnicodeScalars(object.get(key))", protocol)
+        self.assertIn("validateUnicodeScalars(array.get(i))", protocol)
+
+
 class LanChatAdmissionFeedbackTests(unittest.TestCase):
     def test_android_rejected_admission_is_visible_but_durable_send_queue_fallback_is_not_rejected(self):
         repo_root = Path(__file__).resolve().parents[1]
