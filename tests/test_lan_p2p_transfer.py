@@ -284,7 +284,7 @@ class TransferFilesystemTests(unittest.TestCase):
 
     def test_quota_rejects_before_persisting_receipt(self):
         constrained = TransferFilesystem(self.store, self.staging, self.received,
-                                         max_staging_bytes=4096)
+                                         max_staging_bytes=4095)
         with self.assertRaises(TransferValidationError):
             constrained.write_chunk(self._chunk(0), 103)
         self.assertEqual((), self.store.received_chunk_indexes(self.offer.transfer_id))
@@ -318,6 +318,19 @@ class TransferFilesystemTests(unittest.TestCase):
         self.assertEqual((0, 1), self.store.missing_chunks(self.offer.transfer_id))
         self.assertTrue(self.files.write_chunk(chunk, 103))
         self.assertEqual((1,), self.store.missing_chunks(self.offer.transfer_id))
+
+
+
+    def test_resume_treats_symlink_as_corrupt_and_revokes_receipt(self):
+        self.files.write_chunk(self._chunk(0), 103)
+        task = Path(self.staging) / self.files._key(self.offer.transfer_id)
+        path = task / "chunk-00000000.part"
+        path.unlink()
+        target = Path(self.temp_dir.name) / "outside-corrupt"
+        target.write_bytes(self._chunk(0).payload)
+        path.symlink_to(target)
+        self.assertEqual((0, 1), self.files.reconcile(self.offer.transfer_id, 104))
+        self.assertEqual((), self.store.received_chunk_indexes(self.offer.transfer_id))
 
     def test_terminal_cleanup_removes_only_owned_staging_tree(self):
         self.files.write_chunk(self._chunk(0), 103)

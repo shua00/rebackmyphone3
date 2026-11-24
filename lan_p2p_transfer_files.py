@@ -105,7 +105,9 @@ class TransferFilesystem:
     def _used_bytes(self) -> int:
         total = 0
         for root, dirs, files in os.walk(self.staging_root, followlinks=False):
-            dirs[:] = [name for name in dirs if not (Path(root) / name).is_symlink()]
+            dirs[:] = [name for name in dirs
+                        if not (Path(root) / name).is_symlink()
+                        and (Path(root) / name).resolve() != self.received_root]
             for name in files:
                 path = Path(root) / name
                 try:
@@ -170,7 +172,10 @@ class TransferFilesystem:
             task_dir = self._task_dir(transfer_id)
             for index in self.store.received_chunk_indexes(transfer_id):
                 expected = expected_chunk_size(record.offer.size_bytes, record.chunk_size_bytes, index)
-                payload = self._read_regular(self._chunk_path(task_dir, index), expected)
+                try:
+                    payload = self._read_regular(self._chunk_path(task_dir, index), expected)
+                except TransferValidationError:
+                    payload = None
                 receipt = self.store.get_chunk_receipt(transfer_id, index)
                 if (payload is None or receipt is None or
                     receipt["payload_size"] != len(payload) or
