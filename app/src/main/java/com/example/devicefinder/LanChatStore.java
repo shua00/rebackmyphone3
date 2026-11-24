@@ -743,7 +743,9 @@ public final class LanChatStore extends SQLiteOpenHelper {
             db.setTransactionSuccessful();
             return resetTargets + reopenedTargets + reopenedDiscovery;
         } catch (Exception e) {
-            return 0;
+            // Zero means a successful transaction that found nothing eligible. Storage failure
+            // must remain distinguishable so the caller can retain the recovery wake and retry.
+            throw new IllegalStateException("Failed to resume LAN Outbox retry epoch", e);
         } finally {
             db.endTransaction();
         }

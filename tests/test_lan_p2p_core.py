@@ -145,6 +145,15 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("lanChatRetryInFlight.set(false)", retry)
 
 
+    def test_recovery_epoch_storage_failure_is_not_reported_as_no_work(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        method = extract_java_method(store, "public int resumeExhaustedRetriesForRecoveryEvent(")
+        self.assertIn("throw new IllegalStateException(\"Failed to resume LAN Outbox retry epoch\", e)", method)
+        self.assertNotIn("catch (Exception e) {\\n            return 0;", method)
+        self.assertIn("db.endTransaction()", method)
+
+
     def test_all_targets_ack_reconciliation_is_one_sqlite_transaction(self):
         repo_root = Path(__file__).resolve().parents[1]
         store = (
