@@ -375,3 +375,22 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | CI/实机 | 待本提交 Actions；尚未完成真实 Android↔Python Unicode 报文互通 | 不得以 CI 替代实机验收 |
 
 **只拒绝无法形成合法 UTF-8 标量序列的字符串，不限制正常中文、emoji、换行或其他合法消息正文。**
+
+
+## 18. 四类 v2 信封字段与跨端类型一致性（2026-11-24）
+
+| 消息类型 | 必需字段 | 可选字段及类型约束 | 验收重点 |
+|---|---|---|---|
+| `peer.hello` | `sender_peer_id`、`nonce` | `sender_peer_type`、`service_id`、`network_scope` 为字符串；`challenge_only` 为布尔；`listen_port` 为 1–65535 整数；`capabilities` 为字符串数组 | 广播与定向 challenge 均可用；不能把字符串 `"false"` 当布尔值 |
+| `peer.ack` | `sender_peer_id`、`reply_nonce` | 发送者元数据为字符串；`listen_port`（若有）为 1–65535 整数 | nonce、发送者及预期 endpoint 仍由握手状态机共同绑定 |
+| `chat.message` | `sender_peer_id`、`message_id`、`target_peer_id`、字符串 `body` | `created_at_ms`（若有）为非负整数；展示/服务元数据为字符串 | 不再将对象、数组或数字正文隐式转成平台相关字符串 |
+| `chat.ack` | `sender_peer_id`、`message_id`、`target_peer_id`、`status=stored` | 发送者元数据为字符串 | 必须匹配本机目标、原消息 ID、目标 peer 和已验证路由/成功发送端点；重复 ACK 幂等 |
+
+| 项目 | 结果 | 证据与限制 |
+|---|---|---|
+| 缺口定位 | 四种类型的必需字段和部分类型约束此前主要分散在 Android/Python 接收处理器中；编解码器只做通用信封校验，部分错误 JSON 类型可能被 `optString`/Python `str()` 平台相关地转换 | LanP2pProtocol、lan_p2p_core 及三个 Python 服务的实际构造/消费路径 |
+| 修正 | Android/Python 编码和解码统一执行类型级字段校验；不改变消息重试、发现窗口、ACK endpoint 证明或 UI 行为 | LanP2pProtocol.java、lan_p2p_core.py |
+| 回归 | 四种消息类型合法往返；必需字段缺失、字段类型错误、非 `stored` ACK 状态拒绝；Android 源码守卫 | tests/test_lan_p2p_core.py |
+| CI/实机 | 待本批提交 Actions；尚未完成 Android↔三个 Python 服务的实机互通 | 自动化与 CI 不替代实机验收 |
+
+**本节字段约束以当前仓库全部发送端构造和接收端消费路径为基准；可选时间戳不因本次校验而变为必需字段。**
