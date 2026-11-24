@@ -4206,8 +4206,8 @@ public class TrackingService extends Service implements LocationListener {
                             }
                         }
                     }
-                    final int batchSize = 3;
-                    final int maxBatchesPerWake = 3;
+                    final int batchSize = LanChatRetryPolicy.RETRY_BATCH_SIZE;
+                    final int maxBatchesPerWake = LanChatRetryPolicy.MAX_RETRY_BATCHES_PER_WAKE;
                     // Take one stable snapshot for this wake. An unacknowledged first batch
                     // must not prevent later queued messages from receiving their first attempt.
                     List<LanChatStore.PendingMessage> pending = store.loadPending(50);
@@ -4567,14 +4567,10 @@ public class TrackingService extends Service implements LocationListener {
             // loadPending() excludes messages that exhausted this epoch's finite send budget.
             // Their SQLite rows and unacked target records remain intact for recovery events.
             // Empty discovery snapshots are finalized separately as waiting_peers.
-            final long sendRetryDelayMs = minimumAttempts == Integer.MAX_VALUE ? Long.MAX_VALUE
-                    : (minimumAttempts <= 1 ? 1_500L
-                    : (minimumAttempts == 2 ? 4_000L
-                    : Math.min(60_000L, 10_000L << Math.min(3, minimumAttempts - 3))));
-            // Fixed targets that have not yet had a real send get a separate route-probe wake.
-            // It does not increment attempt_count or weaken the per-message delivery budget.
-            final long delayMs = hasUnattemptedRouteTargets
-                    ? Math.min(5_000L, sendRetryDelayMs) : sendRetryDelayMs;
+            // Scheduler wake cadence is a policy decision, not a durable delivery attempt.
+            // Fixed targets without a verified route get a bounded route-probe wake.
+            final long delayMs = LanChatRetryPolicy.outboxRetryWakeDelayMs(
+                    minimumAttempts, hasUnattemptedRouteTargets);
             if (!lanChatRetryWakeScheduled.compareAndSet(false, true)) return;
             boolean scheduled = scheduleLanChatTask("outbox-retry", () -> {
                 lanChatRetryWakeScheduled.set(false);
