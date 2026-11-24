@@ -428,14 +428,36 @@ class LanP2PCoreTests(unittest.TestCase):
         protocol = (
             repo_root / "app/src/main/java/com/example/devicefinder/LanP2pProtocol.java"
         ).read_text(encoding="utf-8")
-        decoder = extract_java_method(protocol, "public static JSONObject decode(")
+        decoder = extract_java_method(
+            protocol, "public static JSONObject decode(byte[] bytes, int offset")
         self.assertIn("StandardCharsets.UTF_8.newDecoder()", decoder)
         self.assertIn("CodingErrorAction.REPORT", decoder)
-        self.assertIn("ByteBuffer.wrap(bytes)", decoder)
+        self.assertIn("ByteBuffer.wrap(bytes, offset, length)", decoder)
         self.assertIn("Invalid LAN P2P UTF-8", decoder)
 
         python_core = (repo_root / "lan_p2p_core.py").read_text(encoding="utf-8")
         self.assertIn('decode("utf-8", errors="strict")', python_core)
+
+    def test_android_udp_v2_path_decodes_original_datagram_bytes(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        tracking = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        handler = extract_java_method(tracking, "private boolean handleLanRealtimePacket(")
+        self.assertIn(
+            "LanP2pProtocol.decode(\n                            data, offset, length, RESCUE_SECRET)",
+            handler,
+        )
+        self.assertNotIn("message.getBytes", handler)
+
+        receive_at = tracking.index("rescueSocket.receive(packet);")
+        raw_v2_at = tracking.index(
+            "handleLanRealtimePacket(rescueSocket, packet, udpReceiveElapsedMs)", receive_at
+        )
+        legacy_string_at = tracking.index(
+            "String message = new String(packet.getData(), 0, packet.getLength())", receive_at
+        )
+        self.assertLess(raw_v2_at, legacy_string_at)
 
     def test_authenticated_v2_packet_round_trip_and_tamper_rejection(self):
         from lan_p2p_core import encode_packet, decode_packet
