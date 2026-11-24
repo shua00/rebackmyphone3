@@ -90,6 +90,24 @@ def extract_python_function(source, name):
 
 class LanP2PCoreTests(unittest.TestCase):
 
+    def test_udp_listener_stops_packet_dispatch_when_service_teardown_wins_receive_race(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        service = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        listener = extract_java_method(service, "private void startRescueListener()")
+        receive = listener.index("rescueSocket.receive(packet)")
+        teardown_guard = listener.index(
+            "if (serviceDestroyed || rescueSocket.isClosed()) break;", receive)
+        realtime_dispatch = listener.index("handleLanRealtimePacket(", receive)
+        legacy_guard = listener.index(
+            "if (serviceDestroyed || rescueSocket.isClosed()) break;", teardown_guard + 1)
+        legacy_decode = listener.index("String message = new String(packet.getData()", legacy_guard)
+        self.assertLess(receive, teardown_guard)
+        self.assertLess(teardown_guard, realtime_dispatch)
+        self.assertLess(realtime_dispatch, legacy_guard)
+        self.assertLess(legacy_guard, legacy_decode)
+
     def test_service_depends_on_policy_not_store_compatibility_aliases(self):
         repo_root = Path(__file__).resolve().parents[1]
         service = (

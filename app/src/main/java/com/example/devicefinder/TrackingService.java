@@ -6215,6 +6215,10 @@ public class TrackingService extends Service implements LocationListener {
                     try {
                         packet.setLength(buffer.length);
                         rescueSocket.receive(packet);
+                        // A datagram may complete concurrently with onDestroy closing the
+                        // ingress socket. Do not dispatch work from a packet received after
+                        // teardown has begun; the sender will retry without a false ACK.
+                        if (serviceDestroyed || rescueSocket.isClosed()) break;
                     } catch (java.net.SocketTimeoutException te) {
                         continue;
                     }
@@ -6224,6 +6228,9 @@ public class TrackingService extends Service implements LocationListener {
                     if (handleLanRealtimePacket(rescueSocket, packet, udpReceiveElapsedMs)) {
                         continue;
                     }
+                    // The service can be destroyed while authenticated-frame dispatch is
+                    // returning. Keep legacy command handlers outside the teardown window too.
+                    if (serviceDestroyed || rescueSocket.isClosed()) break;
                     String message = new String(packet.getData(), 0, packet.getLength());
                     // 只记录命令前缀与来源，不记录认证字段、聊天正文或完整协议包。
                     int typeEnd = message.indexOf(':');
