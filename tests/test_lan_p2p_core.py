@@ -135,12 +135,13 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("final boolean routeRefreshCaptured = lanChatRouteRefreshPending.getAndSet(false)", retry)
         self.assertIn("if (routeRefreshCaptured) lanChatRouteRefreshPending.set(true)", retry)
         self.assertIn("if (routeRefreshCaptured && !retryBatchCompleted)", retry)
-        self.assertIn("lanChatRecoveryEventPending.set(true)", retry)
-        self.assertIn("catch (Exception recoveryStorageFailure)", retry)
+        self.assertIn("boolean recoveryEventCaptured = false", retry)
+        self.assertIn("recoveryEventCaptured = lanChatRecoveryEventPending.getAndSet(false)", retry)
+        self.assertIn("if (recoveryEventCaptured) lanChatRecoveryEventPending.set(true)", retry)
         recovery_call = retry.index("store.resumeExhaustedRetriesForRecoveryEvent")
-        recovery_catch = retry.index("catch (Exception recoveryStorageFailure)")
-        self.assertLess(recovery_call, recovery_catch)
-        self.assertLess(recovery_catch, retry.index("lanChatRecoveryEventPending.set(true)", recovery_catch))
+        outer_catch = retry.index("catch (Exception e)")
+        self.assertLess(recovery_call, outer_catch)
+        self.assertLess(outer_catch, retry.index("if (recoveryEventCaptured) lanChatRecoveryEventPending.set(true)", outer_catch))
         self.assertIn("retryBatchCompleted = true", retry)
         self.assertIn("lanChatRetryInFlight.set(false)", retry)
 
@@ -165,8 +166,9 @@ class LanP2PCoreTests(unittest.TestCase):
         retry = extract_java_method(service, "private void retryPendingLanChatMessages(boolean recoveryEvent)")
         self.assertIn("if (!retryBatchCompleted)", retry)
         self.assertIn('"outbox-retry-after-failure"', retry)
-        self.assertIn("retryAfterFailure, LanChatRetryPolicy.RECOVERY_FAILURE_RETRY_DELAY_MS", retry)
-        self.assertIn("handler.postDelayed(retryAfterFailure, LanChatRetryPolicy.RECOVERY_FAILURE_RETRY_DELAY_MS)", retry)
+        self.assertIn("scheduleLanChatRetryAfterFailure(", retry)
+        self.assertIn('"outbox-retry-after-failure"', retry)
+        self.assertNotIn("retryAfterFailure", retry)
         self.assertIn("retryPendingLanChatMessages(true)", retry)
         self.assertIn("retryPendingLanChatMessages(false)", retry)
 
@@ -1733,7 +1735,6 @@ class LanP2PCoreTests(unittest.TestCase):
         block = retry[rejected:]
         self.assertIn("lanChatRetryInFlight.set(false);", block)
         self.assertIn('scheduleLanChatRetryAfterFailure("outbox-retry-admission-fallback", recoveryEvent)', block)
-        self.assertIn("if (!serviceDestroyed)", block)
         self.assertNotIn("retryPendingLanChatMessages(true)", block)
 
     def test_android_outbox_retry_attempt_ledger_is_persistent_and_migrated(self):

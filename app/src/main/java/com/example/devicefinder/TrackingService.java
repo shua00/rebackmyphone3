@@ -4200,26 +4200,13 @@ public class TrackingService extends Service implements LocationListener {
         try {
             lanChatSendExecutor.execute(() -> {
                 boolean retryBatchCompleted = false;
+                boolean recoveryEventCaptured = false;
                 try {
                     LanChatStore store = lanChatStore;
                     if (store == null) return;
                     int finalizedDiscovery = store.finalizeExpiredDiscoveryWindows(System.currentTimeMillis());
                     if (finalizedDiscovery > 0) {
                         FileLogger.log(this, "CHAT", "LAN 恢复时结算已过期发现窗口 messages=" + finalizedDiscovery);
-                    }
-                    if (lanChatRecoveryEventPending.getAndSet(false)) {
-                        final int resumed;
-                        try {
-                            resumed = store.resumeExhaustedRetriesForRecoveryEvent(System.currentTimeMillis());
-                        } catch (Exception recoveryStorageFailure) {
-                            // A transient SQLite error must not consume the only recovery event
-                            // that can reopen an exhausted retry epoch.
-                            lanChatRecoveryEventPending.set(true);
-                            throw recoveryStorageFailure;
-                        }
-                        if (resumed > 0) {
-                            FileLogger.log(this, "CHAT", "LAN 恢复事件重新开启有限补发预算 messages=" + resumed);
-                        }
                     }
                     synchronized (lanChatQueueLock) {
                         JSONArray legacy = new JSONArray(getSharedPreferences("device_finder_prefs", MODE_PRIVATE)
@@ -4245,6 +4232,15 @@ public class TrackingService extends Service implements LocationListener {
                                     scheduleLanChatMirrorCleanup(id);
                                 }
                             }
+                        }
+                    }
+                    // Consume the recovery event only after legacy migration succeeds. If any
+                    // later Outbox operation fails, the outer catch restores this captured event.
+                    recoveryEventCaptured = lanChatRecoveryEventPending.getAndSet(false);
+                    if (recoveryEventCaptured) {
+                        int resumed = store.resumeExhaustedRetriesForRecoveryEvent(System.currentTimeMillis());
+                        if (resumed > 0) {
+                            FileLogger.log(this, "CHAT", "LAN 恢复事件重新开启有限补发预算 messages=" + resumed);
                         }
                     }
                     final int batchSize = LanChatRetryPolicy.RETRY_BATCH_SIZE;
@@ -4286,6 +4282,9 @@ public class TrackingService extends Service implements LocationListener {
                     scheduleLanChatRetryFromOutbox();
                     retryBatchCompleted = true;
                 } catch (Exception e) {
+                    // Keep the recovery permission until the entire batch has completed;
+                    // a later read/dispatch failure must not strand an already reopened epoch.
+                    if (recoveryEventCaptured) lanChatRecoveryEventPending.set(true);
                     FileLogger.log(this, "CHAT", "⚠️ LAN 聊天补发失败: " + e.getMessage());
                 } finally {
                     if (routeRefreshCaptured && !retryBatchCompleted) {
