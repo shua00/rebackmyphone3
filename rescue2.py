@@ -115,7 +115,7 @@ PACKAGE_NAME = "com.example.devicefinder"
 
 # ===== 配置区 =====
 RESCUE_SECRET = "your_private_secret_key"
-from lan_p2p_core import LanP2PStorageError, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, BoundedPacketDispatcher, list_known_peers, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, load_active_pending_targets, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, next_peer_recovery_eligible_at_ms, list_due_outgoing_peers
+from lan_p2p_core import LanP2PStorageError, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, BoundedPacketDispatcher, list_known_peers, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, send_discovery_broadcast_with_retries, load_active_pending_targets, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, next_peer_recovery_eligible_at_ms, list_due_outgoing_peers
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "rescue2")
 DEFAULT_SERVER_URL = "http://dingwei.bai001.de5.net/api/report"
 DEFAULT_CONFIG_URL = "https://your-config-url.com/config.txt"
@@ -788,26 +788,20 @@ def send_chat_v2(body, target_ips):
             send_outbox_to_active_peers(
                 sock, _CHAT_DEDUP_DB, "rescue2", message_id, probe, RESCUE_SECRET,
                 send_lock=UDP_CHAT_SEND_LOCK, attempts=1, retry_delay_seconds=0.25)
-        elif broadcast_all and begin_outgoing_discovery_window(
-                _CHAT_DEDUP_DB, "rescue2", message_id) and is_outgoing_discovery_pending(
-                    _CHAT_DEDUP_DB, "rescue2", message_id):
+        elif broadcast_all:
             subnet = get_subnet_broadcast()
             destinations = [(ip, UDP_DEVICE_PORT) for ip in dict.fromkeys(
                 [subnet, "255.255.255.255"])]
-            send_broadcast_packet_with_retries(
-                sock, broadcast_bytes, destinations, send_lock=UDP_CHAT_SEND_LOCK,
-                attempts=3, retry_delay_seconds=0.25,
-                should_continue=lambda: is_outgoing_discovery_pending(
-                    _CHAT_DEDUP_DB, "rescue2", message_id))
-        elif selected_ips and not broadcast_all:
-            if not begin_outgoing_discovery_window(_CHAT_DEDUP_DB, "rescue2", message_id):
-                return False
+            send_discovery_broadcast_with_retries(
+                sock, _CHAT_DEDUP_DB, "rescue2", message_id, broadcast_bytes, destinations,
+                send_lock=UDP_CHAT_SEND_LOCK, attempts=3, retry_delay_seconds=0.25)
+        elif selected_ips:
             # A specifically requested IP with no known peer identity is a directed
             # first-discovery probe, never a subnet-wide fallback.
             destinations = [(ip, UDP_DEVICE_PORT) for ip in selected_ips if ip != "255.255.255.255"]
-            send_broadcast_packet_with_retries(
-                sock, broadcast_bytes, destinations, send_lock=UDP_CHAT_SEND_LOCK,
-                attempts=3, retry_delay_seconds=0.25)
+            send_discovery_broadcast_with_retries(
+                sock, _CHAT_DEDUP_DB, "rescue2", message_id, broadcast_bytes, destinations,
+                send_lock=UDP_CHAT_SEND_LOCK, attempts=3, retry_delay_seconds=0.25)
         print(f"{I.ok} 对讲消息已提交发送队列: {message_id}")
         return True
     except Exception as e:

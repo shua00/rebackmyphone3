@@ -1,5 +1,7 @@
 import ast
 import os
+import subprocess
+import sys
 import sqlite3
 import threading
 import time
@@ -4943,3 +4945,137 @@ class LanPeerScopedRecoveryRegressionTests(unittest.TestCase):
             self.assertIn("_V2_RECOVERY_RETRY_PEERS.add(peer_id)", attempt_error)
             self.assertLess(resume.index("attempt_admitted = mark_outgoing_attempt"),
                             resume.index("send_outgoing_packet("))
+
+
+class LanP2PDiscoveryDispatchRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.temp_dir.name, "dispatch.sqlite3")
+        from lan_p2p_core import ensure_outbox_retry_schema
+        self.assertTrue(ensure_outbox_retry_schema(self.db_path))
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _create_empty_message(self, message_id):
+        from lan_p2p_core import persist_outgoing_message
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", message_id, "hello", []))
+
+    def test_all_udp_send_failures_rearm_discovery_deadline(self):
+        from lan_p2p_core import send_discovery_broadcast_with_retries
+        self._create_empty_message("m-all-fail")
+
+        class FailingSocket:
+            def sendto(self, payload, destination):
+                raise OSError("simulated network unavailable")
+
+        with patch("lan_p2p_core.time.time", return_value=1000.0):
+            sent = send_discovery_broadcast_with_retries(
+                FailingSocket(), self.db_path, "server2", "m-all-fail",
+                b"frame", [("192.0.2.1", 8888)], attempts=2, retry_delay_seconds=0)
+        self.assertEqual(sent, 0)
+        with sqlite3.connect(self.db_path) as conn:
+            state, deadline = conn.execute(
+                "SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id=?",
+                ("m-all-fail",)).fetchone()
+        self.assertEqual(state, "discovery_pending")
+        self.assertEqual(deadline, 0)
+
+    def test_successful_udp_dispatch_keeps_original_bounded_deadline(self):
+        from lan_p2p_core import send_discovery_broadcast_with_retries
+        self._create_empty_message("m-send-ok")
+
+        class SuccessfulSocket:
+            def sendto(self, payload, destination):
+                return len(payload)
+
+        with patch("lan_p2p_core.time.time", return_value=1000.0):
+            sent = send_discovery_broadcast_with_retries(
+                SuccessfulSocket(), self.db_path, "server2", "m-send-ok",
+                b"frame", [("192.0.2.1", 8888)], attempts=1, retry_delay_seconds=0)
+        self.assertEqual(sent, 1)
+        with sqlite3.connect(self.db_path) as conn:
+            deadline = conn.execute(
+                "SELECT delivery_deadline_ms FROM lan_outbox WHERE message_id=?",
+                ("m-send-ok",)).fetchone()[0]
+        self.assertEqual(deadline, 1010000)
+
+    def test_failed_dispatch_can_retry_later_without_extending_successful_window(self):
+        from lan_p2p_core import send_discovery_broadcast_with_retries
+        self._create_empty_message("m-retry-window")
+
+        class FailingSocket:
+            def sendto(self, payload, destination):
+                raise OSError("offline")
+
+        class SuccessfulSocket:
+            def sendto(self, payload, destination):
+                return len(payload)
+
+        with patch("lan_p2p_core.time.time", return_value=1000.0):
+            self.assertEqual(send_discovery_broadcast_with_retries(
+                FailingSocket(), self.db_path, "server2", "m-retry-window",
+                b"frame", [("192.0.2.1", 8888)], attempts=1, retry_delay_seconds=0), 0)
+        with patch("lan_p2p_core.time.time", return_value=2000.0):
+            self.assertEqual(send_discovery_broadcast_with_retries(
+                SuccessfulSocket(), self.db_path, "server2", "m-retry-window",
+                b"frame", [("192.0.2.1", 8888)], attempts=1, retry_delay_seconds=0), 1)
+        with patch("lan_p2p_core.time.time", return_value=2001.0):
+            self.assertEqual(send_discovery_broadcast_with_retries(
+                SuccessfulSocket(), self.db_path, "server2", "m-retry-window",
+                b"frame", [("192.0.2.1", 8888)], attempts=1, retry_delay_seconds=0), 1)
+        with sqlite3.connect(self.db_path) as conn:
+            deadline = conn.execute(
+                "SELECT delivery_deadline_ms FROM lan_outbox WHERE message_id=?",
+                ("m-retry-window",)).fetchone()[0]
+        self.assertEqual(deadline, 2010000)
+
+
+class LanP2POutboxProcessRestartTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.temp_dir.name, "restart.sqlite3")
+        self.repo_root = Path(__file__).resolve().parents[1]
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _run_python(self, code):
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(self.repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+        return subprocess.run(
+            [sys.executable, "-c", code, self.db_path],
+            cwd=str(self.repo_root), env=env, check=True,
+            capture_output=True, text=True, timeout=20)
+
+    def test_fixed_target_outbox_and_ack_survive_real_process_restart(self):
+        create = """
+import sys
+from lan_p2p_core import (persist_outgoing_message, mark_outgoing_attempt,
+    record_successful_send_endpoint, acknowledge_outgoing_message)
+db = sys.argv[1]
+assert persist_outgoing_message(db, 'server2', 'server2-id', 'restart-msg',
+                                'durable body', ['android-a'])
+assert mark_outgoing_attempt(db, 'restart-msg', 'android-a', '192.0.2.10', 8888)
+assert record_successful_send_endpoint(db, 'server2', 'restart-msg',
+                                       'android-a', '192.0.2.10', 8888)
+assert acknowledge_outgoing_message(db, 'server2', 'restart-msg', 'android-a')
+"""
+        self._run_python(create)
+        verify = """
+import sqlite3, sys
+from lan_p2p_core import load_pending_outgoing_for_peer
+db = sys.argv[1]
+with sqlite3.connect(db) as conn:
+    outbox = conn.execute('SELECT sender_scope,body,state FROM lan_outbox WHERE message_id=?',
+                          ('restart-msg',)).fetchone()
+    target = conn.execute('SELECT status,attempt_count,last_attempt_endpoint,last_sent_endpoint '
+                          'FROM lan_outbox_targets WHERE message_id=? AND peer_id=?',
+                          ('restart-msg','android-a')).fetchone()
+assert outbox == ('server2', 'durable body', 'delivered'), outbox
+assert target == ('acked', 1, '192.0.2.10:8888', '192.0.2.10:8888'), target
+assert load_pending_outgoing_for_peer(db, 'server2', 'android-a') == []
+"""
+        self._run_python(verify)
+

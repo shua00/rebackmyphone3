@@ -6,6 +6,9 @@ import time
 
 
 _ACK_ENDPOINT_LOCK = threading.RLock()
+# Fixed-size lock striping serializes discovery dispatches for the same message
+# without retaining an unbounded per-message lock registry.
+_DISCOVERY_DISPATCH_LOCKS = tuple(threading.Lock() for _ in range(64))
 
 
 # Must match Android LanChatStore.FIRST_DISCOVERY_WINDOW_MS.
@@ -1209,6 +1212,76 @@ def begin_outgoing_discovery_window(db_path, sender_scope, message_id,
     finally:
         if conn is not None:
             _safe_close(conn)
+
+
+
+def _reset_unsent_discovery_window(db_path, sender_scope, message_id):
+    """Re-arm a discovery row only when no peer has joined its recipient ledger."""
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT state,delivery_deadline_ms FROM lan_outbox "
+            "WHERE sender_scope=? AND message_id=?",
+            (sender_scope, message_id),
+        ).fetchone()
+        if row is None or row[0] != "discovery_pending" or int(row[1] or 0) <= 0:
+            conn.commit()
+            return False
+        target_count = conn.execute(
+            "SELECT COUNT(*) FROM lan_outbox_targets WHERE message_id=?",
+            (message_id,),
+        ).fetchone()[0]
+        if target_count:
+            conn.commit()
+            return False
+        changed = conn.execute(
+            "UPDATE lan_outbox SET delivery_deadline_ms=0 "
+            "WHERE sender_scope=? AND message_id=? AND state='discovery_pending' "
+            "AND delivery_deadline_ms=?",
+            (sender_scope, message_id, int(row[1])),
+        ).rowcount
+        conn.commit()
+        return changed == 1
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        # Unknown persistence state must fail closed: leave the deadline in place.
+        raise LanP2PStorageError("failed to re-arm unsent LAN discovery window") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def send_discovery_broadcast_with_retries(
+        sock, db_path, sender_scope, message_id, packet_bytes, destinations,
+        send_lock=None, attempts=3, retry_delay_seconds=0.25):
+    """Open the first-discovery window only for an actual dispatch attempt.
+
+    Dispatches for one message are serialized in-process. If every sendto fails,
+    the deadline is cleared so a later network-ready retry gets a fresh window.
+    Any exception after dispatch starts leaves the deadline intact conservatively,
+    because the caller cannot prove that no datagram escaped.
+    """
+    if sock is None or not packet_bytes or not db_path or not sender_scope or not message_id:
+        return 0
+    lock_index = hash((str(db_path), str(sender_scope), str(message_id))) % len(
+        _DISCOVERY_DISPATCH_LOCKS)
+    with _DISCOVERY_DISPATCH_LOCKS[lock_index]:
+        if not begin_outgoing_discovery_window(db_path, sender_scope, message_id):
+            return 0
+        if not is_outgoing_discovery_pending(db_path, sender_scope, message_id):
+            return 0
+        sent = send_broadcast_packet_with_retries(
+            sock, packet_bytes, destinations, send_lock=send_lock,
+            attempts=attempts, retry_delay_seconds=retry_delay_seconds,
+            should_continue=lambda: is_outgoing_discovery_pending(
+                db_path, sender_scope, message_id))
+        if sent == 0:
+            _reset_unsent_discovery_window(db_path, sender_scope, message_id)
+        return sent
 
 
 def is_outgoing_discovery_pending(db_path, sender_scope, message_id):

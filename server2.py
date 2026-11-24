@@ -59,7 +59,7 @@ from urllib.parse import urlparse, parse_qs
 # ★ 新增ThreadPoolExecutor 补丁： 2026-11-05 13:50
 from concurrent.futures import ThreadPoolExecutor
 
-from lan_p2p_core import LanP2PStorageError, MAX_PEER_ID_BYTES, max_peer_id_budget_probe, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, BoundedPacketDispatcher, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, encode_chat_http_fallback_payload, decode_chat_http_fallback_payload, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, add_discovery_targets_for_peer, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, next_peer_recovery_eligible_at_ms, list_due_outgoing_peers
+from lan_p2p_core import LanP2PStorageError, MAX_PEER_ID_BYTES, max_peer_id_budget_probe, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, BoundedPacketDispatcher, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, encode_chat_http_fallback_payload, decode_chat_http_fallback_payload, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, add_discovery_targets_for_peer, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, send_discovery_broadcast_with_retries, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, next_peer_recovery_eligible_at_ms, list_due_outgoing_peers
 UDP_LISTEN_PORT = 8887  # server2 独立监听端口；发往 Android 的指令仍使用 8888
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "server2")
 
@@ -1673,22 +1673,14 @@ def send_server2_v2_chat_from_outbox(command_str, fixed_target_ids):
                 sock, CHAT_DEDUP_DB, "server2", message_id, envelope, RESCUE_SECRET,
                 send_lock=UDP_CHAT_SEND_LOCK, attempts=1, retry_delay_seconds=0.25)
 
-        # No known recipients at message creation: bounded broadcast is permitted
-        # only while the original first-discovery window remains open.
-        if not begin_outgoing_discovery_window(
-                CHAT_DEDUP_DB, "server2", message_id) or not is_outgoing_discovery_pending(
-                    CHAT_DEDUP_DB, "server2", message_id):
-            with print_lock:
-                print(f"ℹ️ server2 chat discovery window closed; suppress late-peer broadcast: {message_id}")
-            return 0
+        # No known recipients at message creation: the shared dispatcher opens
+        # the deadline and re-arms it if every UDP sendto fails.
         subnet = get_subnet_broadcast()
         destinations = [(ip, 8888) for ip in dict.fromkeys(
             [subnet, "255.255.255.255"])]
-        return send_broadcast_packet_with_retries(
-            sock, raw, destinations, send_lock=UDP_CHAT_SEND_LOCK,
-            attempts=3, retry_delay_seconds=0.25,
-            should_continue=lambda: is_outgoing_discovery_pending(
-                CHAT_DEDUP_DB, "server2", message_id))
+        return send_discovery_broadcast_with_retries(
+            sock, CHAT_DEDUP_DB, "server2", message_id, raw, destinations,
+            send_lock=UDP_CHAT_SEND_LOCK, attempts=3, retry_delay_seconds=0.25)
     except Exception as e:
         with print_lock:
             print(f"⚠️ server2 v2 chat send retained in Outbox: {type(e).__name__}")
