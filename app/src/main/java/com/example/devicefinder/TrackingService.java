@@ -4516,25 +4516,26 @@ public class TrackingService extends Service implements LocationListener {
             if (!"acked".equals(target.status)) pendingTargetIds.add(target.peerId);
         }
         if (pendingTargetIds.isEmpty()) {
-            // Call the ledger even when its deadline has elapsed so legacy empty-target
-            // rows from earlier builds are migrated to waiting_peers and leave retry queues.
-            boolean firstDispatch = store.beginDiscoveryWindow(messageId);
-            final boolean discoveryWindowOpen;
-            try {
-                discoveryWindowOpen = store.isDiscoveryPending(messageId);
-            } catch (Exception storageFailure) {
-                FileLogger.log(this, "CHAT", "⚠️ LAN 发现窗口账本读取失败，停止本轮发送以防扩大收件人范围: "
-                        + storageFailure.getClass().getSimpleName());
+            // One ledger transaction starts/observes/settles the discovery window. Avoid
+            // separate begin/query/waiting-state round trips and their intervening race.
+            final int discoveryWindowState = store.beginOrReadDiscoveryWindow(messageId);
+            if (discoveryWindowState == LanChatStore.DISCOVERY_WINDOW_ERROR) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN 发现窗口账本操作失败，停止本轮发送以防扩大收件人范围: "
+                        + messageId);
                 return;
             }
-            if (!discoveryWindowOpen) {
-                if (store.isWaitingForPeers(messageId)) {
-                    FileLogger.log(this, "CHAT", "P2P 空目标消息已结算为 waiting_peers，不向晚加入设备广播: "
-                            + messageId);
-                    removePendingLanChat(messageId);
-                }
+            if (discoveryWindowState == LanChatStore.DISCOVERY_WINDOW_WAITING) {
+                FileLogger.log(this, "CHAT", "P2P 空目标消息已结算为 waiting_peers，不向晚加入设备广播: "
+                        + messageId);
+                removePendingLanChat(messageId);
                 return;
             }
+            final boolean discoveryWindowOpen =
+                    discoveryWindowState == LanChatStore.DISCOVERY_WINDOW_OPEN
+                    || discoveryWindowState == LanChatStore.DISCOVERY_WINDOW_STARTED;
+            if (!discoveryWindowOpen) return;
+            final boolean firstDispatch =
+                    discoveryWindowState == LanChatStore.DISCOVERY_WINDOW_STARTED;
             if (firstDispatch) {
                 FileLogger.log(this, "CHAT", "P2P 首次发现窗口开始，限时 "
                         + LAN_CHAT_DISCOVERY_WINDOW_MS + "ms，消息 " + messageId);
