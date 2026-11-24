@@ -1651,7 +1651,8 @@ class LanP2PCoreTests(unittest.TestCase):
         start = tracking.index("private void retryPendingLanChatMessages()")
         end = tracking.index("private void sendLocalUdpMessage", start)
         recovery = tracking[start:end]
-        self.assertIn("final int maxBatchesPerWake = 3", recovery)
+        self.assertIn("final int maxBatchesPerWake = LanChatRetryPolicy.MAX_RETRY_BATCHES_PER_WAKE", recovery)
+        self.assertIn("final int batchSize = LanChatRetryPolicy.RETRY_BATCH_SIZE", recovery)
         self.assertIn("int startIndex = batchNo * batchSize", recovery)
         self.assertIn("scheduleLanChatRetryFromOutbox()", recovery)
         self.assertIn("lanChatRetryWakeScheduled", tracking)
@@ -1664,8 +1665,12 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("boolean attemptAdmitted = false", tracking)
         self.assertIn("if (!attemptAdmitted && !serviceDestroyed)", tracking)
         self.assertIn("scheduleLanChatRetryFromOutbox()", tracking)
-        self.assertIn("minimumAttempts == 2 ? 4_000L", tracking)
-        self.assertIn("Math.min(60_000L, 10_000L << Math.min(3, minimumAttempts - 3))", tracking)
+        policy = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatRetryPolicy.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn("minimumAttempts == 2 ? OUTBOX_RETRY_SECOND_DELAY_MS", policy)
+        self.assertIn("OUTBOX_RETRY_BACKOFF_BASE_MS << Math.min(3, minimumAttempts - 3)", policy)
+        self.assertIn("OUTBOX_RETRY_MAX_DELAY_MS", policy)
         self.assertIn("finite per-epoch attempt budget", tracking)
         self.assertIn("waiting_peers", tracking)
         self.assertIn("waiting_peers", tracking)
@@ -3882,7 +3887,8 @@ class AndroidLanFastRetryBurstTests(unittest.TestCase):
         complete = extract_java_method(service, "private void completeLanChatAckWindow(")
         self.assertIn("discoveryAttempts > 0 && discoveryAttempts < 3", complete)
         self.assertIn("requestRouteRefresh = true", complete)
-        self.assertIn("Math.min(5_000L, sendRetryDelayMs)", extract_java_method(service, "private void scheduleLanChatRetryFromOutbox("))
+        scheduler = extract_java_method(service, "private void scheduleLanChatRetryFromOutbox(")
+        self.assertIn("LanChatRetryPolicy.outboxRetryWakeDelayMs(", scheduler)
 
     def test_retry_timer_is_armed_after_ack_grace_not_before_fast_retry(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -4037,7 +4043,7 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         scheduler = extract_java_method(tracking, "private void scheduleLanChatRetryFromOutbox(")
         self.assertIn("store.hasUnattemptedTargets(item.messageId)", scheduler)
         self.assertIn("hasUnattemptedRouteTargets", scheduler)
-        self.assertIn("Math.min(5_000L, sendRetryDelayMs)", scheduler)
+        self.assertIn("LanChatRetryPolicy.outboxRetryWakeDelayMs(", scheduler)
         self.assertIn("if (minimumAttempts == Integer.MAX_VALUE && !hasUnattemptedRouteTargets) return", scheduler)
         self.assertIn("markAttempt()", scheduler)
         self.assertIn("does not increment attempt_count", scheduler)
