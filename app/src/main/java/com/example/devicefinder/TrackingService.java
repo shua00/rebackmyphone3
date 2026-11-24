@@ -286,7 +286,8 @@ public class TrackingService extends Service implements LocationListener {
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRecoveryEventPending =
             new java.util.concurrent.atomic.AtomicBoolean(false);
     // One earliest-deadline wake preserves recovery events across independently cooling targets.
-    // A newly discovered earlier deadline supersedes (but does not need to cancel) an older timer.
+    // The timestamp is also a callback generation token: stale timers may run, but cannot consume
+    // a newer deadline unless their exact scheduled timestamp still owns this slot.
     private final java.util.concurrent.atomic.AtomicLong lanChatRecoveryCooldownWakeAtMs =
             new java.util.concurrent.atomic.AtomicLong(Long.MAX_VALUE);
     // A route refresh is an ordinary retry wake, not permission to reopen an exhausted epoch.
