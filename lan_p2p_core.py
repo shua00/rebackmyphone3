@@ -587,6 +587,30 @@ def prepare_outgoing_peer_recovery(db_path, sender_scope, peer_id, now_ms=None):
             _safe_close(conn)
 
 
+def next_peer_recovery_eligible_at_ms(db_path, sender_scope, peer_id, now_ms=None):
+    """Return the persisted cooldown deadline for one exhausted peer, or None."""
+    if not sender_scope or not peer_id:
+        return None
+    conn = None
+    now = int(now_ms if now_ms is not None else time.time() * 1000)
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        row = conn.execute("""SELECT MIN(t.last_recovery_at_ms + ?)
+            FROM lan_outbox_targets t JOIN lan_outbox o ON o.message_id=t.message_id
+            WHERE o.sender_scope=? AND t.peer_id=? AND t.status!='acked'
+              AND t.attempt_count>=? AND t.last_recovery_at_ms>?
+              AND o.state NOT IN ('delivered','expired','waiting_peers')""",
+            (OUTBOX_RETRY_RECOVERY_COOLDOWN_MS, str(sender_scope), str(peer_id),
+             MAX_OUTBOX_TARGET_ATTEMPTS, now - OUTBOX_RETRY_RECOVERY_COOLDOWN_MS)).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+    except Exception as exc:
+        raise LanP2PStorageError("failed to read peer LAN recovery cooldown deadline") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
 def list_due_outgoing_peers(db_path, sender_scope, limit=500, now_ms=None):
     """Find active peers with unacked targets whose persisted backoff elapsed."""
     conn = None

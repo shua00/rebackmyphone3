@@ -73,6 +73,19 @@ def extract_java_method(source, signature):
     raise AssertionError("Unbalanced Java method body: " + signature)
 
 
+
+def extract_python_function(source, name):
+    """Return a complete Python function by AST source range."""
+    module = ast.parse(source)
+    node = next((item for item in module.body
+                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == name), None)
+    if node is None:
+        raise AssertionError("Python function not found: " + name)
+    lines = source.splitlines()
+    return "\\n".join(lines[node.lineno - 1:node.end_lineno])
+
+
+
 class LanP2PCoreTests(unittest.TestCase):
 
     def test_service_depends_on_policy_not_store_compatibility_aliases(self):
@@ -4108,7 +4121,8 @@ class AndroidLanInstantRouteRecoveryTests(unittest.TestCase):
         self.assertIn("lanChatRouteRefreshPending.set(true)", complete)
         self.assertIn("lanChatRouteRefreshPending.get()", source)
         self.assertIn("lanChatRouteRefreshPending.getAndSet(false)", source)
-        self.assertIn('scheduleLanChatTask("peer-verified-retry", () -> retryPendingLanChatMessages(true), 350L)', source)
+        self.assertIn('scheduleLanChatTask("peer-verified-retry", () -> retryPendingLanChatMessagesForPeer(senderId), 350L)', source)
+        self.assertNotIn('peer-verified-retry", () -> retryPendingLanChatMessages(true)', source)
 
 
     def test_android_ack_fast_path_skips_discovery_sqlite_read_for_verified_endpoints(self):
@@ -4668,20 +4682,22 @@ class LanP2PEnvelopeBudgetParityTests(unittest.TestCase):
 class LanP2PPeerIdentityUnicodeParityTests(unittest.TestCase):
     def test_python_peer_id_validation_rejects_unpaired_surrogates_and_c1_controls(self):
         from lan_p2p_core import is_valid_peer_id
-        self.assertFalse(is_valid_peer_id("\\ud800"))
-        self.assertFalse(is_valid_peer_id("\\udfff"))
-        self.assertFalse(is_valid_peer_id("device-\\x7f"))
-        self.assertFalse(is_valid_peer_id("device-\\x80"))
-        self.assertFalse(is_valid_peer_id("device-\\x9f"))
+        self.assertFalse(is_valid_peer_id(chr(0xD800)))
+        self.assertFalse(is_valid_peer_id(chr(0xDFFF)))
+        self.assertFalse(is_valid_peer_id("device-" + chr(0x7F)))
+        self.assertFalse(is_valid_peer_id("device-" + chr(0x80)))
+        self.assertFalse(is_valid_peer_id("device-" + chr(0x9F)))
         self.assertTrue(is_valid_peer_id("device-😀"))
 
     def test_android_peer_id_validation_matches_python_utf8_scalar_rules(self):
         repo_root = Path(__file__).resolve().parents[1]
         protocol = (repo_root / "app/src/main/java/com/example/devicefinder/LanP2pProtocol.java").read_text(encoding="utf-8")
         validator = extract_java_method(protocol, "public static boolean isValidPeerId(")
-        self.assertIn("Character.isHighSurrogate(ch)", validator)
-        self.assertIn("Character.isLowSurrogate(peerId.charAt(i + 1))", validator)
-        self.assertIn("else if (Character.isLowSurrogate(ch))", validator)
+        scalar_check = extract_java_method(protocol, "private static boolean isValidUnicodeScalarString(")
+        self.assertIn("isValidUnicodeScalarString(peerId)", validator)
+        self.assertIn("Character.isHighSurrogate(ch)", scalar_check)
+        self.assertIn("Character.isLowSurrogate(value.charAt(i + 1))", scalar_check)
+        self.assertIn("else if (Character.isLowSurrogate(ch))", scalar_check)
         self.assertIn("peerId.getBytes(StandardCharsets.UTF_8).length <= MAX_PEER_ID_BYTES", validator)
 
 
@@ -4691,9 +4707,9 @@ class LanP2PUnicodeEnvelopeParityTests(unittest.TestCase):
         base = {"type": "chat.message", "sender_peer_id": "android-a",
                 "message_id": "m-unicode", "target_peer_id": "android-b",
                 "created_at_ms": 123, "body": "hello"}
-        invalid_value = dict(base, body="bad-\\ud800")
+        invalid_value = dict(base, body="bad-" + chr(0xD800))
         invalid_key = dict(base)
-        invalid_key["bad-\\udfff"] = "value"
+        invalid_key["bad-" + chr(0xDFFF)] = "value"
         for packet in (invalid_value, invalid_key):
             with self.subTest(packet=packet), self.assertRaises(ValueError):
                 encode_packet(packet, "test-secret")
@@ -4819,3 +4835,34 @@ class LanP2PPacketSchemaTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LanPeerScopedRecoveryRegressionTests(unittest.TestCase):
+    def test_android_peer_recovery_does_not_trigger_global_budget_reset(self):
+        root = Path(__file__).resolve().parents[1]
+        service = (root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        store = (root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        self.assertIn("retryPendingLanChatMessagesForPeer(senderId)", service)
+        self.assertNotIn('peer-verified-retry", () -> retryPendingLanChatMessages(true)', service)
+        self.assertIn("lanChatPeerRecoveryEvents.addAll(peerRecoveryEventsCaptured)", service)
+        self.assertIn("|| !lanChatPeerRecoveryEvents.isEmpty()", service)
+        peer_batch = service[service.index("for (String recoveredPeerId") : service.index("final int batchSize")]
+        self.assertNotIn("scheduleLanChatRecoveryCooldownWake(", peer_batch)
+        method = extract_java_method(store, "public int resumeExhaustedRetriesForPeerRecoveryEvent(")
+        self.assertIn("peer_id=? AND status!='acked'", method)
+        self.assertIn('"WHERE t.message_id=lan_outbox.message_id AND t.peer_id=? "', method)
+        self.assertNotIn("resumeExhaustedRetriesForRecoveryEvent(", method)
+        self.assertIn("nextPeerRecoveryEventEligibleAtMs", store)
+        self.assertIn("scheduleLanChatPeerRecoveryCooldownWake", service)
+
+    def test_python_recovery_event_survives_unavailable_socket_and_scan_failure(self):
+        root = Path(__file__).resolve().parents[1]
+        for filename in ("chat.py", "rescue2.py", "server2.py"):
+            source = (root / filename).read_text(encoding="utf-8")
+            worker = extract_python_function(source, "_retry_deferred_v2_peer_recoveries")
+            self.assertIn("_V2_RECOVERY_RETRY_PEERS.update(recovery_event_peers)", worker)
+            self.assertIn("unresolved_recovery_peers", worker)
+            self.assertIn("unresolved_recovery_peers.add(peer_id)", worker)
+            resume = extract_python_function(source, "_resume_pending_v2_for_peer")
+            self.assertIn("_V2_RECOVERY_RETRY_PEERS.add(peer_id)", resume)
+            self.assertIn("next_peer_recovery_eligible_at_ms", resume)

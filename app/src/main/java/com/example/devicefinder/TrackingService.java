@@ -285,6 +285,13 @@ public class TrackingService extends Service implements LocationListener {
     // Coalesce a recovery event that arrives while a retry batch is already in flight.
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRecoveryEventPending =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+    // Authenticated peer recovery must not reopen other peers' exhausted retry budgets.
+    private final java.util.Set<String> lanChatPeerRecoveryEvents =
+            java.util.Collections.newSetFromMap(
+                    new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+    // Per-peer cooldown deadlines keep peer verification from becoming a global retry reset.
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>
+            lanChatPeerRecoveryCooldownWakeAtMs = new java.util.concurrent.ConcurrentHashMap<>();
     // One earliest-deadline wake preserves recovery events across independently cooling targets.
     // The timestamp is also a callback generation token: stale timers may run, but cannot consume
     // a newer deadline unless their exact scheduled timestamp still owns this slot.
@@ -4219,6 +4226,40 @@ public class TrackingService extends Service implements LocationListener {
         }
     }
 
+    /**
+     * Carry a peer.ack recovery permission across its own durable cooldown without widening
+     * the event to every peer in the Outbox.
+     */
+    private void scheduleLanChatPeerRecoveryCooldownWake(String peerId, long delayMs) {
+        if (peerId == null || peerId.isEmpty() || serviceDestroyed) return;
+        java.util.concurrent.atomic.AtomicLong deadline =
+                lanChatPeerRecoveryCooldownWakeAtMs.computeIfAbsent(
+                        peerId, ignored -> new java.util.concurrent.atomic.AtomicLong(Long.MAX_VALUE));
+        long requestedWakeAtMs = System.currentTimeMillis() + Math.max(1L, delayMs);
+        while (true) {
+            long current = deadline.get();
+            if (current <= requestedWakeAtMs) return;
+            if (deadline.compareAndSet(current, requestedWakeAtMs)) break;
+        }
+        final Runnable wake = () -> {
+            if (deadline.compareAndSet(requestedWakeAtMs, Long.MAX_VALUE) && !serviceDestroyed) {
+                retryPendingLanChatMessagesForPeer(peerId);
+            }
+        };
+        long remaining = Math.max(1L, requestedWakeAtMs - System.currentTimeMillis());
+        if (!handler.postDelayed(wake, remaining)) {
+            deadline.compareAndSet(requestedWakeAtMs, Long.MAX_VALUE);
+            lanChatPeerRecoveryEvents.add(peerId);
+            scheduleLanChatRetryAfterFailure("peer-recovery-cooldown-admission", false);
+        }
+    }
+
+    private void retryPendingLanChatMessagesForPeer(String peerId) {
+        if (peerId == null || peerId.isEmpty() || serviceDestroyed) return;
+        lanChatPeerRecoveryEvents.add(peerId);
+        retryPendingLanChatMessages(false);
+    }
+
     private void retryPendingLanChatMessages() {
         retryPendingLanChatMessages(false);
     }
@@ -4237,6 +4278,7 @@ public class TrackingService extends Service implements LocationListener {
             lanChatSendExecutor.execute(() -> {
                 boolean retryBatchCompleted = false;
                 boolean recoveryEventCaptured = false;
+                java.util.Set<String> peerRecoveryEventsCaptured = new java.util.HashSet<>();
                 try {
                     LanChatStore store = lanChatStore;
                     if (store == null) return;
@@ -4273,6 +4315,8 @@ public class TrackingService extends Service implements LocationListener {
                     // Consume the recovery event only after legacy migration succeeds. If any
                     // later Outbox operation fails, the outer catch restores this captured event.
                     recoveryEventCaptured = lanChatRecoveryEventPending.getAndSet(false);
+                    peerRecoveryEventsCaptured.addAll(lanChatPeerRecoveryEvents);
+                    lanChatPeerRecoveryEvents.removeAll(peerRecoveryEventsCaptured);
                     if (recoveryEventCaptured) {
                         int resumed = store.resumeExhaustedRetriesForRecoveryEvent(System.currentTimeMillis());
                         if (resumed > 0) {
@@ -4286,6 +4330,25 @@ public class TrackingService extends Service implements LocationListener {
                                     Math.max(1L, nextEligibleAt - System.currentTimeMillis()));
                         }
                     }
+                    for (String recoveredPeerId : peerRecoveryEventsCaptured) {
+                        long recoveryNow = System.currentTimeMillis();
+                        int resumed = store.resumeExhaustedRetriesForPeerRecoveryEvent(
+                                recoveredPeerId, recoveryNow);
+                        if (resumed > 0) {
+                            FileLogger.log(this, "CHAT", "LAN 单设备恢复事件重新开启有限补发预算 peer="
+                                    + recoveredPeerId + " targets=" + resumed);
+                        }
+                        if (!recoveryEventCaptured) {
+                            long nextEligibleAt = store.nextPeerRecoveryEventEligibleAtMs(
+                                    recoveredPeerId, recoveryNow);
+                            if (nextEligibleAt != Long.MAX_VALUE) {
+                                scheduleLanChatPeerRecoveryCooldownWake(
+                                        recoveredPeerId, Math.max(1L, nextEligibleAt - recoveryNow));
+                            }
+                        }
+                    }
+                    // Peer-scoped recovery never arms the global recovery timer: that timer
+                    // intentionally reopens every eligible peer and is reserved for global events.
                     final int batchSize = LanChatRetryPolicy.RETRY_BATCH_SIZE;
                     final int maxBatchesPerWake = LanChatRetryPolicy.MAX_RETRY_BATCHES_PER_WAKE;
                     // Store owns durable rows and per-target attempt budgets; this service only
@@ -4328,6 +4391,7 @@ public class TrackingService extends Service implements LocationListener {
                     // Keep the recovery permission until the entire batch has completed;
                     // a later read/dispatch failure must not strand an already reopened epoch.
                     if (recoveryEventCaptured) lanChatRecoveryEventPending.set(true);
+                    lanChatPeerRecoveryEvents.addAll(peerRecoveryEventsCaptured);
                     FileLogger.log(this, "CHAT", "⚠️ LAN 聊天补发失败: " + e.getMessage());
                 } finally {
                     if (routeRefreshCaptured && !retryBatchCompleted) {
@@ -4336,7 +4400,8 @@ public class TrackingService extends Service implements LocationListener {
                     lanChatRetryInFlight.set(false);
                     // Preserve events arriving during this batch. A failed batch must back off;
                     // immediately resubmitting a still-failing SQLite operation would spin.
-                    if (lanChatRecoveryEventPending.get() || lanChatRouteRefreshPending.get()) {
+                    if (lanChatRecoveryEventPending.get() || lanChatRouteRefreshPending.get()
+                            || !lanChatPeerRecoveryEvents.isEmpty()) {
                         if (!retryBatchCompleted) {
                             scheduleLanChatRetryAfterFailure(
                                     "outbox-retry-after-failure", lanChatRecoveryEventPending.get());
@@ -5506,7 +5571,7 @@ public class TrackingService extends Service implements LocationListener {
                                 verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
                             }
                             latch.countDown();
-                            scheduleLanChatTask("peer-verified-retry", () -> retryPendingLanChatMessages(true), 350L);
+                            scheduleLanChatTask("peer-verified-retry", () -> retryPendingLanChatMessagesForPeer(senderId), 350L);
                         });
                     } catch (java.util.concurrent.RejectedExecutionException rejected) {
                         FileLogger.log(this, "CHAT", "⚠️ peer.ack 持久化队列已满，暂不启用单播");
@@ -6963,6 +7028,10 @@ public class TrackingService extends Service implements LocationListener {
         logLifecycle("SERVICE_DESTROY", "isForegroundStarted=" + isForegroundStarted);
         FileLogger.log(this, "SERVICE", "🛑 服务销毁");
         serviceDestroyed = true;
+        // These peer-scoped events are process-local permissions, not durable message state.
+        // The Outbox survives; a recreated service establishes fresh authenticated routes.
+        lanChatPeerRecoveryEvents.clear();
+        lanChatPeerRecoveryCooldownWakeAtMs.clear();
 
         // ★ 强力补丁 6：服务销毁时，拔掉所有定时和自愈消息，防幽灵唤醒
         handler.removeMessages(MSG_RETRY_RESCUE_LISTENER);

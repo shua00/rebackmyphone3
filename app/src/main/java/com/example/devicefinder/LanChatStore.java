@@ -752,6 +752,66 @@ public final class LanChatStore extends SQLiteOpenHelper {
     }
 
     /**
+     * Reopen only exhausted targets belonging to one authenticated, recovered peer.
+     * This deliberately does not reopen discovery-only messages or any other peer's budget.
+     */
+    public int resumeExhaustedRetriesForPeerRecoveryEvent(String peerId, long now) {
+        if (peerId == null || peerId.isEmpty()) return 0;
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            int resetTargets = db.update("lan_outbox_targets",
+                    valuesForRecoveryReset(now),
+                    "peer_id=? AND status!='acked' AND attempt_count>=? AND last_recovery_at_ms<=? " +
+                    "AND EXISTS (SELECT 1 FROM lan_outbox o WHERE o.message_id=lan_outbox_targets.message_id " +
+                    "AND o.state NOT IN ('delivered','expired','waiting_peers'))",
+                    new String[]{peerId, String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS),
+                            String.valueOf(now - RETRY_RECOVERY_EVENT_COOLDOWN_MS)});
+            ContentValues reopen = new ContentValues();
+            reopen.put("state", "pending");
+            reopen.put("retry_attempt_count", 0);
+            reopen.put("last_event_retry_at_ms", now);
+            int reopenedMessages = db.update("lan_outbox", reopen,
+                    "state='retry_paused' AND EXISTS (SELECT 1 FROM lan_outbox_targets t " +
+                    "WHERE t.message_id=lan_outbox.message_id AND t.peer_id=? " +
+                    "AND t.status!='acked' AND t.attempt_count<?)",
+                    new String[]{peerId, String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS)});
+            db.setTransactionSuccessful();
+            return resetTargets + reopenedMessages;
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to resume peer LAN Outbox retry epoch", e);
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    /**
+     * Return the next cooldown deadline for exhausted targets of one peer only.
+     * Long.MAX_VALUE means no peer-scoped recovery is currently deferred.
+     */
+    public long nextPeerRecoveryEventEligibleAtMs(String peerId, long now) {
+        if (peerId == null || peerId.isEmpty()) return Long.MAX_VALUE;
+        Cursor c = null;
+        try {
+            c = getReadableDatabase().rawQuery(
+                    "SELECT MIN(t.last_recovery_at_ms + ?) FROM lan_outbox_targets t " +
+                    "JOIN lan_outbox o ON o.message_id=t.message_id " +
+                    "WHERE t.peer_id=? AND t.status!='acked' AND t.attempt_count>=? " +
+                    "AND t.last_recovery_at_ms>? " +
+                    "AND o.state NOT IN ('delivered','expired','waiting_peers')",
+                    new String[]{String.valueOf(RETRY_RECOVERY_EVENT_COOLDOWN_MS), peerId,
+                            String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS),
+                            String.valueOf(now - RETRY_RECOVERY_EVENT_COOLDOWN_MS)});
+            if (!c.moveToFirst() || c.isNull(0)) return Long.MAX_VALUE;
+            return c.getLong(0);
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to read peer LAN recovery cooldown deadline", e);
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
+    /**
      * Return the earliest persisted cooldown deadline for exhausted, deliverable rows.
      * Long.MAX_VALUE means no deferred recovery event is currently needed.
      */

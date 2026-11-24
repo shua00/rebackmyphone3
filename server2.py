@@ -59,7 +59,7 @@ from urllib.parse import urlparse, parse_qs
 # ★ 新增ThreadPoolExecutor 补丁： 2026-11-05 13:50
 from concurrent.futures import ThreadPoolExecutor
 
-from lan_p2p_core import LanP2PStorageError, MAX_PEER_ID_BYTES, max_peer_id_budget_probe, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, BoundedPacketDispatcher, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, encode_chat_http_fallback_payload, decode_chat_http_fallback_payload, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, add_discovery_targets_for_peer, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, list_due_outgoing_peers
+from lan_p2p_core import LanP2PStorageError, MAX_PEER_ID_BYTES, max_peer_id_budget_probe, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, BoundedPacketDispatcher, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, encode_chat_http_fallback_payload, decode_chat_http_fallback_payload, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, add_discovery_targets_for_peer, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, next_peer_recovery_eligible_at_ms, list_due_outgoing_peers
 UDP_LISTEN_PORT = 8887  # server2 独立监听端口；发往 Android 的指令仍使用 8888
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "server2")
 
@@ -1396,9 +1396,17 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=True):
                 prepare_outgoing_peer_recovery(CHAT_DEDUP_DB, "server2", peer_id)
             pending_rows = load_pending_outgoing_for_peer(
                 CHAT_DEDUP_DB, "server2", peer_id, limit=10, force=recovery_event)
+            if recovery_event:
+                next_eligible_at = next_peer_recovery_eligible_at_ms(CHAT_DEDUP_DB, "server2", peer_id)
+                if next_eligible_at is not None:
+                    with _V2_RECOVERY_RETRY_LOCK:
+                        _V2_RECOVERY_RETRY_PEERS.add(peer_id)
         except Exception as e:
             with print_lock:
                 print(f"⚠️ server2 LAN outbox recovery deferred; durable ledger read failed: {type(e).__name__}")
+            if recovery_event:
+                with _V2_RECOVERY_RETRY_LOCK:
+                    _V2_RECOVERY_RETRY_PEERS.add(peer_id)
             return
         for pending in pending_rows:
             chat_packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
@@ -1451,24 +1459,47 @@ def _retry_deferred_v2_peer_recoveries():
             pending_peer_ids = set(recovery_event_peers)
         sock = UDP_LISTENER_SOCKET
         if sock is None:
+            with _V2_RECOVERY_RETRY_LOCK:
+                _V2_RECOVERY_RETRY_PEERS.update(recovery_event_peers)
             continue
         try:
             if sock.fileno() < 0:
+                with _V2_RECOVERY_RETRY_LOCK:
+                    _V2_RECOVERY_RETRY_PEERS.update(recovery_event_peers)
                 continue
             pending_peer_ids.update(list_due_outgoing_peers(CHAT_DEDUP_DB, "server2", limit=500))
             if not pending_peer_ids:
                 continue
             known_peers = {row["peer_id"]: row for row in list_known_peer_snapshot(CHAT_DEDUP_DB, "server2", limit=500)}
         except Exception as exc:
+            with _V2_RECOVERY_RETRY_LOCK:
+                _V2_RECOVERY_RETRY_PEERS.update(recovery_event_peers)
             with print_lock:
                 print(f"⚠️ server2 LAN recovery retry scan deferred: {type(exc).__name__}")
             continue
+        unresolved_recovery_peers = recovery_event_peers - set(known_peers)
+        with _V2_RECOVERY_RETRY_LOCK:
+            _V2_RECOVERY_RETRY_PEERS.update(unresolved_recovery_peers)
         for peer_id in pending_peer_ids:
             peer = known_peers.get(peer_id)
-            if peer and peer.get("endpoint_ip") and int(peer.get("endpoint_port") or 0) in (8887, 8888, 8889, 8890):
-                _resume_pending_v2_for_peer(
-                    sock, peer_id, (peer["endpoint_ip"], int(peer["endpoint_port"])),
-                    recovery_event=peer_id in recovery_event_peers)
+            if not peer or not peer.get("endpoint_ip"):
+                if peer_id in recovery_event_peers:
+                    unresolved_recovery_peers.add(peer_id)
+                continue
+            try:
+                target_port = int(peer.get("endpoint_port") or 0)
+            except (TypeError, ValueError):
+                target_port = 0
+            if target_port not in (8887, 8888, 8889, 8890):
+                if peer_id in recovery_event_peers:
+                    unresolved_recovery_peers.add(peer_id)
+                continue
+            _resume_pending_v2_for_peer(
+                sock, peer_id, (peer["endpoint_ip"], target_port),
+                recovery_event=peer_id in recovery_event_peers)
+        if unresolved_recovery_peers:
+            with _V2_RECOVERY_RETRY_LOCK:
+                _V2_RECOVERY_RETRY_PEERS.update(unresolved_recovery_peers)
 
 
 def _start_v2_recovery_retry_worker():
