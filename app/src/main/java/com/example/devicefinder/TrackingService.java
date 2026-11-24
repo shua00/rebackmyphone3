@@ -5131,10 +5131,16 @@ public class TrackingService extends Service implements LocationListener {
                                     }
                                 });
                             } catch (java.util.concurrent.RejectedExecutionException rejected) {
-                                // last_attempt_endpoint remains durable and is sufficient for this
-                                // message's authenticated ACK; the next route discovery can refresh
-                                // the reusable endpoint if this secondary update is dropped.
-                                FileLogger.logD("CHAT", "send endpoint bookkeeping deferred message=" + messageId);
+                                // ACK acceptance requires successful-send evidence. If the
+                                // maintenance lane rejects this secondary write, persist it inline
+                                // as a rare saturation fallback rather than accepting last_attempt_endpoint.
+                                boolean endpointPersisted = endpointStore != null
+                                        && endpointStore.recordSuccessfulSendEndpoint(
+                                                messageId, peerId, successfulEndpoint);
+                                if (!endpointPersisted) {
+                                    FileLogger.log(this, "CHAT", "⚠️ P2P 成功发送端点记账延后失败 message="
+                                            + messageId + " peer=" + peerId);
+                                }
                             }
                         } catch (Exception e) {
                             final String sendError = e.getClass().getSimpleName();
