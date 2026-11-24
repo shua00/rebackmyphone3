@@ -4262,12 +4262,13 @@ public class TrackingService extends Service implements LocationListener {
                         int resumed = store.resumeExhaustedRetriesForRecoveryEvent(System.currentTimeMillis());
                         if (resumed > 0) {
                             FileLogger.log(this, "CHAT", "LAN 恢复事件重新开启有限补发预算 messages=" + resumed);
-                        } else {
-                            long nextEligibleAt = store.nextRecoveryEventEligibleAtMs(System.currentTimeMillis());
-                            if (nextEligibleAt != Long.MAX_VALUE) {
-                                scheduleLanChatRecoveryCooldownWake(
-                                        Math.max(1L, nextEligibleAt - System.currentTimeMillis()));
-                            }
+                        }
+                        // Schedule the next cooldown even when this event resumed some rows:
+                        // other exhausted targets may still be inside their independent cooldown.
+                        long nextEligibleAt = store.nextRecoveryEventEligibleAtMs(System.currentTimeMillis());
+                        if (nextEligibleAt != Long.MAX_VALUE) {
+                            scheduleLanChatRecoveryCooldownWake(
+                                    Math.max(1L, nextEligibleAt - System.currentTimeMillis()));
                         }
                     }
                     final int batchSize = LanChatRetryPolicy.RETRY_BATCH_SIZE;
