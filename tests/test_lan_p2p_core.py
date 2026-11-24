@@ -1272,8 +1272,8 @@ class LanP2PCoreTests(unittest.TestCase):
                 end = source.index('if packet_type != "chat.message":', start)
                 handler = source[start:end]
                 self.assertIn("active_route = peer_endpoint_matches(", handler)
-                self.assertIn("attempted_route = outgoing_ack_endpoint_matches(", handler)
-                self.assertIn("and sender and (active_route or attempted_route))", handler)
+                self.assertIn("sent_endpoint_route = outgoing_ack_endpoint_matches(", handler)
+                self.assertIn("and sender and (active_route or sent_endpoint_route))", handler)
                 self.assertNotIn("discovery_ack", handler)
                 self.assertNotIn("is_outgoing_discovery_pending(", handler)
 
@@ -2725,7 +2725,7 @@ class LanP2PCoreTests(unittest.TestCase):
         cleanup = handler.index("_remove_chat_fallback_for_message(")
         self.assertLess(route, persist)
         self.assertLess(persist, cleanup)
-        self.assertIn("(active_route or attempted_route)", handler)
+        self.assertIn("(active_route or sent_endpoint_route)", handler)
         self.assertIn("if active_route:", handler)
         self.assertIn('envelope.get("status") == "stored"', handler)
 
@@ -3596,6 +3596,8 @@ class LanP2PCoreTests(unittest.TestCase):
         with sqlite3.connect(self.db_path) as conn:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(lan_outbox_targets)")}
         self.assertIn("last_recovery_at_ms", columns)
+        self.assertIn("last_attempt_endpoint", columns)
+        self.assertIn("last_sent_endpoint", columns)
         with sqlite3.connect(self.db_path) as conn:
             indexes = {row[1] for row in conn.execute("PRAGMA index_list(lan_outbox_targets)")}
         self.assertIn("idx_lan_outbox_targets_retry", indexes)
@@ -3811,7 +3813,8 @@ class PythonFixedTargetImmediateDispatchTests(unittest.TestCase):
     def test_suspect_peer_endpoint_can_be_attempted_and_ack_is_endpoint_bound(self):
         from lan_p2p_core import (
             persist_outgoing_message, record_peer, load_pending_fixed_targets,
-            mark_outgoing_attempt, outgoing_ack_endpoint_matches, list_known_peers,
+            mark_outgoing_attempt, record_successful_send_endpoint,
+            outgoing_ack_endpoint_matches, list_known_peers,
         )
         self.assertTrue(persist_outgoing_message(
             self.db_path, "server2", "server2-id", "m-fixed-fast", "hello", ["android-a"]))
@@ -3823,10 +3826,97 @@ class PythonFixedTargetImmediateDispatchTests(unittest.TestCase):
                          [(x["peer_id"], x["endpoint_ip"], x["endpoint_port"]) for x in targets])
         self.assertTrue(mark_outgoing_attempt(
             self.db_path, "m-fixed-fast", "android-a", "192.168.1.10", 8888))
+        # A pre-send attempt is not proof that the UDP datagram left this process.
+        self.assertFalse(outgoing_ack_endpoint_matches(
+            self.db_path, "server2", "m-fixed-fast", "android-a", "192.168.1.10", 8888))
+        self.assertTrue(record_successful_send_endpoint(
+            self.db_path, "server2", "m-fixed-fast", "android-a", "192.168.1.10", 8888))
         self.assertTrue(outgoing_ack_endpoint_matches(
             self.db_path, "server2", "m-fixed-fast", "android-a", "192.168.1.10", 8888))
         self.assertFalse(outgoing_ack_endpoint_matches(
             self.db_path, "server2", "m-fixed-fast", "android-a", "192.168.1.11", 8888))
+
+    def test_python_ack_endpoint_is_recorded_only_after_successful_udp_send(self):
+        from lan_p2p_core import (
+            persist_outgoing_message, mark_outgoing_attempt,
+            send_outgoing_packet, outgoing_ack_endpoint_matches,
+        )
+
+        class FailingSocket:
+            def sendto(self, payload, destination):
+                raise OSError("simulated UDP send failure")
+
+        class SuccessfulSocket:
+            def sendto(self, payload, destination):
+                return len(payload)
+
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-send-fail", "hello", ["android-a"]))
+        self.assertTrue(mark_outgoing_attempt(
+            self.db_path, "m-send-fail", "android-a", "192.168.1.10", 8888))
+        with self.assertRaises(OSError):
+            send_outgoing_packet(
+                FailingSocket(), b"frame", ("192.168.1.10", 8888),
+                self.db_path, "server2", "m-send-fail", "android-a")
+        self.assertFalse(outgoing_ack_endpoint_matches(
+            self.db_path, "server2", "m-send-fail", "android-a", "192.168.1.10", 8888))
+
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-send-ok", "hello", ["android-a"]))
+        self.assertTrue(mark_outgoing_attempt(
+            self.db_path, "m-send-ok", "android-a", "192.168.1.10", 8888))
+        self.assertTrue(send_outgoing_packet(
+            SuccessfulSocket(), b"frame", ("192.168.1.10", 8888),
+            self.db_path, "server2", "m-send-ok", "android-a"))
+        self.assertTrue(outgoing_ack_endpoint_matches(
+            self.db_path, "server2", "m-send-ok", "android-a", "192.168.1.10", 8888))
+
+    def test_python_ack_endpoint_read_waits_for_successful_send_commit(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from lan_p2p_core import (
+            persist_outgoing_message, mark_outgoing_attempt,
+            send_outgoing_packet, outgoing_ack_endpoint_matches,
+        )
+        send_started = threading.Event()
+        release_send = threading.Event()
+        ack_check_started = threading.Event()
+
+        class BlockingSocket:
+            def sendto(self, payload, destination):
+                send_started.set()
+                if not release_send.wait(2):
+                    raise TimeoutError("test send release timed out")
+
+        self.assertTrue(persist_outgoing_message(
+            self.db_path, "server2", "server2-id", "m-ack-race", "hello", ["android-a"]))
+        self.assertTrue(mark_outgoing_attempt(
+            self.db_path, "m-ack-race", "android-a", "192.168.1.10", 8888))
+
+        def check_ack_route():
+            ack_check_started.set()
+            return outgoing_ack_endpoint_matches(
+                self.db_path, "server2", "m-ack-race", "android-a", "192.168.1.10", 8888)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            send_future = pool.submit(
+                send_outgoing_packet, BlockingSocket(), b"frame",
+                ("192.168.1.10", 8888), self.db_path, "server2", "m-ack-race", "android-a")
+            self.assertTrue(send_started.wait(1))
+            ack_future = pool.submit(check_ack_route)
+            self.assertTrue(ack_check_started.wait(1))
+            self.assertFalse(ack_future.done())
+            release_send.set()
+            self.assertTrue(send_future.result(timeout=2))
+            self.assertTrue(ack_future.result(timeout=2))
+
+    def test_all_python_retry_services_use_successful_send_endpoint_wrapper(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        for filename in ("rescue2.py", "chat.py", "server2.py"):
+            with self.subTest(service=filename):
+                source = (repo_root / filename).read_text(encoding="utf-8")
+                self.assertIn("send_outgoing_packet(", source)
+                self.assertNotIn(
+                    'sock.sendto(raw, (pending["endpoint_ip"], target_port))', source)
 
     def test_peer_ack_recovery_is_woken_off_udp_receive_loop(self):
         repo_root = Path(__file__).resolve().parents[1]

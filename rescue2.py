@@ -115,7 +115,7 @@ PACKAGE_NAME = "com.example.devicefinder"
 
 # ===== 配置区 =====
 RESCUE_SECRET = "your_private_secret_key"
-from lan_p2p_core import LanP2PStorageError, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, list_known_peers, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, load_active_pending_targets, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, list_due_outgoing_peers
+from lan_p2p_core import LanP2PStorageError, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, list_known_peers, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, load_active_pending_targets, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, list_due_outgoing_peers
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "rescue2")
 DEFAULT_SERVER_URL = "http://dingwei.bai001.de5.net/api/report"
 DEFAULT_CONFIG_URL = "https://your-config-url.com/config.txt"
@@ -542,8 +542,10 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=True):
                 if not mark_outgoing_attempt(_CHAT_DEDUP_DB, pending["message_id"], peer_id,
                                               pending["endpoint_ip"], target_port, allow_fast_retry=False):
                     continue
-                with UDP_CHAT_SEND_LOCK:
-                    sock.sendto(raw, (pending["endpoint_ip"], target_port))
+                send_outgoing_packet(
+                    sock, raw, (pending["endpoint_ip"], target_port),
+                    _CHAT_DEDUP_DB, "rescue2", pending["message_id"], peer_id,
+                    send_lock=UDP_CHAT_SEND_LOCK)
             except LanP2PStorageError as e:
                 with print_lock:
                     print(f"⚠️ rescue2 pending chat retry stopped; durable ledger write failed: {type(e).__name__}")
@@ -665,10 +667,10 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
         message_id = str(envelope.get("message_id") or "")
         target = str(envelope.get("target_peer_id") or "")
         active_route = peer_endpoint_matches(_CHAT_DEDUP_DB, "rescue2", sender, addr[0], addr[1])
-        attempted_route = outgoing_ack_endpoint_matches(
+        sent_endpoint_route = outgoing_ack_endpoint_matches(
             _CHAT_DEDUP_DB, "rescue2", message_id, sender, addr[0], addr[1])
         if (target == PEER_NODE_ID and envelope.get("status") == "stored"
-                and sender and (active_route or attempted_route)):
+                and sender and (active_route or sent_endpoint_route)):
             acknowledge_outgoing_message(_CHAT_DEDUP_DB, "rescue2", message_id, sender)
         return
     if packet_type != "chat.message":

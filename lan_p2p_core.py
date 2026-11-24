@@ -1,6 +1,10 @@
 """Shared, dependency-free persistence primitives for LAN P2P services."""
 import sqlite3
+import threading
 import time
+
+
+_ACK_ENDPOINT_LOCK = threading.RLock()
 
 
 # Must match Android LanChatStore.FIRST_DISCOVERY_WINDOW_MS.
@@ -263,6 +267,8 @@ def persist_outgoing_message(db_path, sender_scope, sender_peer_id, message_id,
             last_attempt_at INTEGER NOT NULL DEFAULT 0,
             last_ack_at INTEGER NOT NULL DEFAULT 0,
             last_endpoint TEXT NOT NULL DEFAULT '',
+            last_attempt_endpoint TEXT NOT NULL DEFAULT '',
+            last_sent_endpoint TEXT NOT NULL DEFAULT '',
             last_error TEXT NOT NULL DEFAULT '',
             last_recovery_at_ms INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(message_id, peer_id)
@@ -270,6 +276,9 @@ def persist_outgoing_message(db_path, sender_scope, sender_peer_id, message_id,
         target_columns = {row[1] for row in conn.execute("PRAGMA table_info(lan_outbox_targets)")}
         if "last_recovery_at_ms" not in target_columns:
             conn.execute("ALTER TABLE lan_outbox_targets ADD COLUMN last_recovery_at_ms INTEGER NOT NULL DEFAULT 0")
+        for column in ("last_attempt_endpoint", "last_sent_endpoint"):
+            if column not in target_columns:
+                conn.execute("ALTER TABLE lan_outbox_targets ADD COLUMN " + column + " TEXT NOT NULL DEFAULT ''")
         conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
             "SELECT sender_scope,sender_peer_id,body FROM lan_outbox WHERE message_id=?",
@@ -328,6 +337,8 @@ def ensure_outbox_retry_schema(db_path):
             last_attempt_at INTEGER NOT NULL DEFAULT 0,
             last_ack_at INTEGER NOT NULL DEFAULT 0,
             last_endpoint TEXT NOT NULL DEFAULT '',
+            last_attempt_endpoint TEXT NOT NULL DEFAULT '',
+            last_sent_endpoint TEXT NOT NULL DEFAULT '',
             last_error TEXT NOT NULL DEFAULT '',
             last_recovery_at_ms INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(message_id, peer_id))""")
@@ -338,6 +349,8 @@ def ensure_outbox_retry_schema(db_path):
             "last_attempt_at": "INTEGER NOT NULL DEFAULT 0",
             "last_ack_at": "INTEGER NOT NULL DEFAULT 0",
             "last_endpoint": "TEXT NOT NULL DEFAULT ''",
+            "last_attempt_endpoint": "TEXT NOT NULL DEFAULT ''",
+            "last_sent_endpoint": "TEXT NOT NULL DEFAULT ''",
             "last_error": "TEXT NOT NULL DEFAULT ''",
             "last_recovery_at_ms": "INTEGER NOT NULL DEFAULT 0",
         }
@@ -608,7 +621,9 @@ def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10, for
 
 def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_port,
                          allow_fast_retry=True):
-    """Atomically account a send; recovery workers must revalidate the persisted backoff.
+    """Persist a send attempt before network I/O; this is not ACK evidence.
+
+    Recovery workers must revalidate the persisted backoff.
 
     The initial bounded burst may retry quickly. Background workers pass
     allow_fast_retry=False so a peer/message selected by an earlier due scan
@@ -622,7 +637,8 @@ def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_po
         conn.execute("PRAGMA busy_timeout=10000")
         endpoint = str(endpoint_ip) + ":" + str(endpoint_port)
         cur = conn.execute("""UPDATE lan_outbox_targets SET status='sent',
-            attempt_count=attempt_count+1,last_attempt_at=?,last_endpoint=?,last_error=''
+            attempt_count=attempt_count+1,last_attempt_at=?,last_endpoint=?,
+            last_attempt_endpoint=?,last_error=''
             WHERE message_id=? AND peer_id=? AND status!='acked' AND attempt_count<?
               AND (?=1 OR attempt_count=0 OR last_endpoint<>? OR last_attempt_at +
                    CASE attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000
@@ -631,7 +647,7 @@ def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_po
               AND EXISTS (SELECT 1 FROM lan_outbox o
                           WHERE o.message_id=lan_outbox_targets.message_id
                             AND o.state NOT IN ('delivered','expired','waiting_peers'))""",
-            (now_ms, endpoint, message_id, peer_id, MAX_OUTBOX_TARGET_ATTEMPTS,
+            (now_ms, endpoint, endpoint, message_id, peer_id, MAX_OUTBOX_TARGET_ATTEMPTS,
              1 if allow_fast_retry else 0, endpoint, now_ms))
         conn.commit()
         return cur.rowcount > 0
@@ -1073,6 +1089,59 @@ def load_pending_fixed_targets(db_path, sender_scope, message_id, limit=500):
 
 
 
+def record_successful_send_endpoint(db_path, sender_scope, message_id, peer_id,
+                                     endpoint_ip, endpoint_port):
+    """Persist ACK provenance only after the UDP socket accepted the datagram."""
+    if (not db_path or not sender_scope or not message_id or not peer_id
+            or not endpoint_ip or not 1 <= int(endpoint_port or 0) <= 65535):
+        return False
+    conn = None
+    endpoint = str(endpoint_ip) + ":" + str(int(endpoint_port))
+    try:
+        with _ACK_ENDPOINT_LOCK:
+            conn = sqlite3.connect(db_path, timeout=10)
+            conn.execute("PRAGMA busy_timeout=10000")
+            cur = conn.execute("""UPDATE lan_outbox_targets
+                SET last_sent_endpoint=?
+                WHERE message_id=? AND peer_id=?
+                  AND EXISTS (SELECT 1 FROM lan_outbox o
+                              WHERE o.message_id=lan_outbox_targets.message_id
+                                AND o.sender_scope=?
+                                AND o.state NOT IN ('expired','waiting_peers'))""",
+                (endpoint, message_id, peer_id, sender_scope))
+            conn.commit()
+            return cur.rowcount == 1
+    except Exception:
+        if conn is not None:
+            _safe_rollback(conn)
+        return False
+    finally:
+        _safe_close(conn)
+
+
+def send_outgoing_packet(sock, packet_bytes, destination, db_path, sender_scope,
+                         message_id, peer_id, send_lock=None):
+    """Send one fixed-target datagram and commit success evidence atomically vs ACK reads.
+
+    The attempt row must already be committed. The process-local lock prevents the
+    receive thread from observing the attempt-only interval between sendto() and the
+    post-send SQLite write; a failed send never creates last_sent_endpoint evidence.
+    """
+    if sock is None or not destination or len(destination) != 2:
+        raise ValueError("invalid LAN outgoing datagram destination")
+    endpoint_ip, endpoint_port = str(destination[0]), int(destination[1])
+    with _ACK_ENDPOINT_LOCK:
+        if send_lock is None:
+            sock.sendto(packet_bytes, (endpoint_ip, endpoint_port))
+        else:
+            with send_lock:
+                sock.sendto(packet_bytes, (endpoint_ip, endpoint_port))
+        if not record_successful_send_endpoint(
+                db_path, sender_scope, message_id, peer_id, endpoint_ip, endpoint_port):
+            raise LanP2PStorageError("failed to persist successful LAN UDP send endpoint")
+    return True
+
+
 def send_outbox_to_active_peers(sock, db_path, sender_scope, message_id,
                                 packet_template, secret, send_lock=None,
                                 attempts=3, retry_delay_seconds=0.25):
@@ -1097,11 +1166,8 @@ def send_outbox_to_active_peers(sock, db_path, sender_scope, message_id,
                 if not mark_outgoing_attempt(db_path, message_id, target["peer_id"],
                                              destination[0], destination[1]):
                     continue
-                if send_lock is None:
-                    sock.sendto(raw, destination)
-                else:
-                    with send_lock:
-                        sock.sendto(raw, destination)
+                send_outgoing_packet(sock, raw, destination, db_path, sender_scope,
+                                     message_id, target["peer_id"], send_lock=send_lock)
                 sent_total += 1
             except LanP2PStorageError:
                 raise
@@ -1181,23 +1247,24 @@ def peer_endpoint_matches(db_path, receiver_scope, peer_id, endpoint_ip, endpoin
 
 def outgoing_ack_endpoint_matches(db_path, sender_scope, message_id, peer_id,
                                  endpoint_ip, endpoint_port):
-    """Match an ACK to the exact endpoint attempted for this fixed message target."""
+    """Match an ACK only to the endpoint where this fixed target was successfully sent."""
     if not db_path or not sender_scope or not message_id or not peer_id or not endpoint_ip:
         return False
     try:
-        conn = sqlite3.connect(db_path, timeout=10)
-        try:
-            conn.execute("PRAGMA busy_timeout=10000")
-            row = conn.execute("""SELECT 1 FROM lan_outbox o
-                JOIN lan_outbox_targets t ON t.message_id=o.message_id
-                WHERE o.sender_scope=? AND o.message_id=? AND t.peer_id=?
-                  AND o.state NOT IN ('expired','waiting_peers')
-                  AND t.status='sent' AND t.attempt_count>0
-                  AND t.last_endpoint=? LIMIT 1""",
-                (sender_scope, message_id, peer_id,
-                 str(endpoint_ip) + ":" + str(int(endpoint_port)))).fetchone()
-            return row is not None
-        finally:
-            _safe_close(conn)
+        with _ACK_ENDPOINT_LOCK:
+            conn = sqlite3.connect(db_path, timeout=10)
+            try:
+                conn.execute("PRAGMA busy_timeout=10000")
+                row = conn.execute("""SELECT 1 FROM lan_outbox o
+                    JOIN lan_outbox_targets t ON t.message_id=o.message_id
+                    WHERE o.sender_scope=? AND o.message_id=? AND t.peer_id=?
+                      AND o.state NOT IN ('expired','waiting_peers')
+                      AND t.status='sent' AND t.attempt_count>0
+                      AND t.last_sent_endpoint=? LIMIT 1""",
+                    (sender_scope, message_id, peer_id,
+                     str(endpoint_ip) + ":" + str(int(endpoint_port)))).fetchone()
+                return row is not None
+            finally:
+                _safe_close(conn)
     except Exception:
         return False
