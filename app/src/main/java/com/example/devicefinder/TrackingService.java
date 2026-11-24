@@ -4210,7 +4210,7 @@ public class TrackingService extends Service implements LocationListener {
                     final int maxBatchesPerWake = LanChatRetryPolicy.MAX_RETRY_BATCHES_PER_WAKE;
                     // Take one stable snapshot for this wake. An unacknowledged first batch
                     // must not prevent later queued messages from receiving their first attempt.
-                    List<LanChatStore.PendingMessage> pending = store.loadPending(50);
+                    List<LanChatStore.PendingMessage> pending = store.loadPending(LanChatRetryPolicy.MAX_PENDING_MESSAGES);
                     int queuedBefore = pending.size();
                     for (int batchNo = 0; batchNo < maxBatchesPerWake && !serviceDestroyed; batchNo++) {
                         int startIndex = batchNo * batchSize;
@@ -4236,7 +4236,7 @@ public class TrackingService extends Service implements LocationListener {
                             }
                         }
 
-                        int queuedAfter = store.loadPending(50).size();
+                        int queuedAfter = store.loadPending(LanChatRetryPolicy.MAX_PENDING_MESSAGES).size();
                         FileLogger.log(this, "CHAT", "LAN SQLite Outbox 补发批次 " + (batchNo + 1)
                                 + "，处理 " + (endIndex - startIndex) + " 条，待确认账本变化 "
                                 + queuedBefore + "->" + queuedAfter);
@@ -4550,7 +4550,7 @@ public class TrackingService extends Service implements LocationListener {
         LanChatStore store = lanChatStore;
         if (socket == null || socket.isClosed() || store == null) return;
         try {
-            List<LanChatStore.PendingMessage> pending = store.loadPending(50);
+            List<LanChatStore.PendingMessage> pending = store.loadPending(LanChatRetryPolicy.MAX_PENDING_MESSAGES);
             int minimumAttempts = Integer.MAX_VALUE;
             boolean hasUnattemptedRouteTargets = false;
             for (LanChatStore.PendingMessage item : pending) {
