@@ -2869,7 +2869,7 @@ class LanP2PCoreTests(unittest.TestCase):
         retry_start = end
         retry_end = source.index("// 仅由 lanChatSendExecutor 调用", retry_start)
         retry = source[retry_start:retry_end]
-        self.assertIn("if (lanChatRecoveryEventPending.getAndSet(false))", retry)
+        self.assertIn("recoveryEventCaptured = lanChatRecoveryEventPending.getAndSet(false)", retry)
         self.assertNotIn("resumeExhaustedRetriesForRecoveryEvent", wrapper)
 
 
