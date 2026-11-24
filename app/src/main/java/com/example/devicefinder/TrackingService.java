@@ -4180,10 +4180,12 @@ public class TrackingService extends Service implements LocationListener {
     private void retryPendingLanChatMessages(boolean recoveryEvent) {
         if (recoveryEvent) lanChatRecoveryEventPending.set(true);
         if (serviceDestroyed || !lanChatRetryInFlight.compareAndSet(false, true)) return;
-        // Consume only the ordinary route-refresh wake captured before this batch starts.
-        lanChatRouteRefreshPending.getAndSet(false);
+        // Capture the route-refresh wake, but restore it if executor admission or this batch fails.
+        // Events arriving after this snapshot remain set for the next serialized batch.
+        final boolean routeRefreshCaptured = lanChatRouteRefreshPending.getAndSet(false);
         try {
             lanChatSendExecutor.execute(() -> {
+                boolean retryBatchCompleted = false;
                 try {
                     LanChatStore store = lanChatStore;
                     if (store == null) return;
@@ -4192,7 +4194,15 @@ public class TrackingService extends Service implements LocationListener {
                         FileLogger.log(this, "CHAT", "LAN 恢复时结算已过期发现窗口 messages=" + finalizedDiscovery);
                     }
                     if (lanChatRecoveryEventPending.getAndSet(false)) {
-                        int resumed = store.resumeExhaustedRetriesForRecoveryEvent(System.currentTimeMillis());
+                        final int resumed;
+                        try {
+                            resumed = store.resumeExhaustedRetriesForRecoveryEvent(System.currentTimeMillis());
+                        } catch (Exception recoveryStorageFailure) {
+                            // A transient SQLite error must not consume the only recovery event
+                            // that can reopen an exhausted retry epoch.
+                            lanChatRecoveryEventPending.set(true);
+                            throw recoveryStorageFailure;
+                        }
                         if (resumed > 0) {
                             FileLogger.log(this, "CHAT", "LAN 恢复事件重新开启有限补发预算 messages=" + resumed);
                         }
@@ -4260,9 +4270,13 @@ public class TrackingService extends Service implements LocationListener {
                                 + queuedBefore + "->" + queuedAfter);
                     }
                     scheduleLanChatRetryFromOutbox();
+                    retryBatchCompleted = true;
                 } catch (Exception e) {
                     FileLogger.log(this, "CHAT", "⚠️ LAN 聊天补发失败: " + e.getMessage());
                 } finally {
+                    if (routeRefreshCaptured && !retryBatchCompleted) {
+                        lanChatRouteRefreshPending.set(true);
+                    }
                     lanChatRetryInFlight.set(false);
                     // Do not lose a network/peer recovery event that arrived during this batch.
                     if (lanChatRecoveryEventPending.get()) {
@@ -4278,6 +4292,7 @@ public class TrackingService extends Service implements LocationListener {
                 }
             });
         } catch (java.util.concurrent.RejectedExecutionException e) {
+            if (routeRefreshCaptured) lanChatRouteRefreshPending.set(true);
             lanChatRetryInFlight.set(false);
             FileLogger.log(this, "CHAT", "⚠️ LAN 补发队列暂时已满，安排延迟重试");
             // Queue saturation is not a network-recovery event. Preserve the pending

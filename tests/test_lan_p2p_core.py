@@ -128,6 +128,21 @@ class LanP2PCoreTests(unittest.TestCase):
 
 
 
+    def test_outbox_retry_preserves_recovery_wakes_when_admission_or_storage_fails(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        service = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        retry = extract_java_method(service, "private void retryPendingLanChatMessages(boolean recoveryEvent)")
+        self.assertIn("final boolean routeRefreshCaptured = lanChatRouteRefreshPending.getAndSet(false)", retry)
+        self.assertIn("if (routeRefreshCaptured) lanChatRouteRefreshPending.set(true)", retry)
+        self.assertIn("if (routeRefreshCaptured && !retryBatchCompleted)", retry)
+        self.assertIn("lanChatRecoveryEventPending.set(true)", retry)
+        self.assertIn("catch (Exception recoveryStorageFailure)", retry)
+        self.assertLess(retry.index("catch (Exception recoveryStorageFailure)"),
+                        retry.index("store.resumeExhaustedRetriesForRecoveryEvent"))
+        self.assertIn("retryBatchCompleted = true", retry)
+        self.assertIn("lanChatRetryInFlight.set(false)", retry)
+
+
     def test_all_targets_ack_reconciliation_is_one_sqlite_transaction(self):
         repo_root = Path(__file__).resolve().parents[1]
         store = (
