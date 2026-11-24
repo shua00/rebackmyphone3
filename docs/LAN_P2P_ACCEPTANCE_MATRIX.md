@@ -363,3 +363,15 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | CI/实机 | 待本提交 Actions；尚未进行 Android 真机跨端身份互通验证 | CI 结果不得替代实机验证 |
 
 **本项只统一 peer ID 的 Unicode 标量合法性，不改变身份生成格式、已有合法 UTF-8 peer ID、消息字段、ACK、端口或重试策略。**
+
+
+## 17. v2 信封全部字符串的 Unicode 标量一致性（2026-11-24）
+
+| 项目 | 结果 | 证据与限制 |
+|---|---|---|
+| 缺口定位 | 孤立 surrogate 不仅可能出现在 peer ID，也可能出现在正文、元数据或 JSON 对象键；Python 严格 UTF-8 规范化会拒绝，Android 默认字符串编码可能替换 | Android/Python 编解码器静态对照 |
+| 修正 | 两端在 HMAC 规范化前递归检查所有字符串值和对象键；拒绝孤立高/低 surrogate，保留合法 supplementary Unicode 字符 | lan_p2p_core.py、LanP2pProtocol.java |
+| 回归 | 覆盖编码端字符串值/对象键、解码端转义 surrogate，以及 Android 递归校验源码守卫 | tests/test_lan_p2p_core.py |
+| CI/实机 | 待本提交 Actions；尚未完成真实 Android↔Python Unicode 报文互通 | 不得以 CI 替代实机验收 |
+
+**只拒绝无法形成合法 UTF-8 标量序列的字符串，不限制正常中文、emoji、换行或其他合法消息正文。**
