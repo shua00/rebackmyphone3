@@ -597,8 +597,8 @@ class TransferTcpSessionTests(unittest.TestCase):
             client.shutdown(socket.SHUT_WR)
         finally:
             client.close()
-            server.close()
             worker.join(timeout=3)
+            server.close()
         self.assertFalse(worker.is_alive())
         self.assertEqual(1, len(errors))
         self.assertIsInstance(errors[0], TransferValidationError)
