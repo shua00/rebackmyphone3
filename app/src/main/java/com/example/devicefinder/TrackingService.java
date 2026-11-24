@@ -6701,6 +6701,9 @@ public class TrackingService extends Service implements LocationListener {
             awaitLanExecutorTermination(lanChatProbeExecutor);
             awaitLanExecutorTermination(lanChatIoExecutor);
             awaitLanExecutorTermination(maintenanceExecutor);
+            // Keep the shared reference valid until every accepted task has drained.
+            // In particular, queued persistence jobs still resolve lanChatStore here.
+            if (lanChatStore == storeToClose) lanChatStore = null;
             try {
                 storeToClose.closeStore();
                 FileLogger.log(this, "SERVICE", "LAN SQLite store closed after communication queues drained");
@@ -6755,8 +6758,9 @@ public class TrackingService extends Service implements LocationListener {
         if (lanChatIoExecutor != null) lanChatIoExecutor.shutdown();
         if (lanChatScheduler != null) lanChatScheduler.shutdownNow();
         if (maintenanceExecutor != null) maintenanceExecutor.shutdownNow();
+        // Do not clear lanChatStore yet: already accepted persistence and communication
+        // tasks still need this handle while the executor queues are draining.
         LanChatStore storeToClose = lanChatStore;
-        lanChatStore = null;
         closeLanChatStoreAfterExecutors(storeToClose);
         if (rescueSocketRef != null) {
             try { rescueSocketRef.close(); } catch (Exception e) { FileLogger.log(this, "SERVICE", "⚠️ close rescueSocket 失败: " + e.getMessage()); }
