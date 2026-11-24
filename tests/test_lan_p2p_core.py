@@ -173,13 +173,14 @@ class LanP2PCoreTests(unittest.TestCase):
         store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
         service = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
 
-        pending = extract_java_method(store, "public boolean isDiscoveryPending(")
-        self.assertIn('throw new IllegalStateException("Failed to read LAN discovery state", e);', pending)
-        self.assertNotIn("return false;", pending)
+        window = extract_java_method(store, "public int beginOrReadDiscoveryWindow(")
+        self.assertIn("return DISCOVERY_WINDOW_ERROR;", window)
+        self.assertIn("catch (Exception e)", window)
 
         send = extract_java_method(service, "private void transmitLocalUdpMessageInternal(")
-        self.assertIn("discoveryWindowOpen = store.isDiscoveryPending(messageId)", send)
-        self.assertIn("发现窗口账本读取失败，停止本轮发送", send)
+        self.assertIn("store.beginOrReadDiscoveryWindow(messageId)", send)
+        self.assertIn("discoveryWindowState == LanChatStore.DISCOVERY_WINDOW_ERROR", send)
+        self.assertIn("发现窗口账本操作失败，停止本轮发送", send)
         self.assertIn("发现窗口状态复核失败，停止广播", send)
 
         ack = extract_java_method(service, "private void processAuthenticatedLanChatAck(")
@@ -1557,8 +1558,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertNotIn("item.retryAttempts < 3", tracking)
         self.assertIn("resumeExhaustedRetriesForRecoveryEvent", tracking)
         self.assertIn("lanChatRecoveryEventPending", tracking)
-        self.assertIn("boolean attemptRecorded = false", tracking)
-        self.assertIn("if (attemptRecorded)", tracking)
+        self.assertIn("boolean attemptAdmitted = false", tracking)
+        self.assertIn("if (!attemptAdmitted && !serviceDestroyed)", tracking)
         self.assertIn("scheduleLanChatRetryFromOutbox()", tracking)
         self.assertIn("minimumAttempts == 2 ? 4_000L", tracking)
         self.assertIn("Math.min(60_000L, 10_000L << Math.min(3, minimumAttempts - 3))", tracking)
@@ -1990,8 +1991,10 @@ class LanP2PCoreTests(unittest.TestCase):
         source = (
             repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
         ).read_text(encoding="utf-8")
-        self.assertIn("P2P 排队耗时 ", source)
         self.assertIn("P2P 发送串行锁等待 message=", source)
+        self.assertIn("long lockRequestedAt =", source)
+        self.assertIn("int queueDepthAtRequest = lanChatTransmitLock.getQueueLength()", source)
+        self.assertIn("long lockWaitMs = lockAcquiredAt - lockRequestedAt", source)
 
     def test_android_chat_send_uses_short_ack_wait_and_durable_retry(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -2156,14 +2159,14 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn('v.put("delivery_deadline_ms", 0L)', enqueue)
         self.assertNotIn("+ FIRST_DISCOVERY_WINDOW_MS", enqueue)
 
-        begin_start = store.index("public boolean beginDiscoveryWindow(")
-        begin_end = store.index("public boolean isDiscoveryPending(", begin_start)
-        begin = store[begin_start:begin_end]
+        begin = extract_java_method(store, "public int beginOrReadDiscoveryWindow(")
         self.assertIn("FIRST_DISCOVERY_WINDOW_MS", begin)
-        self.assertIn('if (deadline > 0L)', begin)
+        self.assertIn("if (deadline > 0L)", begin)
+        self.assertIn("delivery_deadline_ms<=0", begin)
 
         self.assertIn("FIRST_DISCOVERY_WINDOW_MS = 10_000L", store)
-        self.assertIn("store.beginDiscoveryWindow(messageId)", service)
+        self.assertIn("store.beginOrReadDiscoveryWindow(messageId)", service)
+        self.assertIn("DISCOVERY_WINDOW_STARTED", service)
         self.assertIn("首次发现窗口开始", service)
 
 
@@ -2230,7 +2233,9 @@ class LanP2PCoreTests(unittest.TestCase):
         end = service.index("private void sendLanUdpPacket(", start)
         send = service[start:end]
         self.assertIn("if (pendingTargetIds.isEmpty()) {", send)
-        self.assertIn("boolean firstDispatch = store.beginDiscoveryWindow(messageId)", send)
+        self.assertIn("store.beginOrReadDiscoveryWindow(messageId)", send)
+        self.assertIn("discoveryWindowState == LanChatStore.DISCOVERY_WINDOW_WAITING", send)
+        self.assertIn("discoveryWindowState == LanChatStore.DISCOVERY_WINDOW_STARTED", send)
         self.assertNotIn(
             "pendingTargetIds.isEmpty() && store.isDiscoveryPending(messageId)", send
         )
@@ -3646,7 +3651,7 @@ class AndroidLanFixedTargetFastPathTests(unittest.TestCase):
         self.assertLess(lookup, lock)
         self.assertIn("pendingSnapshotTargets == 0", send)
         self.assertIn("preLockBroadcastLookupMs", send)
-        self.assertIn("preparedBroadcastAddress, preLockBroadcastLookupMs", send)
+        self.assertRegex(send, r"preparedBroadcastAddress,\\s*preLockBroadcastLookupMs")
         self.assertIn("final String[] broadcasts = pendingTargetIds.isEmpty()", internal)
         self.assertIn("new String[]{preparedBroadcastAddress}", internal)
         self.assertEqual(internal.count("getWifiBroadcastAddress()"), 1)
