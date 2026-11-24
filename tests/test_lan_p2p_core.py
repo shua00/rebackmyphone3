@@ -4663,6 +4663,26 @@ class LanP2PEnvelopeBudgetParityTests(unittest.TestCase):
         self.assertIn("_validate_peer_id_fields(packet)", python_core)
 
 
+class LanP2PPeerIdentityUnicodeParityTests(unittest.TestCase):
+    def test_python_peer_id_validation_rejects_unpaired_surrogates_and_c1_controls(self):
+        from lan_p2p_core import is_valid_peer_id
+        self.assertFalse(is_valid_peer_id("\\ud800"))
+        self.assertFalse(is_valid_peer_id("\\udfff"))
+        self.assertFalse(is_valid_peer_id("device-\\x7f"))
+        self.assertFalse(is_valid_peer_id("device-\\x80"))
+        self.assertFalse(is_valid_peer_id("device-\\x9f"))
+        self.assertTrue(is_valid_peer_id("device-😀"))
+
+    def test_android_peer_id_validation_matches_python_utf8_scalar_rules(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        protocol = (repo_root / "app/src/main/java/com/example/devicefinder/LanP2pProtocol.java").read_text(encoding="utf-8")
+        validator = extract_java_method(protocol, "public static boolean isValidPeerId(")
+        self.assertIn("Character.isHighSurrogate(ch)", validator)
+        self.assertIn("Character.isLowSurrogate(peerId.charAt(i + 1))", validator)
+        self.assertIn("else if (Character.isLowSurrogate(ch))", validator)
+        self.assertIn("peerId.getBytes(StandardCharsets.UTF_8).length <= MAX_PEER_ID_BYTES", validator)
+
+
 class LanChatAdmissionFeedbackTests(unittest.TestCase):
     def test_android_rejected_admission_is_visible_but_durable_send_queue_fallback_is_not_rejected(self):
         repo_root = Path(__file__).resolve().parents[1]
