@@ -16,6 +16,11 @@ import java.net.InetSocketAddress;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -192,6 +197,45 @@ public class LanChatStorePersistenceTest {
 
         assertTrue(store.acknowledge("android-write-failure", "android-a"));
         assertTrue(store.allTargetsAcked("android-write-failure"));
+    }
+
+    @Test
+    public void concurrentIdenticalInboxDeliveriesCommitExactlyOneDurableRow() throws Exception {
+        final int workers = 6;
+        final int deliveries = 12;
+        final CountDownLatch ready = new CountDownLatch(workers);
+        final CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(workers);
+        try {
+            @SuppressWarnings("unchecked")
+            Future<Boolean>[] results = new Future[deliveries];
+            for (int i = 0; i < deliveries; i++) {
+                results[i] = pool.submit(() -> {
+                    ready.countDown();
+                    if (!start.await(5, TimeUnit.SECONDS)) return false;
+                    return store.storeIncoming(
+                            "android-main", "desktop-peer", "android-inbox-concurrent",
+                            "same authenticated payload", "Desktop", 1234L, "12:34:56");
+                });
+            }
+            assertTrue(ready.await(5, TimeUnit.SECONDS));
+            start.countDown();
+            for (Future<Boolean> result : results) {
+                assertTrue(result.get(10, TimeUnit.SECONDS));
+            }
+        } finally {
+            start.countDown();
+            pool.shutdownNow();
+        }
+
+        List<LanChatStore.IncomingMessage> pending =
+                store.loadUndisplayedIncoming("android-main", 20);
+        assertEquals(1, pending.size());
+        assertEquals("android-inbox-concurrent", pending.get(0).messageId);
+        assertFalse(store.storeIncoming(
+                "android-main", "desktop-peer", "android-inbox-concurrent",
+                "different payload under reused message ID", "Desktop", 1234L, "12:34:56"));
+        assertEquals(1, store.loadUndisplayedIncoming("android-main", 20).size());
     }
 
     @Test
