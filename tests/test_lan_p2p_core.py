@@ -137,8 +137,10 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("if (routeRefreshCaptured && !retryBatchCompleted)", retry)
         self.assertIn("lanChatRecoveryEventPending.set(true)", retry)
         self.assertIn("catch (Exception recoveryStorageFailure)", retry)
-        self.assertLess(retry.index("catch (Exception recoveryStorageFailure)"),
-                        retry.index("store.resumeExhaustedRetriesForRecoveryEvent"))
+        recovery_call = retry.index("store.resumeExhaustedRetriesForRecoveryEvent")
+        recovery_catch = retry.index("catch (Exception recoveryStorageFailure)")
+        self.assertLess(recovery_call, recovery_catch)
+        self.assertLess(recovery_catch, retry.index("lanChatRecoveryEventPending.set(true)", recovery_catch))
         self.assertIn("retryBatchCompleted = true", retry)
         self.assertIn("lanChatRetryInFlight.set(false)", retry)
 
