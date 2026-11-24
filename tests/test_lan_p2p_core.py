@@ -3395,18 +3395,18 @@ class AndroidLanSchedulingAndAckProgressTests(unittest.TestCase):
         self.assertIn("LanChatStore storeToClose = lanChatStore;", destroy)
         self.assertIn("closeLanChatStoreAfterExecutors(storeToClose)", destroy)
         self.assertNotIn("lanChatStore = null", destroy)
-        self.assertLess(
-            closer.index("awaitLanExecutorTermination(lanChatPersistExecutor)"),
-            closer.index("if (lanChatStore == storeToClose) lanChatStore = null;"),
-        )
-        self.assertLess(
-            closer.index("awaitLanExecutorTermination(lanChatIoExecutor)"),
-            closer.index("if (lanChatStore == storeToClose) lanChatStore = null;"),
-        )
-        self.assertLess(
-            closer.index("if (lanChatStore == storeToClose) lanChatStore = null;"),
-            closer.index("storeToClose.closeStore()"),
-        )
+        clear_store = closer.index("if (lanChatStore == storeToClose) lanChatStore = null;")
+        for executor in (
+            "lanChatScheduler", "lanChatPersistExecutor", "lanChatImmediateExecutor",
+            "lanChatSendExecutor", "lanChatControlExecutor", "lanChatAckExecutor",
+            "lanChatPeerExecutor", "lanChatProbeExecutor", "lanChatIoExecutor",
+            "maintenanceExecutor",
+        ):
+            self.assertLess(
+                closer.index("awaitLanExecutorTermination(" + executor + ")"),
+                clear_store,
+            )
+        self.assertLess(clear_store, closer.index("storeToClose.closeStore()"))
         persist = extract_java_method(source, "private boolean persistPendingLanChat(")
         self.assertIn("LanChatStore store = lanChatStore;", persist)
         self.assertIn("store.enqueueWithRecipientSnapshot(", persist)
