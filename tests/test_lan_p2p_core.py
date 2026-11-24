@@ -145,6 +145,18 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("lanChatRetryInFlight.set(false)", retry)
 
 
+    def test_outbox_retry_failure_uses_delayed_wake_not_immediate_spin(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        service = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        retry = extract_java_method(service, "private void retryPendingLanChatMessages(boolean recoveryEvent)")
+        self.assertIn("if (!retryBatchCompleted)", retry)
+        self.assertIn('"outbox-retry-after-failure"', retry)
+        self.assertIn("retryAfterFailure, 500L", retry)
+        self.assertIn("handler.postDelayed(retryAfterFailure, 500L)", retry)
+        self.assertIn("retryPendingLanChatMessages(true)", retry)
+        self.assertIn("retryPendingLanChatMessages(false)", retry)
+
+
     def test_recovery_epoch_storage_failure_is_not_reported_as_no_work(self):
         repo_root = Path(__file__).resolve().parents[1]
         store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")

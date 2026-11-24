@@ -4278,12 +4278,25 @@ public class TrackingService extends Service implements LocationListener {
                         lanChatRouteRefreshPending.set(true);
                     }
                     lanChatRetryInFlight.set(false);
-                    // Do not lose a network/peer recovery event that arrived during this batch.
-                    if (lanChatRecoveryEventPending.get()) {
-                        retryPendingLanChatMessages(true);
-                    } else if (lanChatRouteRefreshPending.get()) {
-                        // An ACK-timeout route refresh must not be lost behind this batch.
-                        retryPendingLanChatMessages(false);
+                    // Preserve events arriving during this batch. A failed batch must back off;
+                    // immediately resubmitting a still-failing SQLite operation would spin.
+                    if (lanChatRecoveryEventPending.get() || lanChatRouteRefreshPending.get()) {
+                        if (!retryBatchCompleted) {
+                            final Runnable retryAfterFailure = () -> {
+                                if (!serviceDestroyed) {
+                                    retryPendingLanChatMessages(lanChatRecoveryEventPending.get());
+                                }
+                            };
+                            if (!scheduleLanChatTask("outbox-retry-after-failure",
+                                    retryAfterFailure, 500L)) {
+                                handler.postDelayed(retryAfterFailure, 500L);
+                            }
+                        } else if (lanChatRecoveryEventPending.get()) {
+                            retryPendingLanChatMessages(true);
+                        } else {
+                            // An ACK-timeout route refresh must not be lost behind this batch.
+                            retryPendingLanChatMessages(false);
+                        }
                     } else {
                         // Re-arm after releasing the in-flight guard. A delayed callback may
                         // have fired while this batch was still running and been coalesced.
@@ -4298,8 +4311,15 @@ public class TrackingService extends Service implements LocationListener {
             // Queue saturation is not a network-recovery event. Preserve the pending
             // recovery flag above and retry admission after the current queue drains.
             if (!serviceDestroyed) {
-                scheduleLanChatTask("outbox-retry-admission-fallback",
-                        () -> retryPendingLanChatMessages(recoveryEvent), 500L);
+                final Runnable retryAfterAdmission = () -> {
+                    if (!serviceDestroyed) {
+                        retryPendingLanChatMessages(recoveryEvent || lanChatRecoveryEventPending.get());
+                    }
+                };
+                if (!scheduleLanChatTask("outbox-retry-admission-fallback",
+                        retryAfterAdmission, 500L)) {
+                    handler.postDelayed(retryAfterAdmission, 500L);
+                }
             }
         }
     }
