@@ -1331,7 +1331,7 @@ class LanP2PCoreTests(unittest.TestCase):
         end = source.index("public List<Target> loadKnownPeers(", start)
         method = source[start:end]
         expired_guard = method.index('if ("expired".equals(state)) return false;')
-        delivered_mutation = method.index('next.put("state", "delivered")')
+        delivered_mutation = method.index("LanChatDeliveryState.DELIVERED")
         self.assertLess(expired_guard, delivered_mutation)
         self.assertIn('state = c.getString(0);', method)
         self.assertIn('if (discoveryOpen || total == 0) return false;', method)
@@ -2239,7 +2239,12 @@ class LanP2PCoreTests(unittest.TestCase):
                       store[pending_start:pending_end])
         finalize_start = store.index("private boolean finalizeDiscoveryMessage(")
         finalize_end = store.index("public boolean storeIncoming(", finalize_start)
-        self.assertIn('"waiting_peers"', store[finalize_start:finalize_end])
+        state = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatDeliveryState.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn("LanChatDeliveryState.settleAfterDiscovery(total, acked, hasRetryBudget)", store[finalize_start:finalize_end])
+        self.assertIn('static final String WAITING_PEERS = "waiting_peers";', state)
+        self.assertIn("if (totalTargets <= 0) return WAITING_PEERS;", state)
         self.assertIn("public boolean finalizeDiscoveryWindow(", store)
         tracking = (
             repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
