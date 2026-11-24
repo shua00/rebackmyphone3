@@ -340,5 +340,122 @@ class TransferFilesystemTests(unittest.TestCase):
         self.assertFalse(task.exists())
 
 
+
+class TransferTcpFrameTests(unittest.TestCase):
+    SECRET = b"test-transfer-session-secret-32"
+
+    def _round_trip(self, frame, *, expected_sender="sender", expected_target="receiver"):
+        import socket
+        from lan_p2p_transfer_tcp import send_frame, recv_frame
+        left, right = socket.socketpair()
+        try:
+            send_frame(left, frame, self.SECRET)
+            return recv_frame(right, self.SECRET,
+                              expected_sender_peer_id=expected_sender,
+                              expected_target_peer_id=expected_target)
+        finally:
+            left.close()
+            right.close()
+
+    def test_chunk_frame_round_trip_and_peer_binding(self):
+        from lan_p2p_transfer_tcp import TransferFrame
+        payload = b"chunk-payload"
+        frame = TransferFrame("chunk", "transfer-tcp-1", "sender", "receiver",
+                              index=3, payload=payload)
+        decoded = self._round_trip(frame)
+        self.assertEqual(frame, decoded)
+
+    def test_control_frame_round_trip_with_missing_indexes(self):
+        from lan_p2p_transfer_tcp import TransferFrame
+        frame = TransferFrame("missing", "transfer-tcp-1", "sender", "receiver",
+                              metadata={"indexes": [1, 4, 8]})
+        self.assertEqual(frame, self._round_trip(frame))
+
+    def test_fragmented_tcp_reads_are_reassembled(self):
+        import socket
+        import threading
+        from lan_p2p_transfer_tcp import TransferFrame, encode_frame, recv_frame
+        left, right = socket.socketpair()
+        frame = TransferFrame("chunk", "transfer-tcp-2", "sender", "receiver",
+                              index=0, payload=b"x" * 8192)
+        encoded = encode_frame(frame, self.SECRET)
+        def fragmented_write():
+            for offset in range(0, len(encoded), 37):
+                left.sendall(encoded[offset:offset + 37])
+            left.shutdown(socket.SHUT_WR)
+        worker = threading.Thread(target=fragmented_write)
+        try:
+            worker.start()
+            decoded = recv_frame(right, self.SECRET)
+            self.assertEqual(frame, decoded)
+            worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+        finally:
+            left.close()
+            right.close()
+
+    def test_rejects_wrong_secret_and_peer_identity(self):
+        import socket
+        from lan_p2p_transfer_tcp import TransferFrame, encode_frame, recv_frame, TransferFrameError
+        frame = TransferFrame("chunk", "transfer-tcp-3", "sender", "receiver",
+                              index=0, payload=b"abc")
+        wire = encode_frame(frame, self.SECRET)
+        left, right = socket.socketpair()
+        try:
+            left.sendall(wire)
+            with self.assertRaises(TransferFrameError):
+                recv_frame(right, b"wrong-secret-material-32")
+        finally:
+            left.close()
+            right.close()
+        left, right = socket.socketpair()
+        try:
+            left.sendall(wire)
+            with self.assertRaises(TransferFrameError):
+                recv_frame(right, self.SECRET, expected_sender_peer_id="other-peer")
+        finally:
+            left.close()
+            right.close()
+
+    def test_rejects_oversized_payload_before_reading_body(self):
+        import socket
+        import json
+        import struct
+        from lan_p2p_transfer_tcp import _MAGIC, TransferFrameError, recv_frame
+        header = {
+            "v": 1, "kind": "chunk", "transfer_id": "t", "sender_peer_id": "sender",
+            "target_peer_id": "receiver", "index": 0, "payload_size": 999999,
+            "payload_sha256": "0" * 64, "metadata": None, "auth": "0" * 64
+        }
+        raw = json.dumps(header, separators=(",", ":"), sort_keys=True).encode()
+        left, right = socket.socketpair()
+        try:
+            left.sendall(_MAGIC + struct.pack("!I", len(raw)) + raw)
+            with self.assertRaises(TransferFrameError):
+                recv_frame(right, self.SECRET, max_payload_bytes=1024)
+        finally:
+            left.close()
+            right.close()
+
+    def test_rejects_truncated_stream(self):
+        import socket
+        from lan_p2p_transfer_tcp import TransferFrameError, recv_frame
+        left, right = socket.socketpair()
+        try:
+            left.sendall(b"LNP2\\x00")
+            left.shutdown(socket.SHUT_WR)
+            with self.assertRaises(EOFError):
+                recv_frame(right, self.SECRET)
+        finally:
+            left.close()
+            right.close()
+
+    def test_control_frames_cannot_smuggle_payload(self):
+        from lan_p2p_transfer_tcp import TransferFrame, TransferFrameError, encode_frame
+        with self.assertRaises(TransferFrameError):
+            encode_frame(TransferFrame("complete", "t", "sender", "receiver",
+                                       payload=b"unexpected"), self.SECRET)
+
+
 if __name__ == "__main__":
     unittest.main()

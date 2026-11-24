@@ -1,4 +1,26 @@
 ================================================================================
+v8.16 — 2026-11-25 · LAN 文件传输 TCP 帧协议与边界验收
+================================================================================
+
+【新增】lan_p2p_transfer_tcp.py · 有界认证 TCP framing
+--------------------------------------------------------------------------------
+- 使用独立 LNP2 stream magic + 固定长度前缀 + 有界 JSON header + 原始 payload。
+- 帧头采用 canonical JSON + HMAC-SHA256；payload 单独校验 SHA-256，认证覆盖 payload digest。
+- chunk、chunk_ack、missing、complete、cancel 控制类型分离；控制帧不能夹带分块 payload。
+- 限制 header 4 KiB、metadata 2 KiB、payload 默认 1 MiB；读取长度在读取 payload 前验证。
+- recv_exact 处理 TCP 任意分片与 EOF；sendall 保证完整写入调用语义。
+- 接收端可强制 expected_sender_peer_id / expected_target_peer_id，防止跨任务或错误 peer 注入。
+- 明确该模块只提供 framing primitives；socket listener、peer challenge/session key 生命周期、超时、并发限额和 Android 互通尚未接入。
+
+【测试】TransferTcpFrameTests
+--------------------------------------------------------------------------------
+- 覆盖 chunk/control round-trip、TCP 分片读取、HMAC 与 peer 身份拒绝、超长 payload 头、截断流和控制帧载荷隔离。
+
+【CI】Python 编译清单纳入 lan_p2p_transfer_tcp.py；传输模块源码路径纳入 workflow 触发条件。
+
+================================================================================
+
+================================================================================
 v8.15 — 2026-11-25 · 文件传输安全落盘与崩溃恢复适配层
 ================================================================================
 

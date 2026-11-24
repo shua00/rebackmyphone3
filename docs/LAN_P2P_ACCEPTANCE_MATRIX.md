@@ -491,3 +491,16 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 清理 | 仅允许终态任务删除其哈希专属 staging 目录 | 自动清理调度和保留期限后续实现 |
 
 **阶段判定：** Python 文件系统适配层的 staging、reconcile、assemble/verify、atomic publish 和终态清理具备自动化测试；TCP 网络数据面与 Android 文件 API 集成仍属后续阶段，不得据此宣布端到端文件传输完成。
+
+## 25. TCP 文件传输 framing（2026-11-25）
+
+| 验收点 | 本批实现 | 当前边界 |
+|---|---|---|
+| 流边界 | LNP2 magic + 4-byte header length + JSON header + binary payload | 不与 1200-byte UDP chat datagram 共用 |
+| 认证 | canonical JSON HMAC-SHA256，头部包含 payload SHA-256；接收后分别验证 HMAC 和 payload hash | 依赖调用方提供既有可信 session secret；不自行建立密钥或认证设备 |
+| peer 绑定 | recv_frame 可强制校验预期 sender/target peer ID | 连接接入层仍须完成 challenge、路由和会话绑定 |
+| 资源边界 | header 4 KiB、metadata 2 KiB、默认 payload 1 MiB；先验长度再读 payload | socket timeout、并发连接限额由 listener 层负责 |
+| 流健壮性 | recv_exact 支持分片读取；EOF 明确报错；sendall 完整写出 | 尚未实现 listener、连接池、重试和调度 |
+| 控制面隔离 | chunk 与 missing/ack/complete/cancel 分帧；控制帧拒绝 payload | 控制消息尚未与 TransferStore/TransferFilesystem 调度联通 |
+
+**阶段判定：** TCP framing 与认证边界具备单元/SocketPair 测试，但尚不能称为 TCP 文件传输端到端完成。下一步需实现已认证 peer session 的 listener/client、缺块协商与文件系统适配层联动，再补 Android 同协议实现。
