@@ -2244,7 +2244,7 @@ class LanP2PCoreTests(unittest.TestCase):
         remove_waiter = handler.index("expected.remove(senderId)")
         self.assertLess(persist_ack, remove_waiter)
         self.assertIn("boolean wasExpected = expected != null && expected.remove(senderId);", handler)
-        self.assertIn("expected != null && expected.isEmpty()", handler)
+        self.assertIn("!wasExpected && expected != null && expected.isEmpty()", handler)
         self.assertIn("if (discoveryBroadcastAck && !discoveryAck)", handler)
         self.assertIn("discoveryBroadcastAck = store.isDiscoveryPending(messageId);", handler)
         self.assertIn("expected.isEmpty()\n                    && latch != null && latch.getCount() > 0", handler)
