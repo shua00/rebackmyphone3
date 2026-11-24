@@ -4533,6 +4533,13 @@ class AndroidLanStoreLifecycleTests(unittest.TestCase):
         self.assertIn("lanChatProbeExecutor.shutdown()", destroy)
         self.assertIn("lanChatIoExecutor.shutdown()", destroy)
         self.assertIn("closeLanChatIngressSocket()", destroy)
+        self.assertLess(destroy.index("serviceDestroyed = true"),
+                        destroy.index("closeLanChatIngressSocket()"))
+        self.assertLess(destroy.index("closeLanChatIngressSocket()"),
+                        destroy.index("listenerToStop.interrupt()"))
+        self.assertLess(destroy.index("listenerToStop.interrupt()"),
+                        destroy.index("lanChatPersistExecutor.shutdown()"))
+        self.assertIn("releaseLanMulticastLock();", destroy)
         self.assertLess(destroy.index("closeLanChatIngressSocket()"),
                         destroy.index("lanChatPersistExecutor.shutdown()"))
         ingress_close = extract_java_method(source, "private void closeLanChatIngressSocket()")
@@ -5322,6 +5329,74 @@ print('outbox=', outbox, 'target=', target, 'pending=', pending)
 assert outbox == ('server2', 'durable body', 'delivered'), outbox
 assert target == ('acked', 1, '192.0.2.10:8888', '192.0.2.10:8888'), target
 assert pending == [], pending
+"""
+        self._run_python(verify)
+
+    def test_peer_scoped_retry_recovery_and_partial_ack_survive_process_restart(self):
+        create = """
+import sys
+from unittest.mock import patch
+from lan_p2p_core import (record_peer, persist_outgoing_message,
+    mark_outgoing_attempt, prepare_outgoing_peer_recovery,
+    acknowledge_outgoing_message)
+db = sys.argv[1]
+assert record_peer(db, 'server2', 'android-a', 'android', 'android-main',
+                   '192.0.2.10', 8888, 'active')
+assert record_peer(db, 'server2', 'android-b', 'android', 'android-main',
+                   '192.0.2.11', 8888, 'active')
+assert persist_outgoing_message(db, 'server2', 'server2-id', 'restart-peer-scope',
+                                'durable body', ['android-a', 'android-b'])
+with patch('lan_p2p_core.time.time', return_value=1000.0):
+    assert mark_outgoing_attempt(db, 'restart-peer-scope', 'android-a',
+                                 '192.0.2.10', 8888)
+    assert acknowledge_outgoing_message(
+        db, 'server2', 'restart-peer-scope', 'android-a')
+    for _ in range(8):
+        assert mark_outgoing_attempt(db, 'restart-peer-scope', 'android-b',
+                                     '192.0.2.11', 8888)
+# Persist a prior recovery epoch, then exhaust only android-b again.
+assert prepare_outgoing_peer_recovery(
+    db, 'server2', 'android-b', now_ms=1000000) == 1
+with patch('lan_p2p_core.time.time', return_value=1000.001):
+    for _ in range(8):
+        assert mark_outgoing_attempt(db, 'restart-peer-scope', 'android-b',
+                                     '192.0.2.11', 8888)
+"""
+        self._run_python(create)
+        verify = """
+import contextlib, sqlite3, sys
+from lan_p2p_core import (prepare_outgoing_peer_recovery,
+    load_pending_outgoing_for_peer, next_peer_recovery_eligible_at_ms)
+db = sys.argv[1]
+# A restarted worker must respect the persisted 60-second cooldown.
+assert prepare_outgoing_peer_recovery(
+    db, 'server2', 'android-b', now_ms=1050000) == 0
+assert load_pending_outgoing_for_peer(db, 'server2', 'android-b') == []
+assert load_pending_outgoing_for_peer(db, 'server2', 'android-a') == []
+deadline = next_peer_recovery_eligible_at_ms(
+    db, 'server2', 'android-b', now_ms=1050000)
+assert deadline == 1060000, deadline
+# Only the exhausted, authenticated peer's target is reopened after cooldown.
+assert prepare_outgoing_peer_recovery(
+    db, 'server2', 'android-b', now_ms=1061000) == 1
+pending_b = load_pending_outgoing_for_peer(db, 'server2', 'android-b')
+pending_a = load_pending_outgoing_for_peer(db, 'server2', 'android-a')
+assert [row['message_id'] for row in pending_b] == ['restart-peer-scope'], pending_b
+assert pending_a == [], pending_a
+with contextlib.closing(sqlite3.connect(db)) as conn:
+    state = conn.execute(
+        'SELECT state FROM lan_outbox WHERE message_id=?',
+        ('restart-peer-scope',)).fetchone()[0]
+    targets = dict(conn.execute(
+        'SELECT peer_id,status FROM lan_outbox_targets WHERE message_id=?',
+        ('restart-peer-scope',)).fetchall())
+    retry = conn.execute(
+        'SELECT attempt_count,last_recovery_at_ms FROM lan_outbox_targets '
+        'WHERE message_id=? AND peer_id=?',
+        ('restart-peer-scope','android-b')).fetchone()
+assert state == 'partial', state
+assert targets == {'android-a': 'acked', 'android-b': 'sent'}, targets
+assert retry == (0, 1061000), retry
 """
         self._run_python(verify)
 
