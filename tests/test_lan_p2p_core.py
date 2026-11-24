@@ -1218,7 +1218,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("boolean routeMatches", ack_handler)
         self.assertIn("boolean discoveryAck", ack_handler)
         self.assertIn("if (!routeMatches && !persistedEndpointMatch)", ack_handler)
-        self.assertNotIn("&& !discoveryAck)", ack_handler)
+        self.assertNotIn("if (!routeMatches && !persistedEndpointMatch && !discoveryAck)", ack_handler)
         self.assertIn("allowDiscoveryGrace && discoveryAck", ack_handler)
         self.assertLess(ack_handler.index("if (!routeMatches && !persistedEndpointMatch)"),
                         ack_handler.index("store.acknowledge(messageId, senderId)"))
@@ -2243,8 +2243,11 @@ class LanP2PCoreTests(unittest.TestCase):
         persist_ack = handler.index("store.acknowledge(messageId, senderId)")
         remove_waiter = handler.index("expected.remove(senderId)")
         self.assertLess(persist_ack, remove_waiter)
-        self.assertIn("discoveryAck && expected != null", handler)
-        self.assertIn("expected.isEmpty() && latch != null && latch.getCount() > 0", handler)
+        self.assertIn("boolean wasExpected = expected != null && expected.remove(senderId);", handler)
+        self.assertIn("expected != null && expected.isEmpty()", handler)
+        self.assertIn("if (discoveryBroadcastAck && !discoveryAck)", handler)
+        self.assertIn("discoveryBroadcastAck = store.isDiscoveryPending(messageId);", handler)
+        self.assertIn("expected.isEmpty()\n                    && latch != null && latch.getCount() > 0", handler)
         self.assertIn("wasExpected || discoveryBroadcastAck", handler)
         self.assertNotIn("wasExpected || discoveryAck)", handler)
 
