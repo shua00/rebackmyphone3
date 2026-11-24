@@ -2694,6 +2694,10 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn('scheduleLanChatTask("outbox-recovery-cooldown"', cooldown_wake)
         self.assertIn("handler.postDelayed(wake, delayMs)", cooldown_wake)
         self.assertIn("store.nextRecoveryEventEligibleAtMs", retry)
+        self.assertIn(
+            'if (resumed > 0) {\\n                            FileLogger.log(this, "CHAT", "LAN 恢复事件重新开启有限补发预算 messages=" + resumed);\\n                        }\\n                        // Schedule the next cooldown',
+            retry,
+        )
 
     def test_server2_udp_ack_requires_verified_route_and_durable_outbox_ack_before_fallback_cleanup(self):
         repo_root = Path(__file__).resolve().parents[1]
