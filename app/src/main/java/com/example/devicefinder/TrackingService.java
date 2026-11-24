@@ -4288,8 +4288,8 @@ public class TrackingService extends Service implements LocationListener {
                                 }
                             };
                             if (!scheduleLanChatTask("outbox-retry-after-failure",
-                                    retryAfterFailure, 500L)) {
-                                handler.postDelayed(retryAfterFailure, 500L);
+                                    retryAfterFailure, LanChatRetryPolicy.RECOVERY_FAILURE_RETRY_DELAY_MS)) {
+                                handler.postDelayed(retryAfterFailure, LanChatRetryPolicy.RECOVERY_FAILURE_RETRY_DELAY_MS);
                             }
                         } else if (lanChatRecoveryEventPending.get()) {
                             retryPendingLanChatMessages(true);
@@ -4317,8 +4317,8 @@ public class TrackingService extends Service implements LocationListener {
                     }
                 };
                 if (!scheduleLanChatTask("outbox-retry-admission-fallback",
-                        retryAfterAdmission, 500L)) {
-                    handler.postDelayed(retryAfterAdmission, 500L);
+                        retryAfterAdmission, LanChatRetryPolicy.RECOVERY_FAILURE_RETRY_DELAY_MS)) {
+                    handler.postDelayed(retryAfterAdmission, LanChatRetryPolicy.RECOVERY_FAILURE_RETRY_DELAY_MS);
                 }
             }
         }

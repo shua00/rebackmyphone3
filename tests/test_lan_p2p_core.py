@@ -151,8 +151,8 @@ class LanP2PCoreTests(unittest.TestCase):
         retry = extract_java_method(service, "private void retryPendingLanChatMessages(boolean recoveryEvent)")
         self.assertIn("if (!retryBatchCompleted)", retry)
         self.assertIn('"outbox-retry-after-failure"', retry)
-        self.assertIn("retryAfterFailure, 500L", retry)
-        self.assertIn("handler.postDelayed(retryAfterFailure, 500L)", retry)
+        self.assertIn("retryAfterFailure, LanChatRetryPolicy.RECOVERY_FAILURE_RETRY_DELAY_MS", retry)
+        self.assertIn("handler.postDelayed(retryAfterFailure, LanChatRetryPolicy.RECOVERY_FAILURE_RETRY_DELAY_MS)", retry)
         self.assertIn("retryPendingLanChatMessages(true)", retry)
         self.assertIn("retryPendingLanChatMessages(false)", retry)
 

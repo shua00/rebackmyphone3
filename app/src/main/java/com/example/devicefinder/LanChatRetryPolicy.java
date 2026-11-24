@@ -24,6 +24,7 @@ final class LanChatRetryPolicy {
     static final long OUTBOX_RETRY_SECOND_DELAY_MS = 4_000L;
     static final long OUTBOX_RETRY_BACKOFF_BASE_MS = 10_000L;
     static final long OUTBOX_RETRY_MAX_DELAY_MS = 60_000L;
+    static final long RECOVERY_FAILURE_RETRY_DELAY_MS = 500L;
     static final long UNATTEMPTED_ROUTE_PROBE_MAX_DELAY_MS = 5_000L;
     static final int RETRY_BATCH_SIZE = 3;
     static final int MAX_RETRY_BATCHES_PER_WAKE = 3;
