@@ -143,3 +143,17 @@
 - API 21-22 的 LAN 快路径只在系统默认网络确实为 Wi-Fi、且可取得有效子网广播地址时放行；默认路由切换时撤销旧 peer 路由并重绑 listener。
 - 旧系统网络代数加入 Wi-Fi BSSID、Network ID 与 DHCP 地址/掩码/网关，覆盖同子网重连但 AP 或 DHCP 路径变化的场景。
 - API 23+ 继续以实际 socket-bound Wi-Fi Network 的 LinkProperties 指纹为 LAN 路径权威；单纯 cellular/default Internet route 切换不得误撤销仍可用的 Wi-Fi LAN peer。
+
+
+### D12：文件传输是独立任务，不是放大的聊天消息
+
+- 每次文件传输使用独立 `transfer_id`；不得复用 `message_id`，不得把文件块塞入 `chat.message` 或扩大当前 1200-byte UDP 数据报。
+- Offer 只携带元数据：transfer_id、发送/目标 peer、显示文件名、大小、整文件 SHA-256、创建时间和 MIME 提示。文件名永远不是接收端路径。
+- 接收端必须显式 Accept；Accept 前不发送文件数据。拒绝、取消和过期是终态，不得因重试或重复控制帧复活。
+- 文件数据使用独立流式连接（首选 TCP），控制面与现有 peer 身份/路由复用但任务账本独立；连接失败可重建，不改变文字消息状态。
+- 默认 chunk size 256 KiB，可配置 4 KiB–1 MiB；默认并行块 4、活动任务 4、单文件上限 2 GiB。两端均须执行硬上限与磁盘配额，协商值只能收紧本地限制，不能放宽。
+- 每块按 transfer_id + index 唯一定位，必须验证精确长度和 chunk SHA-256。重复块只有在内容摘要一致时才幂等成功；同 index 不同内容必须失败并保留诊断。
+- 接收端先写入由应用生成的安全临时块文件，完成 fsync/摘要核验后再提交 chunk ledger；重启恢复时必须复核 ledger 对应的块文件存在、长度和摘要，不能只相信数据库进度。
+- 所有块齐备后按序组装到接收端临时文件，验证整文件 SHA-256，成功后才原子 rename 到用户确认的目标位置；校验失败不能报告完成。
+- Resume 交换缺块索引或位图，不重传已验证块；Cancel/cleanup 只影响该 transfer_id，不删除聊天消息或其他传输任务。
+- 当前 `lan_p2p_transfer.py` 仅实现纯领域校验与状态迁移，不包含 socket、SQLite、文件系统或 UI；后续阶段必须分层实现，不能把该模块描述成已可用的文件传输功能。

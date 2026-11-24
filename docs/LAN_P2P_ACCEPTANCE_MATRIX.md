@@ -439,3 +439,18 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | LAN v2 文件传输 | 当前协议仍仅包含 peer hello/ack 与 chat message/ack；文字消息保持小型 UDP 数据报 | 尚未实现文件 offer/chunk/校验/断点续传；按独立数据通道设计，不混入文字消息 UDP |
 
 本节所列 CI 只证明对应 commit 的自动检查与 APK 构建；不替代多设备、真实网络切换和 SQLite 故障注入。
+
+
+## 21. 独立文件传输领域契约（2026-11-25）
+
+| 项目 | 当前实现 | 验收边界 |
+|---|---|---|
+| 独立状态模型 | 新增 `lan_p2p_transfer.py`：Offer/Accept/Transferring/Paused/Verifying/Completed/Rejected/Cancelled/Failed/Expired 状态；非法跳转拒绝，重复同状态事件幂等 | 纯领域模型，不代表网络任务或 UI 已接入 |
+| Offer 安全校验 | 校验 transfer_id、发送/接收 peer、文件名、文件大小、SHA-256、时间戳和 MIME 元数据；文件名仅作显示元数据，不得作为保存路径 | 接收端仍必须自行选择安全保存位置并检查磁盘空间/配额 |
+| 分块契约 | 默认块大小 256 KiB（可配置 4 KiB–1 MiB）；精确验证 chunk index、payload 长度和 chunk SHA-256；整文件 SHA-256 保留为最终验收条件 | 当前只实现纯函数校验；尚未传输、落盘或执行整文件复核 |
+| 断点续传 | 根据已持久化的 chunk index 集合计算有序缺块清单；重复索引幂等 | 尚未实现持久化 chunk ledger、断点恢复与磁盘内容复核 |
+| 资源上限 | 默认单文件 2 GiB、并行块 4、活动任务 4；均由独立 limits 参数约束 | 仍需在发送端和接收端执行总配额、剩余磁盘空间和并发 admission |
+| 文字消息隔离 | 文件传输模型不复用 chat.message/chat.ack，不改变现有 1200-byte UDP 文字消息路径 | 后续控制面可复用 peer 身份/发现，文件数据面应使用独立流式连接 |
+| 自动化 | 新增 Offer、chunk、resume-index、state transition 单元测试 | Actions 待验证；真实 TCP/流式数据、重启续传、损坏块和取消清理尚未验收 |
+
+**本节仅完成文件传输第一阶段领域契约，不代表 LAN 文件传输已可用。后续实现必须保持独立 transfer_id、接收端显式 Accept、分块幂等、分块持久化、整文件 SHA-256、断点续传与安全临时文件/原子落盘。**
