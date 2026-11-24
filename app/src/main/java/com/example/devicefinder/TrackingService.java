@@ -5577,7 +5577,7 @@ public class TrackingService extends Service implements LocationListener {
                     }
                 }
             }
-            boolean discoveryBroadcastAck = expected != null && expected.isEmpty()
+            boolean discoveryBroadcastAck = !wasExpected && expected != null && expected.isEmpty()
                     && latch != null && latch.getCount() > 0;
             if (discoveryBroadcastAck && !discoveryAck) {
                 // A first-discovery peer may already have a verified live route because
