@@ -7,6 +7,7 @@ import threading
 import time
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +17,17 @@ from lan_p2p_core import (LanP2PStorageError, load_stable_peer_id, record_peer,
 
 
 import re
+
+
+@contextmanager
+def _sqlite_connection(database):
+    """Commit/rollback a test transaction and always close its SQLite handle."""
+    connection = sqlite3.connect(database)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
 
 def extract_java_method(source, signature):
     """Extract one Java method using balanced braces, ignoring comments and literals."""
@@ -431,7 +443,7 @@ class LanP2PCoreTests(unittest.TestCase):
         with patch("lan_p2p_core.time.time", return_value=1110.0):
             self.assertTrue(record_peer(self.db_path, "server2", "android-a",
                                         "android", "android-main", "192.168.1.10", 8888, "suspect"))
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             row = conn.execute(
                 "SELECT last_seen_at,last_verified_at,lease_expires_at,status FROM lan_peers "
                 "WHERE receiver_scope='server2' AND peer_id='android-a'"
@@ -746,12 +758,12 @@ class LanP2PCoreTests(unittest.TestCase):
             message_id = "m-terminal-attempt-" + state
             self.assertTrue(persist_outgoing_message(
                 self.db_path, "server2", "server2-id", message_id, "hello", ["android-a"]))
-            with sqlite3.connect(self.db_path) as conn:
+            with _sqlite_connection(self.db_path) as conn:
                 conn.execute("UPDATE lan_outbox SET state=? WHERE message_id=?",
                              (state, message_id))
             self.assertFalse(mark_outgoing_attempt(
                 self.db_path, message_id, "android-a", "192.168.1.10", 8888))
-            with sqlite3.connect(self.db_path) as conn:
+            with _sqlite_connection(self.db_path) as conn:
                 row = conn.execute(
                     "SELECT status,attempt_count FROM lan_outbox_targets "
                     "WHERE message_id=? AND peer_id='android-a'", (message_id,)
@@ -830,14 +842,14 @@ class LanP2PCoreTests(unittest.TestCase):
         )
         self.assertTrue(persist_outgoing_message(
             self.db_path, "server2", "server2-id", "m-empty-final", "hello", []))
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             conn.execute(
                 "UPDATE lan_outbox SET delivery_deadline_ms=1 WHERE message_id='m-empty-final'")
         self.assertFalse(is_outgoing_discovery_pending(
             self.db_path, "server2", "m-empty-final"))
         self.assertEqual(add_discovery_targets_for_peer(
             self.db_path, "server2", "late-android"), 0)
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             state = conn.execute(
                 "SELECT state FROM lan_outbox WHERE message_id='m-empty-final'").fetchone()[0]
             targets = conn.execute(
@@ -853,7 +865,7 @@ class LanP2PCoreTests(unittest.TestCase):
         with patch("lan_p2p_core.time.time", return_value=1000.0):
             self.assertFalse(add_discovery_target(
                 self.db_path, "server2", "m-no-early-window", "android-early"))
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             state, deadline = conn.execute(
                 "SELECT state,delivery_deadline_ms FROM lan_outbox "
                 "WHERE message_id='m-no-early-window'"
@@ -875,7 +887,7 @@ class LanP2PCoreTests(unittest.TestCase):
                 self.db_path, "server2", "server2-id", "m-window-start", "hello", []))
             self.assertTrue(is_outgoing_discovery_pending(
                 self.db_path, "server2", "m-window-start"))
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             state, deadline = conn.execute(
                 "SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id='m-window-start'"
             ).fetchone()
@@ -886,7 +898,7 @@ class LanP2PCoreTests(unittest.TestCase):
         with patch("lan_p2p_core.time.time", return_value=1010.0):
             self.assertTrue(begin_outgoing_discovery_window(
                 self.db_path, "server2", "m-window-start"))
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             deadline = conn.execute(
                 "SELECT delivery_deadline_ms FROM lan_outbox WHERE message_id='m-window-start'"
             ).fetchone()[0]
@@ -902,7 +914,7 @@ class LanP2PCoreTests(unittest.TestCase):
         with patch("lan_p2p_core.time.time", return_value=1002.0):
             self.assertTrue(begin_outgoing_discovery_window(
                 self.db_path, "server2", "m-window-idempotent"))
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             deadline = conn.execute(
                 "SELECT delivery_deadline_ms FROM lan_outbox WHERE message_id='m-window-idempotent'"
             ).fetchone()[0]
@@ -942,7 +954,7 @@ class LanP2PCoreTests(unittest.TestCase):
             self.assertEqual(add_discovery_targets_for_peer(
                 self.db_path, "scope-bulk", "android-late"), 0)
 
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             states = dict(conn.execute(
                 "SELECT message_id,state FROM lan_outbox WHERE message_id LIKE 'm-boundary-%'"
             ).fetchall())
@@ -1124,7 +1136,7 @@ class LanP2PCoreTests(unittest.TestCase):
                 "test-secret", attempts=3, retry_delay_seconds=0.25)
         self.assertEqual(sent, 3)
         self.assertEqual(len(socket.sent), 3)
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             attempt_count = conn.execute(
                 "SELECT attempt_count FROM lan_outbox_targets WHERE message_id=? AND peer_id=?",
                 ("retry-m1", "android-a")
@@ -3112,7 +3124,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertTrue(mark_outgoing_attempt(
             self.db_path, "m-route-change", "android-route-change",
             "192.168.1.44", 8899, allow_fast_retry=False))
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             row = conn.execute(
                 "SELECT attempt_count,last_endpoint FROM lan_outbox_targets "
                 "WHERE message_id='m-route-change' AND peer_id='android-route-change'"
@@ -3405,7 +3417,7 @@ class LanP2PCoreTests(unittest.TestCase):
         with patch("lan_p2p_core.time.time", return_value=1001.0):
             self.assertEqual(0, add_discovery_targets_for_peer(
                 self.db_path, "server2", "android-early"))
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             state, deadline = conn.execute(
                 "SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id='m-pre-discovery'"
             ).fetchone()
@@ -3421,7 +3433,7 @@ class LanP2PCoreTests(unittest.TestCase):
         with patch("lan_p2p_core.time.time", return_value=1011.0):
             self.assertEqual(1, add_discovery_targets_for_peer(
                 self.db_path, "server2", "android-during"))
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             deadline, peer = conn.execute(
                 "SELECT o.delivery_deadline_ms,t.peer_id FROM lan_outbox o "
                 "JOIN lan_outbox_targets t ON t.message_id=o.message_id "
@@ -3452,7 +3464,7 @@ class LanP2PCoreTests(unittest.TestCase):
         with patch("lan_p2p_core.time.time", return_value=2001.0):
             self.assertFalse(acknowledge_outgoing_message(
                 self.db_path, "server2", "m-early-ack", "android-early"))
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             state, deadline = conn.execute(
                 "SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id='m-early-ack'"
             ).fetchone()
@@ -3468,7 +3480,7 @@ class LanP2PCoreTests(unittest.TestCase):
         with patch("lan_p2p_core.time.time", return_value=2011.0):
             self.assertTrue(acknowledge_outgoing_message(
                 self.db_path, "server2", "m-early-ack", "android-during"))
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             state, deadline = conn.execute(
                 "SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id='m-early-ack'"
             ).fetchone()
@@ -3580,14 +3592,14 @@ class LanP2PCoreTests(unittest.TestCase):
             self.db_path, "server2", "server2-id", "m-budget", "hello", ["android-a"]))
         record_peer(self.db_path, "server2", "android-a", "android", "android-main",
                     "192.168.1.10", 8888, "active")
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             conn.execute("UPDATE lan_outbox_targets SET attempt_count=?,last_attempt_at=? "
                          "WHERE message_id=? AND peer_id=?",
                          (MAX_OUTBOX_TARGET_ATTEMPTS, 1234, "m-budget", "android-a"))
             conn.commit()
         self.assertEqual(1, prepare_outgoing_peer_recovery(
             self.db_path, "server2", "android-a", now_ms=100_000))
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             self.assertEqual((0, 0, 100_000), conn.execute(
                 "SELECT attempt_count,last_attempt_at,last_recovery_at_ms FROM lan_outbox_targets "
                 "WHERE message_id='m-budget' AND peer_id='android-a'").fetchone())
@@ -3609,7 +3621,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertTrue(persist_outgoing_message(
             self.db_path, "server2", "server2-id", "m-recovery-before-cap",
             "hello", ["android-a"]))
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             conn.execute(
                 "UPDATE lan_outbox_targets SET attempt_count=3,last_attempt_at=1234,"
                 "last_recovery_at_ms=0 WHERE message_id=? AND peer_id=?",
@@ -3617,7 +3629,7 @@ class LanP2PCoreTests(unittest.TestCase):
             conn.commit()
         self.assertEqual(0, prepare_outgoing_peer_recovery(
             self.db_path, "server2", "android-a", now_ms=100_000))
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             self.assertEqual((3, 1234, 0), conn.execute(
                 "SELECT attempt_count,last_attempt_at,last_recovery_at_ms "
                 "FROM lan_outbox_targets WHERE message_id='m-recovery-before-cap' "
@@ -3629,7 +3641,7 @@ class LanP2PCoreTests(unittest.TestCase):
             conn.commit()
         self.assertEqual(1, prepare_outgoing_peer_recovery(
             self.db_path, "server2", "android-a", now_ms=110_000))
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             self.assertEqual((0, 0, 110_000), conn.execute(
                 "SELECT attempt_count,last_attempt_at,last_recovery_at_ms "
                 "FROM lan_outbox_targets WHERE message_id='m-recovery-before-cap' "
@@ -3647,14 +3659,14 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertEqual(["android-a"], [
             row["peer_id"] for row in load_active_pending_targets(
                 self.db_path, "server2", "m-active-filter")])
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             conn.execute("UPDATE lan_outbox_targets SET attempt_count=? "
                          "WHERE message_id='m-active-filter' AND peer_id='android-a'",
                          (MAX_OUTBOX_TARGET_ATTEMPTS,))
             conn.commit()
         self.assertEqual([], load_active_pending_targets(
             self.db_path, "server2", "m-active-filter"))
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             conn.execute("UPDATE lan_outbox_targets SET attempt_count=0 "
                          "WHERE message_id='m-active-filter' AND peer_id='android-a'")
             conn.execute("UPDATE lan_outbox SET state='waiting_peers' "
@@ -3710,7 +3722,7 @@ class LanP2PCoreTests(unittest.TestCase):
 
     def test_python_retry_schema_migrates_existing_target_ledger(self):
         from lan_p2p_core import ensure_outbox_retry_schema
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             conn.execute("""CREATE TABLE lan_outbox_targets (
                 message_id TEXT NOT NULL, peer_id TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
@@ -3721,12 +3733,12 @@ class LanP2PCoreTests(unittest.TestCase):
                 last_error TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY(message_id, peer_id))""")
         self.assertTrue(ensure_outbox_retry_schema(self.db_path))
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(lan_outbox_targets)")}
         self.assertIn("last_recovery_at_ms", columns)
         self.assertIn("last_attempt_endpoint", columns)
         self.assertIn("last_sent_endpoint", columns)
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             indexes = {row[1] for row in conn.execute("PRAGMA index_list(lan_outbox_targets)")}
         self.assertIn("idx_lan_outbox_targets_retry", indexes)
 
@@ -5016,7 +5028,7 @@ class LanP2PDiscoveryDispatchRecoveryTests(unittest.TestCase):
                 FailingSocket(), self.db_path, "server2", "m-all-fail",
                 b"frame", [("192.0.2.1", 8888)], attempts=2, retry_delay_seconds=0)
         self.assertEqual(sent, 0)
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             state, deadline = conn.execute(
                 "SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id=?",
                 ("m-all-fail",)).fetchone()
@@ -5036,7 +5048,7 @@ class LanP2PDiscoveryDispatchRecoveryTests(unittest.TestCase):
                 SuccessfulSocket(), self.db_path, "server2", "m-send-ok",
                 b"frame", [("192.0.2.1", 8888)], attempts=1, retry_delay_seconds=0)
         self.assertEqual(sent, 1)
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             deadline = conn.execute(
                 "SELECT delivery_deadline_ms FROM lan_outbox WHERE message_id=?",
                 ("m-send-ok",)).fetchone()[0]
@@ -5065,7 +5077,7 @@ class LanP2PDiscoveryDispatchRecoveryTests(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=2) as pool:
                 results = list(pool.map(dispatch, (FailingSocket(), SuccessfulSocket())))
         self.assertEqual(sorted(results), [0, 1])
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             state, deadline = conn.execute(
                 "SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id=?",
                 ("m-concurrent-dispatch",)).fetchone()
@@ -5093,7 +5105,7 @@ class LanP2PDiscoveryDispatchRecoveryTests(unittest.TestCase):
             self.assertEqual(send_discovery_broadcast_with_retries(
                 FailingSocket(), self.db_path, "server2", "m-duplicate-dispatch",
                 b"frame", [("192.0.2.1", 8888)], attempts=1, retry_delay_seconds=0), 0)
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             deadline = conn.execute(
                 "SELECT delivery_deadline_ms FROM lan_outbox WHERE message_id=?",
                 ("m-duplicate-dispatch",)).fetchone()[0]
@@ -5124,7 +5136,7 @@ class LanP2PDiscoveryDispatchRecoveryTests(unittest.TestCase):
             self.assertEqual(send_discovery_broadcast_with_retries(
                 SuccessfulSocket(), self.db_path, "server2", "m-retry-window",
                 b"frame", [("192.0.2.1", 8888)], attempts=1, retry_delay_seconds=0), 1)
-        with sqlite3.connect(self.db_path) as conn:
+        with _sqlite_connection(self.db_path) as conn:
             deadline = conn.execute(
                 "SELECT delivery_deadline_ms FROM lan_outbox WHERE message_id=?",
                 ("m-retry-window",)).fetchone()[0]
@@ -5175,7 +5187,7 @@ with patch('lan_p2p_core.time.time', return_value=1000.0):
     assert send_discovery_broadcast_with_retries(
         FailingSocket(), db, 'server2', 'restart-rearm', b'frame',
         [('192.0.2.1', 8888)], attempts=1, retry_delay_seconds=0) == 0
-with sqlite3.connect(db) as conn:
+with _sqlite_connection(db) as conn:
     assert conn.execute('SELECT delivery_deadline_ms FROM lan_outbox '
                         'WHERE message_id=?', ('restart-rearm',)).fetchone()[0] == 0
 """
@@ -5192,7 +5204,7 @@ with patch('lan_p2p_core.time.time', return_value=2000.0):
     assert send_discovery_broadcast_with_retries(
         SuccessfulSocket(), db, 'server2', 'restart-rearm', b'frame',
         [('192.0.2.1', 8888)], attempts=1, retry_delay_seconds=0) == 1
-with sqlite3.connect(db) as conn:
+with _sqlite_connection(db) as conn:
     deadline = conn.execute('SELECT delivery_deadline_ms FROM lan_outbox '
                             'WHERE message_id=?', ('restart-rearm',)).fetchone()[0]
 assert deadline == 2010000, deadline
@@ -5221,7 +5233,7 @@ with patch('lan_p2p_core.time.time', return_value=1010.0):
                        '192.0.2.11', 8888, 'active')
     assert add_discovery_targets_for_peer(db, 'server2', 'android-late') == 0
     assert load_pending_outgoing_for_peer(db, 'server2', 'android-late') == []
-with sqlite3.connect(db) as conn:
+with _sqlite_connection(db) as conn:
     state = conn.execute('SELECT state FROM lan_outbox WHERE message_id=?',
                          ('restart-frozen',)).fetchone()[0]
     targets = conn.execute('SELECT COUNT(*) FROM lan_outbox_targets WHERE message_id=?',
@@ -5251,7 +5263,7 @@ assert acknowledge_outgoing_message(db, 'server2', 'restart-msg', 'android-a')
 import sqlite3, sys
 from lan_p2p_core import load_pending_outgoing_for_peer
 db = sys.argv[1]
-with sqlite3.connect(db) as conn:
+with _sqlite_connection(db) as conn:
     outbox = conn.execute('SELECT sender_scope,body,state FROM lan_outbox WHERE message_id=?',
                           ('restart-msg',)).fetchone()
     target = conn.execute('SELECT status,attempt_count,last_attempt_endpoint,last_sent_endpoint '
