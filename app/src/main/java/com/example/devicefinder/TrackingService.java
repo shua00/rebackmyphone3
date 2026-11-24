@@ -273,7 +273,7 @@ public class TrackingService extends Service implements LocationListener {
     // 本地 LAN 聊天待确认队列：SharedPreferences 同步 commit，最多保留 50 条。
     private static final String PREF_LAN_CHAT_QUEUE = "lan_p2p_pending_messages";
     private static final int LAN_CHAT_QUEUE_MAX = LanChatRetryPolicy.MAX_PENDING_MESSAGES;
-    private static final long LAN_CHAT_DISCOVERY_WINDOW_MS = LanChatStore.FIRST_DISCOVERY_WINDOW_MS;
+    private static final long LAN_CHAT_DISCOVERY_WINDOW_MS = LanChatRetryPolicy.FIRST_DISCOVERY_WINDOW_MS;
     // Keep route refresh responsive without broadcasting once per keystroke/message.
     private static final long LAN_PEER_DISCOVERY_COOLDOWN_MS = LanChatRetryPolicy.PEER_DISCOVERY_COOLDOWN_MS;
     // Keep discovery nonces valid long enough for bounded persistence/ACK work to finish.
@@ -4482,7 +4482,7 @@ public class TrackingService extends Service implements LocationListener {
             }
         }
         if (attemptAdmitted) {
-            if (attemptNumber >= LanChatStore.MAX_AUTOMATIC_RETRY_ATTEMPTS
+            if (attemptNumber >= LanChatRetryPolicy.MAX_AUTOMATIC_RETRY_ATTEMPTS
                     && !store.allTargetsAcked(messageId)) {
                 FileLogger.log(this, "CHAT", "LAN 自动补发预算已耗尽，SQLite 消息及未 ACK 目标继续保留，等待网络/peer 恢复事件: "
                         + messageId + " attempts=" + attemptNumber);
