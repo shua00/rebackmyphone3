@@ -4271,7 +4271,8 @@ public class TrackingService extends Service implements LocationListener {
         }
     }
 
-    // Outbox retry stays serialized; terminal legacy-mirror file commits are dispatched to the peer maintenance lane.
+    // 仅由 lanChatSendExecutor 调用的补发工作线程入口结束；即时发送走独立队列。
+    // Terminal legacy-mirror file commits are dispatched to the peer maintenance lane.
     // Both the immediate and retry lanes enter the same guarded transmission path;
     // the active-message set and shared transmit lock prevent duplicate concurrent sends.
     private void sendLocalUdpMessage(final String message, final String messageId) {
