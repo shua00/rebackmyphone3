@@ -18,26 +18,31 @@ final class LanChatRetryPolicy {
     static final long PEER_DISCOVERY_COOLDOWN_MS = 1_500L;
     static final long PEER_CHALLENGE_TIMEOUT_MS = 2_500L;
 
-    /**
-     * Delay before the next attempt, indexed by the already completed attempt count.
-     * Attempt 1/2 are a short burst; later retries back off to a 60s ceiling.
-     */
+    /** Retry delays after completed attempts 1..5; later attempts use the ceiling below. */
+    private static final long[] RETRY_DELAY_AFTER_ATTEMPT_MS =
+            {250L, 250L, 10_000L, 20_000L, 40_000L};
+    private static final long RETRY_DELAY_CEILING_MS = 60_000L;
+
     static long retryDelayAfterAttemptMs(int completedAttempts) {
-        switch (completedAttempts) {
-            case 1: return 250L;
-            case 2: return 250L;
-            case 3: return 10_000L;
-            case 4: return 20_000L;
-            case 5: return 40_000L;
-            default: return 60_000L;
+        if (completedAttempts >= 1 && completedAttempts <= RETRY_DELAY_AFTER_ATTEMPT_MS.length) {
+            return RETRY_DELAY_AFTER_ATTEMPT_MS[completedAttempts - 1];
         }
+        return RETRY_DELAY_CEILING_MS;
     }
 
     /**
-     * SQL equivalent of retryDelayAfterAttemptMs for an already validated column name.
-     * The returned fragment is deliberately fixed; callers must not pass user input.
+     * Generate the fixed SQL expression from the same values used by the Java policy.
+     * This avoids a second, drifting copy of retry timing inside the persistence layer.
      */
-    static final String TARGET_RETRY_DELAY_CASE_SQL =
-            "CASE attempt_count WHEN 1 THEN 250 WHEN 2 THEN 250 " +
-            "WHEN 3 THEN 10000 WHEN 4 THEN 20000 WHEN 5 THEN 40000 ELSE 60000 END";
+    private static String buildTargetRetryDelayCaseSql() {
+        StringBuilder sql = new StringBuilder("CASE attempt_count ");
+        for (int i = 0; i < RETRY_DELAY_AFTER_ATTEMPT_MS.length; i++) {
+            sql.append("WHEN ").append(i + 1).append(" THEN ")
+                    .append(RETRY_DELAY_AFTER_ATTEMPT_MS[i]).append(' ');
+        }
+        return sql.append("ELSE ").append(RETRY_DELAY_CEILING_MS).append(" END").toString();
+    }
+
+    static final String TARGET_RETRY_DELAY_CASE_SQL = buildTargetRetryDelayCaseSql();
+
 }
