@@ -20,7 +20,7 @@ final class LanChatDeliveryState {
 
     // Recipient-level states. SENT means a dispatch attempt was durably charged.
     static final String TARGET_PENDING = "pending";
-    static final String TARGET_SENT = "sent";
+    static final String TARGET_ATTEMPT_RESERVED = "sent";
     static final String TARGET_ACKED = "acked";
 
     /**
