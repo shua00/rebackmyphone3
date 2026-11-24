@@ -195,6 +195,35 @@ public class LanChatStorePersistenceTest {
     }
 
     @Test
+    public void acknowledgementsCannotInventFixedRecipientsOrJoinClosedDiscovery() {
+        assertTrue(store.enqueue(
+                "android-ack-discovery", "desktop-peer", "discovery body", 1234L));
+        assertFalse(store.acknowledge("android-ack-discovery", "android-late"));
+        assertEquals(0, store.loadTargets("android-ack-discovery").size());
+
+        assertEquals(LanChatStore.DISCOVERY_WINDOW_STARTED,
+                store.beginOrReadDiscoveryWindow("android-ack-discovery"));
+        SQLiteDatabase db = store.getWritableDatabase();
+        db.execSQL("UPDATE lan_outbox SET delivery_deadline_ms=1 WHERE message_id=?",
+                new Object[]{"android-ack-discovery"});
+        assertTrue(store.finalizeDiscoveryWindow("android-ack-discovery"));
+        assertFalse(store.acknowledge("android-ack-discovery", "android-late"));
+        assertEquals(0, store.loadTargets("android-ack-discovery").size());
+
+        Map<String, InetSocketAddress> routes = Collections.singletonMap(
+                "android-fixed", new InetSocketAddress("192.0.2.12", 8888));
+        assertTrue(store.enqueueWithRecipientSnapshot(
+                "android-ack-fixed", "desktop-peer", "fixed recipients", 1234L, routes));
+        assertFalse(store.acknowledge("android-ack-fixed", "android-late"));
+        List<LanChatStore.Target> fixed = store.loadTargets("android-ack-fixed");
+        assertEquals(1, fixed.size());
+        assertEquals("android-fixed", fixed.get(0).peerId);
+        assertTrue(store.acknowledge("android-ack-fixed", "android-fixed"));
+        assertTrue(store.acknowledge("android-ack-fixed", "android-fixed"));
+        assertTrue(store.allTargetsAcked("android-ack-fixed"));
+    }
+
+    @Test
     public void expiredDiscoveryWindowRemainsFrozenAfterCloseAndReopen() {
         assertTrue(store.enqueue(
                 "android-restart-discovery", "desktop-peer", "discovery body", 1234L));
