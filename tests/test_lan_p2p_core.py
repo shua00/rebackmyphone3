@@ -86,7 +86,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("return RETRY_DELAY_AFTER_ATTEMPT_MS[completedAttempts - 1];", policy)
         self.assertIn("return RETRY_DELAY_CEILING_MS;", policy)
         self.assertIn("buildTargetRetryDelayCaseSql()", policy)
-        self.assertIn("RETRY_DELAY_AFTER_ATTEMPT_MS[i]", policy)
+        self.assertIn("append(retryDelayAfterAttemptMs(i + 1))", policy)
         self.assertIn("LanChatRetryPolicy.TARGET_RETRY_DELAY_CASE_SQL", store)
         self.assertNotIn("CASE attempt_count WHEN 1 THEN 250", store)
         self.assertIn("LanChatRetryPolicy.PEER_DISCOVERY_COOLDOWN_MS", service)
