@@ -318,3 +318,17 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 实机状态 | 未验收 | 双向消息与 ACK、ACK 丢失/重发、部分 ACK、多目标不对称冷却、断网/IP 变化恢复、进程重启、无 Python 服务运行模式仍必须实测 |
 
 **本记录仅证明当前 HEAD 的回归测试与 Android 构建通过。A01–A10、S01–S26、M-A–M-C、F01–F20、G01–G14 的总体验收门槛不变；任何实机要求均不得以 CI 替代。**
+
+
+## 13. 外部架构对照后的改进记录（2026-11-24）
+
+外部项目对照与取舍记录见 [LAN_P2P_ARCHITECTURE_DECISIONS.md](LAN_P2P_ARCHITECTURE_DECISIONS.md)。外部项目源码/README 仅作为设计参考，不构成本项目验收证据。
+
+| 项目 | 当前代码结果 | 可核验证据 | 尚未覆盖 |
+|---|---|---|---|
+| Python ACK 来源语义统一 | 将发送尝试 endpoint 与成功发送 endpoint 分离；ACK 只匹配成功发送 endpoint 或已验证实时路由；三服务固定目标恢复发送统一走 send+record | commits `8bd9e6b`、`ef8a7c7`；新增发送失败/成功、快速 ACK 竞态和旧 schema 迁移测试 | 三服务并发真实进程、真实 UDP 极快 ACK 与磁盘故障组合 |
+| Android/Python 协议解码一致 | Android 使用严格 UTF-8 decoder，非法字节不再被静默替换；与 Python strict decoder 对齐 | commit `db2a85e`；Actions run [45342369963](https://github.com/shua00/rebackmyphone3/actions/runs/45342369963) 的 Python 验证、Android Debug APK 构建和 artifact 上传成功；artifact ID `14897500187` | 真机对非法数据报的拒绝行为和正常消息互通 |
+| Python UDP 接收队头阻塞 | 三服务接收循环只做数据报边界检查、认证和有界入队；ACK、peer 握手、chat.message 分 lane；每 lane 固定 worker，队列有上限 | commits `360225c`、`1c51c88`；Actions run [45343428421](https://github.com/shua00/rebackmyphone3/actions/runs/45343428421)，223 项 Python 测试全部通过 | 高并发压力、队列满时的真实重试恢复、socket 重绑期间队列任务 |
+| 当前分支基线 | PR #1 最新代码 HEAD 为 `1c51c88a7b94d7abd3d69b7c1dbbb41babdecbe5`，仍开放且未合并 | GitHub PR #1 | 代码层完整验收与真机验收尚未完成 |
+
+**边界声明：** Actions #706 对应 Python-only 提交，Android build 按路径规则跳过；最近一次包含 Android 源码的完整构建为 Actions #704（commit `db2a85e`），已成功。以上 CI 均不替代 A01–A10、M-A–M-C 和 F/G 系列的实机验收。
