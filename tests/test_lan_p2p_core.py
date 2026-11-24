@@ -1299,7 +1299,7 @@ class LanP2PCoreTests(unittest.TestCase):
                     source,
                 )
                 self.assertIn("validate_incoming_message_claim(", source)
-                self.assertIn("is_outgoing_discovery_pending(", source)
+                self.assertIn("send_discovery_broadcast_with_retries(", source)
 
     def test_directed_peer_challenge_nonce_is_consumed_atomically_under_replay(self):
         from concurrent.futures import ThreadPoolExecutor
@@ -2044,7 +2044,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("if target_ids:", rescue_sender)
         self.assertIn("attempts=1", rescue_sender)
         self.assertNotIn("selected_peers", rescue_sender)
-        self.assertIn("broadcast_all and begin_outgoing_discovery_window", rescue_sender)
+        self.assertIn("elif broadcast_all:", rescue_sender)
+        self.assertIn("send_discovery_broadcast_with_retries(", rescue_sender)
 
         chat = (repo_root / "chat.py").read_text(encoding="utf-8")
         chat_start = chat.index("def send_chat_v2(")
@@ -2053,7 +2054,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("if target_ids:", chat_sender)
         self.assertIn("attempts=1", chat_sender)
         self.assertIn("message is persisted for retry after peer discovery", chat_sender)
-        self.assertIn("elif begin_outgoing_discovery_window", chat_sender)
+        self.assertIn("send_discovery_broadcast_with_retries(", chat_sender)
 
         server = (repo_root / "server2.py").read_text(encoding="utf-8")
         server_start = server.index("def send_server2_v2_chat_from_outbox(")
@@ -2062,8 +2063,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("if fixed_target_ids:", server_sender)
         self.assertIn("send_outbox_to_active_peers(", server_sender)
         self.assertIn("attempts=1", server_sender)
-        self.assertIn("if not begin_outgoing_discovery_window(", server_sender)
-        self.assertIn("send_broadcast_packet_with_retries(", server_sender)
+        self.assertIn("send_discovery_broadcast_with_retries(", server_sender)
+        self.assertNotIn("begin_outgoing_discovery_window(", server_sender)
         self.assertIn("[(ip, 8888)", server_sender)
 
         action_start = server.index('elif action == "chat_msg":')
@@ -5044,10 +5045,14 @@ class LanP2POutboxProcessRestartTests(unittest.TestCase):
     def _run_python(self, code):
         env = os.environ.copy()
         env["PYTHONPATH"] = str(self.repo_root) + os.pathsep + env.get("PYTHONPATH", "")
-        return subprocess.run(
+        result = subprocess.run(
             [sys.executable, "-c", code, self.db_path],
-            cwd=str(self.repo_root), env=env, check=True,
+            cwd=str(self.repo_root), env=env, check=False,
             capture_output=True, text=True, timeout=20)
+        if result.returncode:
+            raise AssertionError(
+                "subprocess failed: " + result.stderr + "\\nstdout: " + result.stdout)
+        return result
 
     def test_fixed_target_outbox_and_ack_survive_real_process_restart(self):
         create = """
@@ -5073,9 +5078,11 @@ with sqlite3.connect(db) as conn:
     target = conn.execute('SELECT status,attempt_count,last_attempt_endpoint,last_sent_endpoint '
                           'FROM lan_outbox_targets WHERE message_id=? AND peer_id=?',
                           ('restart-msg','android-a')).fetchone()
+pending = load_pending_outgoing_for_peer(db, 'server2', 'android-a')
+print('outbox=', outbox, 'target=', target, 'pending=', pending)
 assert outbox == ('server2', 'durable body', 'delivered'), outbox
 assert target == ('acked', 1, '192.0.2.10:8888', '192.0.2.10:8888'), target
-assert load_pending_outgoing_for_peer(db, 'server2', 'android-a') == []
+assert pending == [], pending
 """
         self._run_python(verify)
 
