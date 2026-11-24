@@ -38,7 +38,7 @@ final class LanChatRetryPolicy {
         StringBuilder sql = new StringBuilder("CASE attempt_count ");
         for (int i = 0; i < RETRY_DELAY_AFTER_ATTEMPT_MS.length; i++) {
             sql.append("WHEN ").append(i + 1).append(" THEN ")
-                    .append(RETRY_DELAY_AFTER_ATTEMPT_MS[i]).append(' ');
+                     .append(retryDelayAfterAttemptMs(i + 1)).append(' ');
         }
         return sql.append("ELSE ").append(RETRY_DELAY_CEILING_MS).append(" END").toString();
     }
