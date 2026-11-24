@@ -75,6 +75,20 @@ def extract_java_method(source, signature):
 
 class LanP2PCoreTests(unittest.TestCase):
 
+    def test_lan_delivery_state_settlement_matrix_is_explicit(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        state = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatDeliveryState.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn('static final String DISCOVERY_PENDING = "discovery_pending";', state)
+        self.assertIn('static final String RETRY_PAUSED = "retry_paused";', state)
+        self.assertIn('static final String DELIVERED = "delivered";', state)
+        self.assertIn('static final String WAITING_PEERS = "waiting_peers";', state)
+        self.assertIn("if (totalTargets <= 0) return WAITING_PEERS;", state)
+        self.assertIn("if (ackedTargets >= totalTargets) return DELIVERED;", state)
+        self.assertIn("return hasRetryBudget ? PENDING : RETRY_PAUSED;", state)
+
+
     def test_lan_chat_retry_policy_is_centralized_and_store_sql_uses_same_policy(self):
         repo_root = Path(__file__).resolve().parents[1]
         policy = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatRetryPolicy.java").read_text(encoding="utf-8")
@@ -2234,18 +2248,23 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("store.finalizeExpiredDiscoveryWindows(System.currentTimeMillis())", tracking)
 
 
-    def test_android_discovery_finalization_respects_exhausted_retry_budget(self):
+    def test_android_discovery_finalization_uses_durable_target_budget(self):
         repo_root = Path(__file__).resolve().parents[1]
         store = (
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         ).read_text(encoding="utf-8")
+        state = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatDeliveryState.java"
+        ).read_text(encoding="utf-8")
         start = store.index("private boolean finalizeDiscoveryMessage(")
         end = store.index("public boolean storeIncoming(", start)
         finalize = store[start:end]
-        self.assertIn("SELECT retry_attempt_count FROM lan_outbox", finalize)
-        self.assertIn("retryAttempts >= MAX_AUTOMATIC_RETRY_ATTEMPTS ? \"retry_paused\" : \"pending\"", finalize)
-        self.assertIn("total == 0 ? \"waiting_peers\"", finalize)
-        self.assertIn("total == acked ? \"delivered\"", finalize)
+        self.assertIn("LanChatDeliveryState.settleAfterDiscovery(total, acked, hasRetryBudget)", finalize)
+        self.assertNotIn("SELECT retry_attempt_count FROM lan_outbox", finalize)
+        self.assertIn("return totalTargets <= 0 ? WAITING_PEERS", state) if "return totalTargets <= 0 ? WAITING_PEERS" in state else self.assertIn("if (totalTargets <= 0) return WAITING_PEERS;", state)
+        self.assertIn("return hasRetryBudget ? PENDING : RETRY_PAUSED;", state)
+        self.assertIn("LanChatDeliveryState.settleAfterAck(total, acked, hasRetryBudget)", store)
+
 
 
     def test_android_waiting_peers_keeps_sqlite_record_but_releases_legacy_queue_mirror(self):
