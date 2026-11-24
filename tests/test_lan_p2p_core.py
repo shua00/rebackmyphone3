@@ -84,7 +84,7 @@ class LanP2PCoreTests(unittest.TestCase):
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatRetryPolicy.java"
         ).read_text(encoding="utf-8")
         self.assertIn("store.loadPending(LanChatRetryPolicy.MAX_PENDING_MESSAGES)", service)
-        self.assertNotIn("store.loadPending(LanChatRetryPolicy.MAX_PENDING_MESSAGES)", service)
+        self.assertNotIn("store.loadPending(50)", service)
         self.assertIn("MAX_PENDING_MESSAGES = 50", policy)
 
 
