@@ -17,16 +17,17 @@ import java.util.List;
  */
 public final class LanChatStore extends SQLiteOpenHelper {
 
-    /** Bounded first-recipient collection window, started on the first actual discovery send. */
-    public static final long FIRST_DISCOVERY_WINDOW_MS = 10_000L;
+    /** Compatibility aliases; policy values are owned by LanChatRetryPolicy. */
+    public static final long FIRST_DISCOVERY_WINDOW_MS = LanChatRetryPolicy.FIRST_DISCOVERY_WINDOW_MS;
     private static final String DB_NAME = "lan_p2p_delivery.db";
     // v9 records the exact endpoint attempted before UDP dispatch.
     private static final int DB_VERSION = 9;
-    public static final int MAX_PENDING_MESSAGES = 50;
+    public static final int MAX_PENDING_MESSAGES = LanChatRetryPolicy.MAX_PENDING_MESSAGES;
     /** Maximum automatic sends in one retry epoch, including the original send. */
-    public static final int MAX_AUTOMATIC_RETRY_ATTEMPTS = 8;
+    public static final int MAX_AUTOMATIC_RETRY_ATTEMPTS = LanChatRetryPolicy.MAX_AUTOMATIC_RETRY_ATTEMPTS;
     /** A real network/peer recovery event may reopen an exhausted retry epoch once per minute. */
-    public static final long RETRY_RECOVERY_EVENT_COOLDOWN_MS = 60_000L;
+    public static final long RETRY_RECOVERY_EVENT_COOLDOWN_MS =
+            LanChatRetryPolicy.RETRY_RECOVERY_EVENT_COOLDOWN_MS;
 
     public static final class PendingMessage {
         public final String messageId;
@@ -873,8 +874,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     "UPDATE lan_outbox_targets SET status='sent',attempt_count=attempt_count+1," +
                     "last_attempt_endpoint=?,last_attempt_at=?,last_error=? WHERE message_id=? AND peer_id=? AND status!='acked' " +
                     "AND attempt_count<? AND (attempt_count=0 OR last_attempt_endpoint<>? " +
-                    "OR last_attempt_at + CASE attempt_count WHEN 1 THEN 250 WHEN 2 THEN 250 " +
-                    "WHEN 3 THEN 10000 WHEN 4 THEN 20000 WHEN 5 THEN 40000 ELSE 60000 END <= ?) " +
+                    "OR last_attempt_at + " + LanChatRetryPolicy.TARGET_RETRY_DELAY_CASE_SQL + " <= ?) " +
                     "AND EXISTS (SELECT 1 FROM lan_outbox o WHERE o.message_id=lan_outbox_targets.message_id " +
                     "AND o.state NOT IN ('delivered','expired','waiting_peers'))");
             int changed;
