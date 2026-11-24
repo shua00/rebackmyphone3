@@ -5002,6 +5002,37 @@ class LanP2PDiscoveryDispatchRecoveryTests(unittest.TestCase):
                 ("m-send-ok",)).fetchone()[0]
         self.assertEqual(deadline, 1010000)
 
+    def test_concurrent_success_and_failure_dispatches_keep_valid_deadline(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from lan_p2p_core import send_discovery_broadcast_with_retries
+        self._create_empty_message("m-concurrent-dispatch")
+
+        class FailingSocket:
+            def sendto(self, payload, destination):
+                time.sleep(0.01)
+                raise OSError("simulated transient failure")
+
+        class SuccessfulSocket:
+            def sendto(self, payload, destination):
+                return len(payload)
+
+        def dispatch(sock):
+            return send_discovery_broadcast_with_retries(
+                sock, self.db_path, "server2", "m-concurrent-dispatch",
+                b"frame", [("192.0.2.1", 8888)], attempts=1, retry_delay_seconds=0)
+
+        with patch("lan_p2p_core.time.time", return_value=1000.0):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(dispatch, (FailingSocket(), SuccessfulSocket())))
+        self.assertEqual(sorted(results), [0, 1])
+        with sqlite3.connect(self.db_path) as conn:
+            state, deadline = conn.execute(
+                "SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id=?",
+                ("m-concurrent-dispatch",)).fetchone()
+        self.assertEqual(state, "discovery_pending")
+        self.assertEqual(deadline, 1010000)
+
+
     def test_later_duplicate_dispatch_failure_does_not_reset_successful_window(self):
         from lan_p2p_core import send_discovery_broadcast_with_retries
         self._create_empty_message("m-duplicate-dispatch")
