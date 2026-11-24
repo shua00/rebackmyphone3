@@ -4352,5 +4352,20 @@ class LanP2PEnvelopeBudgetParityTests(unittest.TestCase):
         self.assertIn("_validate_peer_id_fields(packet)", python_core)
 
 
+class LanChatAdmissionFeedbackTests(unittest.TestCase):
+    def test_android_rejected_admission_is_visible_but_durable_send_queue_fallback_is_not_rejected(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        send = extract_java_method(source, "private void sendLocalUdpMessage(final String message)")
+        notify = extract_java_method(source, "private void notifyLanChatSendRejected(")
+        self.assertIn('notifyLanChatSendRejected("消息过长，未进入发送队列")', send)
+        self.assertIn('notifyLanChatSendRejected("本地持久化失败，请重试")', send)
+        self.assertIn('notifyLanChatSendRejected("发送入口繁忙，请重试")', send)
+        self.assertIn("消息已落账并转入持久化补发", send)
+        self.assertIn("handler.post(", notify)
+        self.assertIn("Toast.LENGTH_LONG", notify)
+        self.assertNotIn("ChatActivity.java", source)
+
+
 if __name__ == "__main__":
     unittest.main()

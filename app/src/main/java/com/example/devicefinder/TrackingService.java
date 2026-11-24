@@ -4020,6 +4020,7 @@ public class TrackingService extends Service implements LocationListener {
         } catch (Exception tooLargeOrInvalid) {
             FileLogger.log(this, "CHAT", "⚠️ LAN 对讲消息超过单个 UDP 数据包限制，未入队: "
                     + tooLargeOrInvalid.getClass().getSimpleName());
+            notifyLanChatSendRejected("消息过长，未进入发送队列");
             return;
         }
         final long enqueueAt = android.os.SystemClock.elapsedRealtime();
@@ -4030,6 +4031,7 @@ public class TrackingService extends Service implements LocationListener {
                 long persistStarted = android.os.SystemClock.elapsedRealtime();
                 if (!persistPendingLanChat(messageId, message)) {
                     FileLogger.log(this, "CHAT", "⚠️ LAN 消息未能持久化，已阻止发送以免断网丢失");
+                    notifyLanChatSendRejected("本地持久化失败，请重试");
                     return;
                 }
                 long persistMs = android.os.SystemClock.elapsedRealtime() - persistStarted;
@@ -4055,8 +4057,21 @@ public class TrackingService extends Service implements LocationListener {
             });
         } catch (java.util.concurrent.RejectedExecutionException e) {
             FileLogger.log(this, "CHAT", "⚠️ LAN 持久化入口队列已满，消息未接受: " + messageId);
+            notifyLanChatSendRejected("发送入口繁忙，请重试");
         }
     }
+
+    /**
+     * The Activity keeps its existing local echo, but a failed durable admission must
+     * not look like a successful send. Report rejection on the main thread without
+     * changing ChatActivity or exposing message contents in logs/UI diagnostics.
+     */
+    private void notifyLanChatSendRejected(final String reason) {
+        handler.post(() -> android.widget.Toast.makeText(getApplicationContext(),
+                "LAN 消息未进入可靠发送队列：" + reason,
+                android.widget.Toast.LENGTH_LONG).show());
+    }
+
 
     private boolean persistPendingLanChat(String messageId, String content) {
         try {
