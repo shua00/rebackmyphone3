@@ -75,6 +75,25 @@ def extract_java_method(source, signature):
 
 class LanP2PCoreTests(unittest.TestCase):
 
+    def test_lan_chat_retry_policy_is_centralized_and_store_sql_uses_same_policy(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        policy = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatRetryPolicy.java").read_text(encoding="utf-8")
+        store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        service = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        self.assertIn("static final int MAX_AUTOMATIC_RETRY_ATTEMPTS = 8;", policy)
+        self.assertIn("static final long RETRY_RECOVERY_EVENT_COOLDOWN_MS = 60_000L;", policy)
+        self.assertIn("case 1: return 250L;", policy)
+        self.assertIn("case 3: return 10_000L;", policy)
+        self.assertIn("case 5: return 40_000L;", policy)
+        self.assertIn("default: return 60_000L;", policy)
+        self.assertIn("LanChatRetryPolicy.TARGET_RETRY_DELAY_CASE_SQL", store)
+        self.assertNotIn("CASE attempt_count WHEN 1 THEN 250", store)
+        self.assertIn("LanChatRetryPolicy.PEER_DISCOVERY_COOLDOWN_MS", service)
+        self.assertIn("LanChatRetryPolicy.PEER_CHALLENGE_TIMEOUT_MS", service)
+        self.assertIn("LanChatRetryPolicy.MAX_PENDING_MESSAGES", service)
+
+
+
     def test_known_peer_queries_raise_storage_error_instead_of_appearing_empty(self):
         from lan_p2p_core import list_known_peers, list_known_peer_snapshot, LanP2PStorageError
         directory_path = os.path.join(self.temp_dir.name, "not-a-peer-database")
