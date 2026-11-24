@@ -254,6 +254,25 @@ def _validate_peer_id_fields(packet):
             raise ValueError("invalid " + field)
 
 
+def _validate_canonical_numbers(value):
+    """Reject JSON numbers whose textual form can diverge across Python/Android."""
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return
+    if isinstance(value, int):
+        if value < -(1 << 63) or value > (1 << 63) - 1:
+            raise ValueError("JSON integer is outside signed 64-bit range")
+        return
+    if isinstance(value, float):
+        raise ValueError("non-integer JSON numbers are unsupported")
+    if isinstance(value, dict):
+        for item in value.values():
+            _validate_canonical_numbers(item)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _validate_canonical_numbers(item)
+
+
 def encode_packet(fields, secret, max_bytes=1200):
     """Encode and authenticate a bounded v2 JSON datagram."""
     import hashlib
@@ -262,6 +281,7 @@ def encode_packet(fields, secret, max_bytes=1200):
         raise ValueError("packet fields must be a dict")
     packet = dict(fields)
     packet.pop("auth", None)
+    _validate_canonical_numbers(packet)
     packet["v"] = 2
     packet_type = packet.get("type")
     if packet_type not in ("peer.hello", "peer.ack", "chat.message", "chat.ack"):
@@ -288,7 +308,10 @@ def decode_packet(data, secret, max_bytes=1200):
         packet = json.loads(bytes(data).decode("utf-8", errors="strict"))
     except Exception as exc:
         raise ValueError("invalid LAN P2P JSON") from exc
-    if not isinstance(packet, dict) or packet.get("v") != 2:
+    if not isinstance(packet, dict):
+        raise ValueError("invalid LAN P2P envelope")
+    _validate_canonical_numbers(packet)
+    if type(packet.get("v")) is not int or packet.get("v") != 2:
         raise ValueError("unsupported LAN P2P protocol version")
     if packet.get("type") not in ("peer.hello", "peer.ack", "chat.message", "chat.ack"):
         raise ValueError("unsupported LAN P2P packet type")
