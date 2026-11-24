@@ -1512,6 +1512,19 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("scheduleLanChatMirrorCleanup(id)", recovery)
         self.assertNotIn("removePendingLanChat(id)", recovery)
 
+    def test_android_attempt_reservation_uses_explicit_target_state_name(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        state = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanChatDeliveryState.java"
+        ).read_text(encoding="utf-8")
+        attempt = extract_java_method(store, "public boolean markAttempt(")
+        self.assertIn("LanChatDeliveryState.TARGET_ATTEMPT_RESERVED", attempt)
+        self.assertIn('static final String TARGET_ATTEMPT_RESERVED = "sent";', state)
+        self.assertIn("TARGET_ATTEMPT_RESERVED", state)
+
     def test_android_sqlite_pending_read_fails_closed_on_query_error(self):
         repo_root = Path(__file__).resolve().parents[1]
         store = (
