@@ -755,8 +755,8 @@ public final class LanChatStore extends SQLiteOpenHelper {
     public int recordOutboxAttempt(String messageId) {
         if (messageId == null || messageId.length() == 0) return -1;
 
-        // The common fixed-recipient path is read-only. Do not acquire SQLite's single
-        // writer slot merely to read target attempt counts while the global send lock is held.
+        // A recipient snapshot may have been committed after the caller's pre-lock
+        // empty-snapshot read. Recheck before charging the message-level discovery counter.
         int[] fastProgress = readOutboxTargetAttemptProgress(getReadableDatabase(), messageId);
         if (fastProgress[0] > 0) {
             return fastProgress[1] == 0 ? -1 : fastProgress[2];
