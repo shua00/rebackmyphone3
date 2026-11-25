@@ -120,6 +120,11 @@ public final class LanTransferTcpListener implements AutoCloseable {
                     return;
                 }
                 activeSockets.add(socket);
+                if (closed.get()) {
+                    activeSockets.remove(socket);
+                    closeQuietly(socket);
+                    return;
+                }
                 try {
                     workers.execute(() -> serveOne(socket));
                 } catch (java.util.concurrent.RejectedExecutionException saturated) {
@@ -131,7 +136,7 @@ public final class LanTransferTcpListener implements AutoCloseable {
                 if (!closed.get()) report("accept", failure);
                 return;
             } catch (RuntimeException failure) {
-                if (!closed.get()) report("network-bind", failure);
+                if (!closed.get()) report("accept-loop", failure);
                 return;
             }
         }
