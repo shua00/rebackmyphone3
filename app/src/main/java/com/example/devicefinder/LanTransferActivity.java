@@ -204,7 +204,7 @@ public final class LanTransferActivity extends Activity {
                             try { getContentResolver().delete(destination, null, null); }
                             catch (Exception ignored) {}
                         }
-                        throw failure;
+                        throw new RuntimeException(failure);
                     }
                     runOnUiThread(() -> Toast.makeText(this, "文件已保存到所选位置：" + transfer.offer.filename,
                             Toast.LENGTH_LONG).show());
