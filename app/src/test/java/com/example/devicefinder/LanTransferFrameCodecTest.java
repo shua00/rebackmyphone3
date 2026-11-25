@@ -59,6 +59,23 @@ public class LanTransferFrameCodecTest {
         assertEquals(2,frame.metadata.getJSONArray("indexes").length());
     }
 
+    @Test public void offerAndOfferAckControlFramesRoundTrip() throws Exception {
+        JSONObject metadata = new JSONObject();
+        metadata.put("filename", "report.txt");
+        metadata.put("size_bytes", 5L);
+        metadata.put("sha256", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        metadata.put("created_at_ms", 1000L);
+        metadata.put("mime_type", "text/plain");
+        metadata.put("chunk_size_bytes", 262144);
+        for (String kind : new String[]{"offer", "offer_ack"}) {
+            byte[] wire = LanTransferFrameCodec.encodeFrame(new LanTransferFrameCodec.Frame(
+                    kind, "transfer-1", "sender", "receiver", null, new byte[0], metadata), KEY, 1024);
+            LanTransferFrameCodec.Frame frame = decode(wire, KEY, 1024, "sender", "receiver");
+            assertEquals(kind, frame.kind);
+            assertEquals("report.txt", frame.metadata.getString("filename"));
+        }
+    }
+
     @Test public void rejectsUnexpectedPeerAndWrongSessionKey() throws Exception {
         byte[] wire = LanTransferFrameCodec.encodeFrame(new LanTransferFrameCodec.Frame(
                 "cancel","transfer-1","sender","receiver",null,new byte[0],null),KEY,1024);
