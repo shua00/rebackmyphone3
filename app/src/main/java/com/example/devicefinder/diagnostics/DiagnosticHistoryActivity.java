@@ -98,7 +98,7 @@ public final class DiagnosticHistoryActivity extends Activity {
                         DiagnosticProbeCatalog.localReadOnlyTests(getApplicationContext());
                 DiagnosticRun.Metadata metadata = DiagnosticRun.Metadata.createForFeature(
                         "android_local", System.currentTimeMillis(), BuildInfo.BUILD_VERSION,
-                        BuildInfo.BUILD_VERSION, Build.MODEL == null ? "unknown" : Build.MODEL,
+                        "unknown", Build.MODEL == null ? "unknown" : Build.MODEL,
                         Build.VERSION.SDK_INT,
                         DiagnosticProbeCatalog.detectNetworkType(getApplicationContext()),
                         "READ_ONLY", "LOCAL");
