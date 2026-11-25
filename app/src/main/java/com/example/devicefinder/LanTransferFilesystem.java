@@ -65,7 +65,7 @@ public final class LanTransferFilesystem {
             File parent=directory.getParentFile();if(parent!=null&&existsNoFollow(parent))syncDirectory(parent);
         }
         rejectSymlink(directory);
-        if(!statNoFollow(directory).isDirectory())throw new IOException("Transfer path is not a directory");
+        if(!OsConstants.S_ISDIR(statNoFollow(directory).st_mode))throw new IOException("Transfer path is not a directory");
     }
     private File taskDirectory(String transferId) throws IOException {
         if(transferId==null||!transferId.matches("[A-Za-z0-9._:-]{1,128}"))throw new IOException("Invalid transfer ID path");
@@ -180,7 +180,7 @@ public final class LanTransferFilesystem {
             if(ok)valid.add(receipt.index);
             else {
                 store.invalidateChunkReceipt(transferId,receipt.index,nowMs);
-                if(existsNoFollow(expected)&&!OsConstants.S_ISLNK(statNoFollow(expected).st_mode))expected.delete();
+                if(existsNoFollow(expected))expected.delete();
             }
         }
         File[] files=dir.listFiles();

@@ -11,8 +11,9 @@ import static org.junit.Assert.*;
 public class LanTransferFilesystemTest {
  private static final String DB="lan_p2p_transfer.db";
  private Context context;private LanTransferStore store;private LanTransferFilesystem fs;
- @Before public void setUp(){context=RuntimeEnvironment.getApplication();context.deleteDatabase(DB);store=new LanTransferStore(context);fs=new LanTransferFilesystem(context,store);}
- @After public void tearDown(){if(store!=null)store.closeStore();context.deleteDatabase(DB);}
+ @Before public void setUp(){context=RuntimeEnvironment.getApplication();context.deleteDatabase(DB);deleteTree(new File(context.getFilesDir(),"lan-transfer-staging"));deleteTree(new File(context.getFilesDir(),"lan-transfer-received"));store=new LanTransferStore(context);fs=new LanTransferFilesystem(context,store);}
+ @After public void tearDown(){if(store!=null)store.closeStore();context.deleteDatabase(DB);deleteTree(new File(context.getFilesDir(),"lan-transfer-staging"));deleteTree(new File(context.getFilesDir(),"lan-transfer-received"));}
+ private static void deleteTree(File f){if(f==null||!f.exists())return;File[] children=f.listFiles();if(children!=null)for(File c:children)deleteTree(c);f.delete();}
  private static String hash(byte[] b)throws Exception{byte[] d=MessageDigest.getInstance("SHA-256").digest(b);StringBuilder s=new StringBuilder();for(byte x:d)s.append(String.format("%02x",x&255));return s.toString();}
  private void start(String id,byte[] content,int chunk)throws Exception{
   store.createOffer(new LanTransferStore.Offer(id,"sender","receiver","payload.bin",content.length,hash(content),1,"application/octet-stream"),2,chunk);

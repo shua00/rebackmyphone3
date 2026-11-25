@@ -653,3 +653,15 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 第 2 阶段 retry policy | 新增固定 backoff / wake / route probe 测试 | 随下一 SHA CI 验证 |
 
 **批次 1 判定：** LNP2 阻塞已解除，Android 独立传输账本基础实现与测试已落地；文件 staging、重启实际 hash reconcile、Android TCP worker/UI、网络切换真机验收仍未完成。
+
+
+## 38. 第 2/3/4 阶段交叉批次 2：Android 文件系统落盘与恢复（2026-11-25）
+
+| 验收点 | 实现 | 证据状态 |
+|---|---|---|
+| 安全 staging | 私有目录按 transfer_id 隔离；拒绝路径穿越、符号链接、非普通文件 | 新增 Robolectric 测试，待 CI |
+| 分块持久化顺序 | 临时文件写入 → 文件 fsync → 原子 rename → 目录 fsync → SQLite receipt | 方法返回前完成账本提交；TCP ACK 尚未接入 |
+| 崩溃恢复 | reconcile 对每个 receipt 重新核对路径、文件长度、chunk SHA-256；撤销坏回执并清理无回执残留 | 新增重启/损坏测试，待 CI |
+| 完整文件 | 组装后重算 whole-file SHA-256，校验后 fsync、原子发布、更新 completed | 新增端到端文件系统测试，待 CI |
+| 资源边界 | 默认 4 GiB staging quota、剩余空间保留、任务隔离 | 待边界与设备存储测试 |
+| 第 2 阶段回归 | Actions #801 的 retry policy tests 已通过；固定 recipient 和逐 peer retry 逻辑保持独立 | 网络切换真机验收待后续 |
