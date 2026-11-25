@@ -20,6 +20,60 @@ public final class LanTransferTcpClient {
     private LanTransferTcpClient() {}
 
 
+
+    /** Authenticated, idempotent Offer exchange. The receiver records it as offered, never auto-accepts. */
+    public static JSONObject sendOffer(Network wifiNetwork, String host, int port, File source,
+            LanTransferStore.Offer offer, String localPeerId, String remotePeerId,
+            String sharedSecret, int chunkSizeBytes, int maxPayloadBytes, int connectTimeoutMs)
+            throws IOException, GeneralSecurityException {
+        if (wifiNetwork == null || host == null || host.isEmpty() || port < 1 || port > 65535
+                || source == null || offer == null || connectTimeoutMs < 1000 || connectTimeoutMs > 60000)
+            throw new IllegalArgumentException("Offer destination and source are required");
+        if (!localPeerId.equals(offer.senderPeerId) || !remotePeerId.equals(offer.targetPeerId))
+            throw new SecurityException("Offer participants do not match authenticated session");
+        if (chunkSizeBytes < LanTransferStore.MIN_CHUNK_SIZE
+                || chunkSizeBytes > LanTransferStore.MAX_CHUNK_SIZE
+                || maxPayloadBytes < 1 || maxPayloadBytes > 1024 * 1024)
+            throw new IllegalArgumentException("Invalid Offer transfer limits");
+        File absolute = source.getAbsoluteFile();
+        String expectedPath = new File(absolute.getParentFile().getCanonicalFile(), absolute.getName()).getPath();
+        if (!source.isFile() || !source.getCanonicalPath().equals(expectedPath)
+                || source.length() != offer.sizeBytes || !hashFile(source).equals(offer.sha256))
+            throw new IOException("Source file does not match immutable Offer");
+        try (Socket socket = wifiNetwork.getSocketFactory().createSocket()) {
+            socket.connect(new InetSocketAddress(host, port), connectTimeoutMs);
+            socket.setTcpNoDelay(true);
+            socket.setKeepAlive(true);
+            socket.setSoTimeout(15000);
+            LanTransferAuthenticator.AuthenticatedPeer peer =
+                    LanTransferAuthenticator.authenticateClient(socket, localPeerId, remotePeerId, sharedSecret);
+            JSONObject metadata = new JSONObject();
+            try {
+                metadata.put("filename", offer.filename);
+                metadata.put("size_bytes", offer.sizeBytes);
+                metadata.put("sha256", offer.sha256);
+                metadata.put("created_at_ms", offer.createdAtMs);
+                metadata.put("mime_type", offer.mimeType);
+                metadata.put("chunk_size_bytes", chunkSizeBytes);
+            } catch (org.json.JSONException invalid) {
+                throw new IOException("Unable to encode transfer Offer", invalid);
+            }
+            send(socket, new LanTransferFrameCodec.Frame("offer", offer.transferId,
+                    localPeerId, remotePeerId, null, new byte[0], metadata),
+                    peer.sessionKey, maxPayloadBytes);
+            LanTransferFrameCodec.Frame response = receive(socket, peer, localPeerId, maxPayloadBytes);
+            if (!"offer_ack".equals(response.kind) || !offer.transferId.equals(response.transferId)
+                    || response.metadata == null
+                    || !("offered".equals(response.metadata.optString("state"))
+                        || "accepted".equals(response.metadata.optString("state"))
+                        || "transferring".equals(response.metadata.optString("state"))))
+                throw new IOException("Receiver did not durably acknowledge Offer");
+            if (response.metadata.optInt("chunk_size_bytes", -1) != chunkSizeBytes)
+                throw new IOException("Receiver changed immutable Offer chunk size");
+            return response.metadata;
+        }
+    }
+
     /**
      * Opens the sender socket through the exact Wi-Fi Network chosen by the caller.
      * Unlike accepted server sockets, an outgoing socket must be created unconnected,
