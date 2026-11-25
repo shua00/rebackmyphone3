@@ -33,6 +33,13 @@ public class LanTransferTcpSessionTest {
         return out.toString();
     }
 
+    private static void deleteTree(File file) {
+        if (file == null || !file.exists()) return;
+        File[] children = file.listFiles();
+        if (children != null) for (File child : children) deleteTree(child);
+        if (!file.delete()) throw new AssertionError("Unable to clean test path " + file);
+    }
+
     private static LanTransferFilesystem.DurableFileOps fileOps() {
         return new LanTransferFilesystem.DurableFileOps() {
             @Override public void syncDirectory(File directory) {}
@@ -46,6 +53,8 @@ public class LanTransferTcpSessionTest {
     public void authenticatedSessionDurablyAcksChunkAndPublishesVerifiedFile() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         context.deleteDatabase("lan_p2p_transfer.db");
+        deleteTree(new File(context.getFilesDir(), "lan-transfer-staging"));
+        deleteTree(new File(context.getFilesDir(), "lan-transfer-received"));
         LanTransferStore store = new LanTransferStore(context);
         String id = "session-test-1";
         store.createOffer(new LanTransferStore.Offer(id, "sender", "receiver",
