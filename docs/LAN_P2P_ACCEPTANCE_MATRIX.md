@@ -924,5 +924,5 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 目标确认 | 用户输入目标 Peer ID、LAN 主机地址和 TCP 端口；必须匹配 credentials trustedPeerIds | 不自动猜测地址；不通过 UDP 聊天通道发送文件 |
 | 后台执行 | 独立 LanTransferSenderService 使用 dataSync 前台服务与单线程 executor；任务元数据先写 SharedPreferences，再运行 worker | 当前一次仅接受一个待发送任务；没有并发任务列表 |
 | 网络选择 | 仅选择 active Wi-Fi 或唯一 Wi-Fi 候选；多候选歧义直接拒绝 | 复用 TrackingService 网络选择原则；仍需验证双 Wi-Fi、蜂窝默认路由和网络切换 |
-| 重试恢复 | offered/paused 任务保留元数据，服务每 60 秒重试；START_STICKY 重启时重新读取任务 | 需验证系统进程回收与设备重启；目前没有独立 BootReceiver 扫描恢复 |
+| 重试恢复 | offered/paused 任务保留元数据，服务每 60 秒重试；START_STICKY 重启时重新读取任务；不可恢复认证/状态异常收敛到 failed | 需验证系统进程回收与设备重启；目前没有独立 BootReceiver 扫描恢复 |
 | 隔离 | 发送 UI/后台服务独立于 ChatActivity、聊天 UDP 队列与 TrackingService 维护线程池 | 源码守卫已增加；Android 构建、设备实测与 Android/Python 互通待验收 |
