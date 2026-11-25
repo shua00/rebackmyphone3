@@ -121,7 +121,7 @@ public class LanTransferTcpSessionTest {
     }
 
     @Test
-    public void androidSenderCompletesAnAuthenticatedTransfer() throws Exception {
+    public void androidSenderOffersThenTransfersOnlyAfterExplicitReceiverAccept() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         context.deleteDatabase("lan_p2p_transfer.db");
         deleteTree(new File(context.getFilesDir(), "lan-transfer-staging"));
@@ -134,9 +134,6 @@ public class LanTransferTcpSessionTest {
         String id = "android-client-test";
         LanTransferStore.Offer offer = new LanTransferStore.Offer(id, "sender", "receiver",
                 "from-client.txt", PAYLOAD.length, sha(PAYLOAD), 1L, "text/plain");
-        store.createOffer(offer, 1L, LanTransferStore.DEFAULT_CHUNK_SIZE);
-        store.transition(id, "accepted", 2L);
-        store.transition(id, "transferring", 3L);
         LanTransferFilesystem filesystem = new LanTransferFilesystem(context, store,
                 LanTransferFilesystem.DEFAULT_STAGING_QUOTA_BYTES, fileOps());
         LanTransferTcpSession session = new LanTransferTcpSession(context, store, filesystem,
@@ -145,15 +142,28 @@ public class LanTransferTcpSessionTest {
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
             Future<Integer> served = executor.submit(() -> {
-                try (Socket accepted = listener.accept()) { return session.serve(accepted); }
+                int total = 0;
+                for (int i = 0; i < 2; i++) {
+                    try (Socket accepted = listener.accept()) { total += session.serve(accepted); }
+                }
+                return total;
             });
+            try (Socket client = new Socket("127.0.0.1", listener.getLocalPort())) {
+                JSONObject ack = LanTransferTcpClient.sendOffer(client, source, offer,
+                        "sender", "receiver", SECRET, LanTransferStore.DEFAULT_CHUNK_SIZE, 1024 * 1024);
+                assertEquals("offered", ack.getString("state"));
+            }
+            assertEquals("offered", store.getTransfer(id).state);
+            // Receiving an authenticated Offer never silently accepts it.
+            store.transition(id, "accepted", 11L);
+            store.transition(id, "transferring", 12L);
             try (Socket client = new Socket("127.0.0.1", listener.getLocalPort())) {
                 java.util.List<Integer> remaining = LanTransferTcpClient.sendFile(client, source,
                         offer, "sender", "receiver", SECRET, LanTransferStore.DEFAULT_CHUNK_SIZE,
                         LanTransferTcpClient.DEFAULT_CHUNKS_PER_SESSION, 1024 * 1024, null);
                 assertTrue(remaining.isEmpty());
             }
-            assertTrue(served.get(4, TimeUnit.SECONDS) >= 3);
+            assertEquals(4, (int) served.get(5, TimeUnit.SECONDS));
             assertEquals("completed", store.getTransfer(id).state);
             File[] published = new File(context.getFilesDir(), "lan-transfer-received").listFiles();
             assertNotNull(published);
