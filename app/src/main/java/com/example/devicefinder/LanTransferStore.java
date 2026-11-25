@@ -242,5 +242,27 @@ public final class LanTransferStore extends SQLiteOpenHelper {
         List<ChunkReceipt> out=new ArrayList<>();Cursor c=getReadableDatabase().rawQuery("SELECT transfer_id,chunk_index,payload_size,chunk_sha256,staging_path,recorded_at_ms FROM lan_transfer_chunks WHERE transfer_id=? ORDER BY chunk_index",new String[]{id});
         try{while(c.moveToNext())out.add(new ChunkReceipt(c.getString(0),c.getInt(1),c.getInt(2),c.getString(3),c.getString(4),c.getLong(5)));}finally{c.close();}return out;
     }
+    /**
+     * Sender-side completion is recorded only after the authenticated remote peer
+     * returns complete/state=completed. Sender ledgers intentionally have no chunk
+     * receipts, so the receiver-only VERIFYING transition is not applicable here.
+     */
+    public boolean markSenderCompleted(String id,String localPeerId,long now) {
+        if(!id(id)||!id(localPeerId)||now<0)throw new IllegalArgumentException("Invalid sender completion");
+        SQLiteDatabase db=getWritableDatabase();db.beginTransaction();
+        try {
+            Cursor c=db.rawQuery("SELECT sender_peer_id,state FROM lan_transfer_tasks WHERE transfer_id=?",new String[]{id});
+            String sender,state;
+            try { if(!c.moveToFirst())throw new IllegalArgumentException("Unknown transfer"); sender=c.getString(0);state=c.getString(1); }
+            finally { c.close(); }
+            if(!localPeerId.equals(sender))throw new SecurityException("Only the sender may finalize its outgoing task");
+            if(!"transferring".equals(state)&&!"completed".equals(state))
+                throw new IllegalStateException("Sender task is not transferring");
+            ContentValues values=new ContentValues();values.put("state","completed");values.put("updated_at_ms",now);
+            db.update("lan_transfer_tasks",values,"transfer_id=?",new String[]{id});
+            db.setTransactionSuccessful();return true;
+        } finally { db.endTransaction(); }
+    }
+
     public void closeStore(){close();}
 }
