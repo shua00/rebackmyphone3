@@ -67,6 +67,9 @@ public class ChatActivity extends Activity {
             refreshHistory(true); // 收到新消息
         }
     };
+    private final BroadcastReceiver transferReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) { refreshIncomingTransferCount(); }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -140,6 +143,12 @@ public class ChatActivity extends Activity {
         } catch (Exception e) {
             android.util.Log.e("ChatActivity", "注册 UPDATE_CHAT_UI 广播失败: " + e.getMessage());
         }
+        try {
+            IntentFilter filter = new IntentFilter("ACTION_LAN_TRANSFER_UPDATED");
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                registerReceiver(transferReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            else registerReceiver(transferReceiver, filter);
+        } catch (Exception e) { android.util.Log.e("ChatActivity", "注册文件传输广播失败", e); }
     }
 
     private void showTransferPairingDialog() {
@@ -350,6 +359,7 @@ public class ChatActivity extends Activity {
         //      若注册失败或 Activity 生命周期异常未注册就走到 onDestroy，
         //      unregisterReceiver 会抛 IllegalArgumentException 崩溃
         try { unregisterReceiver(msgReceiver); } catch (Exception ignored) {}
+        try { unregisterReceiver(transferReceiver); } catch (Exception ignored) {}
         transferUiExecutor.shutdownNow();
     }
 }

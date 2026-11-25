@@ -22,6 +22,7 @@ public final class LanTransferTcpSession {
     public static final int DEFAULT_MAX_PAYLOAD_BYTES = 1024 * 1024;
     public static final int MAX_MISSING_PAGE = 128;
 
+    private final Context appContext;
     private final LanTransferStore store;
     private final LanTransferFilesystem filesystem;
     private final String localPeerId;
@@ -50,6 +51,7 @@ public final class LanTransferTcpSession {
         if (maxFrames < 1 || maxFrames > 256 || maxPayloadBytes < 1
                 || maxPayloadBytes > DEFAULT_MAX_PAYLOAD_BYTES || socketTimeoutMs < 1000)
             throw new IllegalArgumentException("Invalid transfer session limits");
+        this.appContext = context.getApplicationContext();
         this.store = store;
         this.filesystem = filesystem;
         this.localPeerId = localPeerId;
@@ -98,6 +100,8 @@ public final class LanTransferTcpSession {
                 boolean inserted = store.createOffer(incoming, now,
                         requestedOfferChunkSize(frame.metadata));
                 transfer = store.getTransfer(frame.transferId);
+                if (inserted) appContext.sendBroadcast(new android.content.Intent("ACTION_LAN_TRANSFER_UPDATED")
+                        .setPackage(appContext.getPackageName()));
                 responseMetadata = offerAckMetadata(transfer, inserted);
                 responseKind = "offer_ack";
             } else {
