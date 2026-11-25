@@ -8,7 +8,7 @@ v8.21 — 2026-11-25 · TCP 真实监听与连接生命周期
 - TransferTcpServer 提供有界 accept、并发槽位、socket 超时、会话帧/载荷限制、错误回调和关闭清理。
 - connect_transfer_peer 提供连接超时、认证回调和认证失败关闭。
 - 服务端/客户端都必须由调用方提供可信 peer 认证回调，返回远端 peer_id 与 session secret；绝不把 IP/端口当作设备身份。
-- 关闭时先关闭 listener 和活动 socket，再等待 accept/worker 退出，避免空闲读取阻塞造成线程泄漏。
+- 关闭时先关闭 listener 和活动 socket，再等待 accept/worker 退出，避免空闲读取阻塞造成线程泄漏；server 实例关闭后不可复用，避免复用已 shutdown 的线程池和 stop event。
 
 【测试与 CI】
 --------------------------------------------------------------------------------

@@ -114,6 +114,8 @@ class TransferTcpNetworkTests(unittest.TestCase):
                 if client: client.close()
                 server.shutdown()
             self.assertEqual(0, len(server._active))
+            with self.assertRaises(RuntimeError):
+                server.start()
 
 if __name__ == "__main__":
     unittest.main()

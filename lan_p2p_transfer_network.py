@@ -100,6 +100,7 @@ class TransferTcpServer:
         self._listener = None
         self._accept_thread = None
         self._started = False
+        self._closed = False
 
     @property
     def address(self) -> tuple[str, int]:
@@ -110,8 +111,8 @@ class TransferTcpServer:
 
     def start(self):
         with self._lock:
-            if self._started:
-                raise RuntimeError("transfer TCP server already started")
+            if self._started or self._closed:
+                raise RuntimeError("transfer TCP server cannot be started in its current lifecycle state")
             listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
@@ -212,6 +213,7 @@ class TransferTcpServer:
         with self._lock:
             self._listener = None
             self._started = False
+            self._closed = True
 
     close = shutdown
     def __enter__(self):
