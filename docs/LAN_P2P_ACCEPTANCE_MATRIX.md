@@ -887,3 +887,16 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | CI | Actions [#866](https://github.com/shua00/rebackmyphone3/actions/runs/45549615420) 对应代码提交 `8d336d642d89abafa3b8f7f7073bd083f6b03f69`：304 项 Python 测试通过；Android build 因未修改 Android 输入按路径过滤跳过 | 只证明 Python 自动化，不替代 Android 构建或实机 | 
 | 验收边界 | Python filesystem 原有全量 reconcile 仍用于本地显式完整性核验，网络 missing/complete 路径已切换为有界分页；Android 与 Python 真机互通、UI、Wi-Fi 漫游仍未验收 | 不得用本测试替代真机验收 |
 
+
+
+## 23. 文件传输配对与接收请求 UI（2026-11-25）
+
+| 项目 | 实现 | 验收边界 |
+|---|---|---|
+| 安全配对 | ChatActivity 显示本机 peer ID，录入共享密钥与对端 ID；AndroidKeyStore 加密保存，peer allow-list 不为空 | 需双设备手工配置验证；不提供密钥自动交换 |
+| 待接收 Offer | 最多读取 50 条 incoming offered 任务，显示文件名、发送方、大小、状态 | 接受只将账本推进到 transferring，不等于文件已经下载 |
+| 用户动作 | 接受、二次确认拒绝，经 TrackingService 校验固定参与方身份后执行 | Service 异步处理，UI 状态应以账本刷新为准 |
+| 更新通知 | TCP Offer 持久化后、Service 用户操作完成后发送应用内广播；无高频轮询 | 广播仅用于界面刷新，不作为数据持久化凭据 |
+| CI | Actions #867 对代码提交 9c3b8b4c3d92a3d3908b3083156c954c088c8161 正在运行 | 需检查最终 job 结果 |
+| 未完成 | 文件选择与发送、自动发送 worker、接收完成文件入口、Android/Python 实网互通 | 不得将当前接收控制面视为文件传输全流程完成 |
+
