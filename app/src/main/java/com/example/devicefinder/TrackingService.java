@@ -2479,16 +2479,25 @@ public class TrackingService extends Service implements LocationListener {
                     throw new SecurityException("Transfer does not belong to this device");
                 long now = System.currentTimeMillis();
                 if ("ACTION_LAN_TRANSFER_ACCEPT".equals(action)) {
-                    if (!localId.equals(transfer.offer.targetPeerId) || !"offered".equals(transfer.state))
+                    if (!localId.equals(transfer.offer.targetPeerId)
+                            || !("offered".equals(transfer.state) || "accepted".equals(transfer.state)
+                                || "transferring".equals(transfer.state)))
                         throw new IllegalStateException("Only an incoming offered task can be accepted");
-                    lanTransferStore.transition(transferId, "accepted", now);
-                    lanTransferStore.transition(transferId, "transferring", now);
+                    if ("offered".equals(transfer.state))
+                        lanTransferStore.transition(transferId, "accepted", now);
+                    if (!"transferring".equals(transfer.state))
+                        lanTransferStore.transition(transferId, "transferring", now);
                 } else if ("ACTION_LAN_TRANSFER_REJECT".equals(action)) {
-                    if (!localId.equals(transfer.offer.targetPeerId) || !"offered".equals(transfer.state))
+                    if (!localId.equals(transfer.offer.targetPeerId)
+                            || !("offered".equals(transfer.state) || "rejected".equals(transfer.state)))
                         throw new IllegalStateException("Only an incoming offered task can be rejected");
-                    lanTransferStore.transition(transferId, "rejected", now);
+                    if ("offered".equals(transfer.state))
+                        lanTransferStore.transition(transferId, "rejected", now);
                 } else if ("ACTION_LAN_TRANSFER_CANCEL".equals(action)) {
-                    lanTransferFilesystem.cancelAndCleanup(transferId, now);
+                    if (!"completed".equals(transfer.state) && !"rejected".equals(transfer.state)
+                            && !"cancelled".equals(transfer.state) && !"failed".equals(transfer.state)
+                            && !"expired".equals(transfer.state))
+                        lanTransferFilesystem.cancelAndCleanup(transferId, now);
                 }
                 LanTransferStore.Transfer after = lanTransferStore.getTransfer(transferId);
                 FileLogger.log(this, "LAN_TRANSFER", "User action=" + action
