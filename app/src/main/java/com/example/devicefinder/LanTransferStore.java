@@ -76,7 +76,7 @@ public final class LanTransferStore extends SQLiteOpenHelper {
     private static boolean terminal(String s) { return "completed".equals(s)||"rejected".equals(s)||"cancelled".equals(s)||"failed".equals(s)||"expired".equals(s); }
     private static boolean allowed(String a,String b) {
         if(a.equals(b))return true;
-        if("offered".equals(a))return "accepted".equals(b)||"rejected".equals(b)||"cancelled".equals(b)||"expired".equals(b);
+        if("offered".equals(a))return "accepted".equals(b)||"rejected".equals(b)||"cancelled".equals(b)||"expired".equals(b)||"failed".equals(b);
         if("accepted".equals(a))return "transferring".equals(b)||"cancelled".equals(b)||"failed".equals(b);
         if("transferring".equals(a))return "paused".equals(b)||"verifying".equals(b)||"cancelled".equals(b)||"failed".equals(b);
         if("paused".equals(a))return "transferring".equals(b)||"cancelled".equals(b)||"failed".equals(b)||"expired".equals(b);
