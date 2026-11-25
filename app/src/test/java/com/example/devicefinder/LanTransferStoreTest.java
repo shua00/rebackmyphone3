@@ -13,6 +13,7 @@ public class LanTransferStoreTest {
  @Test public void offerIsImmutableIdempotentAndSurvivesReopen(){
   LanTransferStore.Offer o=offer("task-1",8192);assertTrue(store.createOffer(o,1100,4096));assertFalse(store.createOffer(o,1200,4096));
   try{store.createOffer(offer("task-1",8193),1200,4096);fail("conflicting Offer");}catch(IllegalStateException expected){}
+  try{store.createOffer(o,1200,8192);fail("chunk size must be immutable");}catch(IllegalStateException expected){}
   store.closeStore();store=new LanTransferStore(context);LanTransferStore.Transfer saved=store.getTransfer("task-1");
   assertNotNull(saved);assertEquals("sender",saved.offer.senderPeerId);assertEquals("offered",saved.state);assertEquals(2,saved.totalChunks);
  }
