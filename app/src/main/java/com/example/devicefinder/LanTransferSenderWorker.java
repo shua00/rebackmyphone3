@@ -251,8 +251,12 @@ public final class LanTransferSenderWorker implements Runnable {
     }
 
     private void sleepBackoff(long delayMs) throws InterruptedException {
-        if (cancelled.get() || pauseRequested.get()) return;
-        Thread.sleep(Math.max(250L, Math.min(MAX_BACKOFF_MS, delayMs)));
+        long remaining = Math.max(250L, Math.min(MAX_BACKOFF_MS, delayMs));
+        while (remaining > 0L && !cancelled.get() && !pauseRequested.get()) {
+            long slice = Math.min(250L, remaining);
+            Thread.sleep(slice);
+            remaining -= slice;
+        }
     }
 
     private void notifyState(String state) {

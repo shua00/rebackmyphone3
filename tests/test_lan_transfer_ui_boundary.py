@@ -102,6 +102,7 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
         self.assertIn("worker.cancel()", service)
         self.assertIn("worker.pause()", service)
         self.assertIn("pauseRequested", worker)
+        self.assertIn("Math.min(250L, remaining)", worker)
         self.assertIn("notifyPausedAtBoundary()", worker)
         self.assertIn("if (cancelled.get()) { cancelLedger(); return; }", worker)
         self.assertIn('notifyState("paused")', worker)
