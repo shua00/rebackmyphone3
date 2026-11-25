@@ -126,6 +126,8 @@ public final class LanTransferTcpSession {
                 responseMetadata = missingMetadata(page);
                 responseKind = "missing";
             } else if ("complete".equals(frame.kind)) {
+                if (!"transferring".equals(transfer.state) && !"completed".equals(transfer.state))
+                    throw new IOException("Transfer is not ready for completion");
                 if ("completed".equals(transfer.state)) {
                     responseMetadata = stateMetadata("completed");
                     responseKind = "complete";
