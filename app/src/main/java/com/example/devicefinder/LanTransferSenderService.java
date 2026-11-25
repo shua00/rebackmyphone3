@@ -109,7 +109,7 @@ public final class LanTransferSenderService extends Service {
             updateNotification("文件发送任务遇到不可恢复错误，请检查配对/文件后重新发起");
         } finally {
             if(store!=null) store.closeStore();
-            if(retry && !isDestroyed()) {
+            if(retry) {
                 updateNotification("等待对端接受或网络恢复，稍后自动重试");
                 retryHandler.postDelayed(() -> {
                     if(executor!=null && !executor.isShutdown()) {
