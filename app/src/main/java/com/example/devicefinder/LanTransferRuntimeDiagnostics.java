@@ -27,9 +27,11 @@ public final class LanTransferRuntimeDiagnostics {
                 List<LanTransferPeerDirectory.Candidate> current =
                         LanTransferPeerDirectory.loadCurrent(context, nowMs);
                 peers = current.size();
+                boolean first = true;
                 for (LanTransferPeerDirectory.Candidate candidate : current) {
                     long candidateAge = Math.max(0L, nowMs - candidate.lastSeenAtMs);
-                    if (age == 0L || candidateAge < age) age = candidateAge;
+                    if (first || candidateAge < age) age = candidateAge;
+                    first = false;
                 }
             } catch (RuntimeException ignored) {
                 // Lifecycle state remains useful if the optional endpoint cache is unreadable.
