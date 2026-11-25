@@ -9,11 +9,48 @@ from lan_p2p_transfer import TransferLimits, TransferOffer, TransferState
 from lan_p2p_transfer_store import TransferStore
 from lan_p2p_transfer_files import TransferFilesystem
 from lan_p2p_transfer_session import serve_transfer_session
-from lan_p2p_transfer_sender import send_file_over_session
+from lan_p2p_transfer_sender import send_file_over_session, send_offer_over_session
 
 
 class TransferSenderIntegrationTests(unittest.TestCase):
     SECRET = b"sender-integration-secret-32-bytes"
+
+
+    def test_sender_sends_offer_and_receiver_keeps_it_pending(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = b"offer-handshake"
+            source = root / "source.txt"
+            source.write_bytes(payload)
+            offer = TransferOffer("sender-offer", "sender", "receiver", "source.txt",
+                len(payload), hashlib.sha256(payload).hexdigest(), 1000, "text/plain")
+            store = TransferStore(str(root / "ledger.db"), TransferLimits(chunk_size_bytes=4096))
+            files = TransferFilesystem(store, str(root / "stage"), str(root / "received"))
+            server, client = socket.socketpair()
+            errors = []
+            def serve():
+                try:
+                    serve_transfer_session(server, store, files, local_peer_id="receiver",
+                        authenticated_peer_id="sender", session_secret=self.SECRET,
+                        now_ms=lambda: 1000, max_frames=1)
+                except Exception as exc:
+                    errors.append(exc)
+                finally:
+                    server.close()
+            worker = threading.Thread(target=serve)
+            worker.start()
+            try:
+                ack = send_offer_over_session(client, str(source), offer,
+                    local_peer_id="sender", remote_peer_id="receiver",
+                    session_secret=self.SECRET, chunk_size_bytes=4096)
+                self.assertEqual("offered", ack["state"])
+                self.assertTrue(ack["new_offer"])
+                self.assertEqual(TransferState.OFFERED, store.get_transfer(offer.transfer_id).state)
+            finally:
+                client.close()
+                worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual([], errors)
 
     def test_sender_drives_receiver_session_to_verified_completion(self):
         with tempfile.TemporaryDirectory() as directory:
