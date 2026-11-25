@@ -28,19 +28,19 @@ public class LanTransferFilesystemTest {
  }
  @Test public void chunkIsFsyncedBeforeReceiptAndSurvivesReopen()throws Exception{
   byte[] data=new byte[4096];Arrays.fill(data,(byte)7);start("fs-1",data,4096);
-  assertTrue(fs.writeChunk("fs-1",0,data,5));assertEquals(1,store.loadChunkReceipts("fs-1").size());
+  assertTrue(writeChunk("fs-1",0,data,5));assertEquals(1,store.loadChunkReceipts("fs-1").size());
   store.closeStore();store=new LanTransferStore(context);fs=new LanTransferFilesystem(context,store);
-  assertTrue(fs.reconcile("fs-1",6).isEmpty());assertFalse(fs.writeChunk("fs-1",0,data,7));
+  assertTrue(fs.reconcile("fs-1",6).isEmpty());assertFalse(writeChunk("fs-1",0,data,7));
  }
  @Test public void corruptStagedFileInvalidatesReceiptOnRestartReconcile()throws Exception{
-  byte[] data=new byte[4096];Arrays.fill(data,(byte)9);start("fs-2",data,4096);fs.writeChunk("fs-2",0,data,5);
+  byte[] data=new byte[4096];Arrays.fill(data,(byte)9);start("fs-2",data,4096);writeChunk("fs-2",0,data,5);
   File staged=new File(new File(new File(context.getFilesDir(),"lan-transfer-staging"),"fs-2"),"0.part");
   try(FileOutputStream out=new FileOutputStream(staged,false)){out.write(new byte[]{1,2,3});out.getFD().sync();}
   assertEquals(Arrays.asList(0),fs.reconcile("fs-2",6));assertTrue(store.loadChunkReceipts("fs-2").isEmpty());
  }
  @Test public void wholeFileHashGateAndAtomicPublishCompleteTransfer()throws Exception{
   byte[] data=new byte[8192];for(int i=0;i<data.length;i++)data[i]=(byte)(i&255);start("fs-3",data,4096);
-  fs.writeChunk("fs-3",0,Arrays.copyOfRange(data,0,4096),5);fs.writeChunk("fs-3",1,Arrays.copyOfRange(data,4096,8192),6);
+  writeChunk("fs-3",0,Arrays.copyOfRange(data,0,4096),5);writeChunk("fs-3",1,Arrays.copyOfRange(data,4096,8192),6);
   File published=fs.assembleAndPublish("fs-3",7);assertTrue(published.isFile());assertEquals(hash(data),hash(read(published)));
   assertEquals("completed",store.getTransfer("fs-3").state);
  }
@@ -51,7 +51,7 @@ public class LanTransferFilesystemTest {
   assertTrue(store.loadChunkReceipts("fs-4").isEmpty());
  }
  @Test public void symlinkChunkIsRejectedAndReceiptInvalidated()throws Exception{
-  byte[] data=new byte[4096];Arrays.fill(data,(byte)2);start("fs-5",data,4096);fs.writeChunk("fs-5",0,data,5);
+  byte[] data=new byte[4096];Arrays.fill(data,(byte)2);start("fs-5",data,4096);writeChunk("fs-5",0,data,5);
   File dir=new File(new File(context.getFilesDir(),"lan-transfer-staging"),"fs-5");
   File chunk=new File(dir,"0.part"),outside=new File(context.getFilesDir(),"outside-transfer-file");
   try(FileOutputStream out=new FileOutputStream(outside)){out.write(data);out.getFD().sync();}
@@ -60,7 +60,7 @@ public class LanTransferFilesystemTest {
   assertTrue(outside.isFile());
  }
  @Test public void publishedFileIsRecognizedAfterCrashBeforeLedgerCompletion()throws Exception{
-  byte[] data=new byte[4096];Arrays.fill(data,(byte)3);start("fs-6",data,4096);fs.writeChunk("fs-6",0,data,5);store.transition("fs-6","verifying",6);
+  byte[] data=new byte[4096];Arrays.fill(data,(byte)3);start("fs-6",data,4096);writeChunk("fs-6",0,data,5);store.transition("fs-6","verifying",6);
   File publishedRoot=new File(context.getFilesDir(),"lan-transfer-received");assertTrue(publishedRoot.mkdirs()||publishedRoot.isDirectory());
   File published=new File(publishedRoot,"fs-6-payload.bin");try(FileOutputStream out=new FileOutputStream(published)){out.write(data);out.getFD().sync();}
   File recovered=fs.assembleAndPublish("fs-6",7);assertEquals(published.getCanonicalPath(),recovered.getCanonicalPath());assertEquals("completed",store.getTransfer("fs-6").state);

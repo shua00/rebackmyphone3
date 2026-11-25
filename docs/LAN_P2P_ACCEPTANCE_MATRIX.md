@@ -684,3 +684,9 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | Actions #804 | Java 编译通过；LNP2 与前置模块未见失败；TransferFilesystem 5 项测试均抛 IOException | 文件系统测试未通过 |
 | 失败范围 | writeChunk / assemble 前置 staging 操作 | 增加 IOException 类型、message、cause 输出，继续定位具体文件系统原语 |
 | 安全要求 | 不跳过文件/目录 fsync，不放宽 symlink 防护，不先写 receipt 后补文件 | 保持不变 |
+
+
+## 41. TransferFilesystem 诊断入口覆盖修正（2026-11-25）
+
+- 复核 v8.33 后发现测试 helper 只定义未覆盖所有写块用例；本批已统一所有测试调用入口。
+- 新 Actions 将输出具体 IOException 与 cause；生产代码和 fsync/receipt 顺序不变。
