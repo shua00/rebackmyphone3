@@ -34,6 +34,28 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
         self.assertIn('addAction(android.R.drawable.ic_menu_upload, "文件传输"', service)
 
 
+    def test_saf_snapshot_and_sender_service_are_isolated_and_durable(self):
+        activity = (JAVA / "LanTransferActivity.java").read_text(encoding="utf-8")
+        snapshot = (JAVA / "LanTransferSnapshot.java").read_text(encoding="utf-8")
+        service = (JAVA / "LanTransferSenderService.java").read_text(encoding="utf-8")
+        manifest = (ROOT / "app/src/main/AndroidManifest.xml").read_text(encoding="utf-8")
+        layout = (RES / "layout/activity_lan_transfer.xml").read_text(encoding="utf-8")
+        self.assertIn("ACTION_OPEN_DOCUMENT", activity)
+        self.assertIn("LanTransferSnapshot.create", activity)
+        self.assertIn("trustedPeerIds.contains(peerId)", activity)
+        self.assertIn("getFilesDir(),\"lan-transfer-outbox\"", snapshot)
+        self.assertIn("SHA-256", snapshot)
+        self.assertIn("MAX_FILE_BYTES", snapshot)
+        self.assertIn("LanTransferSenderService.enqueue", activity)
+        self.assertIn("startForeground", service)
+        self.assertIn("START_STICKY", service)
+        self.assertIn("lan_transfer_sender_jobs", service)
+        self.assertIn("postDelayed", service)
+        self.assertIn("TRANSPORT_WIFI", service)
+        self.assertIn('android:name=".LanTransferSenderService"', manifest)
+        self.assertIn('android:foregroundServiceType="dataSync"', manifest)
+        self.assertIn("lanTransferSendFile", layout)
+
     def test_sender_worker_is_bounded_resumable_and_wifi_only(self):
         worker = (JAVA / "LanTransferSenderWorker.java").read_text(encoding="utf-8")
         store = (JAVA / "LanTransferStore.java").read_text(encoding="utf-8")
