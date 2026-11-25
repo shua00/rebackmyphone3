@@ -22,7 +22,7 @@ public final class LanTransferDiscovery implements AutoCloseable {
 
     public static final int UDP_PORT = 38472;
     private static final String MAGIC = "LTFD1";
-    // Small periodic beacons refresh candidate leases without high-frequency LAN scanning.
+    // Small periodic beacons refresh candidate leases without high-frequency LAN scanning or port sweeps.
     private static final long BEACON_INTERVAL_MS = 15_000L;
     private final Context context;
     private final Network network;
