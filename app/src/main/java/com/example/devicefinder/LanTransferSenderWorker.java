@@ -82,7 +82,7 @@ public final class LanTransferSenderWorker implements Runnable {
     @Override public void run() {
         try {
             execute();
-            if (pauseRequested.get()) { pauseIfTransferring(); notifyState("paused"); }
+            if (pauseRequested.get()) notifyPausedAtBoundary();
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             pauseIfTransferring();
@@ -138,7 +138,7 @@ public final class LanTransferSenderWorker implements Runnable {
             backoff = Math.min(MAX_BACKOFF_MS, backoff * 2L);
         }
         if (cancelled.get()) { cancelLedger(); return; }
-        if (pauseRequested.get()) { pauseIfTransferring(); notifyState("paused"); return; }
+        if (pauseRequested.get()) { notifyPausedAtBoundary(); return; }
         if (acknowledgement == null
                 || !("accepted".equals(acknowledgement.optString("state"))
                     || "transferring".equals(acknowledgement.optString("state"))
@@ -184,7 +184,7 @@ public final class LanTransferSenderWorker implements Runnable {
             }
         }
         if (cancelled.get()) cancelLedger();
-        else if (pauseRequested.get()) { pauseIfTransferring(); notifyState("paused"); }
+        else if (pauseRequested.get()) notifyPausedAtBoundary();
         else pauseIfTransferring();
     }
 
@@ -214,6 +214,20 @@ public final class LanTransferSenderWorker implements Runnable {
             String state = requireLocalTask().state;
             if ("transferring".equals(state))
                 store.transition(offer.transferId, "paused", System.currentTimeMillis());
+        } catch (Exception ignored) {}
+    }
+
+    private void notifyPausedAtBoundary() {
+        try {
+            String state = requireLocalTask().state;
+            if ("completed".equals(state) || "cancelled".equals(state) || "failed".equals(state)
+                    || "rejected".equals(state) || "expired".equals(state)) return;
+            if ("offered".equals(state)) {
+                notifyState("waiting_for_acceptance");
+                return;
+            }
+            pauseIfTransferring();
+            notifyState("paused");
         } catch (Exception ignored) {}
     }
 
