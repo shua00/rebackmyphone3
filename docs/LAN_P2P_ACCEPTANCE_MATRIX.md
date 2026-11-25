@@ -867,3 +867,11 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 - TCP listener 提供 worker drain；Service 关闭时先关监听/会话 socket，等 session worker 退出后再关闭 transfer SQLite ledger，防止活动会话与数据库关闭竞态。
 - **当前待验收**：#862–#865 的 Service teardown 与完整 Offer 流程 CI；随后还要做真机网络切换与双端文件传输。
 - **产品/UI 门禁**：可信 peer 配对和密钥配置 UI、incoming Offer 列表、接受/拒绝按钮、文件选择、进度和保存位置仍未实现。
+
+
+## 61. Offer 双端与 startup teardown 首轮验收结果（2026-11-25）
+
+- Android #862（提交 `46d3014`）通过，包含 Offer frame allowlist、sender→receiver Offer ACK、显式 accept 后传输、空文件不能绕过 accept，以及 startup worker teardown 顺序修复。
+- Python #857–#861 全部通过，覆盖 Offer/Offer ACK codec、receiver 持久化/幂等 replay、sender source hash validation 与 Offer ACK。
+- #863–#865 继续验证 TCP listener worker drain、SQLite close 顺序和 teardown action guard。
+- 历史失败闭环：#847/#848 是 codec 未允许新 Offer frame kind；#856 是 startup worker 中断时机。两项分别在 #855 与 #862 后通过。
