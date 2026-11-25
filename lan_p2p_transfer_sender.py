@@ -6,7 +6,6 @@ by higher layers. Reconnect and call this function again to query missing chunks
 from __future__ import annotations
 
 import hashlib
-import os
 from pathlib import Path
 import socket
 from typing import Callable
@@ -79,11 +78,13 @@ def send_file_over_session(
             raise TransferValidationError("receiver returned unordered or invalid chunk indexes")
         missing.append(index)
         previous = index
-    if len(missing) > max_chunks_per_session:
-        raise TransferValidationError("missing chunks exceed this session budget")
+    # A large transfer may have more missing chunks than one connection is
+    # allowed to carry. Send a bounded prefix; the completion response returns
+    # the authoritative remainder for the next session.
+    batch = missing[:max_chunks_per_session]
     sent = 0
     with path.open("rb") as source:
-        for index in missing:
+        for index in batch:
             source.seek(index * chunk_size_bytes)
             payload = source.read(min(chunk_size_bytes, size - index * chunk_size_bytes))
             if len(payload) != min(chunk_size_bytes, size - index * chunk_size_bytes):
@@ -100,7 +101,7 @@ def send_file_over_session(
                 raise TransferValidationError("receiver chunk acknowledgement mismatch")
             sent += 1
             if progress is not None:
-                progress(sent, len(missing))
+                progress(sent, len(batch))
     after = path.stat()
     if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
         raise TransferValidationError("source file changed during transfer")
