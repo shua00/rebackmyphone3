@@ -561,4 +561,7 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 会话密钥 | 独立 session domain HMAC-SHA256 派生 32-byte key；与控制帧认证绑定 | Python/Java 相同协议实现；需 CI 互通测试 |
 | 安全边界 | 群组 PSK 不是设备独立私钥；被授权设备持有共享密钥时可伪造其他 peer ID | 必须在产品文档/配对策略中保留此限制 |
 
+
+**最新验证补充：** Actions #785（commit `1140d15`）Python 编译及 302 项测试通过；Android build 因该次 push 的增量仅包含 Python 测试/文档修正而跳过，不能据此宣称 Java 编译通过。本次提交触碰 Android 测试源文件以触发真正的 Android 编译和 Robolectric 测试。
+
 **本批完成条件：** Python 认证单测、真实 TCP listener 集成、Android loopback 认证和 CI Android/Python 两项均通过。真实 Wi-Fi 双机传输仍属于实机验收，不能由 loopback 替代。

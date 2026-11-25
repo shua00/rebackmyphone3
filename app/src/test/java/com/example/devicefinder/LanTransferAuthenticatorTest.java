@@ -16,7 +16,34 @@ public class LanTransferAuthenticatorTest {
         try {
             Future<LanTransferAuthenticator.AuthenticatedPeer> server=executor.submit(()->{
                 try(Socket s=listener.accept()) { s.setSoTimeout(2000);
-                    return LanTransferAuthenticator.authenticateServer(s,"receiver",SECRET,"sender"::equals); }
+                    return LanTransferAuthenticator.authenticateServer(s,"receiver",SECRET,"sender"::equals); 
+    @Test public void clientRejectsServerProofWhenGroupSecretDiffers() throws Exception {
+        ServerSocket listener=new ServerSocket(0);
+        ExecutorService executor=Executors.newSingleThreadExecutor();
+        try {
+            Future<Boolean> server=executor.submit(()->{
+                try(Socket s=listener.accept()) {
+                    s.setSoTimeout(2000);
+                    LanTransferAuthenticator.authenticateServer(s,"receiver",SECRET,"sender"::equals);
+                    return false;
+                } catch(java.io.IOException | SecurityException expected) {
+                    return true;
+                }
+            });
+            try(Socket clientSocket=new Socket("127.0.0.1",listener.getLocalPort())) {
+                clientSocket.setSoTimeout(2000);
+                try {
+                    LanTransferAuthenticator.authenticateClient(
+                        clientSocket,"sender","receiver","different-group-secret");
+                    fail("wrong PSK must be rejected");
+                } catch(SecurityException expected) {
+                    // Client rejects the server proof before returning a session key.
+                }
+            }
+            assertTrue(server.get(3,TimeUnit.SECONDS));
+        } finally { listener.close(); executor.shutdownNow(); }
+    }
+}
             });
             try(Socket clientSocket=new Socket("127.0.0.1",listener.getLocalPort())) {
                 clientSocket.setSoTimeout(2000);
