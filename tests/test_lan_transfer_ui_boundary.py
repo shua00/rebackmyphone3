@@ -27,6 +27,12 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
         self.assertIn("ACTION_LAN_TRANSFER_ACCEPT", activity)
         self.assertIn("ACTION_LAN_TRANSFER_REJECT", activity)
         self.assertIn("lanTransferOfferList", layout)
+        self.assertIn("loadRecentTransfers", activity)
+        self.assertIn("REQUEST_SAVE_RECEIVED_FILE", activity)
+        self.assertIn("ACTION_CREATE_DOCUMENT", activity)
+        self.assertIn("copyCompletedFileToUserLocation", activity)
+        self.assertIn("publishedPath", activity)
+        self.assertIn("loadRecentTransfers", (JAVA / "LanTransferStore.java").read_text(encoding="utf-8"))
 
     def test_foreground_notification_provides_independent_entry(self):
         service = (JAVA / "TrackingService.java").read_text(encoding="utf-8")
