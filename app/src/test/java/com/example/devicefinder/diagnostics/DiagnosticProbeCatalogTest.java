@@ -19,12 +19,13 @@ public class DiagnosticProbeCatalogTest {
                 DiagnosticProbeCatalog.localReadOnlyTests(RuntimeEnvironment.getApplication());
         Set<String> ids = new HashSet<>();
         for (DiagnosticExecutor.TestCase test : tests) ids.add(test.id);
-        assertEquals(5, tests.size());
+        assertEquals(6, tests.size());
         assertTrue(ids.contains("android.runtime"));
         assertTrue(ids.contains("network.connectivity"));
         assertTrue(ids.contains("app.install"));
         assertTrue(ids.contains("lan.ipv4_interface"));
         assertTrue(ids.contains("lan.udp_bind"));
+        assertTrue(ids.contains("lan.transfer_runtime"));
         assertFalse(ids.contains("shell"));
         assertFalse(ids.contains("logcat"));
         assertFalse(ids.contains("chat.content"));
@@ -33,9 +34,9 @@ public class DiagnosticProbeCatalogTest {
                 "android_local", System.currentTimeMillis(), "test", "test",
                 "Robolectric", Build.VERSION.SDK_INT, "UNKNOWN", "READ_ONLY", "LOCAL");
         DiagnosticRun run = DiagnosticExecutor.execute(metadata, tests, tests.size(), null, null);
-        assertEquals(5, run.cases.size());
+        assertEquals(6, run.cases.size());
         for (DiagnosticRun.CaseResult result : run.cases) {
-            assertTrue(result.metrics.size() <= 3);
+            assertTrue(result.metrics.size() <= 4);
             for (String key : result.metrics.keySet()) {
                 assertFalse(key.toLowerCase(java.util.Locale.ROOT).contains("ip"));
                 assertFalse(key.toLowerCase(java.util.Locale.ROOT).contains("ssid"));
@@ -44,7 +45,6 @@ public class DiagnosticProbeCatalogTest {
         }
         assertTrue(DiagnosticJsonReport.toJson(run).contains("\"featureId\":\"android_local\""));
     }
-
     @Test public void networkMetadataUsesOnlyCoarseCategory() {
         String type = DiagnosticProbeCatalog.detectNetworkType(RuntimeEnvironment.getApplication());
         assertTrue(type.equals("WIFI") || type.equals("CELLULAR") || type.equals("OTHER")

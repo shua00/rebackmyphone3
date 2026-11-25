@@ -2610,6 +2610,7 @@ public class TrackingService extends Service implements LocationListener {
                                 "TCP listener stage=" + stage + " error=" + failure.getClass().getSimpleName()));
                 listener.start(bindAddress, LanTransferTcpListener.DEFAULT_PORT);
                 lanTransferTcpListener = listener;
+                LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_RUNNING);
                 lanTransferListenerFingerprint = fingerprint;
                 lanTransferCredentialsFingerprint = credentialFingerprint;
                 FileLogger.log(this, "LAN_TRANSFER", "TCP listener active on selected Wi-Fi "
@@ -2617,6 +2618,8 @@ public class TrackingService extends Service implements LocationListener {
                         + " reason=" + reason);
             }
         } catch (Exception failure) {
+            if (lanTransferTcpListener == null)
+                LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_FAILED);
             FileLogger.log(this, "LAN_TRANSFER", "TCP listener reconcile failed: "
                     + failure.getClass().getSimpleName());
             // A transient snapshot failure does not prove the old LAN path is gone.
@@ -2675,12 +2678,15 @@ public class TrackingService extends Service implements LocationListener {
                         () -> lanTransferTcpListener == null ? 0 : lanTransferTcpListener.getBoundPort());
                 discovery.start();
                 lanTransferDiscovery = discovery;
+                LanTransferRuntimeDiagnostics.publishDiscoveryState(LanTransferRuntimeDiagnostics.STATE_RUNNING);
                 lanTransferDiscoveryFingerprint = fingerprint;
                 FileLogger.log(this, "LAN_TRANSFER", "Independent discovery active on "
                         + links.getInterfaceName() + " address=" + local.getHostAddress()
                         + " reason=" + reason);
             }
         } catch (Exception failure) {
+            if (lanTransferDiscovery == null || !lanTransferDiscovery.isRunning())
+                LanTransferRuntimeDiagnostics.publishDiscoveryState(LanTransferRuntimeDiagnostics.STATE_FAILED);
             FileLogger.log(this, "LAN_TRANSFER", "Independent discovery reconcile failed: "
                     + failure.getClass().getSimpleName());
             // Preserve an existing discovery socket after a transient snapshot failure.
@@ -2689,6 +2695,7 @@ public class TrackingService extends Service implements LocationListener {
 
     private void stopLanTransferDiscovery() {
         synchronized (lanTransferListenerLock) { closeLanTransferDiscoveryLocked(); }
+        LanTransferRuntimeDiagnostics.publishDiscoveryState(LanTransferRuntimeDiagnostics.STATE_STOPPED);
     }
 
     private void closeLanTransferDiscoveryLocked() {
@@ -2696,6 +2703,7 @@ public class TrackingService extends Service implements LocationListener {
         lanTransferDiscovery = null;
         lanTransferDiscoveryFingerprint = null;
         if (old != null) old.close();
+        LanTransferRuntimeDiagnostics.publishDiscoveryState(LanTransferRuntimeDiagnostics.STATE_STOPPED);
     }
 
     private String transferCredentialsFingerprint(LanTransferCredentials.Value credentials)
@@ -2722,6 +2730,7 @@ public class TrackingService extends Service implements LocationListener {
         synchronized (lanTransferListenerLock) {
             closeLanTransferListenerLocked();
         }
+        LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_STOPPED);
     }
 
     private void closeLanTransferListenerLocked() {
@@ -2730,6 +2739,7 @@ public class TrackingService extends Service implements LocationListener {
         lanTransferListenerFingerprint = null;
         lanTransferCredentialsFingerprint = null;
         if (old != null) old.close();
+        LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_STOPPED);
     }
 
     private void closeLanTransferResources() {
