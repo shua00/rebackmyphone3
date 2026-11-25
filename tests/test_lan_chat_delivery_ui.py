@@ -28,6 +28,8 @@ class LanChatDeliveryUiTests(unittest.TestCase):
             self.assertIn(label, activity)
         self.assertNotIn("已读", activity)
         self.assertIn("DELIVERY_STATUS_REFRESH_MS", activity)
+        self.assertIn("A stale query must not cancel", activity)
+        self.assertIn("Start watching for this message before refreshHistory", activity)
 
     def test_delivery_panel_does_not_couple_file_transfer_into_chat_activity(self):
         activity = (JAVA / "ChatActivity.java").read_text(encoding="utf-8")

@@ -170,6 +170,12 @@ public class ChatActivity extends Activity {
             String timeStr = new java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(new java.util.Date());
             String newRecord = timeStr + " | [我] " + msg;
 
+            // Start watching for this message before refreshHistory can enqueue a status read.
+            // This prevents an older in-flight UI query from cancelling the new-message refresh.
+            deliveryStatusAwaitingNewOutbox = true;
+            deliveryStatusAwaitingSinceMs = System.currentTimeMillis();
+            deliveryStatusEmptyPolls = 0;
+
             // 本地追加到最后面
             String updatedHistory = history.isEmpty() ? newRecord : history + "\n" + newRecord;
             sp.edit().putString("chat_history", updatedHistory).apply();
@@ -179,9 +185,6 @@ public class ChatActivity extends Activity {
             Intent intent = new Intent(this, TrackingService.class);
             intent.setAction("ACTION_SEND_UDP_CHAT");
             intent.putExtra("message", msg);
-            deliveryStatusAwaitingNewOutbox = true;
-            deliveryStatusAwaitingSinceMs = System.currentTimeMillis();
-            deliveryStatusEmptyPolls = 0;
             // [C2] 原 startService 在服务被 kill 时会抛 IllegalStateException（Android 8+）；
             //      先按原行为调用，失败再兜底用 startForegroundService 复活服务
             try {
@@ -306,9 +309,12 @@ public class ChatActivity extends Activity {
                         deliveryStatusEmptyPolls++;
                         if (deliveryStatusEmptyPolls >= 5) deliveryStatusAwaitingNewOutbox = false;
                     }
-                    refreshHandler.removeCallbacks(deliveryStatusPoll);
                     if (retryPending) {
+                        refreshHandler.removeCallbacks(deliveryStatusPoll);
                         refreshHandler.postDelayed(deliveryStatusPoll, DELIVERY_STATUS_REFRESH_MS);
+                    } else if (!deliveryStatusAwaitingNewOutbox) {
+                        // A stale query must not cancel the refresh scheduled by a newer send.
+                        refreshHandler.removeCallbacks(deliveryStatusPoll);
                     }
                 });
             });
