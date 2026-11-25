@@ -11,7 +11,8 @@ class ChatInputContinuityTests(unittest.TestCase):
     def test_send_restores_editor_focus_and_keeps_ime_visible(self):
         source = JAVA.read_text(encoding="utf-8")
         self.assertIn("import android.view.inputmethod.InputMethodManager;", source)
-        self.assertIn("restoreChatInputFocus(true);", source)
+        self.assertIn("restoreChatInputFocus(keepKeyboardVisible);", source)
+        self.assertIn("boolean keepKeyboardVisible = isComposerImeVisible();", source)
         self.assertIn("inputMsg.requestFocus();", source)
         self.assertIn("inputMsg.setSelection(inputMsg.length());", source)
         self.assertIn("imm.showSoftInput(inputMsg, InputMethodManager.SHOW_IMPLICIT);", source)

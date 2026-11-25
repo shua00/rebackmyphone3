@@ -2723,8 +2723,10 @@ class LanP2PCoreTests(unittest.TestCase):
         end = source.index("\n    private void refreshDeliveryStatusAsync(", start)
         send = source[start:end]
         self.assertIn('inputMsg.setText("");', send)
-        self.assertIn("restoreChatInputFocus(true);", send)
-        self.assertLess(send.index('inputMsg.setText("");'), send.index("restoreChatInputFocus(true);"))
+        self.assertIn("boolean keepKeyboardVisible = isComposerImeVisible();", send)
+        self.assertIn("restoreChatInputFocus(keepKeyboardVisible);", send)
+        self.assertLess(send.index("isComposerImeVisible();"), send.index('inputMsg.setText("");'))
+        self.assertLess(send.index('inputMsg.setText("");'), send.index("restoreChatInputFocus(keepKeyboardVisible);"))
         focus = extract_java_method(
             source, "private void restoreChatInputFocus(boolean keepKeyboardVisible)"
         )
