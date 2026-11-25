@@ -1,4 +1,15 @@
 ================================================================================
+v8.47 — 2026-11-25 · Android LNP2 authenticated TCP session adapter
+================================================================================
+
+【第 3 阶段：Android TCP 数据面接入】
+--------------------------------------------------------------------------------
+- 新增 LanTransferTcpSession：在已接入的 TCP socket 上完成服务端 PSK 双向认证，再以认证 peer ID 绑定每一帧的 sender/target 与不可变 Offer 参与方。
+- 支持 bounded missing page、chunk durable write → fsync/目录同步 → SQLite receipt → chunk_ack、whole-file verify/publish、幂等 cancel；每连接最多处理 64 帧，socket read timeout 默认 15 秒。
+- 新增 socket loopback Robolectric 测试：覆盖认证、缺块查询、分块 ACK、完成发布和未授权 peer 拒绝。
+- 该提交是可复用的已认证会话处理器，不等于完整生产监听器：Wi-Fi Network socket factory、监听端口 admission/concurrency、服务生命周期、发送端文件读取与 UI Offer/Accept 流程仍待接入和验收。
+
+================================================================================
 v8.46 — 2026-11-25 · 第 2/3/4 阶段交叉批次 2 自动化验收通过
 ================================================================================
 
