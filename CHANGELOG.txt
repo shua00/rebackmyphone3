@@ -1,4 +1,17 @@
 ================================================================================
+v8.23 — 2026-11-25 · Android 文件传输 TCP 帧协议适配
+================================================================================
+
+【新增】Android LNP2 frame codec
+--------------------------------------------------------------------------------
+- 新增 LanTransferFrameCodec.java，与 Python lan_p2p_transfer_tcp.py 对齐 LNP2 magic、4-byte big-endian header length、canonical JSON、payload SHA-256、HMAC-SHA256、帧类型、身份字段和 metadata/payload 上限。
+- 增加 Android loopback 测试：chunk round-trip、missing 分页 metadata、错误 session key/peer ID 拒绝。
+- 认证阶段 Actions #788 已通过：Python 302 项测试 + Android unit tests/APK build 成功；本批帧 codec 新增代码需新一轮 Actions 验证。
+- 当前 Android codec 仅实现帧收发，不等于 Android TransferStore、文件落盘、断点续传和 UI 已接通。
+
+================================================================================
+
+================================================================================
 v8.22 — 2026-11-25 · Python/Android TCP 双向认证协议
 ================================================================================
 

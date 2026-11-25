@@ -565,3 +565,9 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 **最新验证补充：** Actions #788（commit `862cdb510df35068bbc5de1fb1204ff86cd00cb6`）全部成功：Python 编译及 302 项测试通过；Android `testDebugUnitTest` 与 `assembleDebug` 成功，包含新增的 TCP 双向认证 Robolectric loopback 测试。此前 #784、#786、#787 的失败已分别修正，不能将它们隐藏或算作通过；最终以 #788 为准。 [Actions #788](https://github.com/shua00/rebackmyphone3/actions/runs/45522817799)
 
 **本批完成条件：** Python 认证单测、真实 TCP listener 集成、Android loopback 认证和 CI Android/Python 两项均通过。真实 Wi-Fi 双机传输仍属于实机验收，不能由 loopback 替代。
+
+
+## 30. Android LNP2 TCP frame codec（2026-11-25）
+
+新增 `LanTransferFrameCodec.java`，按 Python LNP2 wire format 实现固定 magic、长度前缀、canonical JSON、payload SHA-256、HMAC 和固定 peer ID 检查。新增 loopback chunk/control-frame 测试。
+当前仅是 Android 编解码层；尚未接入 Android 持久化 TransferStore、文件系统安全 staging、发送/接收 worker 和用户文件选择/保存 UI。不得标为 Android 文件传输完成。
