@@ -16,6 +16,7 @@
 package com.example.devicefinder;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -30,6 +31,7 @@ import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -50,6 +52,8 @@ public class ChatActivity extends Activity {
     private ScrollView scrollView;
     private EditText inputMsg;
     private Button btnSend;
+    private Button btnTransfer;
+    private Button btnChatSettings;
     private TextView tvNewMsg; // 【新增】新消息标签
     private TextView tvDeliveryStatus;
     private ExecutorService deliveryStatusExecutor;
@@ -102,6 +106,14 @@ public class ChatActivity extends Activity {
         scrollView = findViewById(R.id.scrollView);
         inputMsg = findViewById(R.id.inputMsg);
         btnSend = findViewById(R.id.btnSend);
+        btnTransfer = findViewById(R.id.btnTransfer);
+        btnChatSettings = findViewById(R.id.btnChatSettings);
+        updateTransferControls();
+        btnTransfer.setOnClickListener(v -> {
+            if (!LanTransferFeature.isEnabled(this)) { updateTransferControls(); return; }
+            startActivity(new Intent(this, LanTransferActivity.class));
+        });
+        btnChatSettings.setOnClickListener(v -> showChatSettings());
         tvNewMsg = findViewById(R.id.tvNewMsg); // 绑定新标签
         tvDeliveryStatus = findViewById(R.id.tvDeliveryStatus);
         deliveryStatusExecutor = Executors.newSingleThreadExecutor();
@@ -157,6 +169,37 @@ public class ChatActivity extends Activity {
         } catch (Exception e) {
             android.util.Log.e("ChatActivity", "注册 UPDATE_CHAT_UI 广播失败: " + e.getMessage());
         }
+    }
+
+
+    private void updateTransferControls() {
+        boolean enabled = LanTransferFeature.isEnabled(this);
+        if (btnTransfer != null) btnTransfer.setVisibility(enabled ? View.VISIBLE : View.GONE);
+    }
+
+    private void showChatSettings() {
+        CheckBox fileTransfer = new CheckBox(this);
+        fileTransfer.setText("启用局域网文件传输");
+        fileTransfer.setTextSize(16f);
+        fileTransfer.setPadding(24, 20, 24, 20);
+        fileTransfer.setChecked(LanTransferFeature.isEnabled(this));
+        TextView explanation = new TextView(this);
+        explanation.setText("开启后，聊天输入区显示附件入口，并可进入独立文件管理页面。关闭后隐藏入口并停止本机文件接收监听；不会删除配对密钥、文件或历史任务。对讲消息通道不受影响。");
+        explanation.setTextSize(13f);
+        explanation.setPadding(24, 0, 24, 12);
+        android.widget.LinearLayout content = new android.widget.LinearLayout(this);
+        content.setOrientation(android.widget.LinearLayout.VERTICAL);
+        content.addView(fileTransfer);
+        content.addView(explanation);
+        new AlertDialog.Builder(this).setTitle("聊天与文件传输设置").setView(content)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("保存", (dialog, which) -> {
+                    boolean enabled = fileTransfer.isChecked();
+                    if (LanTransferFeature.setEnabled(this, enabled)) {
+                        updateTransferControls();
+                        Toast.makeText(this, enabled ? "文件传输已开启" : "文件传输已关闭", Toast.LENGTH_SHORT).show();
+                    } else Toast.makeText(this, "设置保存失败，请重试", Toast.LENGTH_LONG).show();
+                }).show();
     }
 
     private void sendMessage() {

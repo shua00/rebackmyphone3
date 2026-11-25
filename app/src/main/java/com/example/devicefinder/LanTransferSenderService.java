@@ -36,7 +36,7 @@ public final class LanTransferSenderService extends Service {
         return context.getApplicationContext().getSharedPreferences(PREFS,Context.MODE_PRIVATE).contains(JOB);
     }
     public static void resumeIfPending(Context context) {
-        if(!hasPendingJob(context)) return;
+        if(!LanTransferFeature.isEnabled(context) || !hasPendingJob(context)) return;
         Intent intent=new Intent(context,LanTransferSenderService.class).setAction(ACTION_SEND);
         try {
             if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.O) context.startForegroundService(intent); else context.startService(intent);
@@ -51,6 +51,8 @@ public final class LanTransferSenderService extends Service {
     }
 
     public static void enqueue(Context context, LanTransferStore.Offer offer, String host, int port, String path) throws Exception {
+        if (!LanTransferFeature.isEnabled(context))
+            throw new SecurityException("LAN file transfer feature is disabled");
         JSONObject j=new JSONObject();
         j.put("id",offer.transferId);j.put("sender",offer.senderPeerId);j.put("target",offer.targetPeerId);
         j.put("filename",offer.filename);j.put("size",offer.sizeBytes);j.put("sha",offer.sha256);
@@ -100,6 +102,12 @@ public final class LanTransferSenderService extends Service {
     }
 
     private void runJob(JSONObject j,int startId) {
+        if (!LanTransferFeature.isEnabled(this)) {
+            FileLogger.log(this, "LAN_TRANSFER", "Outgoing job paused because feature is disabled");
+            jobActive.set(false);
+            stopSelf(startId);
+            return;
+        }
         LanTransferStore store=null;
         boolean retry=false;
         try {

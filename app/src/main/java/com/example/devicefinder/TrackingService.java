@@ -1032,6 +1032,10 @@ public class TrackingService extends Service implements LocationListener {
             } else if ("ACTION_UPDATE_CONFIG_URL".equals(action)) {
                 String newConfigUrl = intent.getStringExtra("config_url");
                 handleUpdateConfigUrl(newConfigUrl);
+            } else if ("ACTION_LAN_TRANSFER_FEATURE_TOGGLED".equals(action)) {
+                restartForegroundNotification();
+                executeMaintenance("lan-transfer-feature-toggle", () ->
+                        refreshLanTransferTcpListener("feature toggle changed"));
             } else if ("ACTION_LAN_TRANSFER_CREDENTIALS_UPDATED".equals(action)) {
                 executeMaintenance("lan-transfer-credentials", () ->
                         refreshLanTransferTcpListener("credentials updated"));
@@ -2115,9 +2119,11 @@ public class TrackingService extends Service implements LocationListener {
         transferIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         PendingIntent transferPi = PendingIntent.getActivity(this, 889, transferIntent, piFlags);
 
-        Notification notification = builder.setContentTitle("系统同步").setContentText("正在运行...")
-                .setSmallIcon(iconRes).setContentIntent(chatPi).setOngoing(true)
-                .addAction(android.R.drawable.ic_menu_upload, "文件传输", transferPi).build();
+        Notification.Builder notificationBuilder = builder.setContentTitle("系统同步").setContentText("正在运行...")
+                .setSmallIcon(iconRes).setContentIntent(chatPi).setOngoing(true);
+        if (LanTransferFeature.isEnabled(this))
+            notificationBuilder.addAction(android.R.drawable.ic_menu_upload, "文件传输", transferPi);
+        Notification notification = notificationBuilder.build();
         notification.priority = Notification.PRIORITY_MIN;
 
         try {
@@ -2472,6 +2478,12 @@ public class TrackingService extends Service implements LocationListener {
     /** Explicit UI/service action boundary for incoming Offer acceptance, rejection and cancellation. */
     private void handleLanTransferUserAction(String action, String transferId) {
         if (serviceDestroyed) return;
+        if (("ACTION_LAN_TRANSFER_ACCEPT".equals(action)
+                || "ACTION_LAN_TRANSFER_REJECT".equals(action))
+                && !LanTransferFeature.isEnabled(this)) {
+            FileLogger.log(this, "LAN_TRANSFER", "Transfer decision rejected: feature disabled");
+            return;
+        }
         if (transferId == null || transferId.isEmpty()) {
             FileLogger.log(this, "LAN_TRANSFER", "Transfer action rejected: missing transfer_id");
             return;
@@ -2529,6 +2541,10 @@ public class TrackingService extends Service implements LocationListener {
      * absent credentials means the file-transfer listener remains closed.
      */
     private void refreshLanTransferTcpListener(String reason) {
+        if (!LanTransferFeature.isEnabled(this)) {
+            stopLanTransferTcpListener("file-transfer feature disabled");
+            return;
+        }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || serviceDestroyed) {
             stopLanTransferTcpListener("unsupported or service destroyed");
             return;

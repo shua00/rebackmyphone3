@@ -18,15 +18,33 @@
     android:orientation="vertical"
     android:background="#F4F6F9">
 
-    <TextView
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="50dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
         android:background="#1f2937"
-        android:text="📟 局域网对讲机"
-        android:textColor="#FFFFFF"
-        android:textSize="18sp"
-        android:gravity="center"
-        android:textStyle="bold" />
+        android:paddingStart="12dp"
+        android:paddingEnd="6dp">
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:text="📟 局域网对讲机"
+            android:textColor="#FFFFFF"
+            android:textSize="18sp"
+            android:gravity="center_vertical"
+            android:textStyle="bold" />
+        <Button
+            android:id="@+id/btnChatSettings"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:minWidth="0dp"
+            android:text="设置"
+            android:textSize="13sp"
+            android:backgroundTint="#374151"
+            android:textColor="#FFFFFF" />
+    </LinearLayout>
 
     <!-- 用 RelativeLayout 包裹，为了放置悬浮标签 -->
     <RelativeLayout
@@ -102,11 +120,22 @@
             android:imeOptions="actionSend" />
 
         <Button
+            android:id="@+id/btnTransfer"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="附件"
+            android:visibility="gone"
+            android:layout_marginStart="6dp"
+            android:backgroundTint="#475569"
+            android:textColor="#FFFFFF"
+            android:focusable="false"
+            android:focusableInTouchMode="false" />
+        <Button
             android:id="@+id/btnSend"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="发送"
-            android:layout_marginStart="10dp"
+            android:layout_marginStart="6dp"
             android:backgroundTint="#1f2937"
             android:textColor="#FFFFFF"
             android:focusable="false"

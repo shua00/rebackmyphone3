@@ -52,6 +52,11 @@ public final class LanTransferActivity extends Activity {
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
+        if (!LanTransferFeature.isEnabled(this)) {
+            Toast.makeText(this, "文件传输已关闭，请先在聊天设置中开启", Toast.LENGTH_LONG).show();
+            finish();
+            return;
+        }
         setContentView(R.layout.activity_lan_transfer);
         TextView localId = findViewById(R.id.lanTransferLocalPeer);
         status = findViewById(R.id.lanTransferStatus);
@@ -387,6 +392,14 @@ public final class LanTransferActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         refreshOffers();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (!LanTransferFeature.isEnabled(this)) {
+            Toast.makeText(this, "文件传输已关闭", Toast.LENGTH_SHORT).show();
+            finish();
+        }
     }
 
     @Override protected void onDestroy() {
