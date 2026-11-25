@@ -41,6 +41,7 @@ public class BootReceiver extends BroadcastReceiver {
                     context.startService(serviceIntent);
                 }
                 FileLogger.log(context, "BOOT", "✅ [通道1] 已拉起 TrackingService");
+                LanTransferSenderService.resumeIfPending(context);
             } catch (Exception e) {
                 // ★ 2026-11-07 加固：Android 14+ 对 BOOT_COMPLETED 启动 location 型 FGS 有限制，
                 //   部分 ROM 会直接抛 ForegroundServiceStartNotAllowedException。
@@ -49,6 +50,7 @@ public class BootReceiver extends BroadcastReceiver {
                 try {
                     KeepAliveJobService.scheduleJob(context);
                     FileLogger.log(context, "BOOT", "✅ [通道2] 已注入 JobScheduler 保活心跳");
+                    LanTransferSenderService.resumeIfPending(context);
                 } catch (Exception jobEx) {
                     FileLogger.log(context, "BOOT", "❌ [通道2] 调度失败: " + jobEx.getMessage());
                 }
