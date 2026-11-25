@@ -123,7 +123,7 @@ public final class LanTransferFrameCodec {
         String sender = string(header, "sender_peer_id"), target = string(header, "target_peer_id");
         checkId(transferId, "transfer ID"); checkId(sender, "sender peer ID"); checkId(target, "target peer ID");
         if (sender.equals(target)) throw new IOException("Transfer peers must differ");
-        int payloadSize = integer(header, "payload_size");
+        int payloadSize = number(header, "payload_size");
         if (payloadSize < 0 || payloadSize > maxPayloadBytes) throw new IOException("Invalid transfer payload length");
         Object indexValue = header.get("index");
         Integer index = indexValue == JSONObject.NULL ? null : integer(indexValue, "index");

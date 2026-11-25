@@ -628,3 +628,14 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | Actions #798 | Gradle 配置阶段多个 Maven Central 依赖 HTTP 429 | 外部依赖限流；不计为代码通过，也不据此判断 Android 新增 Store 失败 |
 | Android TransferStore | `LanTransferStore.java` 和 `LanTransferStoreTest.java` 已提交，独立数据库与账本门禁已建立 | 等待 Android CI 可运行后验证；文件 staging/重启实际 hash 核验未完成 |
 | CI 诊断 | Android unit test 已启用 failed-event stdout/stderr 输出 | 后续 Actions 可直接看到解码异常详情 |
+
+
+## 36. LNP2 payload_size 解码根因修复（2026-11-25）
+
+| 项目 | 根因证据 | 修复与验收 |
+|---|---|---|
+| Android decode 失败 | Actions #799 输出 payload_size 解析实参类型为 org.json.JSONObject，值是整个 header | 已定位为调用点误将 integer(header, key) 当作字段读取 |
+| 生产修复 | decodeFromStream 原代码 integer(header, "payload_size") | 改为 number(header, "payload_size")，先读取字段再严格解析整数 |
+| 安全约束 | canonical JSON、HMAC、payload hash、身份与长度限制未发现问题 | 全部保留，不接受字符串数字或放宽校验 |
+| 自动化验收 | round-trip、Python golden frame、错误身份/密钥、trailing bytes 均经过修正调用点 | 等待本提交对应 Android + Python Actions；尚未标通过 |
+| TransferStore | Android 独立 SQLite task/chunk ledger 已新增 | 等待可运行的 Android CI；文件系统与网络集成仍待后续批次 |

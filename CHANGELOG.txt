@@ -1,4 +1,22 @@
 ================================================================================
+v8.29 — 2026-11-25 · 修复 Android LNP2 payload_size 解码实参错误
+================================================================================
+
+【根因修复】LanTransferFrameCodec.java
+--------------------------------------------------------------------------------
+- Actions #799 输出确定证据：payload_size 解析函数收到的实参类型是 org.json.JSONObject，值为整个 header，而不是 Number。
+- 根因不是 Android JSON Number 子类型，也不是 canonical JSON/HMAC：decodeFromStream 错把 integer(header, "payload_size") 作为字段读取，直接把 JSONObject 传给整数转换器。
+- 修正为 number(header, "payload_size")，由 number() 先取 header.get("payload_size") 再执行严格整数转换。
+- 保留 payload_size 必须为 JSON 数字、整数范围、canonical JSON、HMAC、payload SHA-256、peer identity 和帧大小限制；不放宽任何安全检查。
+- 既有 round-trip、Python golden frame、错误 peer/key 和 trailing bytes 测试均覆盖此调用路径；需以本提交 Actions 验收为准。
+
+【第 3 阶段】
+--------------------------------------------------------------------------------
+- Android LanTransferStore 独立 SQLite 账本和基础 Robolectric 测试已加入分支；#799 因 Gradle 配置阶段 Maven Central HTTP 429 未能完成代码测试，不能据此判定该模块通过或失败。
+
+================================================================================
+
+================================================================================
 v8.28 — 2026-11-25 · LNP2 整数解析根因诊断细化
 ================================================================================
 
