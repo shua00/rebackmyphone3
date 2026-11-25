@@ -517,3 +517,18 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 资源边界 | 每连接最多处理 64 帧（可配置上限 256） | socket timeout、listener admission、并发连接数由上层负责 |
 
 **阶段判定：** Python TCP 接收侧会话已通过 SocketPair 集成测试串联 framing、身份约束、缺块查询、落盘、校验和完成；尚未具备发送侧与 Android 互通，不能视为端到端 LAN 文件传输完成。
+
+
+## 27. TCP 文件传输缺块分页与会话预算对齐（2026-11-25）
+
+| 验收点 | 本批实现 | 当前边界 |
+|---|---|---|
+| 控制帧大小 | missing 响应每页最多 128 个索引，低于 2 KiB metadata 上限 | 上限是协议硬边界，不代表所有传输配置都可无限增大 |
+| 分页协商 | 发送端按单会话块预算请求页大小；接收端对首次 missing 和 complete 复核结果统一分页，并返回 more | 每次新连接仍重新查询持久化账本和磁盘，不使用易丢失的内存游标 |
+| 会话预算 | 发送端默认最多 62 块；与接收端默认 max_frames=64 对齐（missing 请求 + 块请求 + complete 请求） | 显式提高发送预算时，调用方必须同步提高接收端 max_frames，且不得超过接收端 256 帧上限 |
+| 异常与重连 | ACK 丢失或连接中断后重新查询缺块；索引类型、顺序、范围、页大小和 more 字段均校验 | 实际 socket listener、连接准入和会话密钥生命周期尚未实现 |
+| 集成验证 | 140 块 socketpair 端到端测试使用默认预算跨三次会话完成，核验整文件 SHA-256 并原子发布 | SocketPair 不等同于真实 Wi-Fi、Android 与 PC 跨设备互通 |
+
+**自动化/CI 证据：** commit `accd3afd8e79f5edbfe978b6bacdd0ad2bbd8b67`；Actions [#781](https://github.com/shua00/rebackmyphone3/actions/runs/45518434514) 成功，Python 编译检查通过，292 项测试通过。Android build 按路径规则跳过（本批无 Android 构建输入变更）。
+
+**阶段判定：** Python 文件传输 framing、接收会话、发送驱动、缺块分页与默认帧预算已具备自动化闭环；LAN 文件传输的真实 TCP listener/连接准入、Android 同协议实现、文件选择/保存 UI、真机断网恢复与 PC 互通仍未完成，不能宣称端到端文件传输验收通过。
