@@ -78,7 +78,12 @@ public final class LanTransferTcpClient {
                 || response.metadata == null
                 || !("offered".equals(response.metadata.optString("state"))
                     || "accepted".equals(response.metadata.optString("state"))
-                    || "transferring".equals(response.metadata.optString("state"))))
+                    || "transferring".equals(response.metadata.optString("state"))
+                    || "rejected".equals(response.metadata.optString("state"))
+                    || "cancelled".equals(response.metadata.optString("state"))
+                    || "completed".equals(response.metadata.optString("state"))
+                    || "failed".equals(response.metadata.optString("state"))
+                    || "expired".equals(response.metadata.optString("state"))))
             throw new IOException("Receiver did not durably acknowledge Offer");
         if (response.metadata.optInt("chunk_size_bytes", -1) != chunkSizeBytes)
             throw new IOException("Receiver changed immutable Offer chunk size");
