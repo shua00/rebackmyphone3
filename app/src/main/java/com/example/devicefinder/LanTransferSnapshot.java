@@ -37,8 +37,9 @@ public final class LanTransferSnapshot {
         }
         name=name.replaceAll("[\\\\/\\p{Cntrl}]","_").trim();
         if(name.isEmpty() || ".".equals(name) || "..".equals(name)) name="shared-file";
-        if(name.getBytes(java.nio.charset.StandardCharsets.UTF_8).length>180)
-            name=name.substring(0,Math.min(name.length(),120));
+        while(name.getBytes(java.nio.charset.StandardCharsets.UTF_8).length>180 && !name.isEmpty())
+            name=name.substring(0,name.length()-1);
+        if(name.isEmpty()) name="shared-file";
         String mime=context.getContentResolver().getType(uri);
         if(mime==null || mime.trim().isEmpty() || mime.length()>127) mime="application/octet-stream";
         File dir=new File(context.getFilesDir(),"lan-transfer-outbox");
