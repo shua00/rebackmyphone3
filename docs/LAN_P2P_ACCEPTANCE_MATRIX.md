@@ -900,3 +900,16 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | S04 隔离 | ChatActivity.java 与 activity_chat.xml 恢复到文件传输 UI 接入前基线；前台服务通知打开独立 LanTransferActivity；新增 tests/test_lan_transfer_ui_boundary.py 源码守卫 | 对讲输入、历史、消息刷新与文件传输 UI 解耦；自动化守卫待 CI 执行，实机入口仍待验证 |
 | 未完成 | 文件选择与发送、自动发送 worker、接收完成文件入口、Android/Python 实网互通 | 不得将当前接收控制面视为文件传输全流程完成 |
 
+
+## 24. Android 发送端任务协调器（2026-11-25）
+
+| 项目 | 实现 | 验收边界 |
+|---|---|---|
+| 可信目标 | Worker 构造时校验目标 Peer ID 位于 AndroidKeyStore 解密后的 trustedPeerIds；Offer sender ID 必须等于本机 ID | 尚无 UI 发起入口；不代表完整用户流程 |
+| 网络选择 | 每次 Offer/数据会话从 NetworkProvider 获取当前 Wi-Fi Network，并使用现有 LanTransferTcpClient 的 Network socket factory | Worker 本身不负责选择 Network；接入 TrackingService 时必须复用唯一 Wi-Fi 选择器，不得使用默认蜂窝路由 |
+| Offer 等待 | 幂等重发 Offer，接收端明确接受后才推进发送端本地状态 | 等待窗口有界；超时保留 offered，后续由调度层重新唤起 |
+| 分批续传 | 每个 TCP 会话最多 DEFAULT_CHUNKS_PER_SESSION；断线重连重新查询接收端缺块页 | 依赖接收端持久化 receipt；实网丢包/漫游仍待测试 |
+| 状态收敛 | 增加发送端专用 markSenderCompleted，只有发送方本地账本可写 completed，且须在客户端收到远端 complete/completed 后调用 | 本地无接收 chunk receipt，不使用接收端 VERIFYING 规则 |
+| 限制 | worker 提供最大会话数、Offer 等待期限、退避、取消标志与进度回调 | 当前尚未由 TrackingService 调度；没有 SAF 文件选择、私有快照、重启恢复、通知进度和发送 UI，不能宣称端到端发送已完成 |
+| 自动化 | tests/test_lan_transfer_ui_boundary.py 增加发送端源码守卫 | Actions 结果未确认；Android 编译和跨端实网测试待后续批次 |
+
