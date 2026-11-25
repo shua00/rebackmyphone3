@@ -6,6 +6,9 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.net.Uri;
+import android.text.TextUtils;
+import java.io.File;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
@@ -34,6 +37,7 @@ public final class LanTransferActivity extends Activity {
     private TextView status;
     private Button refreshButton;
     private boolean receiverRegistered;
+    private static final int REQUEST_PICK_TRANSFER_FILE = 7401;
 
     private final BroadcastReceiver updates = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) { refreshOffers(); }
@@ -49,6 +53,8 @@ public final class LanTransferActivity extends Activity {
         refreshButton = findViewById(R.id.lanTransferRefresh);
         localId.setText("本机 Peer ID：" + TrackingService.getUniqueDeviceId(this));
         pairing.setOnClickListener(v -> showPairingDialog());
+        Button send = findViewById(R.id.lanTransferSendFile);
+        send.setOnClickListener(v -> pickFileForSending());
         refreshButton.setOnClickListener(v -> refreshOffers());
         IntentFilter filter = new IntentFilter("ACTION_LAN_TRANSFER_UPDATED");
         try {
@@ -98,6 +104,74 @@ public final class LanTransferActivity extends Activity {
                     refreshOffers();
                 } catch (Exception failure) {
                     Toast.makeText(this, "配对保存失败：" + failure.getClass().getSimpleName(), Toast.LENGTH_LONG).show();
+                }
+            }).show();
+    }
+
+
+    private void pickFileForSending() {
+        Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        pick.addCategory(Intent.CATEGORY_OPENABLE);
+        pick.setType("*/*");
+        pick.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        startActivityForResult(pick, REQUEST_PICK_TRANSFER_FILE);
+    }
+
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQUEST_PICK_TRANSFER_FILE || resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        Uri uri = data.getData();
+        try {
+            int grants = data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION;
+            getContentResolver().takePersistableUriPermission(uri, grants);
+        } catch (Exception ignored) {
+            // The private snapshot below is independent of the provider after it completes.
+        }
+        showOutgoingDestinationDialog(uri);
+    }
+
+    private void showOutgoingDestinationDialog(Uri uri) {
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        int pad = (int) (16 * getResources().getDisplayMetrics().density);
+        form.setPadding(pad, pad, pad, 0);
+        EditText peer = new EditText(this); peer.setSingleLine(true); peer.setHint("已配对的对端 Peer ID"); form.addView(peer);
+        EditText host = new EditText(this); host.setSingleLine(true); host.setHint("对端当前 LAN IP / 主机名"); form.addView(host);
+        EditText port = new EditText(this); port.setSingleLine(true); port.setInputType(InputType.TYPE_CLASS_NUMBER); port.setHint("对端 TCP 端口"); form.addView(port);
+        new AlertDialog.Builder(this).setTitle("发送到可信设备")
+            .setMessage("必须填写已配对设备的精确 Peer ID，以及对端当前可达的 LAN 地址和监听端口。不会自动猜测或广播文件内容。")
+            .setView(form).setNegativeButton("取消", null)
+            .setPositiveButton("创建发送任务", (d, w) -> {
+                String peerId = peer.getText().toString().trim();
+                String remoteHost = host.getText().toString().trim();
+                int remotePort;
+                try { remotePort = Integer.parseInt(port.getText().toString().trim()); }
+                catch (Exception invalid) { Toast.makeText(this, "端口无效", Toast.LENGTH_LONG).show(); return; }
+                if (peerId.isEmpty() || remoteHost.isEmpty() || remotePort < 1 || remotePort > 65535
+                        || remoteHost.contains("/") || remoteHost.contains(" ")) {
+                    Toast.makeText(this, "请填写有效 Peer ID、主机地址和 1–65535 端口", Toast.LENGTH_LONG).show(); return;
+                }
+                status.setText("正在生成应用私有文件快照…");
+                try {
+                    io.execute(() -> {
+                        try {
+                            LanTransferCredentials.Value credentials = LanTransferCredentials.load(getApplicationContext());
+                            if (credentials == null || !credentials.trustedPeerIds.contains(peerId))
+                                throw new SecurityException("目标设备尚未配对或不在可信列表中");
+                            LanTransferSnapshot.Result snapshot = LanTransferSnapshot.create(getApplicationContext(), uri);
+                            String local = TrackingService.getUniqueDeviceId(getApplicationContext());
+                            LanTransferStore.Offer offer = new LanTransferStore.Offer(snapshot.transferId, local,
+                                peerId, snapshot.filename, snapshot.sizeBytes, snapshot.sha256,
+                                System.currentTimeMillis(), snapshot.mimeType);
+                            LanTransferSenderService.enqueue(getApplicationContext(), offer, remoteHost, remotePort,
+                                snapshot.file.getCanonicalPath());
+                            runOnUiThread(() -> status.setText("发送任务已持久化并交由后台服务执行：" + snapshot.filename));
+                        } catch (Exception failure) {
+                            runOnUiThread(() -> status.setText("创建发送任务失败：" + failure.getClass().getSimpleName()));
+                        }
+                    });
+                } catch (RejectedExecutionException stopped) {
+                    status.setText("文件界面正在关闭，请重新打开");
                 }
             }).show();
     }
