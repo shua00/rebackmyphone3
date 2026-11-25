@@ -595,3 +595,14 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 本次处理 | 增加测试侧 IOException message 输出，帮助定位具体失败阶段 |
 | 验收结论 | 未通过；不得启动 Android TCP 集成或标记跨端协议完成 |
 
+
+
+## 33. Android LNP2 解码诊断调用覆盖修正（2026-11-25）
+
+| 项目 | 本批处理 | 验收状态 |
+|---|---|---|
+| Actions #795 复核 | Android testDebugUnitTest 18 项中 4 项失败；Python 检查通过 | 本轮失败已确认 |
+| 诊断遗漏根因 | 上一轮虽增加 decode helper，但失败用例仍直接调用 decodeFrame，因此 helper 从未覆盖失败路径 | 已定位测试接线错误 |
+| 本批修正 | 所有测试解码调用统一进入 helper；同时打印异常类名与 message，捕获 IOException/SecurityException 等异常后原样抛出 | 等待新 SHA Actions |
+| 生产代码 | 不修改帧格式或校验策略；不移除 canonical JSON、HMAC、payload hash、peer identity 检查 | 保持安全约束 |
+| 后续门槛 | 先根据新 Actions 的具体异常信息定位真正的生产解码问题，再修复并增加回归测试 | LNP2 仍阻塞；未通过 |

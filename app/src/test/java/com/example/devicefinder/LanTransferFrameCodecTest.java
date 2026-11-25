@@ -25,7 +25,12 @@ public class LanTransferFrameCodecTest {
         try {
             return LanTransferFrameCodec.decodeFrame(wire, key, maxPayloadBytes, sender, target);
         } catch (java.io.IOException failure) {
-            System.err.println("LNP2 decode diagnostic: " + failure.getMessage());
+            System.err.println("LNP2 decode diagnostic: "
+                    + failure.getClass().getName() + ": " + failure.getMessage());
+            throw failure;
+        } catch (Exception failure) {
+            System.err.println("LNP2 decode diagnostic: "
+                    + failure.getClass().getName() + ": " + failure.getMessage());
             throw failure;
         }
     }
@@ -34,7 +39,7 @@ public class LanTransferFrameCodecTest {
         byte[] payload = "hello-lan-transfer".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         byte[] wire = LanTransferFrameCodec.encodeFrame(new LanTransferFrameCodec.Frame(
                 "chunk","transfer-1","sender","receiver",0,payload,null),KEY,1024);
-        LanTransferFrameCodec.Frame frame = LanTransferFrameCodec.decodeFrame(
+        LanTransferFrameCodec.Frame frame = decode(
                 wire,KEY,1024,"sender","receiver");
         assertEquals("chunk",frame.kind);
         assertEquals("transfer-1",frame.transferId);
@@ -47,7 +52,7 @@ public class LanTransferFrameCodecTest {
         metadata.put("more",true);
         byte[] wire = LanTransferFrameCodec.encodeFrame(new LanTransferFrameCodec.Frame(
                 "missing","transfer-1","sender","receiver",null,new byte[0],metadata),KEY,1024);
-        LanTransferFrameCodec.Frame frame = LanTransferFrameCodec.decodeFrame(
+        LanTransferFrameCodec.Frame frame = decode(
                 wire,KEY,1024,"sender","receiver");
         assertEquals("missing",frame.kind);
         assertTrue(frame.metadata.getBoolean("more"));
@@ -58,12 +63,12 @@ public class LanTransferFrameCodecTest {
         byte[] wire = LanTransferFrameCodec.encodeFrame(new LanTransferFrameCodec.Frame(
                 "cancel","transfer-1","sender","receiver",null,new byte[0],null),KEY,1024);
         try {
-            LanTransferFrameCodec.decodeFrame(wire,KEY,1024,"someone-else","receiver");
+            decode(wire,KEY,1024,"someone-else","receiver");
             fail("unexpected peer must be rejected");
         } catch (SecurityException expected) { }
         byte[] wrongKey = "wrong-session-key-0123456789".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         try {
-            LanTransferFrameCodec.decodeFrame(wire,wrongKey,1024,"sender","receiver");
+            decode(wire,wrongKey,1024,"sender","receiver");
             fail("wrong session key must be rejected");
         } catch (SecurityException expected) { }
     }
@@ -75,7 +80,7 @@ public class LanTransferFrameCodecTest {
     }
 
     @Test public void javaDecoderAcceptsPythonGoldenWireFrame() throws Exception {
-        LanTransferFrameCodec.Frame frame = LanTransferFrameCodec.decodeFrame(
+        LanTransferFrameCodec.Frame frame = decode(
                 fromHex(PYTHON_GOLDEN),KEY,1024,"sender","receiver");
         assertEquals("cancel",frame.kind);
         assertEquals("transfer-1",frame.transferId);
@@ -88,7 +93,7 @@ public class LanTransferFrameCodecTest {
                 "cancel","transfer-1","sender","receiver",null,new byte[0],null),KEY,1024);
         byte[] tailed = java.util.Arrays.copyOf(frame,frame.length+1);
         try {
-            LanTransferFrameCodec.decodeFrame(tailed,KEY,1024,"sender","receiver");
+            decode(tailed,KEY,1024,"sender","receiver");
             fail("trailing bytes must be rejected");
         } catch (java.io.IOException expected) { }
     }
