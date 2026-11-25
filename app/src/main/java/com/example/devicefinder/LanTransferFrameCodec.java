@@ -193,14 +193,17 @@ public final class LanTransferFrameCodec {
     }
     private static int number(JSONObject o,String key) throws Exception { return integer(o.get(key),key); }
     private static int integer(Object v,String field) throws IOException {
-        if (!(v instanceof Number)) throw new IOException("Invalid "+field);
+        if (!(v instanceof Number)) throw new IOException("Invalid "+field
+                + " type=" + (v == null ? "null" : v.getClass().getName())
+                + " value=" + String.valueOf(v));
         try {
             long exact = new java.math.BigDecimal(v.toString()).longValueExact();
             if (exact < Integer.MIN_VALUE || exact > Integer.MAX_VALUE)
                 throw new IOException("Out of range "+field);
             return (int) exact;
         } catch (NumberFormatException | ArithmeticException invalid) {
-            throw new IOException("Invalid integral "+field, invalid);
+            throw new IOException("Invalid integral "+field
+                    + " type=" + v.getClass().getName() + " value=" + v, invalid);
         }
     }
     private static JSONObject withoutAuth(JSONObject source) throws Exception {

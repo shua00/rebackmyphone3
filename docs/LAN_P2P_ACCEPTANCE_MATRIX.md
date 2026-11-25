@@ -618,3 +618,13 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 第 4 阶段：CI 可诊断性 | unit test failed-event 输出 stdout/stderr；CHANGELOG 与本矩阵同步 | 新 SHA CI 未通过前不计完成 |
 
 **批次结论：** 已并行启动 Android 文件账本与协议根因诊断；本批不宣称 Android 文件传输或 LNP2 完成。
+
+
+## 35. 第 2/3/4 阶段交叉批次 1 补充诊断（2026-11-25）
+
+| 项目 | 最新证据 | 处理与状态 |
+|---|---|---|
+| LNP2 decode | Actions #797 已打印 4 个用例共同错误：`Invalid payload_size` | 已将错误诊断细化为实际 JSON 运行时类型和值；仍未修复，协议阻塞 |
+| Actions #798 | Gradle 配置阶段多个 Maven Central 依赖 HTTP 429 | 外部依赖限流；不计为代码通过，也不据此判断 Android 新增 Store 失败 |
+| Android TransferStore | `LanTransferStore.java` 和 `LanTransferStoreTest.java` 已提交，独立数据库与账本门禁已建立 | 等待 Android CI 可运行后验证；文件 staging/重启实际 hash 核验未完成 |
+| CI 诊断 | Android unit test 已启用 failed-event stdout/stderr 输出 | 后续 Actions 可直接看到解码异常详情 |
