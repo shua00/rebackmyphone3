@@ -1,4 +1,19 @@
 ================================================================================
+v8.52 — 2026-11-25 · Android Offer 控制帧与显式接收决策
+================================================================================
+
+【第 3 阶段：文件传输控制面】
+--------------------------------------------------------------------------------
+- Android LNP2 服务端新增 authenticated Offer frame：只接受认证 peer 与固定 target 相符的 Offer，校验 metadata、时间窗口、文件大小/文件名/SHA256/chunk size，并幂等写入独立 TransferStore。
+- Offer ACK 只代表已持久化为 offered，不会自动 accept；接收端显式 accept 后才进入 transferring。
+- Android sender 新增 sendOffer(Socket/Network,...)，发送前校验源文件与不可变 Offer 的长度和 SHA256；后续数据传输仍单独建立 Wi-Fi-bound TCP session。
+- 修复 Store 对相同 transfer_id 的重复 Offer 只校验元数据却允许 chunk_size 改变的问题；现在 chunk size 也不可变。
+- 增加 incoming Offer 精确 target 查询；TrackingService 提供 accept/reject/cancel 显式 action，并将重复 accept/reject/cancel 做成幂等。
+- 防止空文件在 offered/accepted 阶段通过 complete 帧绕过人工接受；complete 只允许 transferring/completed。
+- #840–#846 已通过构建；#847–#853 覆盖 Offer sender、空文件接受门禁、Store chunk-size 不变性、incoming Offer 查询和 Service actions，结果待 CI 完成。
+- 尚缺：用户可见的文件选择/发送、incoming Offer UI/进度/保存位置，以及 Android 真机互通。
+
+================================================================================
 v8.51 — 2026-11-25 · TCP listener 安全边界、凭据热更新与 Wi-Fi 发送 socket
 ================================================================================
 
