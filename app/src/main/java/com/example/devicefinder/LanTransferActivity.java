@@ -281,12 +281,12 @@ public final class LanTransferActivity extends Activity {
             TextView detail = new TextView(this);
             detail.setPadding(0, 12, 0, 4);
             detail.setText(transfer.offer.filename
-                + (incoming ? "\\n接收自：" : "\\n发送给：")
+                + (incoming ? "\n接收自：" : "\n发送给：")
                 + (incoming ? transfer.offer.senderPeerId : transfer.offer.targetPeerId)
-                + "\\n大小：" + android.text.format.Formatter.formatFileSize(this, transfer.offer.sizeBytes)
-                + "\\n方向：" + (incoming ? "接收" : "发送")
-                + "\\n状态：" + transfer.state
-                + "\\n更新时间：" + android.text.format.DateFormat.format("yyyy-MM-dd HH:mm:ss", transfer.updatedAtMs));
+                + "\n大小：" + android.text.format.Formatter.formatFileSize(this, transfer.offer.sizeBytes)
+                + "\n方向：" + (incoming ? "接收" : "发送")
+                + "\n状态：" + transfer.state
+                + "\n更新时间：" + android.text.format.DateFormat.format("yyyy-MM-dd HH:mm:ss", transfer.updatedAtMs));
             offerList.addView(detail);
             if (incoming && "offered".equals(transfer.state)) {
                 LinearLayout actions = new LinearLayout(this);
