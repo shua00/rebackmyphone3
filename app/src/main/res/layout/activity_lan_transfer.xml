@@ -29,6 +29,11 @@
             android:layout_height="wrap_content"
             android:text="选择文件并发送" />
         <Button
+            android:id="@+id/lanTransferCancelSend"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="取消本机发送任务" />
+        <Button
             android:id="@+id/lanTransferPairing"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
