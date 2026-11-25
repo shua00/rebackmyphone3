@@ -1,12 +1,15 @@
 package com.example.devicefinder.diagnostics;
 
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.robolectric.RobolectricTestRunner;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import static org.junit.Assert.*;
 
+@RunWith(RobolectricTestRunner.class)
 public class DiagnosticBatchCoordinatorTest {
     private static final class MemoryStore implements DiagnosticBatchCoordinator.Store {
         final List<DiagnosticBatchEnvelope> out = new ArrayList<>();
