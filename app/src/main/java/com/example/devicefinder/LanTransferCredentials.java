@@ -15,8 +15,6 @@ import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
-import android.security.keystore.KeyGenParameterSpec;
-import android.security.keystore.KeyProperties;
 
 /** AndroidKeyStore-encrypted group PSK and explicit peer allow-list for LAN file transfer. */
 public final class LanTransferCredentials {
@@ -104,14 +102,22 @@ public final class LanTransferCredentials {
         keyStore.load(null);
         if (keyStore.containsAlias(KEY_ALIAS))
             return ((SecretKey) keyStore.getKey(KEY_ALIAS, null));
-        KeyGenerator generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
-        generator.init(new KeyGenParameterSpec.Builder(KEY_ALIAS,
-                KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setRandomizedEncryptionRequired(true)
-                .build());
-        return generator.generateKey();
+        return Api23.createKey(KEY_ALIAS);
+    }
+
+    /** Isolated so API 21/22 can load the outer fail-closed credential class safely. */
+    private static final class Api23 {
+        static SecretKey createKey(String alias) throws Exception {
+            KeyGenerator generator = KeyGenerator.getInstance("AES", "AndroidKeyStore");
+            generator.init(new android.security.keystore.KeyGenParameterSpec.Builder(alias,
+                    android.security.keystore.KeyProperties.PURPOSE_ENCRYPT
+                            | android.security.keystore.KeyProperties.PURPOSE_DECRYPT)
+                    .setBlockModes(android.security.keystore.KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(android.security.keystore.KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setRandomizedEncryptionRequired(true)
+                    .build());
+            return generator.generateKey();
+        }
     }
 
     private static void validate(String secret, Set<String> peers) {
