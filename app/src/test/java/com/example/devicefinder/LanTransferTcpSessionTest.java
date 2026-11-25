@@ -1,7 +1,7 @@
 package com.example.devicefinder;
 
 import android.content.Context;
-import androidx.test.core.app.ApplicationProvider;
+import org.robolectric.RuntimeEnvironment;
 import org.json.JSONObject;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -44,7 +44,7 @@ public class LanTransferTcpSessionTest {
 
     @Test
     public void authenticatedSessionDurablyAcksChunkAndPublishesVerifiedFile() throws Exception {
-        Context context = ApplicationProvider.getApplicationContext();
+        Context context = RuntimeEnvironment.getApplication();
         context.deleteDatabase("lan_p2p_transfer.db");
         LanTransferStore store = new LanTransferStore(context);
         String id = "session-test-1";
