@@ -49,7 +49,7 @@ _TERMINAL_STATES = frozenset({
 _ALLOWED_TRANSITIONS = {
     TransferState.OFFERED: frozenset({
         TransferState.ACCEPTED, TransferState.REJECTED,
-        TransferState.CANCELLED, TransferState.EXPIRED,
+        TransferState.CANCELLED, TransferState.EXPIRED, TransferState.FAILED,
     }),
     TransferState.ACCEPTED: frozenset({
         TransferState.TRANSFERRING, TransferState.CANCELLED,
