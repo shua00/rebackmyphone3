@@ -49,7 +49,7 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
         self.assertIn("LanTransferSenderService.enqueue", activity)
         self.assertIn("startForeground", service)
         self.assertIn("cancelPersistedLocalJob", service)
-        self.assertIn("activeWorker.cancel()", service)
+        self.assertIn("worker.cancel()", service)
         self.assertIn("resumeIfPending", service)
         self.assertIn("cancelLocal", activity)
         self.assertIn("lanTransferCancelSend", layout)
