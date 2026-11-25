@@ -236,7 +236,11 @@ public class ChatActivity extends Activity {
     private boolean isComposerImeVisible() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             android.view.WindowInsets insets = getWindow().getDecorView().getRootWindowInsets();
-            return insets != null && insets.isVisible(android.view.WindowInsets.Type.ime());
+            if (insets != null) {
+                return insets.isVisible(android.view.WindowInsets.Type.ime());
+            }
+            // Root insets can briefly be unavailable during window transitions;
+            // fall through to the same conservative visible-frame check as older APIs.
         }
 
         // Pre-Android 11 fallback for adjustResize devices. The threshold ignores

@@ -33,6 +33,7 @@ class ChatInputContinuityTests(unittest.TestCase):
         source = JAVA.read_text(encoding="utf-8")
         helper = source.split("private boolean isComposerImeVisible()", 1)[1].split("/**", 1)[0]
         self.assertIn("WindowInsets.Type.ime()", helper)
+        self.assertIn("if (insets != null)", helper)
         self.assertIn("getWindowVisibleDisplayFrame", helper)
         self.assertIn("150f * density", helper)
 
