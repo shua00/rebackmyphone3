@@ -822,3 +822,14 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 - 每会话默认最多 62 块，与服务端 64 帧预算对齐；重连重新查询缺块，ACK 丢失不会要求扩大或修改固定 Offer。
 - 新增 Android sender + receiver loopback 测试，覆盖双向认证、missing、chunk ACK、完成发布和结果校验；CI 结果待当前 SHA 运行完成。
 - **未完成项**：生产 Wi-Fi listener/socket binding、连接并发准入、TrackingService 生命周期、Offer/Accept UI、文件任务控制面与安全密钥配置仍未接线。
+
+
+## 57. Android TCP listener 与 TrackingService 网络生命周期接入（2026-11-25）
+
+- `LanTransferTcpListener` 绑定到明确选中的 Wi-Fi IPv4 地址，不绑定 wildcard，也不回退到 cellular；网络路径指纹变化时关闭并重建。
+- 每台设备最多 2 个并发 session，使用 `SynchronousQueue`，不缓存已 accept 但尚未开始处理的空闲 socket；超载连接立即关闭。listener teardown 关闭 active sockets、accept loop 和 worker。
+- `LanTransferCredentials` 使用 AndroidKeyStore AES-GCM 保存文件传输专用组密钥及显式 peer allow-list。最低 32 UTF-8 字节；未 provision 时 listener 默认关闭；解密/校验失败 fail-closed。
+- `TrackingService` 在 Wi-Fi 网络回调路径独立刷新 TCP listener，并在 Service destroy 时先关闭 listener 再关闭 transfer SQLite store。
+- **验收状态**：listener 生命周期测试 #831 成功；credentials 类构建 #832 成功；TrackingService 集成 #833/#834 和 SynchronousQueue 更新待 CI。
+- **剩余安全/产品工作**：提供可信的本地配对/凭据 provision UI 或受控配对流程；不得把 LAN 发现表当成可信身份列表。完成后再开放用户侧文件发送。
+- **真机门禁**：Wi-Fi 断开/切换、服务重建、端口冲突、连接过载、双设备双向传输仍待实机。
