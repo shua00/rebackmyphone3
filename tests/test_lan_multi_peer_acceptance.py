@@ -29,7 +29,7 @@ class MultiPeerDeliveryAcceptanceTests(unittest.TestCase):
                 "SELECT state FROM lan_outbox WHERE message_id=?", (message_id,)
             ).fetchone()[0]
             targets = connection.execute(
-                "SELECT peer_id, acked FROM lan_outbox_targets "
+                "SELECT peer_id, status FROM lan_outbox_targets "
                 "WHERE message_id=? ORDER BY peer_id", (message_id,)
             ).fetchall()
         return state, targets
@@ -46,7 +46,7 @@ class MultiPeerDeliveryAcceptanceTests(unittest.TestCase):
         state, targets = self._state_and_targets("group-3-peer")
         self.assertEqual("partial", state)
         self.assertEqual(
-            [("android-a", 1), ("android-b", 0), ("android-c", 0)], targets)
+            [("android-a", "acked"), ("android-b", "pending"), ("android-c", "pending")], targets)
 
         self.assertTrue(acknowledge_outgoing_message(
             self.db_path, "server2", "group-3-peer", "android-b"))
@@ -56,7 +56,7 @@ class MultiPeerDeliveryAcceptanceTests(unittest.TestCase):
             self.db_path, "server2", "group-3-peer", "android-c"))
         state, targets = self._state_and_targets("group-3-peer")
         self.assertEqual("delivered", state)
-        self.assertTrue(all(acked == 1 for _, acked in targets))
+        self.assertTrue(all(status == "acked" for _, status in targets))
 
     def test_late_peer_cannot_join_already_sent_recipient_snapshot(self):
         self.assertTrue(persist_outgoing_message(
@@ -67,7 +67,7 @@ class MultiPeerDeliveryAcceptanceTests(unittest.TestCase):
             self.db_path, "server2", "fixed-snapshot", "android-c"))
         state, targets = self._state_and_targets("fixed-snapshot")
         self.assertEqual("pending", state)
-        self.assertEqual([("android-a", 0), ("android-b", 0)], targets)
+        self.assertEqual([("android-a", "pending"), ("android-b", "pending")], targets)
 
     def test_duplicate_ack_is_idempotent_and_unknown_ack_never_completes(self):
         self.assertTrue(persist_outgoing_message(
