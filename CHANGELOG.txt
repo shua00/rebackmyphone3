@@ -6,7 +6,7 @@ v8.61 — 2026-11-25 · 文件收发状态与接收文件保存闭环
 --------------------------------------------------------------------------------
 - LanTransferStore.Transfer 暴露账本已记录的 published_path，并新增按本机精确 Peer ID 查询最近收发任务的有界查询；不扫描或展示其他设备任务。
 - LanTransferActivity 将待处理 Offer 扩展为最近收发任务记录，显示方向、对端、大小、状态和更新时间；只有本机为接收方且状态为 offered 时显示接受/拒绝。
-- 接收任务 completed 且存在发布路径时，提供 Android ACTION_CREATE_DOCUMENT 保存入口；复制前重新解析规范路径并要求文件直接位于应用私有 lan-transfer-received 目录，用户自行选择外部保存位置。
+- 接收任务 completed 且存在发布路径时，提供 Android ACTION_CREATE_DOCUMENT 保存入口；复制前重新解析规范路径并要求文件直接位于应用私有 lan-transfer-received 目录；流式复制同时核对实际字节数与 Offer SHA-256，不匹配时尝试删除不完整目标文档。用户自行选择外部保存位置。
 - 保存过程在独立文件 UI executor 中执行，不向外部应用暴露 file:// 或私有文件路径，不新增 FileProvider，也不改动 ChatActivity。
 - 新增源码守卫覆盖收发历史查询、完成文件 SAF 导出和路径边界。
 - 自动化验收范围：待本提交 Actions 完成后记录；真机仍需验证 SAF 提供方、保存取消/失败、接收文件重启后可保存，以及 Android↔Android / Android↔Python 完整互传。
