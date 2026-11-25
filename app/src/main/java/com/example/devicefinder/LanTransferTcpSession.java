@@ -109,7 +109,9 @@ public final class LanTransferTcpSession {
                         || !localPeerId.equals(frame.targetPeerId))
                     throw new SecurityException("Frame does not match fixed Offer participants");
             }
-            if ("chunk".equals(frame.kind)) {
+            if ("offer".equals(frame.kind)) {
+                // Offer was durably recorded above; never auto-accept it.
+            } else if ("chunk".equals(frame.kind)) {
                 if (!"transferring".equals(transfer.state))
                     throw new IOException("Transfer is not accepting chunks");
                 boolean inserted = filesystem.writeChunk(frame.transferId, frame.index,
