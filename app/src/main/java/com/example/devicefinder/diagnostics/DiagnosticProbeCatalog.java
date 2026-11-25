@@ -82,7 +82,7 @@ public final class DiagnosticProbeCatalog {
                     java.net.NetworkInterface network = interfaces.nextElement();
                     if (!network.isUp() || network.isLoopback()) continue;
                     activeInterfaces++;
-                    if (network.supportsBroadcast()) broadcastInterfaces++;
+                    if (hasBroadcastAddress(network)) broadcastInterfaces++;
                     java.util.Enumeration<java.net.InetAddress> addresses = network.getInetAddresses();
                     while (addresses.hasMoreElements()) {
                         java.net.InetAddress address = addresses.nextElement();
@@ -104,7 +104,7 @@ public final class DiagnosticProbeCatalog {
                 if (interfaces != null) {
                     while (interfaces.hasMoreElements() && selected == null) {
                         java.net.NetworkInterface network = interfaces.nextElement();
-                        if (!network.isUp() || network.isLoopback() || !network.supportsBroadcast()) continue;
+                        if (!network.isUp() || network.isLoopback() || !hasBroadcastAddress(network)) continue;
                         java.util.Enumeration<java.net.InetAddress> addresses = network.getInetAddresses();
                         while (addresses.hasMoreElements()) {
                             java.net.InetAddress address = addresses.nextElement();
@@ -123,6 +123,13 @@ public final class DiagnosticProbeCatalog {
             }
         }));
         return Collections.unmodifiableList(tests);
+    }
+
+    private static boolean hasBroadcastAddress(java.net.NetworkInterface network) {
+        for (java.net.InterfaceAddress address : network.getInterfaceAddresses()) {
+            if (address.getBroadcast() != null) return true;
+        }
+        return false;
     }
 
     /** Returns a coarse category only; never reads SSID, BSSID, IP, carrier, or network identity. */
