@@ -571,3 +571,6 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 
 新增 `LanTransferFrameCodec.java`，按 Python LNP2 wire format 实现固定 magic、长度前缀、canonical JSON、payload SHA-256、HMAC 和固定 peer ID 检查。新增 loopback chunk/control-frame 测试。
 当前仅是 Android 编解码层；尚未接入 Android 持久化 TransferStore、文件系统安全 staging、发送/接收 worker 和用户文件选择/保存 UI。不得标为 Android 文件传输完成。
+
+
+**帧编解码测试隔离修正：** Actions #789/#790 暴露 Robolectric Socket shadow 与 loopback 测试不兼容；编解码层现拆为纯字节流 `encodeFrame/decodeFrame`，单测不再依赖 Socket。真实 TCP 网络集成仍由独立网络层测试覆盖。固定 Python golden frame 用于逐字节跨语言互通验收。

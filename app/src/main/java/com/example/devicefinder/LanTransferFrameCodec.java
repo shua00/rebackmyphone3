@@ -3,6 +3,8 @@ package com.example.devicefinder;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -49,69 +51,101 @@ public final class LanTransferFrameCodec {
 
     public static void send(Socket socket, Frame frame, byte[] sessionKey, int maxPayloadBytes)
             throws Exception {
+        socket.getOutputStream().write(encodeFrame(frame, sessionKey, maxPayloadBytes));
+        socket.getOutputStream().flush();
+    }
+
+    /** Encode one complete frame without depending on a socket or network runtime. */
+    public static byte[] encodeFrame(Frame frame, byte[] sessionKey, int maxPayloadBytes)
+            throws Exception {
         validate(frame, sessionKey, maxPayloadBytes);
         JSONObject unsigned = unsignedHeader(frame);
         String auth = hex(hmac(sessionKey, canonical(unsigned).getBytes(StandardCharsets.UTF_8)));
-        JSONObject header = new JSONObject(unsigned.toString());
+        JSONObject header = new JSONObject();
+        Iterator<String> keys = unsigned.keys();
+        while (keys.hasNext()) {
+            String key = keys.next();
+            header.put(key, unsigned.get(key));
+        }
         header.put("auth", auth);
         byte[] encoded = canonical(header).getBytes(StandardCharsets.UTF_8);
-        if (encoded.length<1 || encoded.length>MAX_HEADER_BYTES)
+        if (encoded.length < 1 || encoded.length > MAX_HEADER_BYTES)
             throw new IllegalArgumentException("Transfer header exceeds limit");
-        DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream(8 + encoded.length + frame.payload.length);
+        DataOutputStream out = new DataOutputStream(bytes);
         out.write(MAGIC); out.writeInt(encoded.length); out.write(encoded); out.write(frame.payload); out.flush();
+        return bytes.toByteArray();
     }
 
     public static Frame receive(Socket socket, byte[] sessionKey, int maxPayloadBytes,
             String expectedSenderPeerId, String expectedTargetPeerId) throws Exception {
+        return decodeFromStream(new DataInputStream(socket.getInputStream()), sessionKey,
+                maxPayloadBytes, expectedSenderPeerId, expectedTargetPeerId);
+    }
+
+    /** Decode exactly one complete frame from a byte array; trailing bytes are rejected. */
+    public static Frame decodeFrame(byte[] wire, byte[] sessionKey, int maxPayloadBytes,
+            String expectedSenderPeerId, String expectedTargetPeerId) throws Exception {
+        if (wire == null) throw new IOException("Missing transfer frame bytes");
+        DataInputStream in = new DataInputStream(new ByteArrayInputStream(wire));
+        Frame frame = decodeFromStream(in, sessionKey, maxPayloadBytes,
+                expectedSenderPeerId, expectedTargetPeerId);
+        if (in.available() != 0) throw new IOException("Trailing bytes after transfer frame");
+        return frame;
+    }
+
+    private static Frame decodeFromStream(DataInputStream in, byte[] sessionKey, int maxPayloadBytes,
+            String expectedSenderPeerId, String expectedTargetPeerId) throws Exception {
         requireSession(sessionKey, maxPayloadBytes);
-        DataInputStream in = new DataInputStream(socket.getInputStream());
         byte[] magic = new byte[4]; in.readFully(magic);
         if (!MessageDigest.isEqual(magic, MAGIC)) throw new IOException("Invalid transfer frame magic");
         int headerSize = in.readInt();
-        if (headerSize<1 || headerSize>MAX_HEADER_BYTES) throw new IOException("Invalid transfer header length");
+        if (headerSize < 1 || headerSize > MAX_HEADER_BYTES) throw new IOException("Invalid transfer header length");
         byte[] rawHeader = new byte[headerSize]; in.readFully(rawHeader);
         final String raw;
         try {
             raw = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                     .onUnmappableCharacter(CodingErrorAction.REPORT)
                     .decode(ByteBuffer.wrap(rawHeader)).toString();
-        } catch(CharacterCodingException e) { throw new IOException("Invalid transfer header UTF-8",e); }
+        } catch (CharacterCodingException e) { throw new IOException("Invalid transfer header UTF-8", e); }
         JSONObject header = new JSONObject(raw);
         if (!canonical(header).equals(raw)) throw new IOException("Non-canonical transfer header");
         List<String> keys = new ArrayList<>();
-        Iterator<String> iterator=header.keys();
-        while(iterator.hasNext()) keys.add(iterator.next());
+        Iterator<String> iterator = header.keys();
+        while (iterator.hasNext()) keys.add(iterator.next());
         Collections.sort(keys);
         List<String> expectedKeys = new ArrayList<>();
-        Collections.addAll(expectedKeys,HEADER_KEYS);
+        Collections.addAll(expectedKeys, HEADER_KEYS);
         Collections.sort(expectedKeys);
-        if(!keys.equals(expectedKeys)) throw new IOException("Transfer header schema mismatch");
-        if(number(header,"v")!=VERSION) throw new IOException("Unsupported transfer frame version");
-        String kind=string(header,"kind"), transferId=string(header,"transfer_id");
-        String sender=string(header,"sender_peer_id"), target=string(header,"target_peer_id");
-        checkId(transferId,"transfer ID"); checkId(sender,"sender peer ID"); checkId(target,"target peer ID");
-        if(sender.equals(target)) throw new IOException("Transfer peers must differ");
-        int payloadSize=integer(header,"payload_size");
-        if(payloadSize<0 || payloadSize>maxPayloadBytes) throw new IOException("Invalid transfer payload length");
-        Object indexValue=header.get("index");
-        Integer index=indexValue==JSONObject.NULL?null:integer(indexValue,"index");
-        Object metadataValue=header.get("metadata");
-        JSONObject metadata=metadataValue==JSONObject.NULL?null:(metadataValue instanceof JSONObject?(JSONObject)metadataValue:null);
-        if(metadataValue!=JSONObject.NULL && metadata==null) throw new IOException("Invalid transfer metadata");
-        byte[] payload=new byte[payloadSize]; if(payloadSize>0) in.readFully(payload);
-        String suppliedHash=string(header,"payload_sha256");
-        String actualHash=payloadSize==0?"":hex(MessageDigest.getInstance("SHA-256").digest(payload));
-        if(!MessageDigest.isEqual(suppliedHash.getBytes(StandardCharsets.US_ASCII),
+        if (!keys.equals(expectedKeys)) throw new IOException("Transfer header schema mismatch");
+        if (number(header, "v") != VERSION) throw new IOException("Unsupported transfer frame version");
+        String kind = string(header, "kind"), transferId = string(header, "transfer_id");
+        String sender = string(header, "sender_peer_id"), target = string(header, "target_peer_id");
+        checkId(transferId, "transfer ID"); checkId(sender, "sender peer ID"); checkId(target, "target peer ID");
+        if (sender.equals(target)) throw new IOException("Transfer peers must differ");
+        int payloadSize = integer(header, "payload_size");
+        if (payloadSize < 0 || payloadSize > maxPayloadBytes) throw new IOException("Invalid transfer payload length");
+        Object indexValue = header.get("index");
+        Integer index = indexValue == JSONObject.NULL ? null : integer(indexValue, "index");
+        Object metadataValue = header.get("metadata");
+        JSONObject metadata = metadataValue == JSONObject.NULL ? null
+                : (metadataValue instanceof JSONObject ? (JSONObject) metadataValue : null);
+        if (metadataValue != JSONObject.NULL && metadata == null) throw new IOException("Invalid transfer metadata");
+        byte[] payload = new byte[payloadSize]; if (payloadSize > 0) in.readFully(payload);
+        String suppliedHash = string(header, "payload_sha256");
+        String actualHash = payloadSize == 0 ? ""
+                : hex(MessageDigest.getInstance("SHA-256").digest(payload));
+        if (!MessageDigest.isEqual(suppliedHash.getBytes(StandardCharsets.US_ASCII),
                 actualHash.getBytes(StandardCharsets.US_ASCII))) throw new IOException("Payload SHA-256 mismatch");
-        Frame frame=new Frame(kind,transferId,sender,target,index,payload,metadata);
-        validate(frame,sessionKey,maxPayloadBytes);
-        if(expectedSenderPeerId!=null && !expectedSenderPeerId.equals(sender))
+        Frame frame = new Frame(kind, transferId, sender, target, index, payload, metadata);
+        validate(frame, sessionKey, maxPayloadBytes);
+        if (expectedSenderPeerId != null && !expectedSenderPeerId.equals(sender))
             throw new SecurityException("Unexpected transfer sender");
-        if(expectedTargetPeerId!=null && !expectedTargetPeerId.equals(target))
+        if (expectedTargetPeerId != null && !expectedTargetPeerId.equals(target))
             throw new SecurityException("Unexpected transfer target");
-        JSONObject unsigned=withoutAuth(header);
-        String expectedAuth=hex(hmac(sessionKey,canonical(unsigned).getBytes(StandardCharsets.UTF_8)));
-        if(!MessageDigest.isEqual(string(header,"auth").getBytes(StandardCharsets.US_ASCII),
+        JSONObject unsigned = withoutAuth(header);
+        String expectedAuth = hex(hmac(sessionKey, canonical(unsigned).getBytes(StandardCharsets.UTF_8)));
+        if (!MessageDigest.isEqual(string(header, "auth").getBytes(StandardCharsets.US_ASCII),
                 expectedAuth.getBytes(StandardCharsets.US_ASCII))) throw new SecurityException("Invalid frame HMAC");
         return frame;
     }
