@@ -55,6 +55,16 @@ public final class LanTransferActivity extends Activity {
         pairing.setOnClickListener(v -> showPairingDialog());
         Button send = findViewById(R.id.lanTransferSendFile);
         send.setOnClickListener(v -> pickFileForSending());
+        Button cancelSend = findViewById(R.id.lanTransferCancelSend);
+        cancelSend.setOnClickListener(v -> {
+            new AlertDialog.Builder(this)
+                .setMessage("只取消本机后续发送，不会远程删除对端已经收到的文件或数据。确定继续？")
+                .setNegativeButton("返回", null)
+                .setPositiveButton("取消本机发送", (dialog, which) -> {
+                    LanTransferSenderService.cancelLocal(getApplicationContext());
+                    status.setText("已请求取消本机发送；当前 TCP 分块会话结束后生效");
+                }).show();
+        });
         refreshButton.setOnClickListener(v -> refreshOffers());
         IntentFilter filter = new IntentFilter("ACTION_LAN_TRANSFER_UPDATED");
         try {
