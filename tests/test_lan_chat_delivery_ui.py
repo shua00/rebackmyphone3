@@ -31,11 +31,16 @@ class LanChatDeliveryUiTests(unittest.TestCase):
         self.assertIn("A stale query must not cancel", activity)
         self.assertIn("Start watching for this message before refreshHistory", activity)
 
-    def test_delivery_panel_does_not_couple_file_transfer_into_chat_activity(self):
+    def test_chat_exposes_opt_in_file_entry_without_embedding_transfer_transport(self):
         activity = (JAVA / "ChatActivity.java").read_text(encoding="utf-8")
         layout = (RES / "layout/activity_chat.xml").read_text(encoding="utf-8")
-        self.assertNotIn("LanTransfer", activity)
-        self.assertNotIn("btnTransfer", layout)
+        self.assertIn("LanTransferActivity", activity)
+        self.assertIn("LanTransferFeature", activity)
+        for transport_symbol in ("LanTransferStore", "LanTransferTcpClient",
+                                 "LanTransferTcpListener", "LanTransferCredentials"):
+            self.assertNotIn(transport_symbol, activity)
+        self.assertIn('android:id="@+id/btnTransfer"', layout)
+        self.assertIn('android:id="@+id/btnChatSettings"', layout)
 
 
 if __name__ == "__main__":

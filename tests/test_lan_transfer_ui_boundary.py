@@ -8,13 +8,30 @@ RES = ROOT / "app/src/main/res"
 
 
 class LanTransferUiBoundaryTests(unittest.TestCase):
-    def test_chat_activity_remains_transfer_agnostic(self):
+    def test_chat_entry_is_only_a_navigation_and_feature_gate_boundary(self):
         chat = (JAVA / "ChatActivity.java").read_text(encoding="utf-8")
         layout = (RES / "layout/activity_chat.xml").read_text(encoding="utf-8")
-        self.assertNotIn("LanTransfer", chat)
-        self.assertNotIn("lanTransfer", chat)
-        self.assertNotIn("btnTransfer", layout)
-        self.assertNotIn("tvTransferStatus", layout)
+        self.assertIn("LanTransferActivity", chat)
+        self.assertIn("LanTransferFeature.isEnabled(this)", chat)
+        self.assertNotIn("LanTransferStore", chat)
+        self.assertNotIn("LanTransferTcpClient", chat)
+        self.assertNotIn("LanTransferTcpListener", chat)
+        self.assertNotIn("lanTransferOfferList", chat)
+        self.assertIn('android:id="@+id/btnTransfer"', layout)
+        self.assertIn('android:visibility="gone"', layout)
+
+    def test_file_transfer_is_default_off_and_backend_fail_closed(self):
+        gate = (JAVA / "LanTransferFeature.java").read_text(encoding="utf-8")
+        service = (JAVA / "TrackingService.java").read_text(encoding="utf-8")
+        sender = (JAVA / "LanTransferSenderService.java").read_text(encoding="utf-8")
+        activity = (JAVA / "LanTransferActivity.java").read_text(encoding="utf-8")
+        self.assertIn('.getBoolean(KEY_ENABLED, false)', gate)
+        self.assertIn('putBoolean(KEY_ENABLED, enabled).commit()', gate)
+        self.assertIn('if (!LanTransferFeature.isEnabled(this))', service)
+        self.assertIn('file-transfer feature disabled', service)
+        self.assertIn('if (!LanTransferFeature.isEnabled(context))', sender)
+        self.assertIn('if (!LanTransferFeature.isEnabled(this))', activity)
+        self.assertIn('ACTION_LAN_TRANSFER_FEATURE_TOGGLED', service)
 
 
     def test_pairing_adds_a_peer_without_replacing_existing_trust(self):
@@ -56,6 +73,7 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
     def test_foreground_notification_provides_independent_entry(self):
         service = (JAVA / "TrackingService.java").read_text(encoding="utf-8")
         self.assertIn("new Intent(this, LanTransferActivity.class)", service)
+        self.assertIn('if (LanTransferFeature.isEnabled(this))', service)
         self.assertIn('addAction(android.R.drawable.ic_menu_upload, "文件传输"', service)
 
 
