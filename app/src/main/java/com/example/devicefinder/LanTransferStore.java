@@ -104,10 +104,28 @@ public final class LanTransferStore extends SQLiteOpenHelper {
             db.insertOrThrow("lan_transfer_tasks",null,v);db.setTransactionSuccessful();return true;
         } finally { db.endTransaction(); }
     }
+    private static Transfer readTransfer(Cursor c) {
+        return new Transfer(readOffer(c), c.getString(c.getColumnIndexOrThrow("state")),
+                c.getInt(c.getColumnIndexOrThrow("chunk_size_bytes")),
+                c.getInt(c.getColumnIndexOrThrow("total_chunks")),
+                c.getLong(c.getColumnIndexOrThrow("updated_at_ms")));
+    }
     public Transfer getTransfer(String id) {
         Cursor c=getReadableDatabase().rawQuery("SELECT * FROM lan_transfer_tasks WHERE transfer_id=?",new String[]{id});
-        try { if(!c.moveToFirst())return null;return new Transfer(readOffer(c),c.getString(c.getColumnIndexOrThrow("state")),c.getInt(c.getColumnIndexOrThrow("chunk_size_bytes")),c.getInt(c.getColumnIndexOrThrow("total_chunks")),c.getLong(c.getColumnIndexOrThrow("updated_at_ms"))); }
+        try { if(!c.moveToFirst())return null;return readTransfer(c); }
         finally { c.close(); }
+    }
+    /** Pending incoming Offers for the exact local identity; discovery alone never grants trust. */
+    public List<Transfer> loadIncomingOffers(String localPeerId, int limit) {
+        if (!id(localPeerId) || limit < 1 || limit > 100)
+            throw new IllegalArgumentException("Invalid incoming Offer query");
+        ArrayList<Transfer> result = new ArrayList<>();
+        Cursor c=getReadableDatabase().rawQuery(
+                "SELECT * FROM lan_transfer_tasks WHERE target_peer_id=? AND state='offered' ORDER BY created_at_ms DESC LIMIT ?",
+                new String[]{localPeerId,Integer.toString(limit)});
+        try { while(c.moveToNext()) result.add(readTransfer(c)); }
+        finally { c.close(); }
+        return result;
     }
     /** VERIFYING is forbidden until every expected durable receipt exists. */
     public boolean transition(String id,String target,long now) {
