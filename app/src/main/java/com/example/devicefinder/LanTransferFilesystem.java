@@ -54,7 +54,7 @@ public final class LanTransferFilesystem {
     }
     private static void syncDirectory(File directory) throws IOException {
         FileDescriptor fd=null;
-        try { fd=Os.open(directory.getAbsolutePath(),OsConstants.O_RDONLY|OsConstants.O_DIRECTORY,0);Os.fsync(fd); }
+        try { fd=Os.open(directory.getAbsolutePath(),OsConstants.O_RDONLY,0);Os.fsync(fd); }
         catch(ErrnoException e) { throw new IOException("Unable to fsync transfer directory",e); }
         finally { if(fd!=null)try{Os.close(fd);}catch(ErrnoException ignored){} }
     }
@@ -166,6 +166,9 @@ public final class LanTransferFilesystem {
     public synchronized List<Integer> reconcile(String transferId,long nowMs) throws IOException {
         LanTransferStore.Transfer transfer=store.getTransfer(transferId);
         if(transfer==null)throw new IOException("Unknown transfer task");
+        if("completed".equals(transfer.state)||"rejected".equals(transfer.state)
+                ||"cancelled".equals(transfer.state)||"failed".equals(transfer.state)
+                ||"expired".equals(transfer.state)) return new ArrayList<>();
         File dir=taskDirectory(transferId);
         List<Integer> valid=new ArrayList<>();
         for(LanTransferStore.ChunkReceipt receipt:store.loadChunkReceipts(transferId)) {
@@ -205,16 +208,32 @@ public final class LanTransferFilesystem {
     public synchronized File assembleAndPublish(String transferId,long nowMs) throws IOException {
         LanTransferStore.Transfer transfer=store.getTransfer(transferId);
         if(transfer==null)throw new IOException("Unknown transfer task");
+        File target=new File(publishedRoot,transferId+"-"+transfer.offer.filename);
+        if("completed".equals(transfer.state)) {
+            requireRegularFile(target);
+            if(target.length()!=transfer.offer.sizeBytes||!transfer.offer.sha256.equals(hashFile(target)))
+                throw new SecurityException("Published file no longer matches completed transfer");
+            return target;
+        }
         if(!store.missingChunkIndexes(transferId).isEmpty())throw new IOException("Transfer still has missing chunks");
         if("transferring".equals(transfer.state))store.transition(transferId,"verifying",nowMs);
         else if(!"verifying".equals(transfer.state))throw new IOException("Transfer is not ready to verify");
         ensureDirectory(publishedRoot);
+        if(existsNoFollow(target)) {
+            requireRegularFile(target);
+            if(target.length()==transfer.offer.sizeBytes&&transfer.offer.sha256.equals(hashFile(target))) {
+                store.markCompletedAfterPublish(transferId,transfer.offer.sha256,target.getCanonicalPath(),nowMs);
+                cleanupStaging(transferId);
+                return target;
+            }
+            throw new IOException("Published transfer destination already exists with different content");
+        }
         File temp=new File(publishedRoot,transferId+".assembling-"+UUID.randomUUID());
-        File target=new File(publishedRoot,transferId+"-"+transfer.offer.filename);
         MessageDigest digest;
         try{digest=MessageDigest.getInstance("SHA-256");}catch(Exception e){throw new IOException("SHA-256 unavailable",e);}
         try {
-            try(BufferedOutputStream out=new BufferedOutputStream(new FileOutputStream(temp,false))) {
+            try(FileOutputStream raw=new FileOutputStream(temp,false);
+                    BufferedOutputStream out=new BufferedOutputStream(raw)) {
                 for(int i=0;i<transfer.totalChunks;i++) {
                     File chunk=expectedChunkFile(transferId,i);requireRegularFile(chunk);
                     int expected=(int)Math.min((long)transfer.chunkSizeBytes,transfer.offer.sizeBytes-(long)i*transfer.chunkSizeBytes);
@@ -224,10 +243,8 @@ public final class LanTransferFilesystem {
                     }
                 }
                 out.flush();
-                FileOutputStream raw=null;
-                // BufferedOutputStream owns its FileOutputStream; sync through the temp file descriptor below.
+                raw.getFD().sync();
             }
-            try(FileOutputStream sync=new FileOutputStream(temp,true)){sync.getFD().sync();}
             syncDirectory(publishedRoot);
             String actual=hex(digest.digest());
             if(!transfer.offer.sha256.equals(actual)) {

@@ -52,5 +52,11 @@ public class LanTransferFilesystemTest {
   assertEquals(Arrays.asList(0),fs.reconcile("fs-5",6));assertTrue(store.loadChunkReceipts("fs-5").isEmpty());
   assertTrue(outside.isFile());
  }
+ @Test public void publishedFileIsRecognizedAfterCrashBeforeLedgerCompletion()throws Exception{
+  byte[] data=new byte[4096];Arrays.fill(data,(byte)3);start("fs-6",data,4096);fs.writeChunk("fs-6",0,data,5);store.transition("fs-6","verifying",6);
+  File publishedRoot=new File(context.getFilesDir(),"lan-transfer-received");assertTrue(publishedRoot.mkdirs()||publishedRoot.isDirectory());
+  File published=new File(publishedRoot,"fs-6-payload.bin");try(FileOutputStream out=new FileOutputStream(published)){out.write(data);out.getFD().sync();}
+  File recovered=fs.assembleAndPublish("fs-6",7);assertEquals(published.getCanonicalPath(),recovered.getCanonicalPath());assertEquals("completed",store.getTransfer("fs-6").state);
+ }
  private static byte[] read(File f)throws Exception{java.io.ByteArrayOutputStream b=new java.io.ByteArrayOutputStream();try(java.io.FileInputStream in=new java.io.FileInputStream(f)){byte[] x=new byte[4096];int n;while((n=in.read(x))!=-1)b.write(x,0,n);}return b.toByteArray();}
 }

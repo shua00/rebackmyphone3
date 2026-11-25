@@ -665,3 +665,13 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 完整文件 | 组装后重算 whole-file SHA-256，校验后 fsync、原子发布、更新 completed | 新增端到端文件系统测试，待 CI |
 | 资源边界 | 默认 4 GiB staging quota、剩余空间保留、任务隔离 | 待边界与设备存储测试 |
 | 第 2 阶段回归 | Actions #801 的 retry policy tests 已通过；固定 recipient 和逐 peer retry 逻辑保持独立 | 网络切换真机验收待后续 |
+
+
+## 39. TransferFilesystem 原子发布崩溃窗口修正（2026-11-25）
+
+| 项目 | 修正 | 验收状态 |
+|---|---|---|
+| Android API 兼容 | 移除 SDK 未暴露的 O_DIRECTORY；使用只读目录 fd 执行 fsync | 待 CI |
+| 文件持久化 | 组装流 flush 后直接对原文件描述符 fsync，再 fsync 目录 | 待 CI |
+| 发布/账本双写窗口 | 原子 rename 成功但 completed 事务未提交时，恢复会核验已存在目标文件的长度和 SHA-256，再补交 completed | 新增故障窗口测试，待 CI |
+| 终态恢复 | completed 文件重新核验；终态 reconcile 不重新创建 staging | 待 CI |
