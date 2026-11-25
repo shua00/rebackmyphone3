@@ -19,6 +19,7 @@ android {
         versionCode 1
         versionName "1.0"
         manifestPlaceholders = [diagnosticsEnabled: includeDiagnostics.toString()]
+        buildConfigField "boolean", "DIAGNOSTICS_ENABLED", includeDiagnostics.toString()
 
         // ★ 自动生成格式为 YYYYMMDD-HHmm 的版本号（例如 20261110-1930）
         def buildTime = new java.text.SimpleDateFormat("yyyyMMdd-HHmm").format(new java.util.Date())
