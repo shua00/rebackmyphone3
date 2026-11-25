@@ -131,10 +131,9 @@ def serve_transfer_session(
             else:
                 raise TransferValidationError("invalid missing-page request")
             missing_page_limit = page_limit
-            all_missing = filesystem.reconcile(frame.transfer_id, timestamp)
-            page = all_missing[:page_limit]
+            page, more = filesystem.reconcile_page(frame.transfer_id, timestamp, page_limit)
             response_kind = "missing"
-            response_metadata = {"indexes": list(page), "more": len(all_missing) > len(page)}
+            response_metadata = {"indexes": list(page), "more": more}
         elif frame.kind == "complete":
             if frame.payload or frame.index is not None:
                 raise TransferValidationError("invalid completion request")
@@ -142,11 +141,11 @@ def serve_transfer_session(
                 response_kind = "complete"
                 response_metadata = {"state": TransferState.COMPLETED.value}
             elif record.state in (TransferState.TRANSFERRING, TransferState.VERIFYING):
-                missing = filesystem.reconcile(frame.transfer_id, timestamp)
-                if missing:
-                    page = missing[:missing_page_limit]
+                missing, more = filesystem.reconcile_page(
+                    frame.transfer_id, timestamp, missing_page_limit)
+                if missing or more:
                     response_kind = "missing"
-                    response_metadata = {"indexes": list(page), "more": len(missing) > len(page)}
+                    response_metadata = {"indexes": list(missing), "more": more}
                 else:
                     filesystem.assemble_and_verify(frame.transfer_id, timestamp)
                     response_kind = "complete"

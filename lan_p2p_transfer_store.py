@@ -202,6 +202,24 @@ class TransferStore:
         finally:
             conn.close()
 
+    def load_chunk_receipts_page(self, transfer_id: str, start_index: int = 0,
+                                 limit: int = 128) -> tuple[dict, ...]:
+        """Load a bounded, ordered receipt page without materializing the full ledger."""
+        if (isinstance(start_index, bool) or not isinstance(start_index, int) or start_index < 0
+                or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 256):
+            raise TransferValidationError("invalid chunk receipt page bounds")
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT chunk_index,payload_size,chunk_sha256,recorded_at_ms "
+                "FROM lan_transfer_chunks WHERE transfer_id=? AND chunk_index>=? "
+                "ORDER BY chunk_index LIMIT ?",
+                (transfer_id, start_index, limit),
+            ).fetchall()
+            return tuple(dict(row) for row in rows)
+        finally:
+            conn.close()
+
     def missing_chunks(self, transfer_id: str) -> tuple[int,...]:
         record=self.get_transfer(transfer_id)
         if record is None:

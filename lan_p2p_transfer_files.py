@@ -164,6 +164,74 @@ class TransferFilesystem:
                     pass
             return self.store.record_verified_chunk(descriptor, now_ms)
 
+    def reconcile_page(self, transfer_id: str, now_ms: int,
+                       limit: int = 128) -> tuple[tuple[int, ...], bool]:
+        """Revalidate receipts and return a bounded missing page.
+
+        Memory use is O(limit), even for the 2 GiB / 4 KiB configuration
+        (524,288 chunks). Re-querying from index zero after each sent batch is
+        intentional: durable receipts make lost ACKs and reconnects idempotent.
+        """
+        self.store._check_time(now_ms)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 256:
+            raise TransferValidationError("missing page limit must be between 1 and 256")
+        record = self.store.get_transfer(transfer_id)
+        if record is None:
+            raise TransferValidationError("unknown transfer_id")
+        with self._lock:
+            task_dir = self._task_dir(transfer_id)
+            total = record.total_chunks
+            missing: list[int] = []
+            candidate = 0
+            receipt_start = 0
+            receipts = self.store.load_chunk_receipts_page(transfer_id, receipt_start, 128)
+            offset = 0
+            while candidate < total:
+                if offset >= len(receipts):
+                    if len(receipts) == 128:
+                        receipt_start = receipts[-1]["chunk_index"] + 1
+                        receipts = self.store.load_chunk_receipts_page(
+                            transfer_id, receipt_start, 128)
+                        offset = 0
+                    else:
+                        while candidate < total and len(missing) < limit:
+                            missing.append(candidate)
+                            candidate += 1
+                        return tuple(missing), candidate < total
+                    if not receipts:
+                        while candidate < total and len(missing) < limit:
+                            missing.append(candidate)
+                            candidate += 1
+                        return tuple(missing), candidate < total
+
+                receipt = receipts[offset]
+                index = receipt["chunk_index"]
+                if index > candidate:
+                    missing.append(candidate)
+                    candidate += 1
+                    if len(missing) >= limit:
+                        return tuple(missing), candidate < total
+                    continue
+                if index < candidate:
+                    raise TransferValidationError("chunk receipt page is not strictly ordered")
+                expected = expected_chunk_size(record.offer.size_bytes,
+                                               record.chunk_size_bytes, index)
+                try:
+                    payload = self._read_regular(self._chunk_path(task_dir, index), expected)
+                except TransferValidationError:
+                    payload = None
+                valid = (payload is not None
+                         and receipt["payload_size"] == len(payload)
+                         and receipt["chunk_sha256"] == hashlib.sha256(payload).hexdigest())
+                if not valid:
+                    self.store.remove_chunk_receipt(transfer_id, index, now_ms)
+                    missing.append(index)
+                candidate += 1
+                offset += 1
+                if len(missing) >= limit:
+                    return tuple(missing), candidate < total
+            return tuple(missing), False
+
     def reconcile(self, transfer_id: str, now_ms: int) -> tuple[int, ...]:
         record = self.store.get_transfer(transfer_id)
         if record is None:

@@ -875,3 +875,14 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 - Python #857–#861 全部通过，覆盖 Offer/Offer ACK codec、receiver 持久化/幂等 replay、sender source hash validation 与 Offer ACK。
 - #863–#865 继续验证 TCP listener worker drain、SQLite close 顺序和 teardown action guard。
 - 历史失败闭环：#847/#848 是 codec 未允许新 Offer frame kind；#856 是 startup worker 中断时机。两项分别在 #855 与 #862 后通过。
+
+
+## 21. Python 大文件缺块查询内存上界（2026-11-25）
+
+| 项目 | 结果 | 证据与限制 |
+|---|---|---|
+| 缺口 | Python TCP session 原先先调用全量 `filesystem.reconcile()`，再切片成协议页；2 GiB / 4 KiB 配置可达 524,288 个索引，网络返回虽有界，服务端临时列表却没有上界 | `lan_p2p_transfer_session.py`、`lan_p2p_transfer_files.py`、`lan_p2p_transfer_store.py` |
+| 修正 | 新增 SQLite receipt 分页读取与 `TransferFilesystem.reconcile_page()`；missing/complete 请求只物化有限缺块页，并在分页中重新核验对应文件实际字节和 SHA-256 | 同上 |
+| 回归 | 新增 2 GiB / 4 KiB 边界测试，禁用全量 received-index 扫描，断言首个 128 项缺块页与 `more=true` | `tests/test_lan_p2p_transfer_network.py` |
+| 验收边界 | 当前提交等待 Actions；Python filesystem 原有全量 reconcile 仍用于本地显式完整性核验，网络 missing/complete 路径已切换为有界分页；Android 与 Python 真机互通、UI、Wi-Fi 漫游仍未验收 | 不得用本测试替代真机验收 |
+

@@ -170,3 +170,48 @@ class TransferTcpNetworkTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    def test_two_gibibyte_missing_query_is_bounded_without_materializing_all_indexes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            size = 2 * 1024 * 1024 * 1024
+            offer = TransferOffer("bounded-two-gib", "sender", "receiver",
+                "large.bin", size, "0" * 64, 1)
+            store = TransferStore(str(root / "ledger.db"), TransferLimits(
+                max_file_bytes=size, chunk_size_bytes=4096))
+            files = TransferFilesystem(store, str(root / "stage"), str(root / "received"))
+            store.create_offer(offer, 1)
+            store.transition(offer.transfer_id, TransferState.ACCEPTED, 2)
+            store.transition(offer.transfer_id, TransferState.TRANSFERRING, 3)
+
+            def forbidden_full_scan(_transfer_id):
+                raise AssertionError("network missing query must not materialize every received index")
+            store.received_chunk_indexes = forbidden_full_scan
+
+            server, client = socket.socketpair()
+            errors = []
+            def serve():
+                try:
+                    serve_transfer_session(server, store, files, local_peer_id="receiver",
+                        authenticated_peer_id="sender", session_secret=self.SECRET,
+                        now_ms=lambda: 10, max_frames=1)
+                except Exception as exc:
+                    errors.append(exc)
+                finally:
+                    server.close()
+            worker = threading.Thread(target=serve)
+            worker.start()
+            try:
+                send_frame(client, TransferFrame("missing", offer.transfer_id,
+                    "sender", "receiver", metadata={"limit": 128}), self.SECRET)
+                reply = recv_frame(client, self.SECRET,
+                    expected_sender_peer_id="receiver", expected_target_peer_id="sender")
+                self.assertEqual("missing", reply.kind)
+                self.assertEqual(list(range(128)), reply.metadata["indexes"])
+                self.assertTrue(reply.metadata["more"])
+            finally:
+                client.close()
+                worker.join(timeout=3)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual([], errors)
