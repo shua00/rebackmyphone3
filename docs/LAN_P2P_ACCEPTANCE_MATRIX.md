@@ -585,3 +585,13 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 安全约束 | 不改变 HMAC、payload SHA-256、sender/target 固定身份、header/metadata/payload 上限 | 等待 CI |
 | 阶段边界 | 仅修复 Android 帧编解码兼容性；Android TransferStore、staging、TCP worker、产品 UI 和真机互通仍未完成 | 未通过端到端验收 |
 
+
+## 32. LNP2 解码失败原因定位（2026-11-25）
+
+| 项目 | 状态 |
+|---|---|
+| Actions #794 | Python 通过；Android 18 项中 4 项失败 |
+| 失败范围 | FrameCodec 解码路径；根因尚未由日志证明 |
+| 本次处理 | 增加测试侧 IOException message 输出，帮助定位具体失败阶段 |
+| 验收结论 | 未通过；不得启动 Android TCP 集成或标记跨端协议完成 |
+

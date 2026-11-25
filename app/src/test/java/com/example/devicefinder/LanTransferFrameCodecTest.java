@@ -20,6 +20,16 @@ public class LanTransferFrameCodecTest {
         return out;
     }
 
+    private static LanTransferFrameCodec.Frame decode(byte[] wire, byte[] key,
+            int maxPayloadBytes, String sender, String target) throws Exception {
+        try {
+            return LanTransferFrameCodec.decodeFrame(wire, key, maxPayloadBytes, sender, target);
+        } catch (java.io.IOException failure) {
+            System.err.println("LNP2 decode diagnostic: " + failure.getMessage());
+            throw failure;
+        }
+    }
+
     @Test public void chunkFrameRoundTripsThroughByteCodec() throws Exception {
         byte[] payload = "hello-lan-transfer".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         byte[] wire = LanTransferFrameCodec.encodeFrame(new LanTransferFrameCodec.Frame(
