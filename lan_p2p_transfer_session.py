@@ -11,7 +11,7 @@ import socket
 from typing import Callable
 
 from lan_p2p_transfer import (
-    ChunkDescriptor, TransferState, TransferTransitionError, TransferValidationError,
+    ChunkDescriptor, TransferOffer, TransferState, TransferTransitionError, TransferValidationError,
 )
 from lan_p2p_transfer_files import TransferFilesystem
 from lan_p2p_transfer_store import TransferStore
@@ -54,22 +54,63 @@ def serve_transfer_session(
             )
         except EOFError:
             return handled
-        record = store.get_transfer(frame.transfer_id)
-        if record is None:
-            raise TransferValidationError("unknown transfer task")
-        if (record.offer.sender_peer_id != authenticated_peer_id
-                or record.offer.target_peer_id != local_peer_id
-                or frame.sender_peer_id != record.offer.sender_peer_id
-                or frame.target_peer_id != record.offer.target_peer_id):
-            raise TransferValidationError("frame identity does not match fixed transfer participants")
-
         response_kind = frame.kind
         response_index = None
         response_payload = b""
         response_metadata = None
         timestamp = now_ms()
+        record = store.get_transfer(frame.transfer_id)
 
-        if frame.kind == "chunk":
+        if frame.kind == "offer":
+            if frame.index is not None or frame.payload or not isinstance(frame.metadata, dict):
+                raise TransferValidationError("malformed transfer Offer frame")
+            if (frame.sender_peer_id != authenticated_peer_id
+                    or frame.target_peer_id != local_peer_id):
+                raise TransferValidationError("Offer participants do not match authenticated session")
+            expected = {"filename", "size_bytes", "sha256", "created_at_ms",
+                        "mime_type", "chunk_size_bytes"}
+            if set(frame.metadata) != expected:
+                raise TransferValidationError("invalid transfer Offer metadata")
+            size = frame.metadata["size_bytes"]
+            created = frame.metadata["created_at_ms"]
+            chunk_size = frame.metadata["chunk_size_bytes"]
+            if (isinstance(size, bool) or not isinstance(size, int)
+                    or isinstance(created, bool) or not isinstance(created, int)
+                    or isinstance(chunk_size, bool) or not isinstance(chunk_size, int)):
+                raise TransferValidationError("Offer size, timestamp and chunk size must be integers")
+            if chunk_size != store.limits.chunk_size_bytes:
+                raise TransferValidationError("Offer chunk size does not match receiver configuration")
+            if created > timestamp + 300_000 or created < timestamp - 7 * 24 * 60 * 60 * 1000:
+                raise TransferValidationError("Offer is outside the accepted age window")
+            offer = TransferOffer(
+                frame.transfer_id, authenticated_peer_id, local_peer_id,
+                frame.metadata["filename"], size, frame.metadata["sha256"],
+                created, frame.metadata["mime_type"],
+            )
+            inserted = store.create_offer(offer, timestamp)
+            record = store.get_transfer(frame.transfer_id)
+            if record is None:
+                raise TransferValidationError("Offer was not durably stored")
+            response_kind = "offer_ack"
+            response_metadata = {
+                "state": record.state.value,
+                "chunk_size_bytes": record.chunk_size_bytes,
+                "total_chunks": record.total_chunks,
+                "new_offer": bool(inserted),
+            }
+        else:
+            if record is None:
+                raise TransferValidationError("unknown transfer task")
+            if (record.offer.sender_peer_id != authenticated_peer_id
+                    or record.offer.target_peer_id != local_peer_id
+                    or frame.sender_peer_id != record.offer.sender_peer_id
+                    or frame.target_peer_id != record.offer.target_peer_id):
+                raise TransferValidationError("frame identity does not match fixed transfer participants")
+
+        if frame.kind == "offer":
+            # The durable state remains OFFERED until the receiver explicitly accepts.
+            pass
+        elif frame.kind == "chunk":
             accepted = filesystem.write_chunk(
                 ChunkDescriptor(frame.transfer_id, frame.index, frame.payload,
                                 hashlib.sha256(frame.payload).hexdigest()),
