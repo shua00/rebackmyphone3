@@ -855,3 +855,15 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 - 空文件也必须先 accepted → transferring 才能 complete，阻止 0-byte Offer 绕过接收方确认。
 - **CI 状态**：#840–#846 已通过；#847–#853 当前验证后续 Offer/Store/Service 修改。
 - **用户流程缺口**：文件选择、发送对象选择、接收通知/接受/拒绝 UI、传输进度和保存位置尚未实现；不能把控制 API 视为完整用户功能。
+
+
+## 60. Android/Python Offer 协议对齐与资源关闭顺序（2026-11-25）
+
+- Java 与 Python LNP2 codec 共同允许 `offer` / `offer_ack` 控制帧，其他帧 schema/HMAC/身份校验不放宽。
+- Python receiver session 新增 Offer 接收：只接受认证 peer 的固定 sender/target、严格 metadata schema、时间窗口（最多 7 天）、接收端配置的 chunk size；写入 TransferStore 后回 `offer_ack`，状态保持 OFFERED。
+- Python sender 新增 `send_offer_over_session`：发送前验证 source regular file、长度和 SHA-256；收到 Offer ACK 才返回，且不会自动把接收端状态改为 ACCEPTED。
+- Python Offer 网络/发送测试 #858–#861 成功。
+- Android #847/#848 暴露 FrameCodec 未允许 Offer kind，已修正并增加 round-trip 测试；#855 成功。#856 的独立失败是 TrackingService teardown 对 startup worker 的 interrupt 时机过晚，已提前 interrupt。
+- TCP listener 提供 worker drain；Service 关闭时先关监听/会话 socket，等 session worker 退出后再关闭 transfer SQLite ledger，防止活动会话与数据库关闭竞态。
+- **当前待验收**：#862–#865 的 Service teardown 与完整 Offer 流程 CI；随后还要做真机网络切换与双端文件传输。
+- **产品/UI 门禁**：可信 peer 配对和密钥配置 UI、incoming Offer 列表、接受/拒绝按钮、文件选择、进度和保存位置仍未实现。
