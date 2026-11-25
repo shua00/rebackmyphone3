@@ -244,7 +244,8 @@ public final class LanTransferSenderWorker implements Runnable {
     private void cancelLedger() {
         try {
             String state = requireLocalTask().state;
-            if ("offered".equals(state) || "transferring".equals(state) || "paused".equals(state))
+            if ("offered".equals(state) || "accepted".equals(state)
+                    || "transferring".equals(state) || "paused".equals(state))
                 store.transition(offer.transferId, "cancelled", System.currentTimeMillis());
         } catch (Exception ignored) {}
         notifyState("cancelled");

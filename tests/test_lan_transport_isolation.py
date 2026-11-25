@@ -37,6 +37,12 @@ class LanTransportIsolationTests(unittest.TestCase):
         self.assertNotIn("LanTransferFeature", chat_store)
         self.assertNotIn("lan_file_transfer_enabled", tracking)
 
+    def test_sender_cancel_transitions_accepted_task_to_terminal_state(self):
+        worker = self.read("LanTransferSenderWorker.java")
+        cancel = worker.split("private void cancelLedger()", 1)[1].split("private void sleepBackoff", 1)[0]
+        self.assertIn('"accepted".equals(state)', cancel)
+        self.assertIn('store.transition(offer.transferId, "cancelled"', cancel)
+
     def test_chat_composer_keyboard_behavior_is_not_changed_by_file_entry(self):
         chat = self.read("ChatActivity.java")
         self.assertIn("boolean keepKeyboardVisible = isComposerImeVisible();", chat)
