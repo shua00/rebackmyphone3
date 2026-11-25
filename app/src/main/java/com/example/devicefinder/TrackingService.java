@@ -288,6 +288,7 @@ public class TrackingService extends Service implements LocationListener {
     private volatile LanTransferFilesystem lanTransferFilesystem;
     private volatile LanTransferTcpListener lanTransferTcpListener;
     private volatile String lanTransferListenerFingerprint;
+    private volatile String lanTransferCredentialsFingerprint;
     private final Object lanTransferListenerLock = new Object();
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRetryInFlight =
             new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -2461,12 +2462,20 @@ public class TrackingService extends Service implements LocationListener {
             stopLanTransferTcpListener("unsupported or service destroyed");
             return;
         }
+        final LanTransferCredentials.Value credentials;
         try {
-            LanTransferCredentials.Value credentials = LanTransferCredentials.load(this);
-            if (credentials == null) {
-                stopLanTransferTcpListener("credentials not provisioned");
-                return;
-            }
+            credentials = LanTransferCredentials.load(this);
+        } catch (Exception credentialFailure) {
+            stopLanTransferTcpListener("credential decryption or validation failed");
+            FileLogger.log(this, "LAN_TRANSFER", "Secure credentials unavailable; listener closed: "
+                    + credentialFailure.getClass().getSimpleName());
+            return;
+        }
+        if (credentials == null) {
+            stopLanTransferTcpListener("credentials not provisioned");
+            return;
+        }
+        try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
             Network selected = selectWifiLanNetwork(cm);
             if (selected == null) {
@@ -2491,11 +2500,13 @@ public class TrackingService extends Service implements LocationListener {
                 stopLanTransferTcpListener("no usable Wi-Fi IPv4 address");
                 return;
             }
+            String credentialFingerprint = transferCredentialsFingerprint(credentials);
             String fingerprint = selected.toString() + "|" + links.getInterfaceName()
                     + "|" + bindAddress.getHostAddress();
             synchronized (lanTransferListenerLock) {
                 if (serviceDestroyed) return;
                 if (fingerprint.equals(lanTransferListenerFingerprint)
+                        && credentialFingerprint.equals(lanTransferCredentialsFingerprint)
                         && lanTransferTcpListener != null && lanTransferTcpListener.isRunning()) return;
                 closeLanTransferListenerLocked();
                 if (lanTransferStore == null) lanTransferStore = new LanTransferStore(this);
@@ -2509,6 +2520,7 @@ public class TrackingService extends Service implements LocationListener {
                 listener.start(bindAddress, LanTransferTcpListener.DEFAULT_PORT);
                 lanTransferTcpListener = listener;
                 lanTransferListenerFingerprint = fingerprint;
+                lanTransferCredentialsFingerprint = credentialFingerprint;
                 FileLogger.log(this, "LAN_TRANSFER", "TCP listener active on selected Wi-Fi "
                         + links.getInterfaceName() + " address=" + bindAddress.getHostAddress()
                         + " reason=" + reason);
@@ -2518,6 +2530,22 @@ public class TrackingService extends Service implements LocationListener {
                     + failure.getClass().getSimpleName());
             // A transient snapshot failure does not prove the old LAN path is gone.
         }
+    }
+
+    private String transferCredentialsFingerprint(LanTransferCredentials.Value credentials)
+            throws java.security.GeneralSecurityException {
+        java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+        digest.update(credentials.sharedSecret.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        java.util.ArrayList<String> peers = new java.util.ArrayList<>(credentials.trustedPeerIds);
+        java.util.Collections.sort(peers);
+        for (String peer : peers) {
+            digest.update((byte) 0);
+            digest.update(peer.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+        StringBuilder result = new StringBuilder();
+        for (byte value : digest.digest())
+            result.append(String.format(java.util.Locale.US, "%02x", value & 255));
+        return result.toString();
     }
 
     private void stopLanTransferTcpListener(String reason) {
@@ -2530,6 +2558,7 @@ public class TrackingService extends Service implements LocationListener {
         LanTransferTcpListener old = lanTransferTcpListener;
         lanTransferTcpListener = null;
         lanTransferListenerFingerprint = null;
+        lanTransferCredentialsFingerprint = null;
         if (old != null) old.close();
     }
 
