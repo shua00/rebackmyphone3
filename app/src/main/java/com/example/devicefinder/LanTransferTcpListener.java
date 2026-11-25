@@ -32,7 +32,7 @@ public final class LanTransferTcpListener implements AutoCloseable {
     private final LanTransferStore store;
     private final LanTransferFilesystem filesystem;
     private final String localPeerId;
-    private final String sharedSecret;
+    private final LanTransferAuthenticator.PeerSecretProvider peerSecrets;
     private final LanTransferAuthenticator.TrustedPeerAuthorizer authorizer;
     private final FailureListener failures;
     private final AtomicBoolean closed = new AtomicBoolean(false);
@@ -50,22 +50,10 @@ public final class LanTransferTcpListener implements AutoCloseable {
     private volatile ServerSocket serverSocket;
     private volatile Thread acceptThread;
 
-    public LanTransferTcpListener(Context context, LanTransferStore store,
-            LanTransferFilesystem filesystem, String localPeerId, String sharedSecret,
-            LanTransferAuthenticator.TrustedPeerAuthorizer authorizer,
-            FailureListener failures) {
-        if (context == null || store == null || filesystem == null
-                || localPeerId == null || localPeerId.isEmpty()
-                || sharedSecret == null || sharedSecret.length() < 16
-                || authorizer == null)
-            throw new IllegalArgumentException("Listener requires store, filesystem, identity, provisioned secret and trust policy");
-        this.context = context.getApplicationContext();
-        this.store = store;
-        this.filesystem = filesystem;
-        this.localPeerId = localPeerId;
-        this.sharedSecret = sharedSecret;
-        this.authorizer = authorizer;
-        this.failures = failures;
+    public LanTransferTcpListener(Context c,LanTransferStore s,LanTransferFilesystem f,String id,String secret,LanTransferAuthenticator.TrustedPeerAuthorizer auth,FailureListener failures){this(c,s,f,id,ignored->secret,auth,failures);}
+    public LanTransferTcpListener(Context context,LanTransferStore store,LanTransferFilesystem filesystem,String localPeerId,LanTransferAuthenticator.PeerSecretProvider peerSecrets,LanTransferAuthenticator.TrustedPeerAuthorizer authorizer,FailureListener failures){
+        if(context==null||store==null||filesystem==null||localPeerId==null||localPeerId.isEmpty()||peerSecrets==null||authorizer==null)throw new IllegalArgumentException("Listener requires identity, per-peer credentials and trust policy");
+        this.context=context.getApplicationContext();this.store=store;this.filesystem=filesystem;this.localPeerId=localPeerId;this.peerSecrets=peerSecrets;this.authorizer=authorizer;this.failures=failures;
     }
 
     public synchronized void start(InetAddress wifiAddress, int port) throws IOException {
@@ -157,7 +145,8 @@ public final class LanTransferTcpListener implements AutoCloseable {
     private void serveOne(Socket socket) {
         try (Socket owned = socket) {
             LanTransferTcpSession session = new LanTransferTcpSession(context, store, filesystem,
-                    localPeerId, sharedSecret, authorizer, System::currentTimeMillis);
+                    localPeerId, peerSecrets, authorizer, System::currentTimeMillis,
+                    LanTransferTcpSession.DEFAULT_MAX_FRAMES, LanTransferTcpSession.DEFAULT_MAX_PAYLOAD_BYTES, 15000);
             session.serve(owned);
         } catch (IOException | GeneralSecurityException | RuntimeException failure) {
             if (!closed.get()) report("session", failure);

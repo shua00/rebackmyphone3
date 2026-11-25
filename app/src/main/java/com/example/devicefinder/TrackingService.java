@@ -2605,7 +2605,7 @@ public class TrackingService extends Service implements LocationListener {
                     lanTransferFilesystem = new LanTransferFilesystem(this, lanTransferStore);
                 LanTransferTcpListener listener = new LanTransferTcpListener(this,
                         lanTransferStore, lanTransferFilesystem, getUniqueDeviceId(),
-                        credentials.sharedSecret, credentials.trustedPeerIds::contains,
+                        credentials::secretFor, credentials.trustedPeerIds::contains,
                         (stage, failure) -> FileLogger.log(this, "LAN_TRANSFER",
                                 "TCP listener stage=" + stage + " error=" + failure.getClass().getSimpleName()));
                 listener.start(bindAddress, LanTransferTcpListener.DEFAULT_PORT);

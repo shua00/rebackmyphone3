@@ -109,4 +109,32 @@ public class LanTransferAuthenticatorTest {
             executor.shutdownNow();
         }
     }
+    @Test public void serverSelectsCredentialByAuthenticatedPeerId() throws Exception {
+        final String senderSecret="sender-specific-secret-0123456789", otherSecret="other-peer-secret-0123456789012";
+        ServerSocket listener=new ServerSocket(0);ExecutorService executor=Executors.newSingleThreadExecutor();
+        try {
+            Future<LanTransferAuthenticator.AuthenticatedPeer> server=executor.submit(()->{try(Socket socket=listener.accept()){
+                socket.setSoTimeout(2000);return LanTransferAuthenticator.authenticateServer(socket,"receiver",
+                        id->"sender".equals(id)?senderSecret:otherSecret,"sender"::equals);}});
+            try(Socket clientSocket=new Socket("127.0.0.1",listener.getLocalPort())){
+                clientSocket.setSoTimeout(2000);
+                LanTransferAuthenticator.AuthenticatedPeer client=LanTransferAuthenticator.authenticateClient(clientSocket,"sender","receiver",senderSecret);
+                assertArrayEquals(client.sessionKey,server.get(3,TimeUnit.SECONDS).sessionKey);
+            }
+        } finally {listener.close();executor.shutdownNow();}
+    }
+    @Test public void serverRejectsTrustedIdentityWithoutStoredCredential() throws Exception {
+        ServerSocket listener=new ServerSocket(0);ExecutorService executor=Executors.newSingleThreadExecutor();
+        try {
+            Future<Boolean> server=executor.submit(()->{try(Socket socket=listener.accept()){
+                socket.setSoTimeout(2000);LanTransferAuthenticator.authenticateServer(socket,"receiver",id->null,"sender"::equals);return false;
+            }catch(SecurityException expected){return true;}});
+            try(Socket clientSocket=new Socket("127.0.0.1",listener.getLocalPort())){
+                clientSocket.setSoTimeout(2000);
+                try{LanTransferAuthenticator.authenticateClient(clientSocket,"sender","receiver","sender-specific-secret-0123456789");fail("missing key must reject");}
+                catch(java.io.IOException expected){}
+            }
+            assertTrue(server.get(3,TimeUnit.SECONDS));
+        } finally {listener.close();executor.shutdownNow();}
+    }
 }

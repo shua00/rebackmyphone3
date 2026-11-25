@@ -94,6 +94,8 @@ public final class LanTransferSenderWorker implements Runnable {
         this.listener = listener;
     }
 
+    private String requirePeerSecret(){String secret=credentials.secretFor(offer.targetPeerId);if(secret==null||secret.isEmpty())throw new SecurityException("No paired credential for target peer");return secret;}
+
     private Endpoint currentEndpoint() throws IOException {
         Endpoint endpoint = endpoints.currentEndpoint();
         if (endpoint == null) throw new IOException("No fresh endpoint for selected trusted peer");
@@ -143,7 +145,7 @@ public final class LanTransferSenderWorker implements Runnable {
                 if (network == null) throw new IOException("No selected Wi-Fi LAN network");
                 Endpoint endpoint = currentEndpoint();
                 acknowledgement = LanTransferTcpClient.sendOffer(network, endpoint.host, endpoint.port,
-                        source, offer, localPeerId, offer.targetPeerId, credentials.sharedSecret,
+                        source, offer, localPeerId, offer.targetPeerId, requirePeerSecret(),
                         chunkSizeBytes, 1024 * 1024, (int) CONNECT_TIMEOUT_MS);
                 String remoteState = acknowledgement.optString("state", "");
                 if ("rejected".equals(remoteState) || "cancelled".equals(remoteState)
@@ -189,7 +191,7 @@ public final class LanTransferSenderWorker implements Runnable {
                 Endpoint endpoint = currentEndpoint();
                 List<Integer> missing = LanTransferTcpClient.connectAndSend(network,
                         endpoint.host, endpoint.port, source, offer, localPeerId, offer.targetPeerId,
-                        credentials.sharedSecret, chunkSizeBytes,
+                        requirePeerSecret(), chunkSizeBytes,
                         LanTransferTcpClient.DEFAULT_CHUNKS_PER_SESSION, 1024 * 1024,
                         (int) CONNECT_TIMEOUT_MS,
                         (sent, batch) -> { if (listener != null) listener.onProgress(sent, batch); });

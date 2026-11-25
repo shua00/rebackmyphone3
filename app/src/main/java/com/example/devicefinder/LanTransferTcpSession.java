@@ -26,41 +26,19 @@ public final class LanTransferTcpSession {
     private final LanTransferStore store;
     private final LanTransferFilesystem filesystem;
     private final String localPeerId;
-    private final String sharedSecret;
+    private final LanTransferAuthenticator.PeerSecretProvider peerSecrets;
     private final LanTransferAuthenticator.TrustedPeerAuthorizer authorizer;
     private final Clock clock;
     private final int maxFrames;
     private final int maxPayloadBytes;
     private final int socketTimeoutMs;
 
-    public LanTransferTcpSession(Context context, LanTransferStore store,
-            LanTransferFilesystem filesystem, String localPeerId, String sharedSecret,
-            LanTransferAuthenticator.TrustedPeerAuthorizer authorizer, Clock clock) {
-        this(context, store, filesystem, localPeerId, sharedSecret, authorizer, clock,
-                DEFAULT_MAX_FRAMES, DEFAULT_MAX_PAYLOAD_BYTES, 15000);
-    }
-
-    public LanTransferTcpSession(Context context, LanTransferStore store,
-            LanTransferFilesystem filesystem, String localPeerId, String sharedSecret,
-            LanTransferAuthenticator.TrustedPeerAuthorizer authorizer, Clock clock,
-            int maxFrames, int maxPayloadBytes, int socketTimeoutMs) {
-        if (context == null || store == null || filesystem == null || localPeerId == null
-                || localPeerId.isEmpty() || sharedSecret == null || sharedSecret.isEmpty()
-                || authorizer == null || clock == null)
-            throw new IllegalArgumentException("Transfer session dependencies are required");
-        if (maxFrames < 1 || maxFrames > 256 || maxPayloadBytes < 1
-                || maxPayloadBytes > DEFAULT_MAX_PAYLOAD_BYTES || socketTimeoutMs < 1000)
-            throw new IllegalArgumentException("Invalid transfer session limits");
-        this.appContext = context.getApplicationContext();
-        this.store = store;
-        this.filesystem = filesystem;
-        this.localPeerId = localPeerId;
-        this.sharedSecret = sharedSecret;
-        this.authorizer = authorizer;
-        this.clock = clock;
-        this.maxFrames = maxFrames;
-        this.maxPayloadBytes = maxPayloadBytes;
-        this.socketTimeoutMs = socketTimeoutMs;
+    public LanTransferTcpSession(Context c,LanTransferStore s,LanTransferFilesystem f,String id,String secret,LanTransferAuthenticator.TrustedPeerAuthorizer auth,Clock clock){this(c,s,f,id,ignored->secret,auth,clock,DEFAULT_MAX_FRAMES,DEFAULT_MAX_PAYLOAD_BYTES,15000);}
+    public LanTransferTcpSession(Context c,LanTransferStore s,LanTransferFilesystem f,String id,String secret,LanTransferAuthenticator.TrustedPeerAuthorizer auth,Clock clock,int frames,int bytes,int timeout){this(c,s,f,id,ignored->secret,auth,clock,frames,bytes,timeout);}
+    public LanTransferTcpSession(Context context,LanTransferStore store,LanTransferFilesystem filesystem,String localPeerId,LanTransferAuthenticator.PeerSecretProvider peerSecrets,LanTransferAuthenticator.TrustedPeerAuthorizer authorizer,Clock clock,int maxFrames,int maxPayloadBytes,int socketTimeoutMs){
+        if(context==null||store==null||filesystem==null||localPeerId==null||localPeerId.isEmpty()||peerSecrets==null||authorizer==null||clock==null)throw new IllegalArgumentException("Transfer session dependencies are required");
+        if(maxFrames<1||maxFrames>256||maxPayloadBytes<1||maxPayloadBytes>DEFAULT_MAX_PAYLOAD_BYTES||socketTimeoutMs<1000)throw new IllegalArgumentException("Invalid transfer session limits");
+        this.appContext=context.getApplicationContext();this.store=store;this.filesystem=filesystem;this.localPeerId=localPeerId;this.peerSecrets=peerSecrets;this.authorizer=authorizer;this.clock=clock;this.maxFrames=maxFrames;this.maxPayloadBytes=maxPayloadBytes;this.socketTimeoutMs=socketTimeoutMs;
     }
 
     /** Serves at most maxFrames requests. The caller owns and closes the socket. */
@@ -68,7 +46,7 @@ public final class LanTransferTcpSession {
         if (socket == null || socket.isClosed()) throw new IllegalArgumentException("Connected socket required");
         socket.setSoTimeout(socketTimeoutMs);
         LanTransferAuthenticator.AuthenticatedPeer peer =
-                LanTransferAuthenticator.authenticateServer(socket, localPeerId, sharedSecret, authorizer);
+                LanTransferAuthenticator.authenticateServer(socket, localPeerId, peerSecrets, authorizer);
         int handled = 0;
         int missingPageLimit = 64;
         while (handled < maxFrames && !socket.isClosed()) {

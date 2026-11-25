@@ -27,6 +27,7 @@ public final class LanTransferAuthenticator {
 
     /** API-21-compatible trust policy; avoids java.util.function on older Android releases. */
     public interface TrustedPeerAuthorizer { boolean isTrusted(String peerId); }
+    public interface PeerSecretProvider { String secretFor(String peerId); }
 
     public static final class AuthenticatedPeer {
         public final String peerId;
@@ -58,8 +59,12 @@ public final class LanTransferAuthenticator {
 
     public static AuthenticatedPeer authenticateServer(Socket socket, String localPeerId,
             String sharedSecret, TrustedPeerAuthorizer authorizePeer) throws IOException, GeneralSecurityException {
-        if (authorizePeer == null) throw new IllegalArgumentException("Trusted-peer authorization is required");
-        byte[] serverId = peerBytes(localPeerId), key = deriveKey(sharedSecret);
+        return authenticateServer(socket, localPeerId, ignored -> sharedSecret, authorizePeer);
+    }
+    public static AuthenticatedPeer authenticateServer(Socket socket, String localPeerId,
+            PeerSecretProvider secrets, TrustedPeerAuthorizer authorizePeer) throws IOException, GeneralSecurityException {
+        if (authorizePeer == null || secrets == null) throw new IllegalArgumentException("Credential lookup and trust policy are required");
+        byte[] serverId = peerBytes(localPeerId);
         DataInputStream in = new DataInputStream(socket.getInputStream());
         DataOutputStream out = new DataOutputStream(socket.getOutputStream());
         byte[] magic = new byte[MAGIC.length]; in.readFully(magic);
@@ -68,6 +73,9 @@ public final class LanTransferAuthenticator {
         String clientName = decodePeer(clientId);
         byte[] clientNonce = new byte[NONCE_BYTES]; in.readFully(clientNonce);
         if (!authorizePeer.isTrusted(clientName)) throw new SecurityException("Untrusted TCP peer");
+        String peerSecret = secrets.secretFor(clientName);
+        if (peerSecret == null || peerSecret.isEmpty()) throw new SecurityException("No credential for peer identity");
+        byte[] key = deriveKey(peerSecret);
         byte[] serverNonce = nonce(), transcript = transcript(clientId, serverId, clientNonce, serverNonce);
         out.writeShort(serverId.length); out.write(serverId); out.write(serverNonce);
         out.write(hmac(key, concat(SERVER_DOMAIN, transcript))); out.flush();
