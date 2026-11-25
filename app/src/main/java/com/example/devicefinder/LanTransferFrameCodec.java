@@ -164,7 +164,8 @@ public final class LanTransferFrameCodec {
     private static void validate(Frame f,byte[] key,int maxPayload) throws Exception {
         requireSession(key,maxPayload);
         if(f==null) throw new IllegalArgumentException("Missing transfer frame");
-        if(!("chunk".equals(f.kind)||"chunk_ack".equals(f.kind)||"missing".equals(f.kind)
+        if(!("offer".equals(f.kind)||"offer_ack".equals(f.kind)
+                ||"chunk".equals(f.kind)||"chunk_ack".equals(f.kind)||"missing".equals(f.kind)
                 ||"complete".equals(f.kind)||"cancel".equals(f.kind)))
             throw new IllegalArgumentException("Unsupported transfer frame kind");
         checkId(f.transferId,"transfer ID"); checkId(f.senderPeerId,"sender peer ID");
