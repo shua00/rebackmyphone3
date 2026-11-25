@@ -205,6 +205,16 @@ public final class LanTransferStore extends SQLiteOpenHelper {
             ContentValues v=new ContentValues();v.put("state","completed");v.put("published_path",publishedPath);v.put("updated_at_ms",now);db.update("lan_transfer_tasks",v,"transfer_id=?",new String[]{id});db.setTransactionSuccessful();return true;
         } finally { db.endTransaction(); }
     }
+    public List<ChunkReceipt> loadChunkReceiptsPage(String id,int startIndex,int limit) {
+        if(startIndex<0||limit<1||limit>256)throw new IllegalArgumentException("Invalid receipt page bounds");
+        List<ChunkReceipt> out=new ArrayList<>();
+        Cursor c=getReadableDatabase().rawQuery("SELECT transfer_id,chunk_index,payload_size,chunk_sha256,staging_path,recorded_at_ms FROM lan_transfer_chunks WHERE transfer_id=? AND chunk_index>=? ORDER BY chunk_index LIMIT ?",
+                new String[]{id,Integer.toString(startIndex),Integer.toString(limit)});
+        try { while(c.moveToNext())out.add(new ChunkReceipt(c.getString(0),c.getInt(1),c.getInt(2),c.getString(3),c.getString(4),c.getLong(5))); }
+        finally { c.close(); }
+        return out;
+    }
+
     public List<ChunkReceipt> loadChunkReceipts(String id) {
         List<ChunkReceipt> out=new ArrayList<>();Cursor c=getReadableDatabase().rawQuery("SELECT transfer_id,chunk_index,payload_size,chunk_sha256,staging_path,recorded_at_ms FROM lan_transfer_chunks WHERE transfer_id=? ORDER BY chunk_index",new String[]{id});
         try{while(c.moveToNext())out.add(new ChunkReceipt(c.getString(0),c.getInt(1),c.getInt(2),c.getString(3),c.getString(4),c.getLong(5)));}finally{c.close();}return out;

@@ -726,3 +726,15 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | chunk 热路径 | 单块 receipt 索引查询；活动 Offer 总量预留 quota | 待 CI |
 | complete gate | 只查询一个缺块索引；不创建几十万项全量列表 | 待 CI |
 | control paging | store missing page 上限 128 项并返回 more | 300 块分页测试待 CI |
+
+
+## 46. Android 文件 staging 单文件架构与分页重核验（2026-11-25）
+
+| 项目 | 方案 | 验收状态 |
+|---|---|---|
+| staging 布局 | 每个 transfer 一个 payload.part，分块按固定 offset 写入 | 新代码待 CI |
+| ACK 前置条件 | chunk 写入 + 文件 fsync → SQLite receipt；无 receipt 的崩溃字节仍算 missing | 待 CI |
+| 重启核验 | 128 条 receipt 分页，逐块重算 SHA-256；坏回执撤销 | 待 CI |
+| 缺块控制面 | MissingPage(indexes, more) 最多 128 项 | 新分页测试待 CI |
+| 完成发布 | whole-file hash → fsync → 原子 rename → completed；崩溃窗口可核验恢复 | 待 CI |
+| 资源效率 | 不再为最小块尺寸创建几十万文件；避免逐块全目录扫描和全量缺块数组 | 待大文件压力验收 |

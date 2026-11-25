@@ -53,7 +53,7 @@ public class LanTransferFilesystemTest {
  @Test public void symlinkChunkIsRejectedAndReceiptInvalidated()throws Exception{
   byte[] data=new byte[4096];Arrays.fill(data,(byte)2);start("fs-5",data,4096);writeChunk("fs-5",0,data,5);
   File dir=new File(new File(context.getFilesDir(),"lan-transfer-staging"),"fs-5");
-  File chunk=new File(dir,"0.part"),outside=new File(context.getFilesDir(),"outside-transfer-file");
+  File chunk=new File(dir,"payload.part"),outside=new File(context.getFilesDir(),"outside-transfer-file");
   try(FileOutputStream out=new FileOutputStream(outside)){out.write(data);out.getFD().sync();}
   chunk.delete();Os.symlink(outside.getAbsolutePath(),chunk.getAbsolutePath());
   assertEquals(Arrays.asList(0),fs.reconcile("fs-5",6));assertTrue(store.loadChunkReceipts("fs-5").isEmpty());
@@ -72,8 +72,9 @@ public class LanTransferFilesystemTest {
  }
  @Test public void reconcileExposesMoreFlagForBoundedMissingPages()throws Exception{
   byte[] data=new byte[300*4096];start("fs-page-more",data,4096);
-  assertEquals(128,fs.reconcile("fs-page-more",5).size());
-  LanTransferStore.MissingPage next=store.getMissingChunkPage("fs-page-more",128,128);
+  LanTransferStore.MissingPage first=fs.reconcilePage("fs-page-more",5);
+  assertEquals(128,first.indexes.size());assertTrue(first.more);
+  LanTransferStore.MissingPage next=fs.missingChunkPage("fs-page-more",128,128);
   assertEquals(128,next.indexes.size());assertTrue(next.more);
  }
  private static byte[] read(File f)throws Exception{java.io.ByteArrayOutputStream b=new java.io.ByteArrayOutputStream();try(java.io.FileInputStream in=new java.io.FileInputStream(f)){byte[] x=new byte[4096];int n;while((n=in.read(x))!=-1)b.write(x,0,n);}return b.toByteArray();}
