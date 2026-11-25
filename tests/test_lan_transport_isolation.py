@@ -48,7 +48,7 @@ class LanTransportIsolationTests(unittest.TestCase):
     def test_notification_and_boot_restore_are_gated_or_durable(self):
         sender = self.read("LanTransferSenderService.java")
         boot = self.read("BootReceiver.java")
-        self.assertIn("if (!LanTransferFeature.isEnabled(context) || !hasPendingJob(context)) return;", sender)
+        self.assertIn("if(!LanTransferFeature.isEnabled(context) || !hasPendingJob(context)) return;", sender)
         self.assertIn("LanTransferSenderService.resumeIfPending(context)", boot)
         self.assertIn("if (!LanTransferFeature.isEnabled(this))", sender)
         self.assertIn("worker.pause()", sender)
