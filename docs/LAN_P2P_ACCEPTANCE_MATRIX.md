@@ -759,3 +759,13 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 - Actions #811：Robolectric 下 `Os.open(directory, O_RDONLY)` 抛 EIO；因此目录 fsync 未执行，文件传输用例全部失败。
 - 改为 `FileInputStream(directory).getFD().sync()` 执行目录 fsync，仍要求成功后才提交 chunk receipt；不把目录同步降级为 best-effort。
 - 同轮一项 TrackingServiceLifecycleTest 的 startup thread assertion 失败，待后续回归复验。
+
+
+## 50. DurableFileOps 与平台 syscall 验收边界（2026-11-25）
+
+| 项目 | 处理 | 证据状态 |
+|---|---|---|
+| 生产目录 fsync/rename | 默认 AndroidDurableFileOps 使用 Os.open + Os.fsync + Os.rename | 生产路径保留真实系统调用，待真机验证 |
+| Robolectric 测试 | 注入 DurableFileOps fake：验证目录目标存在与同目录 rename；不模拟声称系统调用已成功 | 用于逻辑/顺序测试 |
+| ACK 前顺序 | 数据文件 fsync → 任务目录 sync → SQLite receipt | 测试替身验证调用顺序；设备级持久性仍待真机 |
+| 安全 | canonical path symlink 检查仍由生产/测试共用代码执行 | symlink 测试待 CI |

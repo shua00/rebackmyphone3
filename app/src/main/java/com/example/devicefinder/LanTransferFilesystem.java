@@ -19,19 +19,41 @@ import java.util.List;
  * individual files for a 2 GiB transfer negotiated at the 4 KiB minimum chunk size.
  */
 public final class LanTransferFilesystem {
+    /** Injectable only to let Robolectric assert ordering; production defaults to real Android fsync/rename syscalls. */
+    public interface DurableFileOps {
+        void syncDirectory(File directory) throws IOException;
+        void atomicRename(File source,File target) throws IOException;
+    }
+    private static final class AndroidDurableFileOps implements DurableFileOps {
+        @Override public void syncDirectory(File dir)throws IOException {
+            FileDescriptor fd=null;
+            try{fd=Os.open(dir.getAbsolutePath(),OsConstants.O_RDONLY,0);Os.fsync(fd);}
+            catch(ErrnoException e){throw new IOException("Unable to fsync transfer directory",e);}
+            finally{if(fd!=null)try{Os.close(fd);}catch(ErrnoException ignored){}}
+        }
+        @Override public void atomicRename(File from,File to)throws IOException {
+            try{Os.rename(from.getAbsolutePath(),to.getAbsolutePath());}
+            catch(ErrnoException e){throw new IOException("Atomic transfer publish failed",e);}
+        }
+    }
     public static final long DEFAULT_STAGING_QUOTA_BYTES=4L*1024L*1024L*1024L;
     private static final long MIN_FREE_SPACE_RESERVE_BYTES=16L*1024L*1024L;
     private final LanTransferStore store;
     private final File root,publishedRoot;
     private final long quotaBytes;
+    private final DurableFileOps fileOps;
 
     public LanTransferFilesystem(Context context,LanTransferStore store) {
         this(context,store,DEFAULT_STAGING_QUOTA_BYTES);
     }
     public LanTransferFilesystem(Context context,LanTransferStore store,long quotaBytes) {
-        if(context==null||store==null||quotaBytes<1)throw new IllegalArgumentException("Context, store and positive quota are required");
+        this(context,store,quotaBytes,new AndroidDurableFileOps());
+    }
+    LanTransferFilesystem(Context context,LanTransferStore store,long quotaBytes,DurableFileOps fileOps) {
+        if(context==null||store==null||quotaBytes<1||fileOps==null)throw new IllegalArgumentException("Context, store, quota and file operations are required");
         this.store=store;this.root=new File(context.getFilesDir(),"lan-transfer-staging");
         this.publishedRoot=new File(context.getFilesDir(),"lan-transfer-received");this.quotaBytes=quotaBytes;
+        this.fileOps=fileOps;
     }
 
     private static String expectedCanonicalPath(File file)throws IOException {
@@ -53,7 +75,10 @@ public final class LanTransferFilesystem {
     }
     private static void ensureDirectory(File dir)throws IOException {
         rejectSymlink(dir);
-        if(!dir.exists()&&!dir.mkdir()&&!dir.isDirectory())throw new IOException("Unable to create transfer directory");
+        if(!dir.exists()) {
+            if(!dir.mkdir()&&!dir.isDirectory())throw new IOException("Unable to create transfer directory");
+            File parent=dir.getParentFile();if(parent!=null&&parent.exists())syncDirectory(parent);
+        }
         rejectSymlink(dir);
         if(!dir.isDirectory())throw new IOException("Transfer path is not a directory");
     }
@@ -64,12 +89,7 @@ public final class LanTransferFilesystem {
     private File stagingFile(String id)throws IOException {
         File dir=taskDirectory(id),file=new File(dir,"payload.part");rejectSymlink(file);return file;
     }
-    private static void syncDirectory(File dir)throws IOException {
-        // Opening a directory read-only and syncing its descriptor is supported by Android
-        // filesystems and remains testable in Robolectric without weakening durability.
-        try(FileInputStream in=new FileInputStream(dir)) { in.getFD().sync(); }
-        catch(IOException e) { throw new IOException("Unable to fsync transfer directory",e); }
-    }
+    private void syncDirectory(File dir)throws IOException { fileOps.syncDirectory(dir); }
     private static void syncFile(RandomAccessFile file)throws IOException { file.getFD().sync(); }
     private static String hex(byte[] b) {
         char[] d="0123456789abcdef".toCharArray();StringBuilder s=new StringBuilder(b.length*2);
@@ -99,10 +119,9 @@ public final class LanTransferFilesystem {
     private static void requireRegularFile(File f)throws IOException {
         rejectSymlink(f);if(!f.exists()||!f.isFile())throw new IOException("Expected regular transfer file");
     }
-    private static void atomicRename(File from,File to)throws IOException {
+    private void atomicRename(File from,File to)throwsIOException {
         rejectSymlink(from);rejectSymlink(to);
-        try{Os.rename(from.getAbsolutePath(),to.getAbsolutePath());}
-        catch(ErrnoException e){throw new IOException("Atomic transfer publish failed",e);}
+        fileOps.atomicRename(from,to);
         syncDirectory(to.getParentFile());
     }
 

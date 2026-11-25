@@ -1,7 +1,7 @@
 package com.example.devicefinder;
 
 import android.content.Context;
-import android.system.Os;
+import java.nio.file.Files;
 import org.junit.After;import org.junit.Before;import org.junit.Test;import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;import org.robolectric.RuntimeEnvironment;import org.robolectric.annotation.Config;
 import java.io.File;import java.io.FileOutputStream;import java.security.MessageDigest;import java.util.Arrays;
@@ -11,9 +11,15 @@ import static org.junit.Assert.*;
 public class LanTransferFilesystemTest {
  private static final String DB="lan_p2p_transfer.db";
  private Context context;private LanTransferStore store;private LanTransferFilesystem fs;
- @Before public void setUp(){context=RuntimeEnvironment.getApplication();context.deleteDatabase(DB);deleteTree(new File(context.getFilesDir(),"lan-transfer-staging"));deleteTree(new File(context.getFilesDir(),"lan-transfer-received"));store=new LanTransferStore(context);fs=new LanTransferFilesystem(context,store);}
+ @Before public void setUp(){context=RuntimeEnvironment.getApplication();context.deleteDatabase(DB);deleteTree(new File(context.getFilesDir(),"lan-transfer-staging"));deleteTree(new File(context.getFilesDir(),"lan-transfer-received"));store=new LanTransferStore(context);fs=new LanTransferFilesystem(context,store,LanTransferFilesystem.DEFAULT_STAGING_QUOTA_BYTES,testFileOps());}
  @After public void tearDown(){if(store!=null)store.closeStore();context.deleteDatabase(DB);deleteTree(new File(context.getFilesDir(),"lan-transfer-staging"));deleteTree(new File(context.getFilesDir(),"lan-transfer-received"));}
  private static void deleteTree(File f){if(f==null||!f.exists())return;File[] children=f.listFiles();if(children!=null)for(File c:children)deleteTree(c);f.delete();}
+ private LanTransferFilesystem.DurableFileOps testFileOps(){
+  return new LanTransferFilesystem.DurableFileOps(){
+   public void syncDirectory(File directory)throws java.io.IOException{if(!directory.isDirectory())throw new java.io.IOException("test sync target is not a directory");}
+   public void atomicRename(File source,File target)throws java.io.IOException{if(!source.renameTo(target))throw new java.io.IOException("test atomic rename failed");}
+  };
+ }
  private static String hash(byte[] b)throws Exception{byte[] d=MessageDigest.getInstance("SHA-256").digest(b);StringBuilder s=new StringBuilder();for(byte x:d)s.append(String.format("%02x",x&255));return s.toString();}
  private void start(String id,byte[] content,int chunk)throws Exception{
   store.createOffer(new LanTransferStore.Offer(id,"sender","receiver","payload.bin",content.length,hash(content),1,"application/octet-stream"),2,chunk);
@@ -46,7 +52,7 @@ public class LanTransferFilesystemTest {
  }
  @Test public void quotaRejectsChunkBeforeReceipt()throws Exception{
   byte[] data=new byte[4096];Arrays.fill(data,(byte)1);start("fs-4",data,4096);
-  LanTransferFilesystem tiny=new LanTransferFilesystem(context,store,1024);
+  LanTransferFilesystem tiny=new LanTransferFilesystem(context,store,1024,testFileOps());
   try{tiny.writeChunk("fs-4",0,data,5);fail("quota must reject");}catch(java.io.IOException expected){}
   assertTrue(store.loadChunkReceipts("fs-4").isEmpty());
  }
@@ -55,7 +61,7 @@ public class LanTransferFilesystemTest {
   File dir=new File(new File(context.getFilesDir(),"lan-transfer-staging"),"fs-5");
   File chunk=new File(dir,"payload.part"),outside=new File(context.getFilesDir(),"outside-transfer-file");
   try(FileOutputStream out=new FileOutputStream(outside)){out.write(data);out.getFD().sync();}
-  chunk.delete();Os.symlink(outside.getAbsolutePath(),chunk.getAbsolutePath());
+  chunk.delete();Files.createSymbolicLink(chunk.toPath(),outside.toPath());
   assertEquals(Arrays.asList(0),fs.reconcile("fs-5",6));assertTrue(store.loadChunkReceipts("fs-5").isEmpty());
   assertTrue(outside.isFile());
  }
