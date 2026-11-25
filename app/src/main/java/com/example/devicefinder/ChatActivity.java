@@ -457,6 +457,7 @@ public class ChatActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        updateTransferControls();
         isForeground = true;
         // Treat changes accumulated while backgrounded like incoming messages:
         // preserve a history-reading position instead of unconditionally jumping to bottom.
