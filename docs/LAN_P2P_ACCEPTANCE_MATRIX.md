@@ -938,6 +938,6 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 状态展示 | 独立 LanTransferActivity 显示收发方向、对端 Peer ID、文件名、大小、状态和更新时间；只对接收方 offered 任务显示接受/拒绝 | 发送任务状态来自同一 SQLite ledger；后台 worker 广播触发刷新，页面恢复时也主动刷新 |
 | 完成文件 | Transfer DTO 暴露账本 published_path；接收方 completed 任务显示“保存到设备文件夹”，由 ACTION_CREATE_DOCUMENT 让用户选择目标 | 不暴露私有 file URI；保存前 canonical path 必须位于应用私有 lan-transfer-received 目录的直接子项；流式复制校验字节数和 Offer SHA-256，失败时尝试删除目标文档并保留私有原文件 |
 | 隔离与线程 | SAF 文件复制使用独立 LanTransferActivity executor；不接入 ChatActivity、不占用聊天 UDP 发送/ACK 队列 | 仍需设备上验证文件提供方、目标存储权限/空间与 Activity 退出时取消行为 |
-| 自动化门禁 | tests/test_lan_transfer_ui_boundary.py 增加历史查询、SAF 导出与 published path 边界守卫 | CI 构建/测试结果以本批 Actions run 为准；不等价于真机互传 |
+| 自动化门禁 | tests/test_lan_transfer_ui_boundary.py 增加历史查询、SAF 导出与 published path 边界守卫 | Actions 45555771696（c3fee0f）Python validation 与 Android build success、APK artifact 已上传；45555634695（1e44fba）含新增 Android Store JUnit 测试的构建/测试 success；45555787743 Python 310 项测试 success，Android build 按路径规则 skipped。自动化不等价于真机互传 |
 
 **剩余真机验收**：Android↔Android、Android↔Python；接收完成后关闭/重启应用再保存；取消 SAF 保存、目标空间不足、文件被外部删除/篡改；Wi-Fi 切换/断网恢复和大文件续传。
