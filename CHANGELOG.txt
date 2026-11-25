@@ -11,6 +11,7 @@ v8.60 — 2026-11-25 · SAF 文件发送入口与独立后台发送服务
 - 修正发送端安全/状态异常的终态收敛：offered/accepted 状态遇到不可恢复认证或任务异常可进入 failed，避免服务把不可恢复任务误当作网络暂停无限重试。
 - 补齐设备重启恢复入口：BootReceiver 在主服务启动路径中检查持久化发送任务并尝试恢复独立 LanTransferSenderService；启动受系统限制时记录日志，不伪称任务已恢复。
 - 增加本机取消操作：独立文件传输界面二次确认后请求后台 worker 停止；正在执行的 TCP 分块会话结束后生效。若进程已不在运行，则直接将本地账本任务置 cancelled 并清除调度元数据；明确不远程删除对端已接收内容。
+- 对齐 Android/Python 状态机：发送端 Offer 在远端返回 failed 或本地安全校验不可恢复时进入 failed；补充 Python 状态机测试和 Android SQLite 状态转换测试。
 - 网络选择复用 TrackingService 的选择原则：优先 active Wi-Fi，只有唯一 Wi-Fi 候选时才选用；多 Wi-Fi 歧义时拒绝连接，不回退默认蜂窝网络。
 - 新增 SAF/后台服务源码守卫；ChatActivity 与 activity_chat.xml 保持文件传输无关。
 - 限制：当前后台调度器一次只接纳一个发送任务；尚未实现任务列表/并发队列和完成快照清理策略 UI；接收端完成文件管理、系统进程回收/设备重启实测、Android/Python 双端真机传输仍待验收。设备重启恢复依赖 BootReceiver 获准启动 dataSync 前台服务；若 ROM/系统策略拒绝，会记录日志，仍需用户打开应用恢复。
