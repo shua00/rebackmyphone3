@@ -116,7 +116,7 @@ public final class LanTransferSenderWorker implements Runnable {
                         chunkSizeBytes, 1024 * 1024, (int) CONNECT_TIMEOUT_MS);
                 String remoteState = acknowledgement.optString("state", "");
                 if ("rejected".equals(remoteState) || "cancelled".equals(remoteState)
-                        || "expired".equals(remoteState)) {
+                        || "expired".equals(remoteState) || "failed".equals(remoteState)) {
                     if ("offered".equals(requireLocalTask().state))
                         store.transition(offer.transferId, remoteState, System.currentTimeMillis());
                     notifyState(remoteState);
