@@ -12,6 +12,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.security.MessageDigest;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
@@ -176,13 +177,34 @@ public final class LanTransferActivity extends Activity {
                     File source = new File(transfer.publishedPath).getCanonicalFile();
                     if (!source.isFile() || !receivedRoot.equals(source.getParentFile()))
                         throw new SecurityException("Published file is outside the private received directory");
-                    try (InputStream input = new FileInputStream(source);
-                         OutputStream output = getContentResolver().openOutputStream(destination, "w")) {
-                        if (output == null) throw new java.io.IOException("Unable to open destination document");
-                        byte[] buffer = new byte[64 * 1024];
-                        int count;
-                        while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
-                        output.flush();
+                    boolean destinationOpened = false;
+                    try {
+                        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+                        long copied = 0;
+                        try (InputStream input = new FileInputStream(source);
+                             OutputStream output = getContentResolver().openOutputStream(destination, "w")) {
+                            if (output == null) throw new java.io.IOException("Unable to open destination document");
+                            destinationOpened = true;
+                            byte[] buffer = new byte[64 * 1024];
+                            int count;
+                            while ((count = input.read(buffer)) != -1) {
+                                output.write(buffer, 0, count);
+                                digest.update(buffer, 0, count);
+                                copied += count;
+                            }
+                            output.flush();
+                        }
+                        StringBuilder actualHash = new StringBuilder();
+                        for (byte value : digest.digest())
+                            actualHash.append(String.format(java.util.Locale.US, "%02x", value & 0xff));
+                        if (copied != transfer.offer.sizeBytes || !transfer.offer.sha256.equals(actualHash.toString()))
+                            throw new SecurityException("Completed file size or SHA-256 no longer matches its ledger");
+                    } catch (Exception failure) {
+                        if (destinationOpened) {
+                            try { getContentResolver().delete(destination, null, null); }
+                            catch (Exception ignored) {}
+                        }
+                        throw failure;
                     }
                     runOnUiThread(() -> Toast.makeText(this, "文件已保存到所选位置：" + transfer.offer.filename,
                             Toast.LENGTH_LONG).show());
