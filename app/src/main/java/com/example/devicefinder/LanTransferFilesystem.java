@@ -65,7 +65,7 @@ public final class LanTransferFilesystem {
             File parent=directory.getParentFile();if(parent!=null&&existsNoFollow(parent))syncDirectory(parent);
         }
         rejectSymlink(directory);
-        if(!OsConstants.S_ISDIR(statNoFollow(directory).st_mode))throw new IOException("Transfer path is not a directory");
+        if(!directory.isDirectory())throw new IOException("Transfer path is not a directory");
     }
     private File taskDirectory(String transferId) throws IOException {
         if(transferId==null||!transferId.matches("[A-Za-z0-9._:-]{1,128}"))throw new IOException("Invalid transfer ID path");
@@ -99,17 +99,17 @@ public final class LanTransferFilesystem {
     }
     private static void requireRegularFile(File file) throws IOException {
         rejectSymlink(file);
-        if(!existsNoFollow(file)||!OsConstants.S_ISREG(statNoFollow(file).st_mode))throw new IOException("Expected regular transfer file");
+        if(!existsNoFollow(file)||!file.isFile())throw new IOException("Expected regular transfer file");
     }
     private long directoryBytes(File dir) throws IOException {
         if(!existsNoFollow(dir))return 0;
         rejectSymlink(dir);
-        if(!OsConstants.S_ISDIR(statNoFollow(dir).st_mode))throw new IOException("Unexpected non-directory in transfer root");
+        if(!dir.isDirectory())throw new IOException("Unexpected non-directory in transfer root");
         long total=0;File[] children=dir.listFiles();if(children==null)throw new IOException("Unable to list transfer directory");
         for(File child:children) {
             rejectSymlink(child);StructStat st=statNoFollow(child);
-            if(OsConstants.S_ISDIR(st.st_mode))total=Math.addExact(total,directoryBytes(child));
-            else if(OsConstants.S_ISREG(st.st_mode))total=Math.addExact(total,st.st_size);
+            if(child.isDirectory())total=Math.addExact(total,directoryBytes(child));
+            else if(child.isFile())total=Math.addExact(total,child.length());
             else throw new IOException("Unsupported filesystem object in transfer staging");
         }
         return total;
@@ -279,7 +279,7 @@ public final class LanTransferFilesystem {
         rejectSymlink(file);
         if(!existsNoFollow(file))return;
         StructStat st=statNoFollow(file);
-        if(OsConstants.S_ISDIR(st.st_mode)) {
+        if(file.isDirectory()) {
             File[] children=file.listFiles();if(children==null)throw new IOException("Unable to clean transfer directory");
             for(File child:children)deleteTreeNoFollow(child);
         }

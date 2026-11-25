@@ -690,3 +690,10 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 
 - 复核 v8.33 后发现测试 helper 只定义未覆盖所有写块用例；本批已统一所有测试调用入口。
 - 新 Actions 将输出具体 IOException 与 cause；生产代码和 fsync/receipt 顺序不变。
+
+
+## 42. TransferFilesystem 文件类型判定修正（2026-11-25）
+
+- Actions #806 明确失败原因为 `OsConstants.S_ISDIR(st_mode)` 在当前 Android/Robolectric 环境下将刚创建的目录判为非目录。
+- 修正为先通过 `Os.lstat` 拒绝符号链接，再通过 `File.isDirectory/isFile` 判断类型；避免跟随符号链接。
+- fsync/rename/receipt 顺序不变，新 SHA 继续验证。
