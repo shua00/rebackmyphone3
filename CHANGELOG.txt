@@ -1,4 +1,18 @@
 ================================================================================
+v8.51 — 2026-11-25 · TCP listener 安全边界、凭据热更新与 Wi-Fi 发送 socket
+================================================================================
+
+【第 3 阶段：网络/凭据闭环加固】
+--------------------------------------------------------------------------------
+- #833：TrackingService TCP listener 网络生命周期接线构建成功。
+- #834：凭据解密失败 fail-closed、凭据变更指纹触发 listener 轮换构建成功。
+- LanTransferCredentials provision/clear 后通过显式 Service action 触发安全 listener 刷新，不需要等待下一次 Wi-Fi 变化。
+- LanTransferTcpClient 新增 connectAndSend(Network,...)：发送 socket 通过所选 Wi-Fi Network 的 SocketFactory 创建，先绑定网络再 connect；不污染进程默认网络。
+- Listener 并发策略调整为 2 个 worker + SynchronousQueue，满载立即拒绝，不让已 accept 的空闲 socket 长时间滞留队列。
+- #835/#836/#837 分别验证并发拒绝、Wi-Fi sender helper 和凭据 fail-closed 测试；状态待 Actions 完成。
+- 仍需完成可信配对 UI/流程、控制面 Offer/Accept、真机漫游和跨设备双向验收。
+
+================================================================================
 v8.50 — 2026-11-25 · Android TCP listener、网络生命周期与安全凭据
 ================================================================================
 
