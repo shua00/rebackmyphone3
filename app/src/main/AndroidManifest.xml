@@ -216,6 +216,7 @@
         <!-- 本机诊断报告历史与导出；不暴露给其他应用调用 -->
         <activity
             android:name=".diagnostics.DiagnosticHistoryActivity"
+            android:enabled="${diagnosticsEnabled}"
             android:exported="false" />
 
         <!-- 局域网聊天界面 -->

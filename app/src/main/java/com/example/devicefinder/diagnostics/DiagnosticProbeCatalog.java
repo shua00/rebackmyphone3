@@ -146,6 +146,12 @@ public final class DiagnosticProbeCatalog {
         values.put(k1, v1); values.put(k2, v2); values.put(k3, v3);
         return values;
     }
+    private static Map<String, Long> metrics(String k1, long v1, String k2, long v2,
+            String k3, long v3, String k4, long v4) {
+        java.util.LinkedHashMap<String, Long> values = new java.util.LinkedHashMap<>();
+        values.put(k1, v1); values.put(k2, v2); values.put(k3, v3); values.put(k4, v4);
+        return values;
+    }
     private static Map<String, Long> metrics(String k1, long v1, String k2, long v2) {
         java.util.LinkedHashMap<String, Long> values = new java.util.LinkedHashMap<>();
         values.put(k1, v1); values.put(k2, v2);

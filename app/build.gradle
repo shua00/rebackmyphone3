@@ -2,6 +2,11 @@ plugins {
     id 'com.android.application'
 }
 
+// Diagnostics are enabled for development/acceptance builds by default.
+// Release slimming: ./gradlew assembleRelease -PincludeDiagnostics=false
+def includeDiagnostics = providers.gradleProperty("includeDiagnostics")
+        .map { it.toBoolean() }.getOrElse(true)
+
 android {
     namespace 'com.example.devicefinder'
     compileSdk 34
@@ -12,6 +17,7 @@ android {
         targetSdk 34
         versionCode 1
         versionName "1.0"
+        manifestPlaceholders = [diagnosticsEnabled: includeDiagnostics.toString()]
 
         // ★ 自动生成格式为 YYYYMMDD-HHmm 的版本号（例如 20261110-1930）
         def buildTime = new java.text.SimpleDateFormat("yyyyMMdd-HHmm").format(new java.util.Date())
@@ -25,6 +31,17 @@ android {
         }
     }
     
+    sourceSets {
+        main {
+            // The diagnostic UI, probes, report/history stores and batch spool are optional.
+            // The tiny LAN runtime-state bridge stays in core because TrackingService publishes
+            // lifecycle snapshots through it; it has no UI, storage, worker or network behavior.
+            if (!includeDiagnostics) {
+                java.exclude 'com/example/devicefinder/diagnostics/**'
+            }
+        }
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
