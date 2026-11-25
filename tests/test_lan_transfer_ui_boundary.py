@@ -16,6 +16,15 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
         self.assertNotIn("btnTransfer", layout)
         self.assertNotIn("tvTransferStatus", layout)
 
+
+    def test_pairing_adds_a_peer_without_replacing_existing_trust(self):
+        activity = (JAVA / "LanTransferActivity.java").read_text(encoding="utf-8")
+        self.assertIn("LanTransferCredentials.Value existing = LanTransferCredentials.load(this);", activity)
+        self.assertIn("trustedPeerIds.addAll(existing.trustedPeerIds);", activity)
+        self.assertIn("trustedPeerIds.add(peerId);", activity)
+        self.assertIn("LanTransferCredentials.provision(this, value, trustedPeerIds);", activity)
+        self.assertNotIn("Collections.singleton(peerId)", activity)
+
     def test_transfer_controls_live_in_dedicated_internal_activity(self):
         manifest = (ROOT / "app/src/main/AndroidManifest.xml").read_text(encoding="utf-8")
         activity = (JAVA / "LanTransferActivity.java").read_text(encoding="utf-8")

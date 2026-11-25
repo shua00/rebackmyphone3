@@ -25,7 +25,9 @@ import android.widget.TextView;
 import android.widget.Toast;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
@@ -116,8 +118,18 @@ public final class LanTransferActivity extends Activity {
                     return;
                 }
                 try {
-                    LanTransferCredentials.provision(this, value, Collections.singleton(peerId));
-                    Toast.makeText(this, "配对凭据已保存；监听器将按服务网络生命周期刷新", Toast.LENGTH_LONG).show();
+                    Set<String> trustedPeerIds = new HashSet<>();
+                    LanTransferCredentials.Value existing = LanTransferCredentials.load(this);
+                    if (existing != null) {
+                        if (!existing.sharedSecret.equals(value)) {
+                            throw new IllegalArgumentException(
+                                    "已有配对使用不同共享密钥；如需更换密钥，请先明确清除旧配对");
+                        }
+                        trustedPeerIds.addAll(existing.trustedPeerIds);
+                    }
+                    trustedPeerIds.add(peerId);
+                    LanTransferCredentials.provision(this, value, trustedPeerIds);
+                    Toast.makeText(this, "配对凭据已保存；已保留原可信设备并添加新设备", Toast.LENGTH_LONG).show();
                     refreshOffers();
                 } catch (Exception failure) {
                     Toast.makeText(this, "配对保存失败：" + failure.getClass().getSimpleName(), Toast.LENGTH_LONG).show();
