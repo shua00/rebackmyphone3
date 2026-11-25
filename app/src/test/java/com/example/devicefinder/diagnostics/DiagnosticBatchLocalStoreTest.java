@@ -53,8 +53,11 @@ public class DiagnosticBatchLocalStoreTest {
         for (int i = 1; i < DiagnosticBatchLocalStore.MAX_INBOX_EVENTS + 1; i++) {
             store.acceptIncoming(event(now + i));
         }
-        assertEquals(DiagnosticBatchLocalStore.MAX_INBOX_EVENTS,
-                store.received("batch-store", DiagnosticBatchLocalStore.MAX_INBOX_EVENTS).size());
+        try (android.database.Cursor cursor = store.getReadableDatabase().rawQuery(
+                "SELECT COUNT(*) FROM diagnostic_events WHERE direction='in'", null)) {
+            assertTrue(cursor.moveToFirst());
+            assertEquals(DiagnosticBatchLocalStore.MAX_INBOX_EVENTS, cursor.getInt(0));
+        }
     }
 
     @Test public void retentionDeletesOnlyInboxAndDeliveredOutbound() {
