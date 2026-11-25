@@ -68,6 +68,7 @@ public final class LanTransferTcpSession {
         LanTransferAuthenticator.AuthenticatedPeer peer =
                 LanTransferAuthenticator.authenticateServer(socket, localPeerId, sharedSecret, authorizer);
         int handled = 0;
+        int missingPageLimit = 64;
         while (handled < maxFrames && !socket.isClosed()) {
             final LanTransferFrameCodec.Frame frame;
             try {
@@ -104,6 +105,7 @@ public final class LanTransferTcpSession {
                 responseKind = "chunk_ack";
             } else if ("missing".equals(frame.kind)) {
                 int limit = requestedPageLimit(frame.metadata);
+                missingPageLimit = limit;
                 filesystem.reconcilePage(frame.transferId, now);
                 LanTransferStore.MissingPage page = filesystem.missingChunkPage(frame.transferId, 0, limit);
                 responseMetadata = missingMetadata(page);
@@ -113,7 +115,8 @@ public final class LanTransferTcpSession {
                     responseMetadata = stateMetadata("completed");
                     responseKind = "complete";
                 } else {
-                    LanTransferStore.MissingPage page = filesystem.reconcilePage(frame.transferId, now);
+                    filesystem.reconcilePage(frame.transferId, now);
+                    LanTransferStore.MissingPage page = filesystem.missingChunkPage(frame.transferId, 0, missingPageLimit);
                     if (!page.indexes.isEmpty()) {
                         responseMetadata = missingMetadata(page);
                         responseKind = "missing";
