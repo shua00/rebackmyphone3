@@ -67,6 +67,61 @@ public final class DiagnosticProbeCatalog {
             }
         }));
 
+
+        tests.add(new DiagnosticExecutor.TestCase("lan.ipv4_interface", new DiagnosticExecutor.Probe() {
+            @Override public boolean isSupported() { return true; }
+            @Override public Map<String, Long> execute() throws Exception {
+                int activeInterfaces = 0;
+                int ipv4Addresses = 0;
+                int broadcastInterfaces = 0;
+                java.util.Enumeration<java.net.NetworkInterface> interfaces =
+                        java.net.NetworkInterface.getNetworkInterfaces();
+                if (interfaces == null) return metrics("active_interfaces", 0L,
+                        "ipv4_addresses", 0L, "broadcast_interfaces", 0L);
+                while (interfaces.hasMoreElements()) {
+                    java.net.NetworkInterface network = interfaces.nextElement();
+                    if (!network.isUp() || network.isLoopback()) continue;
+                    activeInterfaces++;
+                    if (network.supportsBroadcast()) broadcastInterfaces++;
+                    java.util.Enumeration<java.net.InetAddress> addresses = network.getInetAddresses();
+                    while (addresses.hasMoreElements()) {
+                        java.net.InetAddress address = addresses.nextElement();
+                        if (address instanceof java.net.Inet4Address && !address.isLoopbackAddress()
+                                && !address.isLinkLocalAddress()) ipv4Addresses++;
+                    }
+                }
+                return metrics("active_interfaces", activeInterfaces,
+                        "ipv4_addresses", ipv4Addresses, "broadcast_interfaces", broadcastInterfaces);
+            }
+        }));
+
+        tests.add(new DiagnosticExecutor.TestCase("lan.udp_bind", new DiagnosticExecutor.Probe() {
+            @Override public boolean isSupported() { return true; }
+            @Override public Map<String, Long> execute() throws Exception {
+                java.net.InetAddress selected = null;
+                java.util.Enumeration<java.net.NetworkInterface> interfaces =
+                        java.net.NetworkInterface.getNetworkInterfaces();
+                if (interfaces != null) {
+                    while (interfaces.hasMoreElements() && selected == null) {
+                        java.net.NetworkInterface network = interfaces.nextElement();
+                        if (!network.isUp() || network.isLoopback() || !network.supportsBroadcast()) continue;
+                        java.util.Enumeration<java.net.InetAddress> addresses = network.getInetAddresses();
+                        while (addresses.hasMoreElements()) {
+                            java.net.InetAddress address = addresses.nextElement();
+                            if (address instanceof java.net.Inet4Address && !address.isLoopbackAddress()
+                                    && !address.isLinkLocalAddress()) { selected = address; break; }
+                        }
+                    }
+                }
+                if (selected == null) return null;
+                try (java.net.DatagramSocket socket = new java.net.DatagramSocket(null)) {
+                    socket.setReuseAddress(true);
+                    socket.setBroadcast(true);
+                    socket.bind(new java.net.InetSocketAddress(selected, 0));
+                    return metrics("bound", 1L, "broadcast_enabled", socket.getBroadcast() ? 1L : 0L);
+                }
+            }
+        }));
         return Collections.unmodifiableList(tests);
     }
 

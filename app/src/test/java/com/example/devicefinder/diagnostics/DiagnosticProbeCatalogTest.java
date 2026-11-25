@@ -19,10 +19,12 @@ public class DiagnosticProbeCatalogTest {
                 DiagnosticProbeCatalog.localReadOnlyTests(RuntimeEnvironment.getApplication());
         Set<String> ids = new HashSet<>();
         for (DiagnosticExecutor.TestCase test : tests) ids.add(test.id);
-        assertEquals(3, tests.size());
+        assertEquals(5, tests.size());
         assertTrue(ids.contains("android.runtime"));
         assertTrue(ids.contains("network.connectivity"));
         assertTrue(ids.contains("app.install"));
+        assertTrue(ids.contains("lan.ipv4_interface"));
+        assertTrue(ids.contains("lan.udp_bind"));
         assertFalse(ids.contains("shell"));
         assertFalse(ids.contains("logcat"));
         assertFalse(ids.contains("chat.content"));
@@ -31,7 +33,7 @@ public class DiagnosticProbeCatalogTest {
                 "android_local", System.currentTimeMillis(), "test", "test",
                 "Robolectric", Build.VERSION.SDK_INT, "UNKNOWN", "READ_ONLY", "LOCAL");
         DiagnosticRun run = DiagnosticExecutor.execute(metadata, tests, tests.size(), null, null);
-        assertEquals(3, run.cases.size());
+        assertEquals(5, run.cases.size());
         for (DiagnosticRun.CaseResult result : run.cases) {
             assertTrue(result.metrics.size() <= 3);
             for (String key : result.metrics.keySet()) {
