@@ -101,7 +101,10 @@ jobs:
       - name: Build APK
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          # Full acceptance build with diagnostics included.
           gradle testDebugUnitTest assembleDebug --stacktrace
+          # Verify the production-slim variant compiles and packages without the diagnostic suite.
+          gradle assembleRelease -PincludeDiagnostics=false --stacktrace
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
