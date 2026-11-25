@@ -2701,12 +2701,16 @@ public class TrackingService extends Service implements LocationListener {
     private String transferCredentialsFingerprint(LanTransferCredentials.Value credentials)
             throws java.security.GeneralSecurityException {
         java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
-        digest.update(credentials.sharedSecret.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         java.util.ArrayList<String> peers = new java.util.ArrayList<>(credentials.trustedPeerIds);
         java.util.Collections.sort(peers);
         for (String peer : peers) {
             digest.update((byte) 0);
             digest.update(peer.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            String secret = credentials.secretFor(peer);
+            if (secret == null) throw new java.security.GeneralSecurityException(
+                    "Missing per-peer transfer credential");
+            digest.update((byte) 0);
+            digest.update(secret.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
         StringBuilder result = new StringBuilder();
         for (byte value : digest.digest())
