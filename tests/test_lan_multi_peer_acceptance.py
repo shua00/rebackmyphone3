@@ -83,7 +83,7 @@ class MultiPeerDeliveryAcceptanceTests(unittest.TestCase):
         state, targets = self._state_and_targets("idempotent-ack")
         self.assertEqual("partial", state)
         self.assertEqual(
-            [("android-a", 1), ("android-b", 0), ("android-c", 0)], targets)
+            [("android-a", "acked"), ("android-b", "pending"), ("android-c", "pending")], targets)
 
 
 if __name__ == "__main__":
