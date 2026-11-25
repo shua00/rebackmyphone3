@@ -31,6 +31,8 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
         self.assertIn("ACTION_CREATE_DOCUMENT", activity)
         self.assertIn("copyCompletedFileToUserLocation", activity)
         self.assertIn("publishedPath", activity)
+        self.assertIn("MessageDigest.getInstance(\"SHA-256\")", activity)
+        self.assertIn("transfer.offer.sha256.equals(actualHash.toString())", activity)
         transfer_store = (JAVA / "LanTransferStore.java").read_text(encoding="utf-8")
         self.assertIn("loadRecentTransfers", transfer_store)
         self.assertIn("loadIncomingOffers", transfer_store)
