@@ -90,7 +90,12 @@ public final class LanTransferStore extends SQLiteOpenHelper {
         SQLiteDatabase db=getWritableDatabase();db.beginTransaction();
         try {
             Cursor c=db.rawQuery("SELECT * FROM lan_transfer_tasks WHERE transfer_id=?",new String[]{o.transferId});
-            try { if(c.moveToFirst()) { if(!same(readOffer(c),o))throw new IllegalStateException("Conflicting Offer for transfer_id");db.setTransactionSuccessful();return false; } }
+            try { if(c.moveToFirst()) {
+                if(!same(readOffer(c),o)
+                        || c.getInt(c.getColumnIndexOrThrow("chunk_size_bytes"))!=chunk)
+                    throw new IllegalStateException("Conflicting Offer metadata or chunk size for transfer_id");
+                db.setTransactionSuccessful();return false;
+            } }
             finally { c.close(); }
             Cursor count=db.rawQuery("SELECT COUNT(*) FROM lan_transfer_tasks WHERE state NOT IN ('completed','rejected','cancelled','failed','expired')",null);
             int active=0;try{if(count.moveToFirst())active=count.getInt(0);}finally{count.close();}
