@@ -9,7 +9,7 @@ import java.net.Socket;
 import java.security.GeneralSecurityException;
 import java.util.Collections;
 import java.util.Set;
-import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -26,7 +26,6 @@ public final class LanTransferTcpListener implements AutoCloseable {
 
     public static final int DEFAULT_PORT = 38471;
     public static final int MAX_CONNECTIONS = 2;
-    public static final int QUEUE_CAPACITY = 4;
     private static final int ACCEPT_BACKLOG = 8;
 
     private final Context context;
@@ -41,7 +40,7 @@ public final class LanTransferTcpListener implements AutoCloseable {
             Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<Socket, Boolean>());
     private final ThreadPoolExecutor workers = new ThreadPoolExecutor(
             MAX_CONNECTIONS, MAX_CONNECTIONS, 30L, TimeUnit.SECONDS,
-            new ArrayBlockingQueue<Runnable>(QUEUE_CAPACITY),
+            new SynchronousQueue<Runnable>(),
             runnable -> {
                 Thread thread = new Thread(runnable, "LanTransfer-TCP-Worker");
                 thread.setDaemon(true);
@@ -112,6 +111,7 @@ public final class LanTransferTcpListener implements AutoCloseable {
                 socket = current.accept();
                 socket.setTcpNoDelay(true);
                 socket.setKeepAlive(true);
+                socket.setSoTimeout(15000);
                 // The listener is bound to the selected Wi-Fi address. Accepted sockets
                 // inherit that local interface; never call Network.bindSocket after accept,
                 // because the accepted socket is already connected.
