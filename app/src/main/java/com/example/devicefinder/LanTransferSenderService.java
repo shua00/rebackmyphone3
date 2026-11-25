@@ -63,6 +63,7 @@ public final class LanTransferSenderService extends Service {
             JSONObject j=new JSONObject(raw);
             executor.execute(()->runJob(j,startId));
         } catch(Exception failure) {
+            jobActive.set(false);
             FileLogger.log(this,"LAN_TRANSFER","Unable to restore outgoing task: "+failure.getClass().getSimpleName());
             stopSelf(startId);
         }
