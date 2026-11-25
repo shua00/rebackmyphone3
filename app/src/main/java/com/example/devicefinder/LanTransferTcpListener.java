@@ -50,7 +50,11 @@ public final class LanTransferTcpListener implements AutoCloseable {
     private volatile ServerSocket serverSocket;
     private volatile Thread acceptThread;
 
-    public LanTransferTcpListener(Context c,LanTransferStore s,LanTransferFilesystem f,String id,String secret,LanTransferAuthenticator.TrustedPeerAuthorizer auth,FailureListener failures){this(c,s,f,id,ignored->secret,auth,failures);}
+    public LanTransferTcpListener(Context c,LanTransferStore s,LanTransferFilesystem f,String id,String secret,LanTransferAuthenticator.TrustedPeerAuthorizer auth,FailureListener failures){this(c,s,f,id,legacySecretProvider(secret),auth,failures);}
+    private static LanTransferAuthenticator.PeerSecretProvider legacySecretProvider(String secret){
+        if(secret==null||secret.length()<16)throw new IllegalArgumentException("Listener requires a provisioned secret of at least 16 characters");
+        return ignored->secret;
+    }
     public LanTransferTcpListener(Context context,LanTransferStore store,LanTransferFilesystem filesystem,String localPeerId,LanTransferAuthenticator.PeerSecretProvider peerSecrets,LanTransferAuthenticator.TrustedPeerAuthorizer authorizer,FailureListener failures){
         if(context==null||store==null||filesystem==null||localPeerId==null||localPeerId.isEmpty()||peerSecrets==null||authorizer==null)throw new IllegalArgumentException("Listener requires identity, per-peer credentials and trust policy");
         this.context=context.getApplicationContext();this.store=store;this.filesystem=filesystem;this.localPeerId=localPeerId;this.peerSecrets=peerSecrets;this.authorizer=authorizer;this.failures=failures;
