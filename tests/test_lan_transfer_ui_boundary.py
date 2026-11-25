@@ -79,6 +79,7 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
         self.assertIn("markSenderCompleted", worker)
         self.assertIn("failIfTransferring", worker)
         self.assertIn("failed", worker)
+        self.assertIn('"expired".equals(remoteState) || "failed".equals(remoteState)', worker)
         self.assertIn("Only the sender may finalize its outgoing task", store)
         self.assertIn('new LanTransferFrameCodec.Frame("missing"', client)
 
