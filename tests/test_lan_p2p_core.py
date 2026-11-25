@@ -2720,17 +2720,20 @@ class LanP2PCoreTests(unittest.TestCase):
             repo_root / "app/src/main/java/com/example/devicefinder/ChatActivity.java"
         ).read_text(encoding="utf-8")
         start = source.index("private void sendMessage()")
-        end = source.index("\n    private void refreshHistory(", start)
+        end = source.index("\n    private void refreshDeliveryStatusAsync(", start)
         send = source[start:end]
         self.assertIn('inputMsg.setText("");', send)
-        self.assertIn("restoreChatInputFocus();", send)
-        self.assertLess(send.index('inputMsg.setText("");'), send.index("restoreChatInputFocus();"))
-        self.assertIn("private void restoreChatInputFocus()", source)
-        focus = source[source.index("private void restoreChatInputFocus()"):
-                       source.index("private void refreshHistory(")]
+        self.assertIn("restoreChatInputFocus(true);", send)
+        self.assertLess(send.index('inputMsg.setText("");'), send.index("restoreChatInputFocus(true);"))
+        focus = extract_java_method(
+            source, "private void restoreChatInputFocus(boolean keepKeyboardVisible)"
+        )
         self.assertIn("inputMsg.post(", focus)
         self.assertIn("inputMsg.requestFocus();", focus)
         self.assertIn("inputMsg.setSelection(inputMsg.length());", focus)
+        self.assertIn("inputMsg.postDelayed(", focus)
+        self.assertIn("if (!keepKeyboardVisible) return;", focus)
+        self.assertIn("imm.showSoftInput(inputMsg, InputMethodManager.SHOW_IMPLICIT);", focus)
         layout = (repo_root / "app/src/main/res/layout/activity_chat.xml").read_text(encoding="utf-8")
         send_button = layout[layout.index('@+id/btnSend'):]
         self.assertIn('android:focusable="false"', send_button)
@@ -4675,12 +4678,16 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/ChatActivity.java").read_text(encoding="utf-8")
         resume = extract_java_method(source, "protected void onResume()")
-        focus = extract_java_method(source, "private void restoreChatInputFocus()")
+        focus = extract_java_method(
+            source, "private void restoreChatInputFocus(boolean keepKeyboardVisible)"
+        )
         self.assertIn("refreshHistory(false);", resume)
-        self.assertIn("restoreChatInputFocus();", resume)
+        self.assertIn("restoreChatInputFocus(false);", resume)
         self.assertIn("inputMsg.requestFocus();", focus)
         self.assertIn("inputMsg.setSelection(inputMsg.length());", focus)
-        self.assertNotIn("showSoftInput", focus)
+        self.assertIn("if (!keepKeyboardVisible) return;", focus)
+        self.assertLess(focus.index("if (!keepKeyboardVisible) return;"),
+                        focus.index("showSoftInput"))
 
     def test_android_authenticated_packets_are_prebuilt_before_transmit_lock(self):
         repo_root = Path(__file__).resolve().parents[1]
