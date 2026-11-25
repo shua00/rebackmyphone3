@@ -102,6 +102,18 @@ public final class LanTransferTcpListener implements AutoCloseable {
         return !closed.get() && current != null && current.isBound() && !current.isClosed();
     }
 
+    public boolean isTerminated() { return workers.isTerminated(); }
+
+    /** Wait until every accepted session has stopped using the shared transfer store. */
+    public void awaitTermination() {
+        boolean interrupted = false;
+        while (!workers.isTerminated()) {
+            try { workers.awaitTermination(5L, TimeUnit.SECONDS); }
+            catch (InterruptedException stop) { interrupted = true; }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
+    }
+
     private void acceptLoop() {
         while (!closed.get()) {
             final Socket socket;
