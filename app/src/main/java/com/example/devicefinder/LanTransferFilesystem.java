@@ -148,7 +148,13 @@ public final class LanTransferFilesystem {
                 ||"failed".equals(t.state)||"expired".equals(t.state))
             return new LanTransferStore.MissingPage(new ArrayList<>(),false);
         File dir=taskDirectory(id),data=new File(dir,"payload.part");
-        boolean exists=existsNoFollow(data);
+        boolean exists;
+        try { exists=existsNoFollow(data); }
+        catch(IOException unsafePath) {
+            // Unlink an unexpected symlink itself; never follow its target.
+            deleteEntryNoFollow(data);
+            exists=false;
+        }
         if(exists)requireRegularFile(data);
         int start=0;
         while(true) {

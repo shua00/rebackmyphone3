@@ -746,3 +746,9 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 - 完成恢复先核验已发布目标，再检查 staging receipts；避免 rename 后进程崩溃导致已发布文件被误删回执。
 - completed 重复恢复核验目标并清理 staging 残留。
 - 新 SHA CI 验证中。
+
+
+## 48. 单文件 staging symlink 恢复修正（2026-11-25）
+
+- reconcilePage 发现 payload.part 为 symlink 时，安全 unlink 链接本身、撤销旧 receipts，并返回 missing page；不会跟随链接目标。
+- 继续由 Actions 验证 symlink 故障注入用例。
