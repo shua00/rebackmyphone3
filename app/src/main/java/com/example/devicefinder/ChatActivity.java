@@ -193,7 +193,7 @@ public class ChatActivity extends Activity {
         content.setOrientation(android.widget.LinearLayout.VERTICAL);
         content.addView(fileTransfer);
         content.addView(explanation);
-        new AlertDialog.Builder(this).setTitle("聊天与文件传输设置").setView(content)
+        AlertDialog.Builder builder = new AlertDialog.Builder(this).setTitle("聊天与文件传输设置").setView(content)
                 .setNegativeButton("取消", null)
                 .setPositiveButton("保存", (dialog, which) -> {
                     boolean enabled = fileTransfer.isChecked();
@@ -201,10 +201,20 @@ public class ChatActivity extends Activity {
                         updateTransferControls();
                         Toast.makeText(this, enabled ? "文件传输已开启" : "文件传输已关闭", Toast.LENGTH_SHORT).show();
                     } else Toast.makeText(this, "设置保存失败，请重试", Toast.LENGTH_LONG).show();
-                })
-                .setNeutralButton("诊断报告与测试", (dialog, which) ->
-                        startActivity(new Intent(this, com.example.devicefinder.diagnostics.DiagnosticHistoryActivity.class)))
-                .show();
+                });
+        // Keep the core chat screen independent from the optional diagnostics source set.
+        if (BuildConfig.DIAGNOSTICS_ENABLED) {
+            builder.setNeutralButton("诊断报告与测试", (dialog, which) -> {
+                try {
+                    Class<?> diagnosticsActivity = Class.forName(
+                            "com.example.devicefinder.diagnostics.DiagnosticHistoryActivity");
+                    startActivity(new Intent(this, diagnosticsActivity));
+                } catch (ClassNotFoundException e) {
+                    Toast.makeText(this, "当前构建未包含诊断功能", Toast.LENGTH_SHORT).show();
+                }
+            });
+        }
+        builder.show();
     }
 
     private void sendMessage() {
