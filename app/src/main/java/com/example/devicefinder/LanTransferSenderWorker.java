@@ -212,7 +212,7 @@ public final class LanTransferSenderWorker implements Runnable {
     private void pauseIfTransferring() {
         try {
             String state = requireLocalTask().state;
-            if ("transferring".equals(state))
+            if ("accepted".equals(state) || "transferring".equals(state))
                 store.transition(offer.transferId, "paused", System.currentTimeMillis());
         } catch (Exception ignored) {}
     }

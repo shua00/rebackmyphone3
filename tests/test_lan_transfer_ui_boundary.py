@@ -103,6 +103,7 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
         self.assertIn("worker.pause()", service)
         self.assertIn("pauseRequested", worker)
         self.assertIn("notifyPausedAtBoundary()", worker)
+        self.assertIn('"paused".equals(b)', store)
         self.assertIn('notifyState("paused")', worker)
         self.assertIn("resumeIfPending", service)
         self.assertIn("cancelLocal", activity)
