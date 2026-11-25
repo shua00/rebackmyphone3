@@ -639,3 +639,17 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 安全约束 | canonical JSON、HMAC、payload hash、身份与长度限制未发现问题 | 全部保留，不接受字符串数字或放宽校验 |
 | 自动化验收 | round-trip、Python golden frame、错误身份/密钥、trailing bytes 均经过修正调用点 | 等待本提交对应 Android + Python Actions；尚未标通过 |
 | TransferStore | Android 独立 SQLite task/chunk ledger 已新增 | 等待可运行的 Android CI；文件系统与网络集成仍待后续批次 |
+
+
+## 37. 第 2/3/4 阶段交叉批次 1 CI 结果（2026-11-25）
+
+| 验收项 | Actions #800 / commit f78be11 | 结论 |
+|---|---|---|
+| Python validate | success | 通过 |
+| Android `testDebugUnitTest` | success | 通过，包含 LNP2 与 LanTransferStore 基础测试 |
+| Android `assembleDebug` | success | 通过，APK artifact 上传成功 |
+| LNP2 关键修复 | `payload_size` 正确经 `number(header, key)` 取字段，原安全校验保持 | 第一轮跨端编解码自动化通过 |
+| Android TransferStore | 独立 DB、Offer/receipt/state/missing/hash 门禁 | 基础账本测试通过；不等于文件系统和 TCP 端到端完成 |
+| 第 2 阶段 retry policy | 新增固定 backoff / wake / route probe 测试 | 随下一 SHA CI 验证 |
+
+**批次 1 判定：** LNP2 阻塞已解除，Android 独立传输账本基础实现与测试已落地；文件 staging、重启实际 hash reconcile、Android TCP worker/UI、网络切换真机验收仍未完成。
