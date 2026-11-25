@@ -29,6 +29,56 @@ def _hash_file(path: Path) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
+
+def send_offer_over_session(
+    sock: socket.socket,
+    source_path: str,
+    offer: TransferOffer,
+    *,
+    local_peer_id: str,
+    remote_peer_id: str,
+    session_secret: bytes,
+    chunk_size_bytes: int,
+    max_payload_bytes: int = 1024 * 1024,
+) -> dict:
+    """Send an authenticated Offer; receiver persists it as OFFERED but never auto-accepts."""
+    validate_offer(offer)
+    if offer.sender_peer_id != local_peer_id or offer.target_peer_id != remote_peer_id:
+        raise TransferValidationError("offer participants do not match authenticated session")
+    if (isinstance(chunk_size_bytes, bool) or not isinstance(chunk_size_bytes, int)
+            or not 4096 <= chunk_size_bytes <= 1024 * 1024):
+        raise TransferValidationError("invalid negotiated chunk size")
+    path = Path(source_path)
+    if not path.is_file() or path.is_symlink():
+        raise TransferValidationError("source must be a regular non-symlink file")
+    size, digest = _hash_file(path)
+    if size != offer.size_bytes or digest != offer.sha256:
+        raise TransferValidationError("source file does not match immutable offer")
+    metadata = {
+        "filename": offer.filename,
+        "size_bytes": offer.size_bytes,
+        "sha256": offer.sha256,
+        "created_at_ms": offer.created_at_ms,
+        "mime_type": offer.mime_type,
+        "chunk_size_bytes": chunk_size_bytes,
+    }
+    send_frame(sock, TransferFrame("offer", offer.transfer_id, local_peer_id,
+                                   remote_peer_id, metadata=metadata),
+               session_secret, max_payload_bytes)
+    reply = recv_frame(sock, session_secret, max_payload_bytes,
+                       expected_sender_peer_id=remote_peer_id,
+                       expected_target_peer_id=local_peer_id)
+    if (reply.kind != "offer_ack" or reply.transfer_id != offer.transfer_id
+            or not isinstance(reply.metadata, dict)
+            or reply.metadata.get("chunk_size_bytes") != chunk_size_bytes
+            or reply.metadata.get("state") not in {
+                "offered", "accepted", "transferring", "rejected",
+                "cancelled", "completed", "failed", "expired",
+            }):
+        raise TransferValidationError("receiver did not durably acknowledge immutable Offer")
+    return reply.metadata
+
+
 def send_file_over_session(
     sock: socket.socket,
     source_path: str,
