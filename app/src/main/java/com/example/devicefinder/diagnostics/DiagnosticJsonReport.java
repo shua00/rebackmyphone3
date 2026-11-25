@@ -47,6 +47,49 @@ public final class DiagnosticJsonReport {
         return out.append("]}").toString();
     }
 
+    /** Reconstructs a validated report from the stable exported JSON schema. */
+    public static DiagnosticRun fromJson(String encoded) throws org.json.JSONException {
+        if (encoded == null || encoded.length() > 128 * 1024)
+            throw new IllegalArgumentException("Diagnostic report exceeds size limit");
+        org.json.JSONObject root = new org.json.JSONObject(encoded);
+        if (root.getInt("schemaVersion") != DiagnosticRun.SCHEMA_VERSION)
+            throw new IllegalArgumentException("Unsupported diagnostic report schema");
+        DiagnosticRun.Metadata metadata = new DiagnosticRun.Metadata(
+                root.getString("featureId"), root.getString("runId"),
+                root.getLong("startedAtEpochMs"), root.getString("appVersion"),
+                root.getString("commit"), root.getString("deviceModel"),
+                root.getInt("androidApi"), root.getString("networkType"),
+                root.getString("profile"), root.getString("side"));
+        int expected = root.getInt("expectedCaseCount");
+        org.json.JSONArray encodedCases = root.getJSONArray("cases");
+        if (encodedCases.length() > 128)
+            throw new IllegalArgumentException("Too many diagnostic cases");
+        java.util.ArrayList<DiagnosticRun.CaseResult> cases = new java.util.ArrayList<>();
+        for (int i = 0; i < encodedCases.length(); i++) {
+            org.json.JSONObject item = encodedCases.getJSONObject(i);
+            DiagnosticRun.Status status = DiagnosticRun.Status.valueOf(item.getString("status"));
+            org.json.JSONObject encodedMetrics = item.getJSONObject("metrics");
+            if (encodedMetrics.length() > 32)
+                throw new IllegalArgumentException("Too many diagnostic metrics");
+            java.util.LinkedHashMap<String, Long> metrics = new java.util.LinkedHashMap<>();
+            java.util.Iterator<String> keys = encodedMetrics.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                Object value = encodedMetrics.get(key);
+                if (!(value instanceof Number))
+                    throw new IllegalArgumentException("Diagnostic metric must be numeric");
+                double numeric = ((Number) value).doubleValue();
+                long integer = ((Number) value).longValue();
+                if (!Double.isFinite(numeric) || numeric != integer || integer < 0)
+                    throw new IllegalArgumentException("Diagnostic metric must be a non-negative integer");
+                metrics.put(key, integer);
+            }
+            cases.add(new DiagnosticRun.CaseResult(item.getString("caseId"), status,
+                    item.getLong("durationMs"), item.optString("failureCode", ""), metrics));
+        }
+        return new DiagnosticRun(metadata, cases, expected);
+    }
+
     private static StringBuilder field(StringBuilder out, String key, String value) {
         quote(out, key).append(':');
         return quote(out, value);
