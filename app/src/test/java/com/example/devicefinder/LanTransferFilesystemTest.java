@@ -19,6 +19,13 @@ public class LanTransferFilesystemTest {
   store.createOffer(new LanTransferStore.Offer(id,"sender","receiver","payload.bin",content.length,hash(content),1,"application/octet-stream"),2,chunk);
   store.transition(id,"accepted",3);store.transition(id,"transferring",4);
  }
+ private boolean writeChunk(String id,int index,byte[] bytes,long now)throws java.io.IOException {
+  try{return fs.writeChunk(id,index,bytes,now);}catch(java.io.IOException e){
+   System.err.println("TransferFS diagnostic: "+e.getClass().getName()+": "+e.getMessage());
+   if(e.getCause()!=null)System.err.println("TransferFS cause: "+e.getCause().getClass().getName()+": "+e.getCause().getMessage());
+   throw e;
+  }
+ }
  @Test public void chunkIsFsyncedBeforeReceiptAndSurvivesReopen()throws Exception{
   byte[] data=new byte[4096];Arrays.fill(data,(byte)7);start("fs-1",data,4096);
   assertTrue(fs.writeChunk("fs-1",0,data,5));assertEquals(1,store.loadChunkReceipts("fs-1").size());
