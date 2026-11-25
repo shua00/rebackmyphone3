@@ -48,6 +48,7 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
         self.assertIn("MAX_FILE_BYTES", snapshot)
         self.assertIn("LanTransferSenderService.enqueue", activity)
         self.assertIn("startForeground", service)
+        self.assertNotIn("isDestroyed()", service)
         self.assertIn("START_STICKY", service)
         self.assertIn("lan_transfer_sender_jobs", service)
         self.assertIn("postDelayed", service)
