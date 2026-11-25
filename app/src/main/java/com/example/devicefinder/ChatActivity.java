@@ -28,6 +28,7 @@ import android.os.Looper;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ScrollView;
@@ -149,7 +150,7 @@ public class ChatActivity extends Activity {
             inputMsg.setText("");
             // Restore focus after the Button click has fully completed. An immediate
             // requestFocus() can be overwritten by the Button's own focus dispatch.
-            restoreChatInputFocus();
+            restoreChatInputFocus(true);
 
             // 【新增】拦截暗号清空指令
             if ("/clear".equalsIgnoreCase(msg)) {
@@ -211,16 +212,29 @@ public class ChatActivity extends Activity {
     }
 
     /**
-     * Keep continuous typing usable after sending from either the button or IME action.
-     * Post the focus request so it runs after the current click/focus dispatch; do not
-     * force-show the keyboard when the user had intentionally dismissed it.
+     * Keep the composer ready for consecutive messages.
+     *
+     * Sending is an explicit continuation of text entry, so restore both editor focus
+     * and the IME after the send button/IME action has completed its own focus dispatch.
+     * The delayed IME request avoids OEM keyboards losing the race to the button click.
+     * Lifecycle-only focus restoration does not open a keyboard the user dismissed.
      */
-    private void restoreChatInputFocus() {
+    private void restoreChatInputFocus(boolean keepKeyboardVisible) {
         if (inputMsg == null) return;
         inputMsg.post(() -> {
             if (isFinishing()) return;
             inputMsg.requestFocus();
             inputMsg.setSelection(inputMsg.length());
+            if (!keepKeyboardVisible) return;
+
+            inputMsg.postDelayed(() -> {
+                if (isFinishing() || !hasWindowFocus() || inputMsg == null) return;
+                InputMethodManager imm =
+                        (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                if (imm != null) {
+                    imm.showSoftInput(inputMsg, InputMethodManager.SHOW_IMPLICIT);
+                }
+            }, 80L);
         });
     }
 
@@ -350,7 +364,7 @@ public class ChatActivity extends Activity {
         refreshHistory(false);
         // Reclaim the editor after Activity/IME focus transitions so an already-visible
         // keyboard is immediately ready for typing without an extra tap on the field.
-        restoreChatInputFocus();
+        restoreChatInputFocus(false);
     }
 
     // 删掉 onPause 里的 finishAndRemoveTask，保留正常的生命周期
