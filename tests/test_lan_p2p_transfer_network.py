@@ -10,6 +10,8 @@ from lan_p2p_transfer_network import TransferTcpServer, connect_transfer_peer
 from lan_p2p_transfer_auth import authenticate_tcp_client, authenticate_tcp_server
 from lan_p2p_transfer_sender import send_file_over_session
 from lan_p2p_transfer_store import TransferStore
+from lan_p2p_transfer_session import serve_transfer_session
+from lan_p2p_transfer_tcp import TransferFrame, recv_frame, send_frame
 
 class TransferTcpNetworkTests(unittest.TestCase):
     SECRET = b"network-integration-secret-32-bytes"
@@ -24,6 +26,54 @@ class TransferTcpNetworkTests(unittest.TestCase):
         store.transition(offer.transfer_id, TransferState.ACCEPTED, 2)
         store.transition(offer.transfer_id, TransferState.TRANSFERRING, 3)
         return source, offer, store, files
+
+
+    def test_authenticated_offer_is_durable_idempotent_and_not_auto_accepted(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            store = TransferStore(str(root / "ledger.db"), TransferLimits(chunk_size_bytes=4096))
+            files = TransferFilesystem(store, str(root / "stage"), str(root / "received"))
+            payload = b"offer-only"
+            offer = TransferOffer("offer-control", "sender", "receiver", "offer.txt",
+                len(payload), hashlib.sha256(payload).hexdigest(), 1000, "text/plain")
+            metadata = {
+                "filename": offer.filename, "size_bytes": offer.size_bytes,
+                "sha256": offer.sha256, "created_at_ms": offer.created_at_ms,
+                "mime_type": offer.mime_type, "chunk_size_bytes": 4096,
+            }
+            server_sock, client_sock = socket.socketpair()
+            errors = []
+            def serve():
+                try:
+                    serve_transfer_session(server_sock, store, files,
+                        local_peer_id="receiver", authenticated_peer_id="sender",
+                        session_secret=self.SECRET, now_ms=lambda: 1000, max_frames=2)
+                except Exception as exc:
+                    errors.append(exc)
+                finally:
+                    server_sock.close()
+            worker = threading.Thread(target=serve)
+            worker.start()
+            try:
+                request = TransferFrame("offer", offer.transfer_id, "sender", "receiver",
+                    metadata=metadata)
+                send_frame(client_sock, request, self.SECRET)
+                ack = recv_frame(client_sock, self.SECRET, expected_sender_peer_id="receiver",
+                    expected_target_peer_id="sender")
+                self.assertEqual("offer_ack", ack.kind)
+                self.assertEqual("offered", ack.metadata["state"])
+                self.assertTrue(ack.metadata["new_offer"])
+                send_frame(client_sock, request, self.SECRET)
+                replay = recv_frame(client_sock, self.SECRET, expected_sender_peer_id="receiver",
+                    expected_target_peer_id="sender")
+                self.assertEqual("offer_ack", replay.kind)
+                self.assertFalse(replay.metadata["new_offer"])
+                self.assertEqual(TransferState.OFFERED, store.get_transfer(offer.transfer_id).state)
+            finally:
+                client_sock.close()
+                worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual([], errors)
 
     def test_real_loopback_listener_client_and_verified_publish(self):
         with tempfile.TemporaryDirectory() as d:
