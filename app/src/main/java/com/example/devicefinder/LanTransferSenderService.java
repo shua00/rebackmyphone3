@@ -62,13 +62,30 @@ public final class LanTransferSenderService extends Service {
         catch(Exception failure) { FileLogger.log(context,"LAN_TRANSFER","Unable to request local cancel: "+failure.getClass().getSimpleName()); }
     }
 
+    /** Legacy fixed-endpoint overload retained for controlled diagnostics. */
     public static void enqueue(Context context, LanTransferStore.Offer offer, String host, int port, String path) throws Exception {
+        enqueueInternal(context, offer, host, port, path);
+    }
+
+    /** Production queue stores peer identity, not a stale IP/port. */
+    public static void enqueue(Context context, LanTransferStore.Offer offer, String path) throws Exception {
+        enqueueInternal(context, offer, null, 0, path);
+    }
+
+    private static void enqueueInternal(Context context, LanTransferStore.Offer offer,
+            String host, int port, String path) throws Exception {
         if (!LanTransferFeature.isEnabled(context))
             throw new SecurityException("LAN file transfer feature is disabled");
+        if (offer == null || path == null || path.trim().isEmpty())
+            throw new IllegalArgumentException("Offer and private snapshot path are required");
         JSONObject j=new JSONObject();
         j.put("id",offer.transferId);j.put("sender",offer.senderPeerId);j.put("target",offer.targetPeerId);
         j.put("filename",offer.filename);j.put("size",offer.sizeBytes);j.put("sha",offer.sha256);
-        j.put("created",offer.createdAtMs);j.put("mime",offer.mimeType);j.put("host",host);j.put("port",port);j.put("path",path);
+        j.put("created",offer.createdAtMs);j.put("mime",offer.mimeType);
+        if (host != null && !host.trim().isEmpty() && port >= 1 && port <= 65535) {
+            j.put("host",host); j.put("port",port);
+        }
+        j.put("path",path);
         android.content.SharedPreferences prefs=context.getApplicationContext().getSharedPreferences(PREFS,Context.MODE_PRIVATE);
         synchronized(LanTransferSenderService.class) {
             if(prefs.getString(JOB,null)!=null)
@@ -156,7 +173,13 @@ public final class LanTransferSenderService extends Service {
                 throw new SecurityException("Snapshot path is outside private outbox");
             store=new LanTransferStore(this);
             LanTransferSenderWorker worker=new LanTransferSenderWorker(store,credentials,()->selectWifiNetwork(),
-                source,offer,local,j.getString("host"),j.getInt("port"),LanTransferStore.DEFAULT_CHUNK_SIZE,
+                source,offer,local,()->{
+                    LanTransferPeerDirectory.Candidate candidate = LanTransferPeerDirectory.findCurrent(
+                            getApplicationContext(), offer.targetPeerId, System.currentTimeMillis());
+                    if (candidate == null || !candidate.isConnectable())
+                        throw new java.io.IOException("Trusted peer has no fresh endpoint on current Wi-Fi");
+                    return new LanTransferSenderWorker.Endpoint(candidate.host, candidate.port);
+                },LanTransferStore.DEFAULT_CHUNK_SIZE,
                 LanTransferSenderWorker.DEFAULT_MAX_TRANSFER_SESSIONS,LanTransferSenderWorker.DEFAULT_OFFER_WAIT_MS,
                 new LanTransferSenderWorker.Listener() {
                     @Override public void onState(String state) {

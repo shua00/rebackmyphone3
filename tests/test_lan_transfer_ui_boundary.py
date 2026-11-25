@@ -91,7 +91,7 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
         layout = (RES / "layout/activity_lan_transfer.xml").read_text(encoding="utf-8")
         self.assertIn("ACTION_OPEN_DOCUMENT", activity)
         self.assertIn("LanTransferSnapshot.create", activity)
-        self.assertIn("trustedPeerIds.contains(peerId)", activity)
+        self.assertIn("credentials.trustedPeerIds.contains(fresh.peerId)", activity)
         self.assertIn("getFilesDir(),\"lan-transfer-outbox\"", snapshot)
         self.assertIn("SHA-256", snapshot)
         self.assertIn("MAX_FILE_BYTES", snapshot)
@@ -139,6 +139,29 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
         self.assertIn('"expired".equals(remoteState) || "failed".equals(remoteState)', worker)
         self.assertIn("Only the sender may finalize its outgoing task", store)
         self.assertIn('new LanTransferFrameCodec.Frame("missing"', client)
+
+    def test_file_send_uses_discovered_peer_selection_and_live_endpoint_resolution(self):
+        activity = (JAVA / "LanTransferActivity.java").read_text(encoding="utf-8")
+        layout = (RES / "layout/activity_lan_transfer.xml").read_text(encoding="utf-8")
+        worker = (JAVA / "LanTransferSenderWorker.java").read_text(encoding="utf-8")
+        sender = (JAVA / "LanTransferSenderService.java").read_text(encoding="utf-8")
+        self.assertIn('android:id="@+id/lanTransferPeerList"', layout)
+        self.assertIn("showDestinationPicker()", activity)
+        self.assertIn("LanTransferPeerDirectory.loadCurrent", activity)
+        self.assertIn("LanTransferPeerDirectory.findCurrent", activity)
+        self.assertNotIn("showOutgoingDestinationDialog", activity)
+        self.assertNotIn('对端当前 LAN IP', activity)
+        self.assertIn("EndpointProvider", worker)
+        self.assertIn("currentEndpoint()", worker)
+        self.assertIn("LanTransferPeerDirectory.findCurrent", sender)
+        self.assertIn("Production queue stores peer identity, not a stale IP/port", sender)
+
+    def test_chat_composer_ime_restore_is_bounded_and_state_aware(self):
+        chat = (JAVA / "ChatActivity.java").read_text(encoding="utf-8")
+        self.assertIn("COMPOSER_IME_RESTORE_MAX_ATTEMPTS = 3", chat)
+        self.assertIn("if (isComposerImeVisible())", chat)
+        self.assertIn("composerImeRestoreAttempts++", chat)
+        self.assertIn("composerImeRestoreAttempts = 0", chat)
 
 
 if __name__ == "__main__":

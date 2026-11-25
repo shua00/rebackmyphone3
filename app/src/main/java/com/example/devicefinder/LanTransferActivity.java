@@ -45,6 +45,7 @@ public final class LanTransferActivity extends Activity {
     private static final int REQUEST_PICK_TRANSFER_FILE = 7401;
     private static final int REQUEST_SAVE_RECEIVED_FILE = 7402;
     private LanTransferStore.Transfer pendingSaveTransfer;
+    private LanTransferPeerDirectory.Candidate selectedDestination;
 
     private final BroadcastReceiver updates = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) { refreshOffers(); }
@@ -64,9 +65,9 @@ public final class LanTransferActivity extends Activity {
         Button pairing = findViewById(R.id.lanTransferPairing);
         refreshButton = findViewById(R.id.lanTransferRefresh);
         localId.setText("本机 Peer ID：" + TrackingService.getUniqueDeviceId(this));
-        pairing.setOnClickListener(v -> showPairingDialog());
+        pairing.setOnClickListener(v -> showPairingDialog(null));
         Button send = findViewById(R.id.lanTransferSendFile);
-        send.setOnClickListener(v -> pickFileForSending());
+        send.setOnClickListener(v -> showDestinationPicker());
         Button cancelSend = findViewById(R.id.lanTransferCancelSend);
         cancelSend.setOnClickListener(v -> {
             new AlertDialog.Builder(this)
@@ -79,6 +80,7 @@ public final class LanTransferActivity extends Activity {
         });
         refreshButton.setOnClickListener(v -> refreshOffers());
         IntentFilter filter = new IntentFilter("ACTION_LAN_TRANSFER_UPDATED");
+        filter.addAction("ACTION_LAN_TRANSFER_PEERS_UPDATED");
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
                 registerReceiver(updates, filter, Context.RECEIVER_NOT_EXPORTED);
@@ -91,7 +93,7 @@ public final class LanTransferActivity extends Activity {
         refreshOffers();
     }
 
-    private void showPairingDialog() {
+    private void showPairingDialog(String suggestedPeerId) {
         LinearLayout form = new LinearLayout(this);
         form.setOrientation(LinearLayout.VERTICAL);
         int pad = (int) (16 * getResources().getDisplayMetrics().density);
@@ -107,6 +109,7 @@ public final class LanTransferActivity extends Activity {
         EditText peer = new EditText(this);
         peer.setSingleLine(true);
         peer.setHint("对端设备 ID（精确匹配）");
+        if (!TextUtils.isEmpty(suggestedPeerId)) peer.setText(suggestedPeerId);
         form.addView(peer);
         new AlertDialog.Builder(this)
             .setTitle("LAN 文件传输安全配对")
@@ -172,6 +175,10 @@ public final class LanTransferActivity extends Activity {
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_PICK_TRANSFER_FILE && resultCode != RESULT_OK) {
+            selectedDestination = null;
+            return;
+        }
         if (requestCode == REQUEST_SAVE_RECEIVED_FILE) {
             LanTransferStore.Transfer transfer = pendingSaveTransfer;
             pendingSaveTransfer = null;
@@ -188,7 +195,20 @@ public final class LanTransferActivity extends Activity {
         } catch (Exception ignored) {
             // The private snapshot below is independent of the provider after it completes.
         }
-        showOutgoingDestinationDialog(uri);
+        LanTransferPeerDirectory.Candidate destination = selectedDestination;
+        selectedDestination = null;
+        if (destination == null) {
+            Toast.makeText(this, "请先从在线设备列表选择接收设备", Toast.LENGTH_LONG).show();
+            return;
+        }
+        LanTransferPeerDirectory.Candidate fresh = LanTransferPeerDirectory.findCurrent(
+                getApplicationContext(), destination.peerId, System.currentTimeMillis());
+        if (fresh == null || !fresh.isConnectable()) {
+            status.setText("目标设备端点已过期或暂不可连接，请刷新设备列表后重试");
+            refreshPeerList();
+            return;
+        }
+        createOutgoingTask(uri, fresh);
     }
 
     private void requestSaveCompletedFile(LanTransferStore.Transfer transfer) {
@@ -254,54 +274,113 @@ public final class LanTransferActivity extends Activity {
         }
     }
 
-    private void showOutgoingDestinationDialog(Uri uri) {
-        LinearLayout form = new LinearLayout(this);
-        form.setOrientation(LinearLayout.VERTICAL);
-        int pad = (int) (16 * getResources().getDisplayMetrics().density);
-        form.setPadding(pad, pad, pad, 0);
-        EditText peer = new EditText(this); peer.setSingleLine(true); peer.setHint("已配对的对端 Peer ID"); form.addView(peer);
-        EditText host = new EditText(this); host.setSingleLine(true); host.setHint("对端当前 LAN IP / 主机名"); form.addView(host);
-        EditText port = new EditText(this); port.setSingleLine(true); port.setInputType(InputType.TYPE_CLASS_NUMBER); port.setHint("对端 TCP 端口"); form.addView(port);
-        new AlertDialog.Builder(this).setTitle("发送到可信设备")
-            .setMessage("必须填写已配对设备的精确 Peer ID，以及对端当前可达的 LAN 地址和监听端口。不会自动猜测或广播文件内容。")
-            .setView(form).setNegativeButton("取消", null)
-            .setPositiveButton("创建发送任务", (d, w) -> {
-                String peerId = peer.getText().toString().trim();
-                String remoteHost = host.getText().toString().trim();
-                int remotePort;
-                try { remotePort = Integer.parseInt(port.getText().toString().trim()); }
-                catch (Exception invalid) { Toast.makeText(this, "端口无效", Toast.LENGTH_LONG).show(); return; }
-                if (peerId.isEmpty() || remoteHost.isEmpty() || remotePort < 1 || remotePort > 65535
-                        || remoteHost.contains("/") || remoteHost.contains(" ")) {
-                    Toast.makeText(this, "请填写有效 Peer ID、主机地址和 1–65535 端口", Toast.LENGTH_LONG).show(); return;
-                }
-                status.setText("正在生成应用私有文件快照…");
+    private void showDestinationPicker() {
+        try {
+            LanTransferCredentials.Value credentials = LanTransferCredentials.load(this);
+            if (credentials == null || credentials.trustedPeerIds.isEmpty()) {
+                new AlertDialog.Builder(this).setTitle("尚无可信设备")
+                    .setMessage("请先在两台设备上完成配对。设备发现只用于显示候选设备，不会自动建立信任。")
+                    .setPositiveButton("去配对", (d, w) -> showPairingDialog(null))
+                    .setNegativeButton("取消", null).show();
+                return;
+            }
+            List<LanTransferPeerDirectory.Candidate> candidates =
+                    LanTransferPeerDirectory.loadCurrent(this, System.currentTimeMillis());
+            java.util.ArrayList<LanTransferPeerDirectory.Candidate> trusted = new java.util.ArrayList<>();
+            for (LanTransferPeerDirectory.Candidate candidate : candidates)
+                if (candidate.isConnectable() && credentials.trustedPeerIds.contains(candidate.peerId))
+                    trusted.add(candidate);
+            if (trusted.isEmpty()) {
+                status.setText("当前局域网尚未发现可连接的可信设备；请确认对端已开启文件传输并刷新");
+                refreshPeerList();
+                return;
+            }
+            String[] labels = new String[trusted.size()];
+            for (int i = 0; i < trusted.size(); i++) {
+                LanTransferPeerDirectory.Candidate c = trusted.get(i);
+                labels[i] = c.peerId + " · " + c.host + " · 在线";
+            }
+            new AlertDialog.Builder(this).setTitle("选择接收设备")
+                .setItems(labels, (dialog, which) -> {
+                    selectedDestination = trusted.get(which);
+                    pickFileForSending();
+                }).setNegativeButton("取消", null).show();
+        } catch (Exception failure) {
+            status.setText("读取可信设备失败：" + failure.getClass().getSimpleName());
+        }
+    }
+
+    private void createOutgoingTask(Uri uri, LanTransferPeerDirectory.Candidate destination) {
+        status.setText("正在生成应用私有文件快照…");
+        try {
+            io.execute(() -> {
                 try {
-                    io.execute(() -> {
-                        try {
-                            LanTransferCredentials.Value credentials = LanTransferCredentials.load(getApplicationContext());
-                            if (credentials == null || !credentials.trustedPeerIds.contains(peerId))
-                                throw new SecurityException("目标设备尚未配对或不在可信列表中");
-                            LanTransferSnapshot.Result snapshot = LanTransferSnapshot.create(getApplicationContext(), uri);
-                            String local = TrackingService.getUniqueDeviceId(getApplicationContext());
-                            LanTransferStore.Offer offer = new LanTransferStore.Offer(snapshot.transferId, local,
-                                peerId, snapshot.filename, snapshot.sizeBytes, snapshot.sha256,
-                                System.currentTimeMillis(), snapshot.mimeType);
-                            LanTransferSenderService.enqueue(getApplicationContext(), offer, remoteHost, remotePort,
-                                snapshot.file.getCanonicalPath());
-                            runOnUiThread(() -> status.setText("发送任务已持久化并交由后台服务执行：" + snapshot.filename));
-                        } catch (Exception failure) {
-                            runOnUiThread(() -> status.setText("创建发送任务失败：" + failure.getClass().getSimpleName()));
-                        }
-                    });
-                } catch (RejectedExecutionException stopped) {
-                    status.setText("文件界面正在关闭，请重新打开");
+                    LanTransferPeerDirectory.Candidate fresh = LanTransferPeerDirectory.findCurrent(
+                            getApplicationContext(), destination.peerId, System.currentTimeMillis());
+                    if (fresh == null || !fresh.isConnectable())
+                        throw new java.io.IOException("目标设备发现记录已过期");
+                    LanTransferCredentials.Value credentials = LanTransferCredentials.load(getApplicationContext());
+                    if (credentials == null || !credentials.trustedPeerIds.contains(fresh.peerId))
+                        throw new SecurityException("目标设备尚未配对或不在可信列表中");
+                    LanTransferSnapshot.Result snapshot = LanTransferSnapshot.create(getApplicationContext(), uri);
+                    String local = TrackingService.getUniqueDeviceId(getApplicationContext());
+                    LanTransferStore.Offer offer = new LanTransferStore.Offer(snapshot.transferId, local,
+                            fresh.peerId, snapshot.filename, snapshot.sizeBytes, snapshot.sha256,
+                            System.currentTimeMillis(), snapshot.mimeType);
+                    LanTransferSenderService.enqueue(getApplicationContext(), offer,
+                            snapshot.file.getCanonicalPath());
+                    runOnUiThread(() -> status.setText("发送任务已创建：" + snapshot.filename
+                            + " → " + fresh.peerId + "；后台将按当前局域网端点连接"));
+                } catch (Exception failure) {
+                    runOnUiThread(() -> status.setText("创建发送任务失败：" + failure.getClass().getSimpleName()));
                 }
-            }).show();
+            });
+        } catch (RejectedExecutionException stopped) {
+            status.setText("文件界面正在关闭，请重新打开");
+        }
+    }
+
+    private void refreshPeerList() {
+        if (offerList == null || isFinishing() || isDestroyed()) return;
+        LinearLayout peerList = findViewById(R.id.lanTransferPeerList);
+        if (peerList == null) return;
+        peerList.removeAllViews();
+        List<LanTransferPeerDirectory.Candidate> candidates =
+                LanTransferPeerDirectory.loadCurrent(this, System.currentTimeMillis());
+        LanTransferCredentials.Value credentials = null;
+        try { credentials = LanTransferCredentials.load(this); } catch (Exception ignored) {}
+        Set<String> trusted = credentials == null ? Collections.emptySet() : credentials.trustedPeerIds;
+        if (candidates.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("暂未发现设备。使用独立文件传输发现通道；对讲发现不是必需条件。");
+            empty.setPadding(0, 8, 0, 12);
+            peerList.addView(empty);
+            return;
+        }
+        for (LanTransferPeerDirectory.Candidate candidate : candidates) {
+            boolean isTrusted = trusted.contains(candidate.peerId);
+            TextView item = new TextView(this);
+            item.setPadding(0, 10, 0, 4);
+            item.setText(candidate.peerId + "\n" + candidate.host + ":"
+                    + (candidate.isConnectable() ? candidate.port : "等待监听")
+                    + (isTrusted ? "\n已配对 · 可发送" : "\n未配对 · 仅发现，不可信任"));
+            peerList.addView(item);
+            Button action = new Button(this);
+            if (isTrusted && candidate.isConnectable()) {
+                action.setText("发送文件到此设备");
+                action.setOnClickListener(v -> { selectedDestination = candidate; pickFileForSending(); });
+            } else {
+                action.setText(isTrusted ? "等待设备开启接收" : "与此设备配对");
+                action.setEnabled(!isTrusted);
+                action.setOnClickListener(v -> showPairingDialog(candidate.peerId));
+            }
+            peerList.addView(action);
+        }
     }
 
     private void refreshOffers() {
         if (isFinishing() || isDestroyed() || io.isShutdown()) return;
+        refreshPeerList();
         try {
             io.execute(() -> {
                 List<LanTransferStore.Transfer> transfers = Collections.emptyList();

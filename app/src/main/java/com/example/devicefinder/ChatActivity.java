@@ -60,7 +60,9 @@ public class ChatActivity extends Activity {
     private final AtomicBoolean deliveryStatusRefreshQueued = new AtomicBoolean(false);
     private boolean deliveryStatusAwaitingNewOutbox = false;
     private boolean pendingComposerImeRestore = false;
-    private static final long COMPOSER_IME_RESTORE_DELAY_MS = 80L;
+    private int composerImeRestoreAttempts = 0;
+    private static final long COMPOSER_IME_RESTORE_DELAY_MS = 90L;
+    private static final int COMPOSER_IME_RESTORE_MAX_ATTEMPTS = 3;
     private long deliveryStatusAwaitingSinceMs = 0L;
     private int deliveryStatusEmptyPolls = 0;
     private static final long DELIVERY_STATUS_REFRESH_MS = 2_000L;
@@ -315,6 +317,7 @@ public class ChatActivity extends Activity {
             // Sending is an explicit continuation of typing. If the window temporarily
             // loses focus during the click/IME transition, retry once it regains focus.
             pendingComposerImeRestore = true;
+            composerImeRestoreAttempts = 0;
             scheduleComposerImeRestore();
         });
     }
@@ -322,16 +325,23 @@ public class ChatActivity extends Activity {
     private void scheduleComposerImeRestore() {
         if (!pendingComposerImeRestore || inputMsg == null || !hasWindowFocus()) return;
         inputMsg.postDelayed(() -> {
-            if (!pendingComposerImeRestore || isFinishing() || inputMsg == null
-                    || !hasWindowFocus()) return;
+            if (!pendingComposerImeRestore || isFinishing() || inputMsg == null) return;
+            if (!hasWindowFocus()) return; // Window-focus callback schedules the next bounded attempt.
+            if (isComposerImeVisible()) {
+                pendingComposerImeRestore = false;
+                composerImeRestoreAttempts = 0;
+                return;
+            }
             InputMethodManager imm =
                     (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
-            if (imm != null) {
-                imm.showSoftInput(inputMsg, InputMethodManager.SHOW_IMPLICIT);
+            if (imm != null) imm.showSoftInput(inputMsg, InputMethodManager.SHOW_IMPLICIT);
+            composerImeRestoreAttempts++;
+            if (composerImeRestoreAttempts >= COMPOSER_IME_RESTORE_MAX_ATTEMPTS) {
+                pendingComposerImeRestore = false;
+                composerImeRestoreAttempts = 0;
+            } else {
+                scheduleComposerImeRestore();
             }
-            // Clear after the explicit send-triggered attempt. A later user dismissal
-            // must remain respected and must not be undone by unrelated focus changes.
-            pendingComposerImeRestore = false;
         }, COMPOSER_IME_RESTORE_DELAY_MS);
     }
 
@@ -480,6 +490,7 @@ public class ChatActivity extends Activity {
     protected void onPause() {
         super.onPause();
         pendingComposerImeRestore = false;
+        composerImeRestoreAttempts = 0;
         isForeground = false;
         refreshHandler.removeCallbacks(deliveryStatusPoll);
     }
@@ -492,6 +503,8 @@ public class ChatActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        pendingComposerImeRestore = false;
+        composerImeRestoreAttempts = 0;
         super.onDestroy();
         refreshHandler.removeCallbacks(deliveryStatusPoll);
         if (deliveryStatusExecutor != null) {

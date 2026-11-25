@@ -24,6 +24,17 @@ public final class LanTransferSenderWorker implements Runnable {
         void onState(String state);
         void onProgress(int sentInBatch, int batchSize);
     }
+    public interface EndpointProvider { Endpoint currentEndpoint() throws IOException; }
+    public static final class Endpoint {
+        public final String host;
+        public final int port;
+        public Endpoint(String host, int port) {
+            if (host == null || host.trim().isEmpty() || port < 1 || port > 65535)
+                throw new IllegalArgumentException("Invalid discovered transfer endpoint");
+            this.host = host.trim();
+            this.port = port;
+        }
+    }
 
     public static final int DEFAULT_MAX_TRANSFER_SESSIONS = 120;
     public static final long DEFAULT_OFFER_WAIT_MS = 15L * 60L * 1000L;
@@ -36,8 +47,7 @@ public final class LanTransferSenderWorker implements Runnable {
     private final File source;
     private final LanTransferStore.Offer offer;
     private final String localPeerId;
-    private final String remoteHost;
-    private final int remotePort;
+    private final EndpointProvider endpoints;
     private final int chunkSizeBytes;
     private final int maxSessions;
     private final long offerWaitMs;
@@ -45,14 +55,25 @@ public final class LanTransferSenderWorker implements Runnable {
     private final AtomicBoolean cancelled = new AtomicBoolean(false);
     private final AtomicBoolean pauseRequested = new AtomicBoolean(false);
 
+    /** Compatibility constructor for fixed-endpoint protocol tests. */
     public LanTransferSenderWorker(LanTransferStore store,
             LanTransferCredentials.Value credentials, NetworkProvider networks,
             File source, LanTransferStore.Offer offer, String localPeerId,
             String remoteHost, int remotePort, int chunkSizeBytes,
             int maxSessions, long offerWaitMs, Listener listener) {
+        this(store, credentials, networks, source, offer, localPeerId,
+                () -> new Endpoint(remoteHost, remotePort), chunkSizeBytes,
+                maxSessions, offerWaitMs, listener);
+    }
+
+    /** Production constructor resolves the endpoint afresh for every TCP connection. */
+    public LanTransferSenderWorker(LanTransferStore store,
+            LanTransferCredentials.Value credentials, NetworkProvider networks,
+            File source, LanTransferStore.Offer offer, String localPeerId,
+            EndpointProvider endpoints, int chunkSizeBytes,
+            int maxSessions, long offerWaitMs, Listener listener) {
         if (store == null || credentials == null || networks == null || source == null
-                || offer == null || localPeerId == null || remoteHost == null
-                || remoteHost.trim().isEmpty() || remotePort < 1 || remotePort > 65535
+                || offer == null || localPeerId == null || endpoints == null
                 || chunkSizeBytes < LanTransferStore.MIN_CHUNK_SIZE
                 || chunkSizeBytes > LanTransferStore.MAX_CHUNK_SIZE
                 || maxSessions < 1 || maxSessions > 4096 || offerWaitMs < 1000L
@@ -66,12 +87,17 @@ public final class LanTransferSenderWorker implements Runnable {
         this.source = source;
         this.offer = offer;
         this.localPeerId = localPeerId;
-        this.remoteHost = remoteHost.trim();
-        this.remotePort = remotePort;
+        this.endpoints = endpoints;
         this.chunkSizeBytes = chunkSizeBytes;
         this.maxSessions = maxSessions;
         this.offerWaitMs = offerWaitMs;
         this.listener = listener;
+    }
+
+    private Endpoint currentEndpoint() throws IOException {
+        Endpoint endpoint = endpoints.currentEndpoint();
+        if (endpoint == null) throw new IOException("No fresh endpoint for selected trusted peer");
+        return endpoint;
     }
 
     public void cancel() { cancelled.set(true); }
@@ -115,7 +141,8 @@ public final class LanTransferSenderWorker implements Runnable {
             try {
                 Network network = networks.currentWifiNetwork();
                 if (network == null) throw new IOException("No selected Wi-Fi LAN network");
-                acknowledgement = LanTransferTcpClient.sendOffer(network, remoteHost, remotePort,
+                Endpoint endpoint = currentEndpoint();
+                acknowledgement = LanTransferTcpClient.sendOffer(network, endpoint.host, endpoint.port,
                         source, offer, localPeerId, offer.targetPeerId, credentials.sharedSecret,
                         chunkSizeBytes, 1024 * 1024, (int) CONNECT_TIMEOUT_MS);
                 String remoteState = acknowledgement.optString("state", "");
@@ -159,8 +186,9 @@ public final class LanTransferSenderWorker implements Runnable {
             try {
                 Network network = networks.currentWifiNetwork();
                 if (network == null) throw new IOException("No selected Wi-Fi LAN network");
+                Endpoint endpoint = currentEndpoint();
                 List<Integer> missing = LanTransferTcpClient.connectAndSend(network,
-                        remoteHost, remotePort, source, offer, localPeerId, offer.targetPeerId,
+                        endpoint.host, endpoint.port, source, offer, localPeerId, offer.targetPeerId,
                         credentials.sharedSecret, chunkSizeBytes,
                         LanTransferTcpClient.DEFAULT_CHUNKS_PER_SESSION, 1024 * 1024,
                         (int) CONNECT_TIMEOUT_MS,
