@@ -893,10 +893,10 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 
 | 项目 | 实现 | 验收边界 |
 |---|---|---|
-| 安全配对 | ChatActivity 显示本机 peer ID，录入共享密钥与对端 ID；AndroidKeyStore 加密保存，peer allow-list 不为空 | 需双设备手工配置验证；不提供密钥自动交换 |
-| 待接收 Offer | 最多读取 50 条 incoming offered 任务，显示文件名、发送方、大小、状态 | 接受只将账本推进到 transferring，不等于文件已经下载 |
+| 安全配对 | 独立 LanTransferActivity 显示本机 peer ID，录入共享密钥与对端 ID；AndroidKeyStore 加密保存，peer allow-list 不为空 | 需双设备手工配置验证；不提供密钥自动交换 |
+| 待接收 Offer | 独立界面最多读取 50 条 incoming offered 任务，显示文件名、发送方、大小、状态 | 接受只将账本推进到 transferring，不等于文件已经下载 |
 | 用户动作 | 接受、二次确认拒绝，经 TrackingService 校验固定参与方身份后执行 | Service 异步处理，UI 状态应以账本刷新为准 |
-| 更新通知 | TCP Offer 持久化后、Service 用户操作完成后发送应用内广播；无高频轮询 | 广播仅用于界面刷新，不作为数据持久化凭据 |
-| CI | Actions #867 对代码提交 9c3b8b4c3d92a3d3908b3083156c954c088c8161 正在运行 | 需检查最终 job 结果 |
+| 更新通知 | TCP Offer 持久化后、Service 用户操作完成后发送应用内广播；无高频轮询；前台服务通知提供独立界面入口 | 广播仅用于界面刷新，不作为数据持久化凭据 |
+| S04 隔离 | ChatActivity.java 与 activity_chat.xml 恢复到文件传输 UI 接入前基线；前台服务通知打开独立 LanTransferActivity | 对讲输入、历史、消息刷新与文件传输 UI 解耦；仍需回归测试 |
 | 未完成 | 文件选择与发送、自动发送 worker、接收完成文件入口、Android/Python 实网互通 | 不得将当前接收控制面视为文件传输全流程完成 |
 
