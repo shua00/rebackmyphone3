@@ -2462,12 +2462,14 @@ public class TrackingService extends Service implements LocationListener {
 
     /** Explicit UI/service action boundary for incoming Offer acceptance, rejection and cancellation. */
     private void handleLanTransferUserAction(String action, String transferId) {
+        if (serviceDestroyed) return;
         if (transferId == null || transferId.isEmpty()) {
             FileLogger.log(this, "LAN_TRANSFER", "Transfer action rejected: missing transfer_id");
             return;
         }
         try {
             synchronized (lanTransferListenerLock) {
+                if (serviceDestroyed) return;
                 if (lanTransferStore == null) lanTransferStore = new LanTransferStore(this);
                 if (lanTransferFilesystem == null)
                     lanTransferFilesystem = new LanTransferFilesystem(this, lanTransferStore);
