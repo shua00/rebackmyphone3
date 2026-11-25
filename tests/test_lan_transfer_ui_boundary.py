@@ -34,5 +34,22 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
         self.assertIn('addAction(android.R.drawable.ic_menu_upload, "文件传输"', service)
 
 
+    def test_sender_worker_is_bounded_resumable_and_wifi_only(self):
+        worker = (JAVA / "LanTransferSenderWorker.java").read_text(encoding="utf-8")
+        store = (JAVA / "LanTransferStore.java").read_text(encoding="utf-8")
+        client = (JAVA / "LanTransferTcpClient.java").read_text(encoding="utf-8")
+        self.assertIn("trustedPeerIds.contains(offer.targetPeerId)", worker)
+        self.assertIn("currentWifiNetwork()", worker)
+        self.assertIn("LanTransferTcpClient.sendOffer", worker)
+        self.assertIn("LanTransferTcpClient.connectAndSend", worker)
+        self.assertIn("DEFAULT_CHUNKS_PER_SESSION", worker)
+        self.assertIn("offerWaitMs", worker)
+        self.assertIn("maxSessions", worker)
+        self.assertIn("store.transition(offer.transferId, \"paused\"", worker)
+        self.assertIn("markSenderCompleted", worker)
+        self.assertIn("Only the sender may finalize its outgoing task", store)
+        self.assertIn('new LanTransferFrameCodec.Frame("missing"', client)
+
+
 if __name__ == "__main__":
     unittest.main()
