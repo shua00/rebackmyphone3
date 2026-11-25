@@ -28,21 +28,6 @@
         android:gravity="center"
         android:textStyle="bold" />
 
-    <LinearLayout
-        android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:orientation="vertical" android:paddingStart="10dp" android:paddingEnd="10dp"
-        android:paddingTop="6dp" android:paddingBottom="4dp" android:background="#FFFFFF">
-        <TextView android:id="@+id/tvTransferStatus" android:layout_width="match_parent"
-            android:layout_height="wrap_content" android:text="文件传输：安全配对后可用"
-            android:textColor="#475569" android:textSize="12sp" />
-        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal">
-            <Button android:id="@+id/btnTransferSettings" android:layout_width="0dp" android:layout_height="40dp"
-                android:layout_weight="1" android:text="安全配对" android:textSize="12sp" />
-            <Button android:id="@+id/btnIncomingTransfers" android:layout_width="0dp" android:layout_height="40dp"
-                android:layout_weight="1" android:text="待接收文件 (0)" android:textSize="12sp" />
-        </LinearLayout>
-    </LinearLayout>
-
     <!-- 用 RelativeLayout 包裹，为了放置悬浮标签 -->
     <RelativeLayout
         android:layout_width="match_parent"
