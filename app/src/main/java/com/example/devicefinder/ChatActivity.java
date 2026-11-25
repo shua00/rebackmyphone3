@@ -201,7 +201,10 @@ public class ChatActivity extends Activity {
                         updateTransferControls();
                         Toast.makeText(this, enabled ? "文件传输已开启" : "文件传输已关闭", Toast.LENGTH_SHORT).show();
                     } else Toast.makeText(this, "设置保存失败，请重试", Toast.LENGTH_LONG).show();
-                }).show();
+                })
+                .setNeutralButton("诊断报告与测试", (dialog, which) ->
+                        startActivity(new Intent(this, com.example.devicefinder.diagnostics.DiagnosticHistoryActivity.class)))
+                .show();
     }
 
     private void sendMessage() {
