@@ -30,9 +30,10 @@ public final class LanTransferStore extends SQLiteOpenHelper {
     }
     public static final class Transfer {
         public final Offer offer; public final String state; public final int chunkSizeBytes,totalChunks;
-        public final long updatedAtMs;
-        Transfer(Offer o,String s,int chunk,int total,long updated) {
+        public final long updatedAtMs; public final String publishedPath;
+        Transfer(Offer o,String s,int chunk,int total,long updated,String path) {
             offer=o;state=s;chunkSizeBytes=chunk;totalChunks=total;updatedAtMs=updated;
+            publishedPath=path==null?"":path;
         }
     }
     public static final class MissingPage {
@@ -108,7 +109,8 @@ public final class LanTransferStore extends SQLiteOpenHelper {
         return new Transfer(readOffer(c), c.getString(c.getColumnIndexOrThrow("state")),
                 c.getInt(c.getColumnIndexOrThrow("chunk_size_bytes")),
                 c.getInt(c.getColumnIndexOrThrow("total_chunks")),
-                c.getLong(c.getColumnIndexOrThrow("updated_at_ms")));
+                c.getLong(c.getColumnIndexOrThrow("updated_at_ms")),
+                c.getString(c.getColumnIndexOrThrow("published_path")));
     }
     public Transfer getTransfer(String id) {
         Cursor c=getReadableDatabase().rawQuery("SELECT * FROM lan_transfer_tasks WHERE transfer_id=?",new String[]{id});
@@ -127,6 +129,19 @@ public final class LanTransferStore extends SQLiteOpenHelper {
         finally { c.close(); }
         return result;
     }
+    /** Recent transfers involving this exact local identity, newest activity first. */
+    public List<Transfer> loadRecentTransfers(String localPeerId, int limit) {
+        if (!id(localPeerId) || limit < 1 || limit > 100)
+            throw new IllegalArgumentException("Invalid transfer history query");
+        ArrayList<Transfer> result = new ArrayList<>();
+        Cursor c=getReadableDatabase().rawQuery(
+                "SELECT * FROM lan_transfer_tasks WHERE sender_peer_id=? OR target_peer_id=? ORDER BY updated_at_ms DESC LIMIT ?",
+                new String[]{localPeerId,localPeerId,Integer.toString(limit)});
+        try { while(c.moveToNext()) result.add(readTransfer(c)); }
+        finally { c.close(); }
+        return result;
+    }
+
     /** VERIFYING is forbidden until every expected durable receipt exists. */
     public boolean transition(String id,String target,long now) {
         if(target==null||now<0)throw new IllegalArgumentException("Invalid transition");
