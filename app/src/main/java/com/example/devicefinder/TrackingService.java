@@ -7364,6 +7364,10 @@ public class TrackingService extends Service implements LocationListener {
         logLifecycle("SERVICE_DESTROY", "isForegroundStarted=" + isForegroundStarted);
         FileLogger.log(this, "SERVICE", "🛑 服务销毁");
         serviceDestroyed = true;
+        // Interrupt startup immediately: transport teardown may wait briefly for active
+        // file-transfer sessions, and must not leave startup work running during that wait.
+        Thread startupToStop = startupThread;
+        if (startupToStop != null) startupToStop.interrupt();
         // Stop the independent file-transfer listener before closing its SQLite ledger.
         closeLanTransferResources();
         // Stop UDP ingress before shutting down its consumers. A packet already being
