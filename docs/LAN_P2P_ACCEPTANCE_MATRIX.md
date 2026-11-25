@@ -833,3 +833,13 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 - **验收状态**：listener 生命周期测试 #831 成功；credentials 类构建 #832 成功；TrackingService 集成 #833/#834 和 SynchronousQueue 更新待 CI。
 - **剩余安全/产品工作**：提供可信的本地配对/凭据 provision UI 或受控配对流程；不得把 LAN 发现表当成可信身份列表。完成后再开放用户侧文件发送。
 - **真机门禁**：Wi-Fi 断开/切换、服务重建、端口冲突、连接过载、双设备双向传输仍待实机。
+
+
+## 58. TCP listener 安全与网络生命周期闭环进展（2026-11-25）
+
+- #833 TrackingService listener 网络生命周期接线构建成功；#834 凭据校验/指纹轮换和 fail-closed 构建成功。
+- AndroidKeyStore 凭据 provision/clear 后发显式 Service action，促使 listener 立即刷新；网络不变化也不必等待下一次回调。
+- 发送端新增 `connectAndSend(Network,...)`，用目标 Wi-Fi Network 的 SocketFactory 创建未连接 socket 后再连接，避免错误地在 connect 后绑定 Network。
+- listener 限制 2 个 active worker，使用 `SynchronousQueue` 满载立即拒绝；不把未处理 socket 排队滞留。
+- #835/#836/#837 待 CI：listener admission、Wi-Fi sender helper、credentials fail-closed tests。
+- **仍未开放用户文件传输**：尚缺可信 peer 的本地配对/凭据 UI，以及 Offer/Accept 控制面。当前没有凭据时 listener 保持关闭；发现到的 peer 不会自动成为可信对象。
