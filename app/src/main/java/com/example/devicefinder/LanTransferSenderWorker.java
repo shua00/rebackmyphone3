@@ -218,6 +218,7 @@ public final class LanTransferSenderWorker implements Runnable {
     }
 
     private void notifyPausedAtBoundary() {
+        if (cancelled.get()) { cancelLedger(); return; }
         try {
             String state = requireLocalTask().state;
             if ("completed".equals(state) || "cancelled".equals(state) || "failed".equals(state)
