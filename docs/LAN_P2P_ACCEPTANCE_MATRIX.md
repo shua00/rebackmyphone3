@@ -926,4 +926,5 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 网络选择 | 仅选择 active Wi-Fi 或唯一 Wi-Fi 候选；多候选歧义直接拒绝 | 复用 TrackingService 网络选择原则；仍需验证双 Wi-Fi、蜂窝默认路由和网络切换 |
 | 重试恢复 | offered/paused 任务保留元数据，服务每 60 秒重试；START_STICKY 重建服务时读取任务；BootReceiver 启动路径检查并恢复持久化任务；不可恢复认证/状态异常收敛到 failed | 需验证不同 ROM 的开机 dataSync 前台服务启动许可；拒绝时仅记日志并等待用户重新打开应用 |
 | 取消 | 独立界面二次确认；活动 worker 设置取消标志，当前 TCP 分块会话完成后收敛；进程不在时由服务将本地任务标记 cancelled | 只取消本机后续发送，不远程删除接收端已有数据；需要验证长会话取消延迟 |
+| 协议状态一致性 | Android 与 Python 的 offered → failed 终态转换一致；远端返回 failed 时 Android sender 不再等待超时窗口 | Python 状态机与 Android SQLite 状态转换测试已增加；完整端到端跨端实网仍待设备验收 |
 | 隔离 | 发送 UI/后台服务独立于 ChatActivity、聊天 UDP 队列与 TrackingService 维护线程池 | 源码守卫已增加；Android 构建、设备实测与 Android/Python 互通待验收 |
