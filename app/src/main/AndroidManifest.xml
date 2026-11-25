@@ -200,6 +200,12 @@
             android:resizeableActivity="false"
             android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|density|uiMode" />
 
+        <!-- 独立局域网文件传输控制界面；不耦合文字对讲 Activity -->
+        <activity
+            android:name=".LanTransferActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
         <!-- 局域网聊天界面 -->
         <activity
             android:name=".ChatActivity"
