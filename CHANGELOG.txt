@@ -9,7 +9,8 @@ v8.61 — 2026-11-25 · 文件收发状态与接收文件保存闭环
 - 接收任务 completed 且存在发布路径时，提供 Android ACTION_CREATE_DOCUMENT 保存入口；复制前重新解析规范路径并要求文件直接位于应用私有 lan-transfer-received 目录；流式复制同时核对实际字节数与 Offer SHA-256，不匹配时尝试删除不完整目标文档。用户自行选择外部保存位置。
 - 保存过程在独立文件 UI executor 中执行，不向外部应用暴露 file:// 或私有文件路径，不新增 FileProvider，也不改动 ChatActivity。
 - 新增源码守卫覆盖收发历史查询、完成文件 SAF 导出和路径边界。
-- 自动化验收范围：待本提交 Actions 完成后记录；真机仍需验证 SAF 提供方、保存取消/失败、接收文件重启后可保存，以及 Android↔Android / Android↔Python 完整互传。
+- 自动化验收：Actions run 45555771696（提交 c3fee0f）validate-python、detect-android-changes、Android build 全部 success，并上传 app-debug artifact（artifact 14996295343）；run 45555634695（提交 1e44fba）Android build 与 JUnit/ Python tests 全部 success；run 45555787743（提交 c1954b9）Python 310 项测试与源码守卫 success，Android build 因仅改 Python 测试文件按路径规则 skipped。
+- 纠错记录：较早提交的 UI 源码守卫仍要求旧的 loadIncomingOffers(Activity) 调用，重构为统一历史查询后出现失败；已将守卫改为检查 Store 的 incoming 查询与 Activity 的 recent history，并由后续 Python Actions 成功验证。
 
 ================================================================================
 
