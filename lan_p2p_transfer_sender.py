@@ -11,7 +11,9 @@ import socket
 from typing import Callable
 
 from lan_p2p_transfer import TransferOffer, TransferValidationError, validate_offer
-from lan_p2p_transfer_tcp import TransferFrame, recv_frame, send_frame
+from lan_p2p_transfer_tcp import (
+    MAX_MISSING_INDEXES_PER_FRAME, TransferFrame, recv_frame, send_frame,
+)
 
 
 def _hash_file(path: Path) -> tuple[int, str]:
@@ -61,15 +63,19 @@ def send_file_over_session(
     if size != offer.size_bytes or digest != offer.sha256:
         raise TransferValidationError("source file does not match accepted offer")
     total = (size + chunk_size_bytes - 1) // chunk_size_bytes
+    page_limit = min(max_chunks_per_session, MAX_MISSING_INDEXES_PER_FRAME)
     send_frame(sock, TransferFrame("missing", offer.transfer_id, local_peer_id,
-                                   remote_peer_id), session_secret, max_payload_bytes)
+                                   remote_peer_id,
+                                   metadata={"limit": page_limit}),
+               session_secret, max_payload_bytes)
     reply = recv_frame(sock, session_secret, max_payload_bytes,
                        expected_sender_peer_id=remote_peer_id,
                        expected_target_peer_id=local_peer_id)
     if reply.kind != "missing" or reply.transfer_id != offer.transfer_id:
         raise TransferValidationError("receiver did not return a missing-chunk list")
     indexes = reply.metadata.get("indexes") if isinstance(reply.metadata, dict) else None
-    if not isinstance(indexes, list) or len(indexes) > total:
+    more = reply.metadata.get("more") if isinstance(reply.metadata, dict) else None
+    if not isinstance(indexes, list) or len(indexes) > page_limit or not isinstance(more, bool):
         raise TransferValidationError("receiver returned an invalid missing-chunk list")
     missing = []
     previous = -1
@@ -78,10 +84,9 @@ def send_file_over_session(
             raise TransferValidationError("receiver returned unordered or invalid chunk indexes")
         missing.append(index)
         previous = index
-    # A large transfer may have more missing chunks than one connection is
-    # allowed to carry. Send a bounded prefix; the completion response returns
-    # the authoritative remainder for the next session.
-    batch = missing[:max_chunks_per_session]
+    # The receiver pages missing indexes to keep control metadata below the
+    # framing limit. A new session re-queries after this bounded page.
+    batch = missing[:min(max_chunks_per_session, page_limit)]
     sent = 0
     with path.open("rb") as source:
         for index in batch:
@@ -114,8 +119,14 @@ def send_file_over_session(
         raise TransferValidationError("completion response belongs to another transfer")
     if complete.kind == "missing":
         remaining = complete.metadata.get("indexes") if isinstance(complete.metadata, dict) else None
-        if not isinstance(remaining, list):
+        more = complete.metadata.get("more") if isinstance(complete.metadata, dict) else None
+        if not isinstance(remaining, list) or len(remaining) > page_limit or not isinstance(more, bool):
             raise TransferValidationError("receiver returned malformed remaining chunks")
+        previous = -1
+        for index in remaining:
+            if isinstance(index, bool) or not isinstance(index, int) or not previous < index < total:
+                raise TransferValidationError("receiver returned invalid remaining chunk indexes")
+            previous = index
         return tuple(remaining)
     if complete.kind != "complete" or not isinstance(complete.metadata, dict) or complete.metadata.get("state") != "completed":
         raise TransferValidationError("receiver did not confirm verified completion")

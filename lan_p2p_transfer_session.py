@@ -15,7 +15,9 @@ from lan_p2p_transfer import (
 )
 from lan_p2p_transfer_files import TransferFilesystem
 from lan_p2p_transfer_store import TransferStore
-from lan_p2p_transfer_tcp import TransferFrame, recv_frame, send_frame
+from lan_p2p_transfer_tcp import (
+    MAX_MISSING_INDEXES_PER_FRAME, TransferFrame, recv_frame, send_frame,
+)
 
 
 def serve_transfer_session(
@@ -42,6 +44,7 @@ def serve_transfer_session(
     if not isinstance(authenticated_peer_id, str) or not authenticated_peer_id:
         raise TransferValidationError("authenticated peer identity is required")
     handled = 0
+    missing_page_limit = min(64, MAX_MISSING_INDEXES_PER_FRAME)
     while handled < max_frames:
         try:
             frame = recv_frame(
@@ -77,8 +80,20 @@ def serve_transfer_session(
         elif frame.kind == "missing":
             if frame.payload or frame.index is not None:
                 raise TransferValidationError("invalid missing request")
+            if frame.metadata is None:
+                page_limit = min(64, MAX_MISSING_INDEXES_PER_FRAME)
+            elif (isinstance(frame.metadata, dict) and set(frame.metadata) == {"limit"}
+                  and isinstance(frame.metadata.get("limit"), int)
+                  and not isinstance(frame.metadata.get("limit"), bool)
+                  and 1 <= frame.metadata["limit"] <= MAX_MISSING_INDEXES_PER_FRAME):
+                page_limit = frame.metadata["limit"]
+            else:
+                raise TransferValidationError("invalid missing-page request")
+            missing_page_limit = page_limit
+            all_missing = filesystem.reconcile(frame.transfer_id, timestamp)
+            page = all_missing[:page_limit]
             response_kind = "missing"
-            response_metadata = {"indexes": list(filesystem.reconcile(frame.transfer_id, timestamp))}
+            response_metadata = {"indexes": list(page), "more": len(all_missing) > len(page)}
         elif frame.kind == "complete":
             if frame.payload or frame.index is not None:
                 raise TransferValidationError("invalid completion request")
@@ -88,8 +103,9 @@ def serve_transfer_session(
             elif record.state in (TransferState.TRANSFERRING, TransferState.VERIFYING):
                 missing = filesystem.reconcile(frame.transfer_id, timestamp)
                 if missing:
+                    page = missing[:missing_page_limit]
                     response_kind = "missing"
-                    response_metadata = {"indexes": list(missing)}
+                    response_metadata = {"indexes": list(page), "more": len(missing) > len(page)}
                 else:
                     filesystem.assemble_and_verify(frame.transfer_id, timestamp)
                     response_kind = "complete"

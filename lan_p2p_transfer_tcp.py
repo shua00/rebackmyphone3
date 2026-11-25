@@ -20,6 +20,7 @@ _MAGIC = b"LNP2"
 _VERSION = 1
 _MAX_HEADER_BYTES = 4096
 _DEFAULT_MAX_PAYLOAD_BYTES = 1024 * 1024
+MAX_MISSING_INDEXES_PER_FRAME = 128
 _ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _KINDS = frozenset({"chunk", "chunk_ack", "missing", "complete", "cancel"})
 _HEADER_KEYS = frozenset({
