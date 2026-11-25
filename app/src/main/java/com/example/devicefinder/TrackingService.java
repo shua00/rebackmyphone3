@@ -1032,6 +1032,9 @@ public class TrackingService extends Service implements LocationListener {
             } else if ("ACTION_UPDATE_CONFIG_URL".equals(action)) {
                 String newConfigUrl = intent.getStringExtra("config_url");
                 handleUpdateConfigUrl(newConfigUrl);
+            } else if ("ACTION_LAN_TRANSFER_CREDENTIALS_UPDATED".equals(action)) {
+                executeMaintenance("lan-transfer-credentials", () ->
+                        refreshLanTransferTcpListener("credentials updated"));
             } else if ("ACTION_HEARTBEAT".equals(action)) {
                 long actual = System.currentTimeMillis();
                 long drift = lastHeartbeatExpectedAt > 0 ? actual - lastHeartbeatExpectedAt : -1;
