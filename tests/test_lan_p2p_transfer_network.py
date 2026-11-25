@@ -103,7 +103,7 @@ class TransferTcpNetworkTests(unittest.TestCase):
                 errors.append(exc)
                 closed.set()
             server = TransferTcpServer(store, files, local_peer_id="receiver",
-                authenticate_peer=lambda conn, addr: ("sender", self.SECRET),
+                authenticate_peer=lambda conn, addr: authenticate_tcp_server(conn, "receiver", self.SECRET, authorize_peer=lambda peer: peer == "sender"),
                 now_ms=lambda: 10, host="127.0.0.1", port=0,
                 socket_timeout_seconds=0.15, on_error=on_error).start()
             client = None

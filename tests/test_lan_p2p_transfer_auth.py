@@ -26,7 +26,9 @@ class TransferAuthenticationTests(unittest.TestCase):
     def test_mutual_authentication_derives_identical_session_key(self):
         result,errors=self._run_pair()
         self.assertEqual([],errors)
-        self.assertEqual(("receiver",result["client"][1]),result["server"])
+        self.assertEqual("receiver", result["client"][0])
+        self.assertEqual("sender", result["server"][0])
+        self.assertEqual(result["client"][1], result["server"][1])
         self.assertEqual(32,len(result["client"][1]))
     def test_unknown_peer_is_rejected_by_trust_registry(self):
         result,errors=self._run_pair(allowed=False)
@@ -37,6 +39,47 @@ class TransferAuthenticationTests(unittest.TestCase):
     def test_unexpected_server_identity_is_rejected(self):
         result,errors=self._run_pair(expected_server="other-device")
         self.assertTrue(errors); self.assertNotIn("client",result)
+
+    def test_replayed_server_proof_is_rejected_for_fresh_client_nonce(self):
+        import hashlib
+        import hmac
+        import struct
+        key = hashlib.sha256(b"lan-p2p-v2\\x00" + self.SECRET.encode()).digest()
+        old_client_nonce = b"o" * 32
+        server_nonce = b"s" * 32
+        client_nonce = b"n" * 32
+        client_id, server_id = b"sender", b"receiver"
+        transcript = (struct.pack("!H", len(client_id)) + client_id
+                      + struct.pack("!H", len(server_id)) + server_id
+                      + old_client_nonce + server_nonce)
+        replayed_proof = hmac.new(
+            key, b"lan-transfer-v1/server\\x00" + transcript, hashlib.sha256
+        ).digest()
+        left, right = socket.socketpair()
+        left.settimeout(1)
+        def replay_server():
+            try:
+                data = bytearray()
+                while len(data) < 4 + 2 + len(client_id) + 32:
+                    part = right.recv(4 + 2 + len(client_id) + 32 - len(data))
+                    if not part:
+                        return
+                    data.extend(part)
+                right.sendall(struct.pack("!H", len(server_id)) + server_id
+                              + server_nonce + replayed_proof)
+            finally:
+                right.close()
+        worker = threading.Thread(target=replay_server)
+        worker.start()
+        try:
+            with self.assertRaises(TransferValidationError):
+                authenticate_tcp_client(left, "sender", "receiver", self.SECRET,
+                                         nonce_factory=lambda size: client_nonce)
+        finally:
+            left.close()
+        worker.join(timeout=2)
+        self.assertFalse(worker.is_alive())
+
     def test_invalid_nonce_source_is_rejected(self):
         left,right=socket.socketpair()
         with self.assertRaises(TransferValidationError):
