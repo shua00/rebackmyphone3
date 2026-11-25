@@ -68,9 +68,9 @@ public class DiagnosticBatchLocalStoreTest {
         store.enqueue(pending);
         store.enqueue(delivered);
         store.markDelivered(delivered.eventId);
+        assertEquals(1, store.pruneExpiredReports());
         assertTrue(store.acceptIncoming(inbox));
-
-        assertEquals(2, store.pruneExpiredReports());
+        assertEquals(1, store.pruneExpiredReports());
         assertEquals(1, store.pending(10).size());
         assertEquals(0, store.received("batch-store", 10).size());
     }
