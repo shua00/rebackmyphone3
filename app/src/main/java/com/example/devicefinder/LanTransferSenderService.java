@@ -29,14 +29,20 @@ public final class LanTransferSenderService extends Service {
     private static final int NOTIFICATION_ID=8842;
     private ExecutorService executor;
     private final Handler retryHandler = new Handler(Looper.getMainLooper());
+    private final java.util.concurrent.atomic.AtomicBoolean jobActive = new java.util.concurrent.atomic.AtomicBoolean(false);
 
     public static void enqueue(Context context, LanTransferStore.Offer offer, String host, int port, String path) throws Exception {
         JSONObject j=new JSONObject();
         j.put("id",offer.transferId);j.put("sender",offer.senderPeerId);j.put("target",offer.targetPeerId);
         j.put("filename",offer.filename);j.put("size",offer.sizeBytes);j.put("sha",offer.sha256);
         j.put("created",offer.createdAtMs);j.put("mime",offer.mimeType);j.put("host",host);j.put("port",port);j.put("path",path);
-        if(!context.getApplicationContext().getSharedPreferences(PREFS,MODE_PRIVATE).edit().putString(JOB,j.toString()).commit())
-            throw new IllegalStateException("Unable to persist outgoing task metadata");
+        android.content.SharedPreferences prefs=context.getApplicationContext().getSharedPreferences(PREFS,Context.MODE_PRIVATE);
+        synchronized(LanTransferSenderService.class) {
+            if(prefs.getString(JOB,null)!=null)
+                throw new IllegalStateException("An outgoing transfer is already queued; finish or cancel it before starting another");
+            if(!prefs.edit().putString(JOB,j.toString()).commit())
+                throw new IllegalStateException("Unable to persist outgoing task metadata");
+        }
         Intent intent=new Intent(context,LanTransferSenderService.class).setAction(ACTION_SEND);
         if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.O) context.startForegroundService(intent); else context.startService(intent);
     }
@@ -53,6 +59,7 @@ public final class LanTransferSenderService extends Service {
         try {
             String raw=getSharedPreferences(PREFS,MODE_PRIVATE).getString(JOB,null);
             if(raw==null) { stopForeground(true);stopSelf(startId);return START_NOT_STICKY; }
+            if(!jobActive.compareAndSet(false,true)) return START_STICKY;
             JSONObject j=new JSONObject(raw);
             executor.execute(()->runJob(j,startId));
         } catch(Exception failure) {
@@ -105,10 +112,11 @@ public final class LanTransferSenderService extends Service {
                 retryHandler.postDelayed(() -> {
                     if(executor!=null && !executor.isShutdown()) {
                         try { executor.execute(() -> runJob(j,startId)); }
-                        catch(java.util.concurrent.RejectedExecutionException ignored) { stopSelf(startId); }
+                        catch(java.util.concurrent.RejectedExecutionException ignored) { jobActive.set(false);stopSelf(startId); }
                     }
                 }, 60000L);
             } else {
+                jobActive.set(false);
                 stopSelf(startId);
             }
         }
@@ -147,6 +155,6 @@ public final class LanTransferSenderService extends Service {
         NotificationManager nm=(NotificationManager)getSystemService(NOTIFICATION_SERVICE);
         if(nm!=null)nm.notify(NOTIFICATION_ID,notification(text));
     }
-    @Override public void onDestroy() { retryHandler.removeCallbacksAndMessages(null);if(executor!=null)executor.shutdownNow();super.onDestroy(); }
+    @Override public void onDestroy() { retryHandler.removeCallbacksAndMessages(null);jobActive.set(false);if(executor!=null)executor.shutdownNow();super.onDestroy(); }
     @Override public IBinder onBind(Intent intent) { return null; }
 }
