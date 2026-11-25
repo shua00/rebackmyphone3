@@ -33,6 +33,27 @@ class ChatInputContinuityTests(unittest.TestCase):
         self.assertIn("if (!keepKeyboardVisible) return;", source)
         self.assertIn("pendingComposerImeRestore = false;", source)
 
+    def test_keyboard_resize_does_not_mark_history_reader_as_away_from_bottom(self):
+        source = JAVA.read_text(encoding="utf-8")
+        self.assertIn('android:windowSoftInputMode="adjustResize"', (ROOT / "app/src/main/AndroidManifest.xml").read_text(encoding="utf-8"))
+        self.assertIn("lastScrollViewportHeight", source)
+        self.assertIn("viewportHeight != lastScrollViewportHeight", source)
+        self.assertIn("Do not mistake that geometry change for the user's scrolling away", source)
+
+    def test_incoming_messages_preserve_history_position_and_offer_new_message_entry(self):
+        source = JAVA.read_text(encoding="utf-8")
+        refresh = source.split("private void refreshHistory(boolean isNewMessage)", 1)[1].split("@Override", 1)[0]
+        self.assertIn("if (!isNewMessage || isAtBottom)", refresh)
+        self.assertIn("tvNewMsg.setVisibility(View.VISIBLE);", refresh)
+        resume = source.split("protected void onResume()", 1)[1].split("public void onWindowFocusChanged", 1)[0]
+        self.assertIn("refreshHistory(true);", resume)
+        self.assertNotIn("refreshHistory(false);", resume)
+
+    def test_sending_from_history_returns_to_own_latest_message(self):
+        source = JAVA.read_text(encoding="utf-8")
+        send = source.split("private void sendMessage()", 1)[1].split("private void restoreChatInputFocus", 1)[0]
+        self.assertIn("refreshHistory(false);", send)
+
     def test_send_button_does_not_steal_editor_focus(self):
         layout = LAYOUT.read_text(encoding="utf-8")
         button = layout.split('android:id="@+id/btnSend"', 1)[1].split("/>", 1)[0]

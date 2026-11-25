@@ -66,6 +66,8 @@ public class ChatActivity extends Activity {
     //      若无 volatile，跨线程可见性无保证，可能出现"手机收到消息但聊天页不刷新"
     public static volatile boolean isForeground = false;
     private boolean isAtBottom = true; // 【新增】是否在最底部
+    // A keyboard-driven viewport resize is not user scrolling; preserve the prior bottom intent.
+    private int lastScrollViewportHeight = -1;
 
     private final Handler refreshHandler = new Handler(Looper.getMainLooper());
 
@@ -108,7 +110,17 @@ public class ChatActivity extends Activity {
             // ★ 修复：防止布局未加载完或子 View 被系统回收导致的 NPE 闪退
             if (scrollView.getChildCount() == 0) return;
             
-            int diff = (scrollView.getChildAt(0).getBottom() - (scrollView.getHeight() + scrollView.getScrollY()));
+            int viewportHeight = scrollView.getHeight();
+            if (lastScrollViewportHeight > 0 && viewportHeight != lastScrollViewportHeight) {
+                // adjustResize changes the visible viewport when the IME opens/closes.
+                // Do not mistake that geometry change for the user's scrolling away
+                // from the latest message; the next real scroll event recalculates it.
+                lastScrollViewportHeight = viewportHeight;
+                return;
+            }
+            lastScrollViewportHeight = viewportHeight;
+            int diff = (scrollView.getChildAt(0).getBottom()
+                    - (viewportHeight + scrollView.getScrollY()));
             isAtBottom = diff <= 50; // 留50像素余量
             if (isAtBottom) {
                 tvNewMsg.setVisibility(View.GONE);
@@ -375,7 +387,9 @@ public class ChatActivity extends Activity {
     protected void onResume() {
         super.onResume();
         isForeground = true;
-        refreshHistory(false);
+        // Treat changes accumulated while backgrounded like incoming messages:
+        // preserve a history-reading position instead of unconditionally jumping to bottom.
+        refreshHistory(true);
         // Reclaim the editor after Activity/IME focus transitions so an already-visible
         // keyboard is immediately ready for typing without an extra tap on the field.
         restoreChatInputFocus(false);
