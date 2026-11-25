@@ -814,3 +814,11 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 - #821：测试仍残留第二处旧 context 引用；已修复并加入 staging/published 目录清理，保证可重复运行。
 - complete 响应使用当前连接协商的 missing page limit，保持 Python sender 与 Android receiver 的分页约束一致。
 - #824 运行针对当前测试文件最终修正；状态待验收，未提前标记通过。
+
+
+## 56. Android TCP sender/receiver 双端互通（2026-11-25）
+
+- 新增 `LanTransferTcpClient`：源文件 regular/non-symlink 检查、初始 SHA-256 与 Offer 一致性、missing page 查询、bounded chunk batch、逐块 ACK、发送后再次计算 whole-file SHA-256，防止传输期间源文件被静默修改。
+- 每会话默认最多 62 块，与服务端 64 帧预算对齐；重连重新查询缺块，ACK 丢失不会要求扩大或修改固定 Offer。
+- 新增 Android sender + receiver loopback 测试，覆盖双向认证、missing、chunk ACK、完成发布和结果校验；CI 结果待当前 SHA 运行完成。
+- **未完成项**：生产 Wi-Fi listener/socket binding、连接并发准入、TrackingService 生命周期、Offer/Accept UI、文件任务控制面与安全密钥配置仍未接线。
