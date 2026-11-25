@@ -29,7 +29,7 @@ class LanTransferDiscoveryIsolationTests(unittest.TestCase):
         self.assertNotIn("LanChat", source)
         self.assertNotIn("8888", source)
         self.assertIn("recordFileDiscoveryCandidate", source)
-        self.assertIn("Unauthenticated LAN candidate discovery", source)
+        self.assertIn("unauthenticated LAN candidate discovery", source)
 
     def test_endpoint_lookup_is_current_network_scoped(self):
         source = self.read("LanTransferPeerDirectory.java")
