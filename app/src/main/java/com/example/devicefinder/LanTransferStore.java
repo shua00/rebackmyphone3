@@ -35,6 +35,11 @@ public final class LanTransferStore extends SQLiteOpenHelper {
             offer=o;state=s;chunkSizeBytes=chunk;totalChunks=total;updatedAtMs=updated;
         }
     }
+    public static final class MissingPage {
+        public final List<Integer> indexes;
+        public final boolean more;
+        MissingPage(List<Integer> indexes,boolean more) { this.indexes=indexes;this.more=more; }
+    }
     public static final class ChunkReceipt {
         public final String transferId,sha256,stagingPath; public final int index,sizeBytes; public final long recordedAtMs;
         ChunkReceipt(String id,int i,int size,String hash,String path,long time) {
@@ -127,6 +132,46 @@ public final class LanTransferStore extends SQLiteOpenHelper {
             ContentValues update=new ContentValues();update.put("updated_at_ms",now);db.update("lan_transfer_tasks",update,"transfer_id=?",new String[]{id});db.setTransactionSuccessful();return true;
         } finally { db.endTransaction(); }
     }
+    public ChunkReceipt getChunkReceipt(String id,int index) {
+        Cursor c=getReadableDatabase().rawQuery("SELECT transfer_id,chunk_index,payload_size,chunk_sha256,staging_path,recorded_at_ms FROM lan_transfer_chunks WHERE transfer_id=? AND chunk_index=?",
+                new String[]{id,Integer.toString(index)});
+        try {
+            if(!c.moveToFirst())return null;
+            return new ChunkReceipt(c.getString(0),c.getInt(1),c.getInt(2),c.getString(3),c.getString(4),c.getLong(5));
+        } finally { c.close(); }
+    }
+
+    /** Reserve declared active task sizes conservatively; avoids rescanning every staged file per chunk. */
+    public long getActiveReservedBytes() {
+        Cursor c=getReadableDatabase().rawQuery("SELECT COALESCE(SUM(size_bytes),0) FROM lan_transfer_tasks WHERE state NOT IN ('completed','rejected','cancelled','failed','expired')",null);
+        try { return c.moveToFirst()?c.getLong(0):0L; } finally { c.close(); }
+    }
+
+    /** Bounded missing-index page; never materializes a potentially 524k-index list. */
+    public MissingPage getMissingChunkPage(String id,int startIndex,int limit) {
+        if(startIndex<0||limit<1||limit>128)throw new IllegalArgumentException("Invalid missing page bounds");
+        Transfer transfer=getTransfer(id);if(transfer==null)throw new IllegalArgumentException("Unknown transfer");
+        if(startIndex>=transfer.totalChunks)return new MissingPage(new ArrayList<>(),false);
+        List<Integer> missing=new ArrayList<>(limit);
+        Cursor c=getReadableDatabase().rawQuery("SELECT chunk_index FROM lan_transfer_chunks WHERE transfer_id=? AND chunk_index>=? ORDER BY chunk_index",
+                new String[]{id,Integer.toString(startIndex)});
+        try {
+            boolean has=c.moveToFirst();int candidate=startIndex;
+            while(candidate<transfer.totalChunks) {
+                if(has&&c.getInt(0)==candidate) { candidate++;has=c.moveToNext();continue; }
+                missing.add(candidate++);
+                if(missing.size()==limit) {
+                    while(candidate<transfer.totalChunks) {
+                        if(has&&c.getInt(0)==candidate) { candidate++;has=c.moveToNext(); }
+                        else return new MissingPage(missing,true);
+                    }
+                    return new MissingPage(missing,false);
+                }
+            }
+            return new MissingPage(missing,false);
+        } finally { c.close(); }
+    }
+
     public List<Integer> missingChunkIndexes(String id) {
         Transfer t=getTransfer(id);if(t==null)throw new IllegalArgumentException("Unknown transfer");
         boolean[] seen=new boolean[t.totalChunks];Cursor c=getReadableDatabase().rawQuery("SELECT chunk_index FROM lan_transfer_chunks WHERE transfer_id=?",new String[]{id});

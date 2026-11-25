@@ -2,6 +2,7 @@ package com.example.devicefinder;
 
 import android.content.Context;
 import android.system.Os;
+import android.system.ErrnoException;
 import android.system.OsConstants;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -137,16 +138,14 @@ public final class LanTransferFilesystem {
         String digest=hashBytes(payload);
         File dir=taskDirectory(transferId), target=new File(dir,index+".part");
         rejectSymlink(target);
-        for(LanTransferStore.ChunkReceipt receipt:store.loadChunkReceipts(transferId)) {
-            if(receipt.index==index) {
-                requireRegularFile(target);
-                if(target.length()!=payload.length||!receipt.sha256.equals(digest)||!digest.equals(hashFile(target)))
-                    throw new IOException("Conflicting replay for durable chunk");
-                return false;
-            }
+        LanTransferStore.ChunkReceipt receipt=store.getChunkReceipt(transferId,index);
+        if(receipt!=null) {
+            requireRegularFile(target);
+            if(target.length()!=payload.length||!receipt.sha256.equals(digest)||!digest.equals(hashFile(target)))
+                throw new IOException("Conflicting replay for durable chunk");
+            return false;
         }
-        long current=directoryBytes(root);
-        if(current+payload.length>quotaBytes)throw new IOException("LAN transfer staging quota exceeded");
+        if(store.getActiveReservedBytes()>quotaBytes)throw new IOException("LAN transfer staging quota exceeded");
         if(root.getUsableSpace()<payload.length+MIN_FREE_SPACE_RESERVE_BYTES)throw new IOException("Insufficient free space for transfer chunk");
         File temp=new File(dir,index+".tmp-"+UUID.randomUUID());
         try {
@@ -174,7 +173,7 @@ public final class LanTransferFilesystem {
         File dir=taskDirectory(transferId);
         List<Integer> valid=new ArrayList<>();
         for(LanTransferStore.ChunkReceipt receipt:store.loadChunkReceipts(transferId)) {
-            File expected=expectedChunkFile(transferId,receipt.index);
+            File expected=new File(dir,receipt.index+".part");
             boolean ok=false;
             try {
                 requireRegularFile(expected);
@@ -203,7 +202,7 @@ public final class LanTransferFilesystem {
             } else throw new IOException("Unexpected staging entry");
         }
         syncDirectory(dir);
-        return store.missingChunkIndexes(transferId);
+        return store.getMissingChunkPage(transferId,0,128).indexes;
     }
 
     /** Assemble verified chunks, check the whole-file digest, fsync and atomically publish. */
@@ -236,8 +235,9 @@ public final class LanTransferFilesystem {
         try {
             try(FileOutputStream raw=new FileOutputStream(temp,false);
                     BufferedOutputStream out=new BufferedOutputStream(raw)) {
+                File stagingDir=taskDirectory(transferId);
                 for(int i=0;i<transfer.totalChunks;i++) {
-                    File chunk=expectedChunkFile(transferId,i);requireRegularFile(chunk);
+                    File chunk=new File(stagingDir,i+".part");requireRegularFile(chunk);
                     int expected=(int)Math.min((long)transfer.chunkSizeBytes,transfer.offer.sizeBytes-(long)i*transfer.chunkSizeBytes);
                     if(chunk.length()!=expected)throw new IOException("Staged chunk length changed");
                     try(BufferedInputStream in=new BufferedInputStream(new FileInputStream(chunk))) {

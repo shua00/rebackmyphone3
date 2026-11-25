@@ -38,6 +38,17 @@ public class LanTransferStoreTest {
   assertTrue(store.invalidateChunkReceipt("task-4",0,1600));assertEquals("transferring",store.getTransfer("task-4").state);
   assertEquals(Arrays.asList(0),store.missingChunkIndexes("task-4"));
  }
+ @Test public void missingIndexesArePagedAndActiveReservationsAreBounded() {
+  store.createOffer(offer("task-pages",300L*4096L),1100,4096);
+  assertEquals(300L*4096L,store.getActiveReservedBytes());
+  LanTransferStore.MissingPage first=store.getMissingChunkPage("task-pages",0,128);
+  assertEquals(128,first.indexes.size());assertEquals(Integer.valueOf(0),first.indexes.get(0));
+  assertEquals(Integer.valueOf(127),first.indexes.get(127));assertTrue(first.more);
+  LanTransferStore.MissingPage second=store.getMissingChunkPage("task-pages",128,128);
+  assertEquals(Integer.valueOf(128),second.indexes.get(0));assertTrue(second.more);
+  LanTransferStore.MissingPage third=store.getMissingChunkPage("task-pages",256,128);
+  assertEquals(44,third.indexes.size());assertFalse(third.more);
+ }
  @Test public void traversalAndInvalidChunkSizeAreRejected(){
   try{store.createOffer(new LanTransferStore.Offer("task-5","sender","receiver","../evil",1,HASH,1,"x"),1,4096);fail();}catch(IllegalArgumentException expected){}
   try{store.createOffer(offer("task-6",1),1,1024);fail();}catch(IllegalArgumentException expected){}

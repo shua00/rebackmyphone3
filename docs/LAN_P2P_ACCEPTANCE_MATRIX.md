@@ -704,3 +704,14 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 - Actions #807：Transfer path is not a directory 仍出现在 staging 初始化，说明 lstat 结果与 Robolectric File 视图不一致。
 - 移除 lstat 作为目录存在性/类型依据，改用 canonical child path 必须等于 canonical parent + basename 的约束检测符号链接（包含 dangling link），随后再用 File.isDirectory/isFile 判断类型。
 - 目录/文件 fsync 和先落盘再写 receipt 规则保留；新 SHA 验证。
+
+
+## 44. 大文件传输账本/文件系统效率与缺块分页（2026-11-25）
+
+| 项目 | 修正 | 验收状态 |
+|---|---|---|
+| 单块回执查询 | `getChunkReceipt(transfer_id,index)` 使用复合主键索引 | 待 CI |
+| quota | 以活动任务声明大小做保守总量预留，另检查磁盘可用空间；避免每块递归扫描所有文件 | 待 CI |
+| missing page | 新增最多 128 个索引的游标分页，不一次性创建全量缺块列表 | 新增 300 块测试，待 CI |
+| 大文件路径操作 | reconcile/assemble 复用单任务目录句柄路径，减少重复 canonical/stat 操作 | 待 CI |
+| 安全顺序 | chunk fsync → atomic rename → directory fsync → SQLite receipt 保持不变 | 待 CI |

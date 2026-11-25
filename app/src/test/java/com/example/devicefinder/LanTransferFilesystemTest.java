@@ -65,5 +65,10 @@ public class LanTransferFilesystemTest {
   File published=new File(publishedRoot,"fs-6-payload.bin");try(FileOutputStream out=new FileOutputStream(published)){out.write(data);out.getFD().sync();}
   File recovered=fs.assembleAndPublish("fs-6",7);assertEquals(published.getCanonicalPath(),recovered.getCanonicalPath());assertEquals("completed",store.getTransfer("fs-6").state);
  }
+ @Test public void reconcileReturnsBoundedMissingPageForLargeTransfers()throws Exception{
+  byte[] data=new byte[300*4096];start("fs-pages",data,4096);
+  assertEquals(128,fs.reconcile("fs-pages",5).size());
+  assertEquals(Integer.valueOf(0),fs.reconcile("fs-pages",6).get(0));
+ }
  private static byte[] read(File f)throws Exception{java.io.ByteArrayOutputStream b=new java.io.ByteArrayOutputStream();try(java.io.FileInputStream in=new java.io.FileInputStream(f)){byte[] x=new byte[4096];int n;while((n=in.read(x))!=-1)b.write(x,0,n);}return b.toByteArray();}
 }
