@@ -3,7 +3,6 @@ package com.example.devicefinder;
 import android.content.Context;
 import android.system.ErrnoException;
 import android.system.Os;
-import android.system.OsConstants;
 import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileDescriptor;
@@ -66,10 +65,10 @@ public final class LanTransferFilesystem {
         File dir=taskDirectory(id),file=new File(dir,"payload.part");rejectSymlink(file);return file;
     }
     private static void syncDirectory(File dir)throws IOException {
-        FileDescriptor fd=null;
-        try{fd=Os.open(dir.getAbsolutePath(),OsConstants.O_RDONLY,0);Os.fsync(fd);}
-        catch(ErrnoException e){throw new IOException("Unable to fsync transfer directory",e);}
-        finally{if(fd!=null)try{Os.close(fd);}catch(ErrnoException ignored){}}
+        // Opening a directory read-only and syncing its descriptor is supported by Android
+        // filesystems and remains testable in Robolectric without weakening durability.
+        try(FileInputStream in=new FileInputStream(dir)) { in.getFD().sync(); }
+        catch(IOException e) { throw new IOException("Unable to fsync transfer directory",e); }
     }
     private static void syncFile(RandomAccessFile file)throws IOException { file.getFD().sync(); }
     private static String hex(byte[] b) {

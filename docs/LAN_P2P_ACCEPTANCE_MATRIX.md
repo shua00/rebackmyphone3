@@ -752,3 +752,10 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 
 - reconcilePage 发现 payload.part 为 symlink 时，安全 unlink 链接本身、撤销旧 receipts，并返回 missing page；不会跟随链接目标。
 - 继续由 Actions 验证 symlink 故障注入用例。
+
+
+## 49. Android 目录 fsync 兼容修正（2026-11-25）
+
+- Actions #811：Robolectric 下 `Os.open(directory, O_RDONLY)` 抛 EIO；因此目录 fsync 未执行，文件传输用例全部失败。
+- 改为 `FileInputStream(directory).getFD().sync()` 执行目录 fsync，仍要求成功后才提交 chunk receipt；不把目录同步降级为 best-effort。
+- 同轮一项 TrackingServiceLifecycleTest 的 startup thread assertion 失败，待后续回归复验。
