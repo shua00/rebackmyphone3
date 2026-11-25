@@ -2728,12 +2728,14 @@ class LanP2PCoreTests(unittest.TestCase):
         focus = extract_java_method(
             source, "private void restoreChatInputFocus(boolean keepKeyboardVisible)"
         )
+        ime = extract_java_method(source, "private void scheduleComposerImeRestore()")
         self.assertIn("inputMsg.post(", focus)
         self.assertIn("inputMsg.requestFocus();", focus)
         self.assertIn("inputMsg.setSelection(inputMsg.length());", focus)
-        self.assertIn("inputMsg.postDelayed(", focus)
-        self.assertIn("if (!keepKeyboardVisible) return;", focus)
-        self.assertIn("imm.showSoftInput(inputMsg, InputMethodManager.SHOW_IMPLICIT);", focus)
+        self.assertIn("scheduleComposerImeRestore();", focus)
+        self.assertIn("inputMsg.postDelayed(", ime)
+        self.assertIn("imm.showSoftInput(inputMsg, InputMethodManager.SHOW_IMPLICIT);", ime)
+        self.assertIn("pendingComposerImeRestore = false;", ime)
         layout = (repo_root / "app/src/main/res/layout/activity_chat.xml").read_text(encoding="utf-8")
         send_button = layout[layout.index('@+id/btnSend'):]
         self.assertIn('android:focusable="false"', send_button)
@@ -4681,13 +4683,17 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         focus = extract_java_method(
             source, "private void restoreChatInputFocus(boolean keepKeyboardVisible)"
         )
+        ime = extract_java_method(source, "private void scheduleComposerImeRestore()")
+        window_focus = extract_java_method(source, "public void onWindowFocusChanged(boolean hasFocus)")
         self.assertIn("refreshHistory(false);", resume)
         self.assertIn("restoreChatInputFocus(false);", resume)
         self.assertIn("inputMsg.requestFocus();", focus)
         self.assertIn("inputMsg.setSelection(inputMsg.length());", focus)
         self.assertIn("if (!keepKeyboardVisible) return;", focus)
-        self.assertLess(focus.index("if (!keepKeyboardVisible) return;"),
-                        focus.index("showSoftInput"))
+        self.assertNotIn("scheduleComposerImeRestore();", focus.split("if (!keepKeyboardVisible) return;", 1)[0])
+        self.assertIn("if (hasFocus && pendingComposerImeRestore)", window_focus)
+        self.assertIn("showSoftInput", ime)
+
 
     def test_android_authenticated_packets_are_prebuilt_before_transmit_lock(self):
         repo_root = Path(__file__).resolve().parents[1]
