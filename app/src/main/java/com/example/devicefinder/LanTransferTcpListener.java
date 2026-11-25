@@ -1,7 +1,6 @@
 package com.example.devicefinder;
 
 import android.content.Context;
-import android.net.Network;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -18,12 +17,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Bounded TCP listener for the LAN transfer data plane.
  *
- * The listener binds only to the caller-selected Wi-Fi address. Accepted sockets are
- * explicitly bound to the same Android Network before authentication or protocol IO.
- * Secret provisioning and trusted-peer policy are deliberately injected by the owner.
+ * The listener binds only to the caller-selected Wi-Fi address. Accepted sockets inherit
+ * that local interface; the owner must close/recreate this listener when the selected Wi-Fi
+ * Network or LinkProperties change. Secret provisioning and trust policy are injected.
  */
 public final class LanTransferTcpListener implements AutoCloseable {
-    public interface SocketBinder { void bind(Socket socket) throws IOException; }
     public interface FailureListener { void onFailure(String stage, Exception failure); }
 
     public static final int DEFAULT_PORT = 38471;
@@ -37,7 +35,6 @@ public final class LanTransferTcpListener implements AutoCloseable {
     private final String localPeerId;
     private final String sharedSecret;
     private final LanTransferAuthenticator.TrustedPeerAuthorizer authorizer;
-    private final SocketBinder binder;
     private final FailureListener failures;
     private final AtomicBoolean closed = new AtomicBoolean(false);
     private final Set<Socket> activeSockets =
@@ -57,11 +54,11 @@ public final class LanTransferTcpListener implements AutoCloseable {
     public LanTransferTcpListener(Context context, LanTransferStore store,
             LanTransferFilesystem filesystem, String localPeerId, String sharedSecret,
             LanTransferAuthenticator.TrustedPeerAuthorizer authorizer,
-            SocketBinder binder, FailureListener failures) {
+            FailureListener failures) {
         if (context == null || store == null || filesystem == null
                 || localPeerId == null || localPeerId.isEmpty()
                 || sharedSecret == null || sharedSecret.length() < 16
-                || authorizer == null || binder == null)
+                || authorizer == null)
             throw new IllegalArgumentException("Listener requires store, filesystem, identity, provisioned secret and trust policy");
         this.context = context.getApplicationContext();
         this.store = store;
@@ -69,7 +66,6 @@ public final class LanTransferTcpListener implements AutoCloseable {
         this.localPeerId = localPeerId;
         this.sharedSecret = sharedSecret;
         this.authorizer = authorizer;
-        this.binder = binder;
         this.failures = failures;
     }
 
@@ -116,7 +112,9 @@ public final class LanTransferTcpListener implements AutoCloseable {
                 socket = current.accept();
                 socket.setTcpNoDelay(true);
                 socket.setKeepAlive(true);
-                binder.bind(socket);
+                // The listener is bound to the selected Wi-Fi address. Accepted sockets
+                // inherit that local interface; never call Network.bindSocket after accept,
+                // because the accepted socket is already connected.
                 if (closed.get()) {
                     socket.close();
                     return;
