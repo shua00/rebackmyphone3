@@ -35,7 +35,7 @@ public class LanTransferFilesystemTest {
  @Test public void chunkIsFsyncedBeforeReceiptAndSurvivesReopen()throws Exception{
   byte[] data=new byte[4096];Arrays.fill(data,(byte)7);start("fs-1",data,4096);
   assertTrue(writeChunk("fs-1",0,data,5));assertEquals(1,store.loadChunkReceipts("fs-1").size());
-  store.closeStore();store=new LanTransferStore(context);fs=new LanTransferFilesystem(context,store);
+  store.closeStore();store=new LanTransferStore(context);fs=new LanTransferFilesystem(context,store,LanTransferFilesystem.DEFAULT_STAGING_QUOTA_BYTES,testFileOps());
   assertTrue(fs.reconcile("fs-1",6).isEmpty());assertFalse(writeChunk("fs-1",0,data,7));
  }
  @Test public void corruptStagedFileInvalidatesReceiptOnRestartReconcile()throws Exception{

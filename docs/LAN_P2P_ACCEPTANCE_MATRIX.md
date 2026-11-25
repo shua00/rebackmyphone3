@@ -775,3 +775,9 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 
 - 目录创建改为实例方法以调用注入的 `fileOps.syncDirectory(parent)`；补回 OsConstants 导入并修复 atomicRename 声明。
 - 生产默认路径仍为 Android Os 系统调用，测试替身仅由 Robolectric 构造函数注入。
+
+
+## 52. TransferFilesystem 重启测试注入修正（2026-11-25）
+
+- Actions #816 文件系统测试仅 1 项失败：重开 Store 后测试重建 Filesystem 时忘记注入 Robolectric DurableFileOps，错误走到 Android Os.open 默认路径。
+- 已统一重启后的测试构造注入 fake；生产默认实现未改变。
