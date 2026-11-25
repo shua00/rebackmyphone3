@@ -134,6 +134,10 @@ class TransferStateMachineTests(unittest.TestCase):
                 with self.assertRaises(TransferTransitionError):
                     transition_state(terminal, TransferState.TRANSFERRING)
 
+    def test_sender_offer_can_fail_on_terminal_remote_or_security_error(self):
+        self.assertEqual(TransferState.FAILED,
+            transition_state(TransferState.OFFERED, TransferState.FAILED))
+
     def test_illegal_shortcuts_and_unknown_states_are_rejected(self):
         with self.assertRaises(TransferTransitionError):
             transition_state(TransferState.OFFERED, TransferState.COMPLETED)
