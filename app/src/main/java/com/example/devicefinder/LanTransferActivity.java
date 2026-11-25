@@ -75,6 +75,7 @@ public final class LanTransferActivity extends Activity {
         } catch (Exception failure) {
             status.setText("无法监听传输状态更新：" + failure.getClass().getSimpleName());
         }
+        LanTransferSenderService.resumeIfPending(this);
         refreshOffers();
     }
 
