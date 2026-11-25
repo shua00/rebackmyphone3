@@ -24,10 +24,8 @@ public final class LanTransferPairingReplayGuard {
         String key=sessionId + "\0" + senderPeerId;
         Entry old=entries.get(key);
         if(old!=null && sequence<=old.lastSequence) return false;
-        if(old==null && entries.size()>=MAX_SESSIONS) {
-            String eldest=entries.keySet().iterator().next();
-            entries.remove(eldest);
-        }
+        // Fail closed at capacity: evicting a live session would reopen its replay window.
+        if(old==null && entries.size()>=MAX_SESSIONS) return false;
         entries.put(key,new Entry(sequence,nowMs+ttlMs));
         return true;
     }

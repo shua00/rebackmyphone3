@@ -54,21 +54,6 @@ public final class LanTransferCredentials {
      * Atomic read-merge-write for a completed pairing. Existing v1 peers remain mapped to their
      * legacy PSK; the newly paired peer receives only its fresh 32-byte secret.
      */
-    /** Compatibility helper for the legacy manual-PSK screen; new pairing must use mergePeerSecret. */
-    @Deprecated
-    static Set<String> mergeTrustedPeerIds(Set<String> existingPeerIds,String existingSecret,
-            String requestedSecret,String newPeerId) {
-        if(existingPeerIds!=null&&!existingPeerIds.isEmpty()
-                &&(existingSecret==null||!existingSecret.equals(requestedSecret)))
-            throw new IllegalArgumentException("Existing trusted peers cannot be rebound to a different group secret");
-        if(existingSecret!=null&&!existingSecret.equals(requestedSecret))
-            throw new IllegalArgumentException("Existing pairing uses a different group secret");
-        Set<String> merged=new HashSet<>();
-        if(existingPeerIds!=null)merged.addAll(existingPeerIds);
-        validatePeer(newPeerId);validateSecret(requestedSecret);merged.add(newPeerId);
-        return Collections.unmodifiableSet(merged);
-    }
-
     public static synchronized void mergePeerSecret(Context c,String peerId,byte[] peerSecret)throws Exception {
         if(c==null)throw new IllegalArgumentException("Context is required");
         validatePeer(peerId);
