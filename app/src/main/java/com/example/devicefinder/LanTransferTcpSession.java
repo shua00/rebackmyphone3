@@ -83,19 +83,32 @@ public final class LanTransferTcpSession {
                 if (invalid instanceof SecurityException) throw (SecurityException) invalid;
                 throw new IOException("Invalid LNP2 frame", invalid);
             }
-            LanTransferStore.Transfer transfer = store.getTransfer(frame.transferId);
-            if (transfer == null) throw new SecurityException("Unknown transfer task");
-            LanTransferStore.Offer offer = transfer.offer;
-            if (!peer.peerId.equals(offer.senderPeerId)
-                    || !localPeerId.equals(offer.targetPeerId)
-                    || !peer.peerId.equals(frame.senderPeerId)
-                    || !localPeerId.equals(frame.targetPeerId))
-                throw new SecurityException("Frame does not match fixed Offer participants");
-
-            String responseKind = frame.kind;
-            JSONObject responseMetadata = null;
             long now = clock.nowMs();
             if (now < 0) throw new IOException("Invalid transfer clock");
+            String responseKind = frame.kind;
+            JSONObject responseMetadata = null;
+            LanTransferStore.Transfer transfer = store.getTransfer(frame.transferId);
+            if ("offer".equals(frame.kind)) {
+                if (frame.index != null || frame.payload.length != 0 || frame.metadata == null)
+                    throw new IOException("Malformed transfer Offer frame");
+                if (!peer.peerId.equals(frame.senderPeerId) || !localPeerId.equals(frame.targetPeerId))
+                    throw new SecurityException("Offer sender/target does not match authenticated session");
+                LanTransferStore.Offer incoming = parseOffer(frame.transferId, peer.peerId,
+                        localPeerId, frame.metadata, now);
+                boolean inserted = store.createOffer(incoming, now,
+                        requestedOfferChunkSize(frame.metadata));
+                transfer = store.getTransfer(frame.transferId);
+                responseMetadata = offerAckMetadata(transfer, inserted);
+                responseKind = "offer_ack";
+            } else {
+                if (transfer == null) throw new SecurityException("Unknown transfer task");
+                LanTransferStore.Offer offer = transfer.offer;
+                if (!peer.peerId.equals(offer.senderPeerId)
+                        || !localPeerId.equals(offer.targetPeerId)
+                        || !peer.peerId.equals(frame.senderPeerId)
+                        || !localPeerId.equals(frame.targetPeerId))
+                    throw new SecurityException("Frame does not match fixed Offer participants");
+            }
             if ("chunk".equals(frame.kind)) {
                 if (!"transferring".equals(transfer.state))
                     throw new IOException("Transfer is not accepting chunks");
@@ -146,6 +159,62 @@ public final class LanTransferTcpSession {
             handled++;
         }
         return handled;
+    }
+
+
+    private static LanTransferStore.Offer parseOffer(String transferId, String sender,
+            String target, JSONObject metadata, long now) throws IOException {
+        if (metadata.length() != 6
+                || !metadata.has("filename") || !metadata.has("size_bytes")
+                || !metadata.has("sha256") || !metadata.has("created_at_ms")
+                || !metadata.has("mime_type") || !metadata.has("chunk_size_bytes"))
+            throw new IOException("Invalid transfer Offer metadata");
+        try {
+            Object sizeValue = metadata.get("size_bytes");
+            Object createdValue = metadata.get("created_at_ms");
+            if (!(sizeValue instanceof Number) || !(createdValue instanceof Number))
+                throw new IOException("Offer size/timestamp must be JSON integers");
+            long size = new java.math.BigDecimal(sizeValue.toString()).longValueExact();
+            long created = new java.math.BigDecimal(createdValue.toString()).longValueExact();
+            String filename = metadata.getString("filename");
+            String sha256 = metadata.getString("sha256");
+            String mime = metadata.getString("mime_type");
+            int chunk = requestedOfferChunkSize(metadata);
+            if (created > now + 300000L || created < now - 7L * 24L * 60L * 60L * 1000L)
+                throw new IOException("Transfer Offer is outside the accepted age window");
+            return new LanTransferStore.Offer(transferId, sender, target, filename,
+                    size, sha256, created, mime);
+        } catch (org.json.JSONException | ArithmeticException invalid) {
+            throw new IOException("Malformed transfer Offer metadata", invalid);
+        }
+    }
+
+    private static int requestedOfferChunkSize(JSONObject metadata) throws IOException {
+        try {
+            Object value = metadata.get("chunk_size_bytes");
+            if (!(value instanceof Number)) throw new IOException("Offer chunk size must be a JSON integer");
+            int chunk = new java.math.BigDecimal(value.toString()).intValueExact();
+            if (chunk < LanTransferStore.MIN_CHUNK_SIZE || chunk > LanTransferStore.MAX_CHUNK_SIZE)
+                throw new IOException("Offer chunk size outside supported range");
+            return chunk;
+        } catch (org.json.JSONException | ArithmeticException invalid) {
+            throw new IOException("Invalid Offer chunk size", invalid);
+        }
+    }
+
+    private static JSONObject offerAckMetadata(LanTransferStore.Transfer transfer,
+            boolean inserted) throws IOException {
+        JSONObject result = new JSONObject();
+        if (transfer == null) throw new IOException("Offer was not durably stored");
+        try {
+            result.put("state", transfer.state);
+            result.put("chunk_size_bytes", transfer.chunkSizeBytes);
+            result.put("total_chunks", transfer.totalChunks);
+            result.put("new_offer", inserted);
+        } catch (org.json.JSONException invalid) {
+            throw new IOException("Unable to encode Offer acknowledgement", invalid);
+        }
+        return result;
     }
 
     private static int requestedPageLimit(JSONObject metadata) throws IOException {
