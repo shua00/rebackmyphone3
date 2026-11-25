@@ -532,3 +532,17 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 **自动化/CI 证据：** commit `accd3afd8e79f5edbfe978b6bacdd0ad2bbd8b67`；Actions [#781](https://github.com/shua00/rebackmyphone3/actions/runs/45518434514) 成功，Python 编译检查通过，292 项测试通过。Android build 按路径规则跳过（本批无 Android 构建输入变更）。
 
 **阶段判定：** Python 文件传输 framing、接收会话、发送驱动、缺块分页与默认帧预算已具备自动化闭环；LAN 文件传输的真实 TCP listener/连接准入、Android 同协议实现、文件选择/保存 UI、真机断网恢复与 PC 互通仍未完成，不能宣称端到端文件传输验收通过。
+
+
+## 28. TCP 真实监听/客户端与连接生命周期（2026-11-25）
+
+| 验收点 | 本批实现 | 当前边界 |
+|---|---|---|
+| TCP listener | 新增独立 `TransferTcpServer`，支持 bind/listen/accept 和后台会话 worker | 仅 IPv4 TCP；尚未接入 Android Network 绑定和多网卡策略 |
+| client connect | 新增 `connect_transfer_peer`，连接超时、认证回调失败自动关闭 socket | 认证回调必须由上层实现可信 peer challenge/session key；本模块不自行发明信任协议 |
+| 身份约束 | listener/client 仅接受认证回调返回的 peer_id 与至少 16 字节 session secret；会话帧继续核对固定任务参与者 | 测试回调使用固定身份/密钥，只验证接线与资源生命周期，不代表生产认证已验收 |
+| 资源准入 | 并发连接槽位有界；超过上限立即关闭；每连接读写超时；每连接帧数/载荷受限 | 尚未验证真实 Wi-Fi 网络抖动、NAT/路由变化及 OEM 后台行为 |
+| 关闭与错误 | shutdown 关闭 listener/活动 socket，再等待 accept/worker 退出；错误通过回调暴露 | 进程被强杀时仍依赖 OS 回收，重启后任务恢复由账本/磁盘 reconcile 负责 |
+| 集成测试 | 新增 loopback TCP 端到端文件传输、并发准入拒绝、认证失败关闭、空闲超时回收测试 | loopback 不是双设备 LAN 真机验收 |
+
+**阶段判定：** 本批补齐 Python 真实 TCP socket 监听/客户端生命周期的可运行基础设施。身份认证仍由调用方回调提供，当前尚未把现有 peer challenge 代码接入回调；因此不能宣称生产认证链路或 Android/PC 文件传输已完成。
