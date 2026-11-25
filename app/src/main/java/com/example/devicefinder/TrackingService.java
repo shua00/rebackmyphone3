@@ -2174,12 +2174,15 @@ public class TrackingService extends Service implements LocationListener {
         else alarmManager.set(AlarmManager.RTC_WAKEUP, triggerAt, pi);
     }
 
-    private String getUniqueDeviceId() {
-        SharedPreferences sp = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
+    private String getUniqueDeviceId() { return getUniqueDeviceId(this); }
+
+    /** Shared peer identity resolver for the service transport and ChatActivity UI. */
+    static String getUniqueDeviceId(Context context) {
+        SharedPreferences sp = context.getSharedPreferences("device_finder_prefs", Context.MODE_PRIVATE);
         String deviceId = sp.getString("saved_device_id", null);
         if (deviceId == null) {
             String model = Build.MODEL != null ? Build.MODEL.replaceAll("\\s+", "_") : "UnknownPhone";
-            String androidId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+            String androidId = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ANDROID_ID);
             String suffix = (androidId != null && androidId.length() >= 4) ? androidId.substring(androidId.length() - 4) : "0000";
             deviceId = model + "_" + suffix;
             sp.edit().putString("saved_device_id", deviceId).apply();
@@ -2504,6 +2507,7 @@ public class TrackingService extends Service implements LocationListener {
                 LanTransferStore.Transfer after = lanTransferStore.getTransfer(transferId);
                 FileLogger.log(this, "LAN_TRANSFER", "User action=" + action
                         + " transfer=" + transferId + " state=" + (after == null ? "missing" : after.state));
+                sendBroadcast(new Intent("ACTION_LAN_TRANSFER_UPDATED").setPackage(getPackageName()));
             }
         } catch (Exception failure) {
             FileLogger.log(this, "LAN_TRANSFER", "User action failed action=" + action

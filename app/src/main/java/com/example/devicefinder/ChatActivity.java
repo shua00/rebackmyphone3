@@ -16,6 +16,7 @@
 package com.example.devicefinder;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -30,9 +31,15 @@ import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.text.InputType;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class ChatActivity extends Activity {
 
@@ -41,6 +48,11 @@ public class ChatActivity extends Activity {
     private EditText inputMsg;
     private Button btnSend;
     private TextView tvNewMsg; // 【新增】新消息标签
+    private Button btnTransferSettings, btnIncomingTransfers;
+    private TextView tvTransferStatus;
+    private final ExecutorService transferUiExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "LanTransfer-UI"); t.setDaemon(true); return t;
+    });
 
     // [M1] volatile：TrackingService 的 UDP 接收线程读此字段决定是否 sendBroadcast，
     //      若无 volatile，跨线程可见性无保证，可能出现"手机收到消息但聊天页不刷新"
@@ -80,6 +92,12 @@ public class ChatActivity extends Activity {
         inputMsg = findViewById(R.id.inputMsg);
         btnSend = findViewById(R.id.btnSend);
         tvNewMsg = findViewById(R.id.tvNewMsg); // 绑定新标签
+        btnTransferSettings = findViewById(R.id.btnTransferSettings);
+        btnIncomingTransfers = findViewById(R.id.btnIncomingTransfers);
+        tvTransferStatus = findViewById(R.id.tvTransferStatus);
+        btnTransferSettings.setOnClickListener(v -> showTransferPairingDialog());
+        btnIncomingTransfers.setOnClickListener(v -> showIncomingTransfers());
+        refreshIncomingTransferCount();
 
         // 【新增】监听滚动，判断是否滑到了底部
         scrollView.getViewTreeObserver().addOnScrollChangedListener(() -> {
@@ -122,6 +140,88 @@ public class ChatActivity extends Activity {
         } catch (Exception e) {
             android.util.Log.e("ChatActivity", "注册 UPDATE_CHAT_UI 广播失败: " + e.getMessage());
         }
+    }
+
+    private void showTransferPairingDialog() {
+        String localId = TrackingService.getUniqueDeviceId(this);
+        LinearLayout form = new LinearLayout(this); form.setOrientation(LinearLayout.VERTICAL);
+        int pad = (int) (16 * getResources().getDisplayMetrics().density);
+        form.setPadding(pad, pad, pad, 0);
+        TextView local = new TextView(this); local.setText("本机设备 ID（提供给对端）：\\n" + localId); form.addView(local);
+        EditText secret = new EditText(this); secret.setSingleLine(true);
+        secret.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        secret.setHint("双方一致的共享密钥（至少 32 字节）"); form.addView(secret);
+        EditText peer = new EditText(this); peer.setSingleLine(true); peer.setHint("对端设备 ID（精确匹配）"); form.addView(peer);
+        new AlertDialog.Builder(this).setTitle("LAN 文件传输安全配对")
+            .setMessage("两台设备使用相同共享密钥，并分别填写对方设备 ID。仅允许名单内设备连接。密钥由 AndroidKeyStore 加密保存。")
+            .setView(form).setNegativeButton("取消", null)
+            .setPositiveButton("保存并启用", (d, w) -> {
+                String value = secret.getText().toString(); String peerId = peer.getText().toString().trim(); secret.setText("");
+                try {
+                    LanTransferCredentials.provision(this, value, Collections.singleton(peerId));
+                    Toast.makeText(this, "配对已保存，局域网文件接收正在启用", Toast.LENGTH_LONG).show();
+                    refreshIncomingTransferCount();
+                } catch (Exception failure) {
+                    Toast.makeText(this, "配对保存失败：" + failure.getMessage(), Toast.LENGTH_LONG).show();
+                }
+            }).show();
+    }
+
+    private void refreshIncomingTransferCount() {
+        if (isFinishing() || transferUiExecutor.isShutdown()) return;
+        transferUiExecutor.execute(() -> {
+            int count = 0; String error = null; LanTransferStore store = null;
+            try {
+                store = new LanTransferStore(getApplicationContext());
+                count = store.loadIncomingOffers(TrackingService.getUniqueDeviceId(this), 50).size();
+            } catch (Exception failure) { error = failure.getClass().getSimpleName(); }
+            finally { if (store != null) store.closeStore(); }
+            final int n = count; final String e = error;
+            runOnUiThread(() -> { if (isFinishing()) return;
+                btnIncomingTransfers.setText("待接收文件 (" + n + ")");
+                tvTransferStatus.setText(e == null ? (n == 0 ? "文件传输：暂无待处理请求" : "文件传输：有 " + n + " 个待处理请求") : "读取失败：" + e);
+            });
+        });
+    }
+
+    private void showIncomingTransfers() {
+        if (transferUiExecutor.isShutdown()) return;
+        transferUiExecutor.execute(() -> {
+            List<LanTransferStore.Transfer> offers = Collections.emptyList(); String error = null;
+            LanTransferStore store = null;
+            try { store = new LanTransferStore(getApplicationContext());
+                offers = store.loadIncomingOffers(TrackingService.getUniqueDeviceId(this), 50);
+            } catch (Exception failure) { error = failure.getClass().getSimpleName(); }
+            finally { if (store != null) store.closeStore(); }
+            final List<LanTransferStore.Transfer> rows = offers; final String e = error;
+            runOnUiThread(() -> {
+                if (isFinishing()) return;
+                if (e != null) { Toast.makeText(this, "读取文件请求失败：" + e, Toast.LENGTH_LONG).show(); return; }
+                if (rows.isEmpty()) { Toast.makeText(this, "当前没有待处理的文件请求", Toast.LENGTH_SHORT).show(); refreshIncomingTransferCount(); return; }
+                LinearLayout items = new LinearLayout(this); items.setOrientation(LinearLayout.VERTICAL);
+                int pad = (int) (12 * getResources().getDisplayMetrics().density); items.setPadding(pad,pad,pad,pad);
+                for (LanTransferStore.Transfer t : rows) {
+                    TextView detail = new TextView(this);
+                    detail.setText(t.offer.filename + "\\n发送方：" + t.offer.senderPeerId + "\\n大小：" + android.text.format.Formatter.formatFileSize(this,t.offer.sizeBytes) + "\\n状态：" + t.state);
+                    items.addView(detail);
+                    LinearLayout actions = new LinearLayout(this);
+                    Button accept = new Button(this); accept.setText("接受");
+                    Button reject = new Button(this); reject.setText("拒绝");
+                    actions.addView(accept,new LinearLayout.LayoutParams(0,-2,1)); actions.addView(reject,new LinearLayout.LayoutParams(0,-2,1)); items.addView(actions);
+                    accept.setOnClickListener(v -> { sendTransferAction("ACTION_LAN_TRANSFER_ACCEPT",t.offer.transferId); refreshIncomingTransferCount(); });
+                    reject.setOnClickListener(v -> new AlertDialog.Builder(this).setMessage("确定拒绝接收该文件？").setNegativeButton("取消",null)
+                        .setPositiveButton("拒绝",(d,w) -> { sendTransferAction("ACTION_LAN_TRANSFER_REJECT",t.offer.transferId); refreshIncomingTransferCount(); }).show());
+                }
+                ScrollView scroll = new ScrollView(this); scroll.addView(items);
+                new AlertDialog.Builder(this).setTitle("待接收文件请求").setView(scroll).setPositiveButton("关闭",null).show();
+            });
+        });
+    }
+
+    private void sendTransferAction(String action, String transferId) {
+        Intent intent = new Intent(this, TrackingService.class).setAction(action).putExtra("transfer_id",transferId);
+        try { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent); else startService(intent); }
+        catch (Exception failure) { Toast.makeText(this,"文件操作提交失败："+failure.getClass().getSimpleName(),Toast.LENGTH_LONG).show(); }
     }
 
     private void sendMessage() {
@@ -221,6 +321,7 @@ public class ChatActivity extends Activity {
         super.onResume();
         isForeground = true;
         refreshHistory(false);
+        refreshIncomingTransferCount();
         // Reclaim the editor after Activity/IME focus transitions so an already-visible
         // keyboard is immediately ready for typing without an extra tap on the field.
         restoreChatInputFocus();
@@ -248,8 +349,7 @@ public class ChatActivity extends Activity {
         // [B7] 防御：onCreate 中 registerReceiver 已包 try/catch，
         //      若注册失败或 Activity 生命周期异常未注册就走到 onDestroy，
         //      unregisterReceiver 会抛 IllegalArgumentException 崩溃
-        try {
-            unregisterReceiver(msgReceiver);
-        } catch (Exception ignored) {}
+        try { unregisterReceiver(msgReceiver); } catch (Exception ignored) {}
+        transferUiExecutor.shutdownNow();
     }
 }
