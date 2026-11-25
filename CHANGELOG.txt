@@ -8,6 +8,7 @@ v8.60 — 2026-11-25 · SAF 文件发送入口与独立后台发送服务
 - 独立 LanTransferActivity 增加“选择文件并发送”：用户必须明确输入已配对 Peer ID、当前 LAN 主机地址和 TCP 端口；目标不在 trustedPeerIds 时拒绝创建任务，不猜测 IP、不把文件内容放入 UDP 聊天通道。
 - 新增 LanTransferSenderService，使用独立 dataSync 前台服务和有界单线程 executor 执行 worker；发送任务元数据先持久化，进程被系统回收后可由 START_STICKY 重新读取。
 - Offer 尚待接受或网络异常进入 paused 时，服务保留任务并按 60 秒间隔有界重试；终态清除任务调度元数据。单任务队列采用显式拒绝策略，避免新任务静默覆盖旧任务。
+- 修正发送端安全/状态异常的终态收敛：offered/accepted 状态遇到不可恢复认证或任务异常可进入 failed，避免服务把不可恢复任务误当作网络暂停无限重试。
 - 网络选择复用 TrackingService 的选择原则：优先 active Wi-Fi，只有唯一 Wi-Fi 候选时才选用；多 Wi-Fi 歧义时拒绝连接，不回退默认蜂窝网络。
 - 新增 SAF/后台服务源码守卫；ChatActivity 与 activity_chat.xml 保持文件传输无关。
 - 限制：当前后台调度器一次只接纳一个发送任务；尚未实现任务列表/并发队列、用户取消控件、完成快照保留/清理策略 UI；接收端完成文件管理、进程重启实测、Android/Python 双端真机传输仍待验收。重启恢复依赖系统重启该 START_STICKY 服务，不能替代设备重启后的显式恢复调度。
