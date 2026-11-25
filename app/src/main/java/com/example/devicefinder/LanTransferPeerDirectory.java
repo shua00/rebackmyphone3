@@ -1,17 +1,15 @@
 package com.example.devicefinder;
 
 import android.content.Context;
-import android.content.SharedPreferences;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
-/**
- * File-transfer-owned directory of untrusted LAN discovery candidates and recent endpoints.
- * Discovery hints never grant trust and are never consulted by the authentication policy.
- */
+/** File-transfer-owned candidates. Chat discovery is a fallback hint, never an authority. */
 public final class LanTransferPeerDirectory {
     public static final long ENDPOINT_TTL_MS = 120_000L;
     public static final int MAX_ENTRIES = 128;
@@ -32,7 +30,6 @@ public final class LanTransferPeerDirectory {
         public boolean isConnectable() { return port >= 1 && port <= 65535; }
         public boolean isAuthenticated() { return false; }
     }
-
     private LanTransferPeerDirectory() {}
 
     public static void activateNetwork(Context context, String fingerprint) {
@@ -43,22 +40,16 @@ public final class LanTransferPeerDirectory {
                     .edit().putString(KEY_CURRENT_NETWORK, fingerprint).commit();
         }
     }
-
     public static String getCurrentNetwork(Context context) {
         if (context == null) return null;
         return context.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .getString(KEY_CURRENT_NETWORK, null);
     }
-
     public static void recordFileDiscoveryCandidate(Context c, String id, String host, int port,
-            String network, long now) {
-        record(c,id,host,port,network,SOURCE_FILE_DISCOVERY,now);
-    }
-    /** Optional chat-discovery adapter; this is still an untrusted routing hint. */
+            String network, long now) { record(c,id,host,port,network,SOURCE_FILE_DISCOVERY,now); }
+    /** Optional chat hint. It is usable only when no fresh file-discovery lease exists. */
     public static void recordChatDiscoveryHint(Context c, String id, String host, int port,
-            String network, long now) {
-        record(c,id,host,port,network,SOURCE_CHAT_HINT,now);
-    }
+            String network, long now) { record(c,id,host,port,network,SOURCE_CHAT_HINT,now); }
 
     private static void record(Context context, String id, String host, int port,
             String network, String source, long now) {
@@ -68,38 +59,52 @@ public final class LanTransferPeerDirectory {
             throw new IllegalArgumentException("Invalid LAN transfer discovery candidate");
         synchronized (LOCK) {
             List<Candidate> next = read(context);
-            for (int i=next.size()-1;i>=0;i--) if (next.get(i).peerId.equals(id)) next.remove(i);
+            // Maintain a separate lease per source and peer. Chat cannot evict file discovery.
+            for (int i=next.size()-1;i>=0;i--) {
+                Candidate old=next.get(i);
+                if (old.peerId.equals(id) && old.networkFingerprint.equals(network)
+                        && old.source.equals(source)) next.remove(i);
+            }
             next.add(new Candidate(id,host,port,network,source,now));
             prune(next,now);
             Collections.sort(next,(a,b)->Long.compare(b.lastSeenAtMs,a.lastSeenAtMs));
-            while(next.size()>MAX_ENTRIES) next.remove(next.size()-1);
+            while(next.size()>MAX_ENTRIES*2) next.remove(next.size()-1);
             persist(context,next);
         }
     }
-
     public static Candidate findCurrent(Context c, String id, long now) {
         String network=getCurrentNetwork(c);
         if(c==null || !validPeerId(id) || !validFingerprint(network) || now<=0L) return null;
         synchronized(LOCK) {
-            for(Candidate item:read(c))
-                if(item.peerId.equals(id) && item.networkFingerprint.equals(network) && fresh(item,now))
-                    return item;
+            Candidate chat=null;
+            for(Candidate item:read(c)) {
+                if(!item.peerId.equals(id) || !item.networkFingerprint.equals(network) || !fresh(item,now))
+                    continue;
+                if(SOURCE_FILE_DISCOVERY.equals(item.source)) return item;
+                if(SOURCE_CHAT_HINT.equals(item.source) && (chat==null || item.lastSeenAtMs>chat.lastSeenAtMs))
+                    chat=item;
+            }
+            return chat;
         }
-        return null;
     }
-
     public static List<Candidate> loadCurrent(Context c, long now) {
         String network=getCurrentNetwork(c);
         if(c==null || !validFingerprint(network) || now<=0L) return Collections.emptyList();
         synchronized(LOCK) {
-            List<Candidate> result=new ArrayList<>();
-            for(Candidate item:read(c))
-                if(item.networkFingerprint.equals(network) && fresh(item,now)) result.add(item);
+            Map<String,Candidate> selected=new LinkedHashMap<>();
+            for(Candidate item:read(c)) {
+                if(!item.networkFingerprint.equals(network) || !fresh(item,now)) continue;
+                Candidate old=selected.get(item.peerId);
+                if(old==null || (SOURCE_CHAT_HINT.equals(old.source)
+                        && SOURCE_FILE_DISCOVERY.equals(item.source))
+                        || (old.source.equals(item.source) && item.lastSeenAtMs>old.lastSeenAtMs))
+                    selected.put(item.peerId,item);
+            }
+            List<Candidate> result=new ArrayList<>(selected.values());
             Collections.sort(result,(a,b)->Long.compare(b.lastSeenAtMs,a.lastSeenAtMs));
             return Collections.unmodifiableList(result);
         }
     }
-
     public static void pruneExpired(Context c,long now) {
         if(c==null || now<=0L) return;
         synchronized(LOCK) {
@@ -114,7 +119,6 @@ public final class LanTransferPeerDirectory {
                     .remove(KEY_ENTRIES).commit();
         }
     }
-
     private static List<Candidate> read(Context c) {
         List<Candidate> out=new ArrayList<>();
         String raw=c.getApplicationContext().getSharedPreferences(PREFS,Context.MODE_PRIVATE)
@@ -122,7 +126,7 @@ public final class LanTransferPeerDirectory {
         if(raw==null || raw.isEmpty())return out;
         try {
             JSONArray rows=new JSONArray(raw);
-            for(int i=0;i<rows.length() && i<MAX_ENTRIES*2;i++) {
+            for(int i=0;i<rows.length() && i<MAX_ENTRIES*4;i++) {
                 JSONObject row=rows.optJSONObject(i); if(row==null)continue;
                 String id=row.optString("peer_id",""), host=row.optString("host","");
                 int port=row.optInt("port",-1); String network=row.optString("network","");
