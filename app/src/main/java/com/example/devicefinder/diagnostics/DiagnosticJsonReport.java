@@ -26,6 +26,8 @@ public final class DiagnosticJsonReport {
         field(out, "passCount", run.count(DiagnosticRun.Status.PASS)).append(',');
         field(out, "failCount", run.count(DiagnosticRun.Status.FAIL)).append(',');
         field(out, "skippedCount", run.count(DiagnosticRun.Status.SKIPPED)).append(',');
+        field(out, "timeoutCount", run.count(DiagnosticRun.Status.TIMEOUT)).append(',');
+        field(out, "cancelledCount", run.count(DiagnosticRun.Status.CANCELLED)).append(',');
         field(out, "acceptancePassed", run.isCompleteAndPassing()).append(',');
         out.append("\"cases\":[");
         for (int i = 0; i < run.cases.size(); i++) {
