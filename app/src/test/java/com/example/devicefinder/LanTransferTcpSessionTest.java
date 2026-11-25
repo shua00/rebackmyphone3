@@ -178,6 +178,51 @@ public class LanTransferTcpSessionTest {
     }
 
     @Test
+    public void emptyOfferCannotBePublishedBeforeExplicitAcceptance() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        context.deleteDatabase("lan_p2p_transfer.db");
+        deleteTree(new File(context.getFilesDir(), "lan-transfer-staging"));
+        deleteTree(new File(context.getFilesDir(), "lan-transfer-received"));
+        LanTransferStore store = new LanTransferStore(context);
+        String emptySha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        String id = "empty-offer-before-accept";
+        store.createOffer(new LanTransferStore.Offer(id, "sender", "receiver",
+                "empty.bin", 0L, emptySha, 1L, "application/octet-stream"),
+                10L, LanTransferStore.DEFAULT_CHUNK_SIZE);
+        LanTransferFilesystem filesystem = new LanTransferFilesystem(context, store,
+                LanTransferFilesystem.DEFAULT_STAGING_QUOTA_BYTES, fileOps());
+        LanTransferTcpSession session = new LanTransferTcpSession(context, store, filesystem,
+                "receiver", SECRET, "sender"::equals, () -> 10L);
+        ServerSocket listener = new ServerSocket(0);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<Boolean> served = executor.submit(() -> {
+                try (Socket accepted = listener.accept()) {
+                    session.serve(accepted);
+                    return false;
+                } catch (java.io.IOException expected) {
+                    return true;
+                }
+            });
+            try (Socket client = new Socket("127.0.0.1", listener.getLocalPort())) {
+                LanTransferAuthenticator.AuthenticatedPeer peer =
+                        LanTransferAuthenticator.authenticateClient(client, "sender", "receiver", SECRET);
+                LanTransferFrameCodec.send(client, new LanTransferFrameCodec.Frame(
+                        "complete", id, "sender", "receiver", null, new byte[0], null),
+                        peer.sessionKey, 1024 * 1024);
+            }
+            assertTrue(served.get(4, TimeUnit.SECONDS));
+            assertEquals("offered", store.getTransfer(id).state);
+            File[] published = new File(context.getFilesDir(), "lan-transfer-received").listFiles();
+            assertTrue(published == null || published.length == 0);
+        } finally {
+            listener.close();
+            executor.shutdownNow();
+            store.closeStore();
+        }
+    }
+
+    @Test
     public void untrustedPeerIsRejectedBeforeAnyTransferFrameIsProcessed() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         LanTransferStore store = new LanTransferStore(context);
