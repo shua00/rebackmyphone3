@@ -12,7 +12,7 @@ import java.util.concurrent.TimeoutException;
  * production transfer state: concrete probes must call the real production interfaces.
  * Invoke from a dedicated background executor, never the Android main thread.
  */
-public final class LanTransferDiagnosticExecutor {
+public final class DiagnosticExecutor {
     public interface Probe {
         /** False means the test is not applicable on this device/network and is recorded SKIPPED. */
         boolean isSupported() throws Exception;
@@ -21,7 +21,7 @@ public final class LanTransferDiagnosticExecutor {
     }
 
     public interface Listener {
-        void onCaseCompleted(LanTransferDiagnosticRun.CaseResult result, int completed, int total);
+        void onCaseCompleted(DiagnosticRun.CaseResult result, int completed, int total);
     }
 
     public interface Cancellation {
@@ -39,9 +39,9 @@ public final class LanTransferDiagnosticExecutor {
         }
     }
 
-    private LanTransferDiagnosticExecutor() {}
+    private DiagnosticExecutor() {}
 
-    public static LanTransferDiagnosticRun execute(LanTransferDiagnosticRun.Metadata metadata,
+    public static DiagnosticRun execute(DiagnosticRun.Metadata metadata,
             List<TestCase> tests, int expectedCaseCount, Cancellation cancellation, Listener listener) {
         if (metadata == null || tests == null || expectedCaseCount < 1 || expectedCaseCount > 128
                 || tests.size() > expectedCaseCount || tests.size() > 128)
@@ -52,11 +52,11 @@ public final class LanTransferDiagnosticExecutor {
                 throw new IllegalArgumentException("Null or duplicate diagnostic test");
         }
 
-        List<LanTransferDiagnosticRun.CaseResult> results = new ArrayList<>();
+        List<DiagnosticRun.CaseResult> results = new ArrayList<>();
         for (int i = 0; i < tests.size(); i++) {
             TestCase test = tests.get(i);
             long started = System.nanoTime();
-            LanTransferDiagnosticRun.CaseResult result;
+            DiagnosticRun.CaseResult result;
             if (cancellation != null && cancellation.isCancelled()) {
                 result = skipped(test.id, "CANCELLED");
             } else {
@@ -66,12 +66,12 @@ public final class LanTransferDiagnosticExecutor {
                     } else {
                         Map<String, Long> metrics = test.probe.execute();
                         long duration = elapsedMs(started);
-                        result = new LanTransferDiagnosticRun.CaseResult(test.id,
-                                LanTransferDiagnosticRun.Status.PASS, duration, "", metrics);
+                        result = new DiagnosticRun.CaseResult(test.id,
+                                DiagnosticRun.Status.PASS, duration, "", metrics);
                     }
                 } catch (Exception failure) {
-                    result = new LanTransferDiagnosticRun.CaseResult(test.id,
-                            LanTransferDiagnosticRun.Status.FAIL, elapsedMs(started),
+                    result = new DiagnosticRun.CaseResult(test.id,
+                            DiagnosticRun.Status.FAIL, elapsedMs(started),
                             stableFailureCode(failure), null);
                 }
             }
@@ -81,12 +81,12 @@ public final class LanTransferDiagnosticExecutor {
                 catch (RuntimeException ignored) { /* UI observers cannot abort diagnostics. */ }
             }
         }
-        return new LanTransferDiagnosticRun(metadata, results, expectedCaseCount);
+        return new DiagnosticRun(metadata, results, expectedCaseCount);
     }
 
-    private static LanTransferDiagnosticRun.CaseResult skipped(String id, String code) {
-        return new LanTransferDiagnosticRun.CaseResult(id,
-                LanTransferDiagnosticRun.Status.SKIPPED, 0L, code, null);
+    private static DiagnosticRun.CaseResult skipped(String id, String code) {
+        return new DiagnosticRun.CaseResult(id,
+                DiagnosticRun.Status.SKIPPED, 0L, code, null);
     }
 
     private static long elapsedMs(long startedNanos) {

@@ -15,18 +15,26 @@ import java.util.UUID;
  * Callers must never place credentials, raw peer IDs, IP addresses, payloads, or file contents
  * in this report.
  */
-public final class LanTransferDiagnosticRun {
+public final class DiagnosticRun {
     public static final int SCHEMA_VERSION = 1;
     public enum Status { PASS, FAIL, SKIPPED }
 
     public static final class Metadata {
         public final String runId;
         public final long startedAtEpochMs;
-        public final String appVersion, commit, deviceModel, networkType, profile, side;
+        public final String featureId, appVersion, commit, deviceModel, networkType, profile, side;
         public final int androidApi;
 
         public Metadata(String runId, long startedAtEpochMs, String appVersion, String commit,
                 String deviceModel, int androidApi, String networkType, String profile, String side) {
+            this("lan_transfer", runId, startedAtEpochMs, appVersion, commit, deviceModel,
+                    androidApi, networkType, profile, side);
+        }
+
+        public Metadata(String featureId, String runId, long startedAtEpochMs, String appVersion,
+                String commit, String deviceModel, int androidApi, String networkType,
+                String profile, String side) {
+            this.featureId = bounded(featureId, 64, "featureId");
             this.runId = bounded(runId, 64, "runId");
             this.startedAtEpochMs = startedAtEpochMs;
             this.appVersion = bounded(appVersion, 80, "appVersion");
@@ -42,8 +50,15 @@ public final class LanTransferDiagnosticRun {
 
         public static Metadata create(long startedAtEpochMs, String appVersion, String commit,
                 String deviceModel, int androidApi, String networkType, String profile, String side) {
-            return new Metadata(UUID.randomUUID().toString(), startedAtEpochMs, appVersion, commit,
+            return createForFeature("lan_transfer", startedAtEpochMs, appVersion, commit,
                     deviceModel, androidApi, networkType, profile, side);
+        }
+
+        public static Metadata createForFeature(String featureId, long startedAtEpochMs,
+                String appVersion, String commit, String deviceModel, int androidApi,
+                String networkType, String profile, String side) {
+            return new Metadata(featureId, UUID.randomUUID().toString(), startedAtEpochMs,
+                    appVersion, commit, deviceModel, androidApi, networkType, profile, side);
         }
     }
 
@@ -84,7 +99,7 @@ public final class LanTransferDiagnosticRun {
     public final List<CaseResult> cases;
     public final int expectedCaseCount;
 
-    public LanTransferDiagnosticRun(Metadata metadata, List<CaseResult> cases, int expectedCaseCount) {
+    public DiagnosticRun(Metadata metadata, List<CaseResult> cases, int expectedCaseCount) {
         if (metadata == null || cases == null || cases.size() > 128
                 || expectedCaseCount < 1 || expectedCaseCount > 128 || cases.size() > expectedCaseCount)
             throw new IllegalArgumentException("Invalid diagnostic run");

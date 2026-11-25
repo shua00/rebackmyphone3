@@ -3,15 +3,16 @@ package com.example.devicefinder.diagnostics;
 import java.util.Map;
 
 /** Stable JSON export for offline comparison; intentionally excludes all secret/network payload data. */
-public final class LanTransferDiagnosticReport {
-    private LanTransferDiagnosticReport() {}
+public final class DiagnosticJsonReport {
+    private DiagnosticJsonReport() {}
 
-    public static String toJson(LanTransferDiagnosticRun run) {
+    public static String toJson(DiagnosticRun run) {
         if (run == null) throw new IllegalArgumentException("Diagnostic run is required");
-        LanTransferDiagnosticRun.Metadata m = run.metadata;
+        DiagnosticRun.Metadata m = run.metadata;
         StringBuilder out = new StringBuilder(1024);
         out.append('{');
-        field(out, "schemaVersion", LanTransferDiagnosticRun.SCHEMA_VERSION).append(',');
+        field(out, "schemaVersion", DiagnosticRun.SCHEMA_VERSION).append(',');
+        field(out, "featureId", m.featureId).append(',');
         field(out, "runId", m.runId).append(',');
         field(out, "startedAtEpochMs", m.startedAtEpochMs).append(',');
         field(out, "appVersion", m.appVersion).append(',');
@@ -22,14 +23,14 @@ public final class LanTransferDiagnosticReport {
         field(out, "profile", m.profile).append(',');
         field(out, "side", m.side).append(',');
         field(out, "expectedCaseCount", run.expectedCaseCount).append(',');
-        field(out, "passCount", run.count(LanTransferDiagnosticRun.Status.PASS)).append(',');
-        field(out, "failCount", run.count(LanTransferDiagnosticRun.Status.FAIL)).append(',');
-        field(out, "skippedCount", run.count(LanTransferDiagnosticRun.Status.SKIPPED)).append(',');
+        field(out, "passCount", run.count(DiagnosticRun.Status.PASS)).append(',');
+        field(out, "failCount", run.count(DiagnosticRun.Status.FAIL)).append(',');
+        field(out, "skippedCount", run.count(DiagnosticRun.Status.SKIPPED)).append(',');
         field(out, "acceptancePassed", run.isCompleteAndPassing()).append(',');
         out.append("\"cases\":[");
         for (int i = 0; i < run.cases.size(); i++) {
             if (i > 0) out.append(',');
-            LanTransferDiagnosticRun.CaseResult c = run.cases.get(i);
+            DiagnosticRun.CaseResult c = run.cases.get(i);
             out.append('{');
             field(out, "caseId", c.caseId).append(',');
             field(out, "status", c.status.name()).append(',');
