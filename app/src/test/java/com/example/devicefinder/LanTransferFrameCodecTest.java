@@ -58,7 +58,7 @@ public class LanTransferFrameCodecTest {
         } finally {listener.close();executor.shutdownNow();}
     }
 
-    @Test public void rejectsWrongSessionKeyAndUnexpectedPeer() throws Exception {
+    @Test public void rejectsUnexpectedPeer() throws Exception {
         ServerSocket listener=new ServerSocket(0);
         ExecutorService executor=Executors.newSingleThreadExecutor();
         try {
@@ -76,4 +76,24 @@ public class LanTransferFrameCodecTest {
             assertTrue(received.get(3,TimeUnit.SECONDS));
         } finally {listener.close();executor.shutdownNow();}
     }
+    @Test public void rejectsWrongSessionKey() throws Exception {
+        ServerSocket listener=new ServerSocket(0);
+        ExecutorService executor=Executors.newSingleThreadExecutor();
+        byte[] wrongKey="wrong-session-key-0123456789".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        try {
+            Future<Boolean> received=executor.submit(()->{
+                try(Socket socket=listener.accept()){
+                    socket.setSoTimeout(2000);
+                    LanTransferFrameCodec.receive(socket,wrongKey,1024,"sender","receiver");
+                    return false;
+                } catch(SecurityException expected){return true;}
+            });
+            try(Socket client=new Socket("127.0.0.1",listener.getLocalPort())){
+                LanTransferFrameCodec.send(client,new LanTransferFrameCodec.Frame(
+                        "cancel","transfer-1","sender","receiver",null,new byte[0],null),KEY,1024);
+            }
+            assertTrue(received.get(3,TimeUnit.SECONDS));
+        } finally {listener.close();executor.shutdownNow();}
+    }
+
 }
