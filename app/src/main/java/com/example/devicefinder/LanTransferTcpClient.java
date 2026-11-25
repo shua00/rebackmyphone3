@@ -1,11 +1,13 @@
 package com.example.devicefinder;
 
+import android.net.Network;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.net.Socket;
+import java.net.InetSocketAddress;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.util.ArrayList;
@@ -16,6 +18,29 @@ public final class LanTransferTcpClient {
     public interface Progress { void onProgress(int sent, int batchSize); }
     public static final int DEFAULT_CHUNKS_PER_SESSION = 62;
     private LanTransferTcpClient() {}
+
+
+    /**
+     * Opens the sender socket through the exact Wi-Fi Network chosen by the caller.
+     * Unlike accepted server sockets, an outgoing socket must be created unconnected,
+     * bound by Network.getSocketFactory(), and only then connected.
+     */
+    public static List<Integer> connectAndSend(Network wifiNetwork, String host, int port,
+            File source, LanTransferStore.Offer offer, String localPeerId, String remotePeerId,
+            String sharedSecret, int chunkSizeBytes, int maxChunksPerSession,
+            int maxPayloadBytes, int connectTimeoutMs, Progress progress)
+            throws IOException, GeneralSecurityException {
+        if (wifiNetwork == null || host == null || host.isEmpty() || port < 1 || port > 65535
+                || connectTimeoutMs < 1000 || connectTimeoutMs > 60000)
+            throw new IllegalArgumentException("A selected Wi-Fi Network and valid destination are required");
+        try (Socket socket = wifiNetwork.getSocketFactory().createSocket()) {
+            socket.connect(new InetSocketAddress(host, port), connectTimeoutMs);
+            socket.setTcpNoDelay(true);
+            socket.setKeepAlive(true);
+            return sendFile(socket, source, offer, localPeerId, remotePeerId, sharedSecret,
+                    chunkSizeBytes, maxChunksPerSession, maxPayloadBytes, progress);
+        }
+    }
 
     /**
      * Sends one bounded batch. Reconnect and call again when missing indexes are returned;
