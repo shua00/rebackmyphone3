@@ -86,6 +86,7 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
         activity = (JAVA / "LanTransferActivity.java").read_text(encoding="utf-8")
         snapshot = (JAVA / "LanTransferSnapshot.java").read_text(encoding="utf-8")
         service = (JAVA / "LanTransferSenderService.java").read_text(encoding="utf-8")
+        worker = (JAVA / "LanTransferSenderWorker.java").read_text(encoding="utf-8")
         manifest = (ROOT / "app/src/main/AndroidManifest.xml").read_text(encoding="utf-8")
         layout = (RES / "layout/activity_lan_transfer.xml").read_text(encoding="utf-8")
         self.assertIn("ACTION_OPEN_DOCUMENT", activity)
