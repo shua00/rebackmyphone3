@@ -884,5 +884,6 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 缺口 | Python TCP session 原先先调用全量 `filesystem.reconcile()`，再切片成协议页；2 GiB / 4 KiB 配置可达 524,288 个索引，网络返回虽有界，服务端临时列表却没有上界 | `lan_p2p_transfer_session.py`、`lan_p2p_transfer_files.py`、`lan_p2p_transfer_store.py` |
 | 修正 | 新增 SQLite receipt 分页读取与 `TransferFilesystem.reconcile_page()`；missing/complete 请求只物化有限缺块页，并在分页中重新核验对应文件实际字节和 SHA-256 | 同上 |
 | 回归 | 新增 2 GiB / 4 KiB 边界测试，禁用全量 received-index 扫描，断言首个 128 项缺块页与 `more=true` | `tests/test_lan_p2p_transfer_network.py` |
-| 验收边界 | 当前提交等待 Actions；Python filesystem 原有全量 reconcile 仍用于本地显式完整性核验，网络 missing/complete 路径已切换为有界分页；Android 与 Python 真机互通、UI、Wi-Fi 漫游仍未验收 | 不得用本测试替代真机验收 |
+| CI | Actions [#866](https://github.com/shua00/rebackmyphone3/actions/runs/45549615420) 对应代码提交 `8d336d642d89abafa3b8f7f7073bd083f6b03f69`：304 项 Python 测试通过；Android build 因未修改 Android 输入按路径过滤跳过 | 只证明 Python 自动化，不替代 Android 构建或实机 | 
+| 验收边界 | Python filesystem 原有全量 reconcile 仍用于本地显式完整性核验，网络 missing/complete 路径已切换为有界分页；Android 与 Python 真机互通、UI、Wi-Fi 漫游仍未验收 | 不得用本测试替代真机验收 |
 

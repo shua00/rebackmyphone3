@@ -8,7 +8,8 @@ v8.55 — 2026-11-25 · Python 大文件缺块查询改为真正有界扫描
 - TransferStore 新增有界 receipt page；TransferFilesystem.reconcile_page 按 receipt 分页核验实际 chunk 文件，缺块查询内存限定为请求页大小。
 - TCP missing 与 complete 请求统一走有界核验；发送端仍通过重连从索引 0 重新查询，已持久化回执使重复查询保持幂等。
 - 新增 2 GiB / 4 KiB 边界测试：禁止调用全量 received-index 扫描，验证首个 128 项缺块页及 more 标志。
-- 本提交 Actions 需验证 Python 全量测试；尚不代表 Android/Python 真机互通或文件传输 UI 已完成。
+- Actions #866（run 45549615420）通过：304 项 Python 测试全部成功；Android build 按路径过滤跳过（本提交未改 Android 源码）。
+- 该结果仅验证 Python 自动化，不代表 Android/Python 真机互通或文件传输 UI 已完成。
 
 ================================================================================
 
