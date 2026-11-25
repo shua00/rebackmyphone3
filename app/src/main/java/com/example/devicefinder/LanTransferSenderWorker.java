@@ -43,6 +43,7 @@ public final class LanTransferSenderWorker implements Runnable {
     private final long offerWaitMs;
     private final Listener listener;
     private final AtomicBoolean cancelled = new AtomicBoolean(false);
+    private final AtomicBoolean pauseRequested = new AtomicBoolean(false);
 
     public LanTransferSenderWorker(LanTransferStore store,
             LanTransferCredentials.Value credentials, NetworkProvider networks,
@@ -75,9 +76,13 @@ public final class LanTransferSenderWorker implements Runnable {
 
     public void cancel() { cancelled.set(true); }
 
+    /** Stop at the next safe protocol boundary while retaining the durable task for resume. */
+    public void pause() { pauseRequested.set(true); }
+
     @Override public void run() {
         try {
             execute();
+            if (pauseRequested.get()) { pauseIfTransferring(); notifyState("paused"); }
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             pauseIfTransferring();
@@ -107,7 +112,7 @@ public final class LanTransferSenderWorker implements Runnable {
         long offerDeadline = System.currentTimeMillis() + offerWaitMs;
         long backoff = 1000L;
         JSONObject acknowledgement = null;
-        while (!cancelled.get() && System.currentTimeMillis() < offerDeadline) {
+        while (!cancelled.get() && !pauseRequested.get() && System.currentTimeMillis() < offerDeadline) {
             try {
                 Network network = networks.currentWifiNetwork();
                 if (network == null) throw new IOException("No selected Wi-Fi LAN network");
@@ -133,6 +138,7 @@ public final class LanTransferSenderWorker implements Runnable {
             backoff = Math.min(MAX_BACKOFF_MS, backoff * 2L);
         }
         if (cancelled.get()) { cancelLedger(); return; }
+        if (pauseRequested.get()) { pauseIfTransferring(); notifyState("paused"); return; }
         if (acknowledgement == null
                 || !("accepted".equals(acknowledgement.optString("state"))
                     || "transferring".equals(acknowledgement.optString("state"))
@@ -149,7 +155,7 @@ public final class LanTransferSenderWorker implements Runnable {
         }
 
         backoff = 1000L;
-        for (int session = 0; session < maxSessions && !cancelled.get(); session++) {
+        for (int session = 0; session < maxSessions && !cancelled.get() && !pauseRequested.get(); session++) {
             try {
                 Network network = networks.currentWifiNetwork();
                 if (network == null) throw new IOException("No selected Wi-Fi LAN network");
@@ -170,12 +176,15 @@ public final class LanTransferSenderWorker implements Runnable {
             } catch (IOException retryable) {
                 pauseIfTransferring();
                 notifyState("paused");
+                if (pauseRequested.get()) break;
                 sleepBackoff(backoff);
+                if (pauseRequested.get()) break;
                 backoff = Math.min(MAX_BACKOFF_MS, backoff * 2L);
                 advanceLocalToTransferring();
             }
         }
         if (cancelled.get()) cancelLedger();
+        else if (pauseRequested.get()) { pauseIfTransferring(); notifyState("paused"); }
         else pauseIfTransferring();
     }
 

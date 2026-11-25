@@ -32,6 +32,10 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
         self.assertIn('if (!LanTransferFeature.isEnabled(context))', sender)
         self.assertIn('if (!LanTransferFeature.isEnabled(this))', activity)
         self.assertIn('ACTION_LAN_TRANSFER_FEATURE_TOGGLED', service)
+        self.assertIn('onFeatureToggled(app, enabled)', gate)
+        self.assertIn('ACTION_FEATURE_TOGGLED', sender)
+        self.assertIn('worker.pause()', sender)
+        self.assertIn('retry && LanTransferFeature.isEnabled(this)', sender)
 
 
     def test_pairing_adds_a_peer_without_replacing_existing_trust(self):
@@ -94,6 +98,9 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
         self.assertIn("startForeground", service)
         self.assertIn("cancelPersistedLocalJob", service)
         self.assertIn("worker.cancel()", service)
+        self.assertIn("worker.pause()", service)
+        self.assertIn("pauseRequested", worker)
+        self.assertIn('pauseIfTransferring(); notifyState("paused")', worker)
         self.assertIn("resumeIfPending", service)
         self.assertIn("cancelLocal", activity)
         self.assertIn("lanTransferCancelSend", layout)

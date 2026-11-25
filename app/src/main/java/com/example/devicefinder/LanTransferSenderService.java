@@ -24,6 +24,7 @@ import java.util.concurrent.Executors;
 /** Dedicated foreground lifecycle for file sending; isolated from chat and tracking executors. */
 public final class LanTransferSenderService extends Service {
     public static final String ACTION_SEND="com.example.devicefinder.LAN_TRANSFER_SEND";
+    public static final String ACTION_FEATURE_TOGGLED="com.example.devicefinder.LAN_TRANSFER_FEATURE_TOGGLED";
     private static final String PREFS="lan_transfer_sender_jobs";
     private static final String JOB="active_job_v1";
     private static final int NOTIFICATION_ID=8842;
@@ -35,6 +36,16 @@ public final class LanTransferSenderService extends Service {
     public static boolean hasPendingJob(Context context) {
         return context.getApplicationContext().getSharedPreferences(PREFS,Context.MODE_PRIVATE).contains(JOB);
     }
+    public static void onFeatureToggled(Context context, boolean enabled) {
+        if (enabled) { resumeIfPending(context); return; }
+        Intent intent = new Intent(context, LanTransferSenderService.class).setAction(ACTION_FEATURE_TOGGLED);
+        try { context.startService(intent); }
+        catch (Exception failure) {
+            FileLogger.log(context, "LAN_TRANSFER", "Sender pause request deferred: "
+                    + failure.getClass().getSimpleName());
+        }
+    }
+
     public static void resumeIfPending(Context context) {
         if(!LanTransferFeature.isEnabled(context) || !hasPendingJob(context)) return;
         Intent intent=new Intent(context,LanTransferSenderService.class).setAction(ACTION_SEND);
@@ -76,6 +87,21 @@ public final class LanTransferSenderService extends Service {
     }
 
     @Override public int onStartCommand(Intent intent,int flags,int startId) {
+        if (intent != null && ACTION_FEATURE_TOGGLED.equals(intent.getAction())) {
+            if (!LanTransferFeature.isEnabled(this)) {
+                retryHandler.removeCallbacksAndMessages(null);
+                LanTransferSenderWorker worker = activeWorker;
+                if (worker != null) {
+                    worker.pause();
+                    updateNotification("文件传输已关闭：当前分块会话结束后暂停，任务保留");
+                } else {
+                    jobActive.set(false);
+                    stopForeground(true);
+                    stopSelf(startId);
+                }
+            }
+            return START_NOT_STICKY;
+        }
         if(intent!=null && "com.example.devicefinder.LAN_TRANSFER_CANCEL_LOCAL".equals(intent.getAction())) {
             LanTransferSenderWorker worker=activeWorker;
             if(worker!=null) {
@@ -149,7 +175,7 @@ public final class LanTransferSenderService extends Service {
         } finally {
             activeWorker=null;
             if(store!=null) store.closeStore();
-            if(retry) {
+            if(retry && LanTransferFeature.isEnabled(this)) {
                 updateNotification("等待对端接受或网络恢复，稍后自动重试");
                 retryHandler.postDelayed(() -> {
                     if(executor!=null && !executor.isShutdown()) {

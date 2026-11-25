@@ -19,6 +19,7 @@ public final class LanTransferFeature {
         boolean saved = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit().putBoolean(KEY_ENABLED, enabled).commit();
         if (!saved) return false;
+        LanTransferSenderService.onFeatureToggled(app, enabled);
         try {
             app.startService(new Intent(app, TrackingService.class)
                     .setAction("ACTION_LAN_TRANSFER_FEATURE_TOGGLED"));
