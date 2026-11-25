@@ -39,7 +39,7 @@ def send_file_over_session(
     session_secret: bytes,
     chunk_size_bytes: int,
     max_payload_bytes: int = 1024 * 1024,
-    max_chunks_per_session: int = 256,
+    max_chunks_per_session: int = 62,
     progress: Callable[[int, int], None] | None = None,
 ) -> tuple[int, ...]:
     """Send currently missing chunks and request final verification.

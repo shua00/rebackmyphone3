@@ -111,14 +111,14 @@ class TransferSenderIntegrationTests(unittest.TestCase):
             store.transition(offer.transfer_id, TransferState.ACCEPTED, 2)
             store.transition(offer.transfer_id, TransferState.TRANSFERRING, 3)
 
-            for expected_remaining in (tuple(range(128, 140)), ()):
+            for expected_remaining in (tuple(range(62, 124)), tuple(range(124, 140)), ()):
                 server, client = socket.socketpair()
                 errors = []
                 def serve():
                     try:
                         serve_transfer_session(server, store, files, local_peer_id="receiver",
                             authenticated_peer_id="sender", session_secret=self.SECRET,
-                            now_ms=lambda: 10, max_frames=256)
+                            now_ms=lambda: 10, max_frames=64)
                     except Exception as exc:
                         errors.append(exc)
                 worker = threading.Thread(target=serve)
@@ -127,7 +127,7 @@ class TransferSenderIntegrationTests(unittest.TestCase):
                     remaining = send_file_over_session(client, str(source), offer,
                         local_peer_id="sender", remote_peer_id="receiver",
                         session_secret=self.SECRET, chunk_size_bytes=4096,
-                        max_chunks_per_session=256)
+                        )
                 finally:
                     client.close()
                     server.close()
