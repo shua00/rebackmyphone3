@@ -56,6 +56,19 @@ public class LanTransferStoreTest {
   assertTrue(store.transition("task-failed","failed",1200));
   assertEquals("failed",store.getTransfer("task-failed").state);
  }
+ @Test public void recentHistoryIsScopedToLocalIdentityAndIncludesPublishedPath(){
+  store.createOffer(offer("task-history",0),1100,4096);
+  store.transition("task-history","accepted",1200);
+  store.transition("task-history","transferring",1300);
+  store.transition("task-history","verifying",1400);
+  assertTrue(store.markCompletedAfterPublish("task-history",HASH,"/private/lan-transfer-received/task-history-report.bin",1500));
+  assertEquals(1,store.loadRecentTransfers("receiver",50).size());
+  LanTransferStore.Transfer received=store.loadRecentTransfers("receiver",50).get(0);
+  assertEquals("completed",received.state);
+  assertEquals("/private/lan-transfer-received/task-history-report.bin",received.publishedPath);
+  assertEquals(0,store.loadRecentTransfers("other",50).size());
+  assertEquals(1,store.loadRecentTransfers("sender",50).size());
+ }
  @Test public void traversalAndInvalidChunkSizeAreRejected(){
   try{store.createOffer(new LanTransferStore.Offer("task-5","sender","receiver","../evil",1,HASH,1,"x"),1,4096);fail();}catch(IllegalArgumentException expected){}
   try{store.createOffer(offer("task-6",1),1,1024);fail();}catch(IllegalArgumentException expected){}
