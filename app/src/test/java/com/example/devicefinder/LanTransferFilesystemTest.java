@@ -70,5 +70,11 @@ public class LanTransferFilesystemTest {
   assertEquals(128,fs.reconcile("fs-pages",5).size());
   assertEquals(Integer.valueOf(0),fs.reconcile("fs-pages",6).get(0));
  }
+ @Test public void reconcileExposesMoreFlagForBoundedMissingPages()throws Exception{
+  byte[] data=new byte[300*4096];start("fs-page-more",data,4096);
+  assertEquals(128,fs.reconcile("fs-page-more",5).size());
+  LanTransferStore.MissingPage next=store.getMissingChunkPage("fs-page-more",128,128);
+  assertEquals(128,next.indexes.size());assertTrue(next.more);
+ }
  private static byte[] read(File f)throws Exception{java.io.ByteArrayOutputStream b=new java.io.ByteArrayOutputStream();try(java.io.FileInputStream in=new java.io.FileInputStream(f)){byte[] x=new byte[4096];int n;while((n=in.read(x))!=-1)b.write(x,0,n);}return b.toByteArray();}
 }

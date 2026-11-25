@@ -45,6 +45,16 @@ public final class LanTransferFilesystem {
         if(parent==null)return file.getCanonicalPath();
         return new File(parent.getCanonicalFile(),file.getName()).getPath();
     }
+    private static void deleteEntryNoFollow(File file) throws IOException {
+        String expected=expectedCanonicalPath(file);
+        String actual=file.getCanonicalPath();
+        // File.delete unlinks a symlink itself; it does not delete the symlink target.
+        if(!actual.equals(expected)) {
+            if(!file.delete())throw new IOException("Unable to unlink transfer symlink");
+        } else if(file.exists()&&!file.delete()) {
+            throw new IOException("Unable to delete transfer file");
+        }
+    }
     private static void rejectSymlink(File file) throws IOException {
         // Canonical child must remain exactly beneath its canonical parent. This also
         // detects dangling symlinks without following them for reads or writes.
@@ -79,10 +89,6 @@ public final class LanTransferFilesystem {
         ensureDirectory(dir);
         return dir;
     }
-    private File expectedChunkFile(String transferId,int index) throws IOException {
-        if(index<0)throw new IOException("Invalid chunk index");
-        return new File(taskDirectory(transferId),index+".part");
-    }
     private static String hex(byte[] bytes) {
         final char[] digits="0123456789abcdef".toCharArray();StringBuilder out=new StringBuilder(bytes.length*2);
         for(byte b:bytes){int v=b&255;out.append(digits[v>>>4]).append(digits[v&15]);}return out.toString();
@@ -103,19 +109,6 @@ public final class LanTransferFilesystem {
     private static void requireRegularFile(File file) throws IOException {
         rejectSymlink(file);
         if(!existsNoFollow(file)||!file.isFile())throw new IOException("Expected regular transfer file");
-    }
-    private long directoryBytes(File dir) throws IOException {
-        if(!existsNoFollow(dir))return 0;
-        rejectSymlink(dir);
-        if(!dir.isDirectory())throw new IOException("Unexpected non-directory in transfer root");
-        long total=0;File[] children=dir.listFiles();if(children==null)throw new IOException("Unable to list transfer directory");
-        for(File child:children) {
-            rejectSymlink(child);
-            if(child.isDirectory())total=Math.addExact(total,directoryBytes(child));
-            else if(child.isFile())total=Math.addExact(total,child.length());
-            else throw new IOException("Unsupported filesystem object in transfer staging");
-        }
-        return total;
     }
     private static void atomicRename(File from,File to) throws IOException {
         rejectSymlink(from);rejectSymlink(to);
@@ -171,7 +164,7 @@ public final class LanTransferFilesystem {
                 ||"cancelled".equals(transfer.state)||"failed".equals(transfer.state)
                 ||"expired".equals(transfer.state)) return new ArrayList<>();
         File dir=taskDirectory(transferId);
-        List<Integer> valid=new ArrayList<>();
+        java.util.Set<Integer> valid=new java.util.HashSet<>();
         for(LanTransferStore.ChunkReceipt receipt:store.loadChunkReceipts(transferId)) {
             File expected=new File(dir,receipt.index+".part");
             boolean ok=false;
@@ -184,7 +177,7 @@ public final class LanTransferFilesystem {
             if(ok)valid.add(receipt.index);
             else {
                 store.invalidateChunkReceipt(transferId,receipt.index,nowMs);
-                if(existsNoFollow(expected))expected.delete();
+                deleteEntryNoFollow(expected);
             }
         }
         File[] files=dir.listFiles();
@@ -216,7 +209,7 @@ public final class LanTransferFilesystem {
                 throw new SecurityException("Published file no longer matches completed transfer");
             return target;
         }
-        if(!store.missingChunkIndexes(transferId).isEmpty())throw new IOException("Transfer still has missing chunks");
+        if(!store.getMissingChunkPage(transferId,0,1).indexes.isEmpty())throw new IOException("Transfer still has missing chunks");
         if("transferring".equals(transfer.state))store.transition(transferId,"verifying",nowMs);
         else if(!"verifying".equals(transfer.state))throw new IOException("Transfer is not ready to verify");
         ensureDirectory(publishedRoot);
@@ -260,7 +253,7 @@ public final class LanTransferFilesystem {
             cleanupStaging(transferId);
             return target;
         } catch(IOException|RuntimeException failure) {
-            if(existsNoFollow(temp))temp.delete();
+            deleteEntryNoFollow(temp);
             throw failure;
         }
     }

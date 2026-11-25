@@ -715,3 +715,14 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | missing page | 新增最多 128 个索引的游标分页，不一次性创建全量缺块列表 | 新增 300 块测试，待 CI |
 | 大文件路径操作 | reconcile/assemble 复用单任务目录句柄路径，减少重复 canonical/stat 操作 | 待 CI |
 | 安全顺序 | chunk fsync → atomic rename → directory fsync → SQLite receipt 保持不变 | 待 CI |
+
+
+## 45. TransferFilesystem 大文件扫描和 symlink 清理补强（2026-11-25）
+
+| 项目 | 改进 | 验收 |
+|---|---|---|
+| symlink receipt | 先撤销损坏回执，再 unlink symlink 本身；不跟随目标 | symlink 测试待 CI |
+| reconcile | HashSet 检查有效 receipt，避免 List.contains O(n²) | 待 CI |
+| chunk 热路径 | 单块 receipt 索引查询；活动 Offer 总量预留 quota | 待 CI |
+| complete gate | 只查询一个缺块索引；不创建几十万项全量列表 | 待 CI |
+| control paging | store missing page 上限 128 项并返回 more | 300 块分页测试待 CI |
