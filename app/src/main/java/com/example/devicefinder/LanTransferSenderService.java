@@ -30,6 +30,25 @@ public final class LanTransferSenderService extends Service {
     private ExecutorService executor;
     private final Handler retryHandler = new Handler(Looper.getMainLooper());
     private final java.util.concurrent.atomic.AtomicBoolean jobActive = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private volatile LanTransferSenderWorker activeWorker;
+
+    public static boolean hasPendingJob(Context context) {
+        return context.getApplicationContext().getSharedPreferences(PREFS,Context.MODE_PRIVATE).contains(JOB);
+    }
+    public static void resumeIfPending(Context context) {
+        if(!hasPendingJob(context)) return;
+        Intent intent=new Intent(context,LanTransferSenderService.class).setAction(ACTION_SEND);
+        try {
+            if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.O) context.startForegroundService(intent); else context.startService(intent);
+        } catch(Exception failure) {
+            FileLogger.log(context,"LAN_TRANSFER","Pending sender restore deferred: "+failure.getClass().getSimpleName());
+        }
+    }
+    public static void cancelLocal(Context context) {
+        Intent intent=new Intent(context,LanTransferSenderService.class).setAction("com.example.devicefinder.LAN_TRANSFER_CANCEL_LOCAL");
+        try { context.startService(intent); }
+        catch(Exception failure) { FileLogger.log(context,"LAN_TRANSFER","Unable to request local cancel: "+failure.getClass().getSimpleName()); }
+    }
 
     public static void enqueue(Context context, LanTransferStore.Offer offer, String host, int port, String path) throws Exception {
         JSONObject j=new JSONObject();
@@ -55,6 +74,16 @@ public final class LanTransferSenderService extends Service {
     }
 
     @Override public int onStartCommand(Intent intent,int flags,int startId) {
+        if(intent!=null && "com.example.devicefinder.LAN_TRANSFER_CANCEL_LOCAL".equals(intent.getAction())) {
+            LanTransferSenderWorker worker=activeWorker;
+            if(worker!=null) {
+                worker.cancel();
+                updateNotification("正在停止本机发送；当前 TCP 分块会话结束后生效");
+            } else {
+                cancelPersistedLocalJob(startId);
+            }
+            return START_STICKY;
+        }
         if(intent!=null && !ACTION_SEND.equals(intent.getAction())) { stopSelf(startId);return START_NOT_STICKY; }
         try {
             String raw=getSharedPreferences(PREFS,MODE_PRIVATE).getString(JOB,null);
@@ -100,7 +129,9 @@ public final class LanTransferSenderService extends Service {
                     }
                     @Override public void onProgress(int sent,int batch) { updateNotification("文件传输中："+sent+"/"+batch+" 块"); }
                 });
+            activeWorker=worker;
             worker.run();
+            activeWorker=null;
             LanTransferStore.Transfer current=store.getTransfer(offer.transferId);
             retry=current!=null && ("offered".equals(current.state) || "paused".equals(current.state));
         } catch(Exception failure) {
@@ -108,6 +139,7 @@ public final class LanTransferSenderService extends Service {
             getSharedPreferences(PREFS,MODE_PRIVATE).edit().remove(JOB).commit();
             updateNotification("文件发送任务遇到不可恢复错误，请检查配对/文件后重新发起");
         } finally {
+            activeWorker=null;
             if(store!=null) store.closeStore();
             if(retry) {
                 updateNotification("等待对端接受或网络恢复，稍后自动重试");
@@ -121,6 +153,33 @@ public final class LanTransferSenderService extends Service {
                 jobActive.set(false);
                 stopSelf(startId);
             }
+        }
+    }
+
+
+    private void cancelPersistedLocalJob(int startId) {
+        String raw=getSharedPreferences(PREFS,MODE_PRIVATE).getString(JOB,null);
+        if(raw==null) { jobActive.set(false);stopSelf(startId);return; }
+        LanTransferStore store=null;
+        try {
+            JSONObject j=new JSONObject(raw);
+            store=new LanTransferStore(this);
+            LanTransferStore.Transfer task=store.getTransfer(j.getString("id"));
+            if(task!=null && ("offered".equals(task.state)||"accepted".equals(task.state)
+                    ||"transferring".equals(task.state)||"paused".equals(task.state)))
+                store.transition(j.getString("id"),"cancelled",System.currentTimeMillis());
+            getSharedPreferences(PREFS,MODE_PRIVATE).edit().remove(JOB).commit();
+            Intent update=new Intent("ACTION_LAN_TRANSFER_UPDATED").setPackage(getPackageName());
+            update.putExtra("transfer_id",j.getString("id")).putExtra("state","cancelled_local");
+            sendBroadcast(update);
+            updateNotification("已取消本机发送任务；不会远程删除对端已接收的数据");
+        } catch(Exception failure) {
+            FileLogger.log(this,"LAN_TRANSFER","Local cancel failed: "+failure.getClass().getSimpleName());
+            updateNotification("本机取消失败，请刷新任务状态");
+        } finally {
+            if(store!=null) store.closeStore();
+            jobActive.set(false);
+            stopSelf(startId);
         }
     }
 
