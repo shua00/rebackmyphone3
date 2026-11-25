@@ -1,10 +1,8 @@
 package com.example.devicefinder;
 
 import android.content.Context;
-import android.system.ErrnoException;
 import android.system.Os;
 import android.system.OsConstants;
-import android.system.StructStat;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.File;
@@ -41,16 +39,20 @@ public final class LanTransferFilesystem {
         this.quotaBytes=quotaBytes;
     }
 
-    private static boolean existsNoFollow(File file) throws IOException {
-        try { Os.lstat(file.getAbsolutePath()); return true; }
-        catch(ErrnoException e) { if(e.errno==OsConstants.ENOENT)return false;throw new IOException("Unable to inspect staging path",e); }
-    }
-    private static StructStat statNoFollow(File file) throws IOException {
-        try { return Os.lstat(file.getAbsolutePath()); }
-        catch(ErrnoException e) { throw new IOException("Unable to inspect file",e); }
+    private static String expectedCanonicalPath(File file) throws IOException {
+        File parent=file.getParentFile();
+        if(parent==null)return file.getCanonicalPath();
+        return new File(parent.getCanonicalFile(),file.getName()).getPath();
     }
     private static void rejectSymlink(File file) throws IOException {
-        if(existsNoFollow(file)&&OsConstants.S_ISLNK(statNoFollow(file).st_mode))throw new IOException("Symlink is not allowed in transfer storage");
+        // Canonical child must remain exactly beneath its canonical parent. This also
+        // detects dangling symlinks without following them for reads or writes.
+        if(!file.getCanonicalPath().equals(expectedCanonicalPath(file)))
+            throw new IOException("Symlink is not allowed in transfer storage");
+    }
+    private static boolean existsNoFollow(File file) throws IOException {
+        rejectSymlink(file);
+        return file.exists();
     }
     private static void syncDirectory(File directory) throws IOException {
         FileDescriptor fd=null;
@@ -107,7 +109,7 @@ public final class LanTransferFilesystem {
         if(!dir.isDirectory())throw new IOException("Unexpected non-directory in transfer root");
         long total=0;File[] children=dir.listFiles();if(children==null)throw new IOException("Unable to list transfer directory");
         for(File child:children) {
-            rejectSymlink(child);StructStat st=statNoFollow(child);
+            rejectSymlink(child);
             if(child.isDirectory())total=Math.addExact(total,directoryBytes(child));
             else if(child.isFile())total=Math.addExact(total,child.length());
             else throw new IOException("Unsupported filesystem object in transfer staging");
@@ -278,7 +280,6 @@ public final class LanTransferFilesystem {
     private static void deleteTreeNoFollow(File file) throws IOException {
         rejectSymlink(file);
         if(!existsNoFollow(file))return;
-        StructStat st=statNoFollow(file);
         if(file.isDirectory()) {
             File[] children=file.listFiles();if(children==null)throw new IOException("Unable to clean transfer directory");
             for(File child:children)deleteTreeNoFollow(child);

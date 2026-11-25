@@ -697,3 +697,10 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 - Actions #806 明确失败原因为 `OsConstants.S_ISDIR(st_mode)` 在当前 Android/Robolectric 环境下将刚创建的目录判为非目录。
 - 修正为先通过 `Os.lstat` 拒绝符号链接，再通过 `File.isDirectory/isFile` 判断类型；避免跟随符号链接。
 - fsync/rename/receipt 顺序不变，新 SHA 继续验证。
+
+
+## 43. TransferFilesystem canonical 路径防护修正（2026-11-25）
+
+- Actions #807：Transfer path is not a directory 仍出现在 staging 初始化，说明 lstat 结果与 Robolectric File 视图不一致。
+- 移除 lstat 作为目录存在性/类型依据，改用 canonical child path 必须等于 canonical parent + basename 的约束检测符号链接（包含 dangling link），随后再用 File.isDirectory/isFile 判断类型。
+- 目录/文件 fsync 和先落盘再写 receipt 规则保留；新 SHA 验证。
