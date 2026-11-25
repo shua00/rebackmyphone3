@@ -843,3 +843,15 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 - listener 限制 2 个 active worker，使用 `SynchronousQueue` 满载立即拒绝；不把未处理 socket 排队滞留。
 - #835/#836/#837 待 CI：listener admission、Wi-Fi sender helper、credentials fail-closed tests。
 - **仍未开放用户文件传输**：尚缺可信 peer 的本地配对/凭据 UI，以及 Offer/Accept 控制面。当前没有凭据时 listener 保持关闭；发现到的 peer 不会自动成为可信对象。
+
+
+## 59. Android Offer 控制面与显式接收决策（2026-11-25）
+
+- 服务端新增认证 `offer` 帧：必须通过双向 PSK 认证、peer allow-list 和 sender/target 固定身份校验；Offer metadata 限定字段、时间窗口、文件名、大小、whole SHA-256、MIME 与 chunk size。
+- 接收 Offer 后只写入独立 SQLite TransferStore 的 `offered` 状态并回 `offer_ack`；不自动接受，不会因设备在线就开始写文件。
+- sender 新增 `sendOffer(Socket/Network,...)`，发送前重验源文件长度与 SHA-256。数据面仍通过独立 TCP session 发送。
+- Transfer ID 重放时同时锁定全部 Offer metadata 和 chunk size，不能用重复 Offer 改变分块参数。
+- `loadIncomingOffers(localPeerId, limit)` 只返回发给指定本机身份的待处理 Offer；TrackingService 提供显式 accept/reject/cancel action，accept 需要经过 offered → accepted → transferring，操作可幂等重试。
+- 空文件也必须先 accepted → transferring 才能 complete，阻止 0-byte Offer 绕过接收方确认。
+- **CI 状态**：#840–#846 已通过；#847–#853 当前验证后续 Offer/Store/Service 修改。
+- **用户流程缺口**：文件选择、发送对象选择、接收通知/接受/拒绝 UI、传输进度和保存位置尚未实现；不能把控制 API 视为完整用户功能。
