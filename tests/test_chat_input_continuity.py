@@ -37,6 +37,7 @@ class ChatInputContinuityTests(unittest.TestCase):
         source = JAVA.read_text(encoding="utf-8")
         self.assertIn('android:windowSoftInputMode="adjustResize"', (ROOT / "app/src/main/AndroidManifest.xml").read_text(encoding="utf-8"))
         self.assertIn("lastScrollViewportHeight", source)
+        self.assertIn("CHAT_BOTTOM_THRESHOLD_PX", source)
         self.assertIn("viewportHeight != lastScrollViewportHeight", source)
         self.assertIn("Do not mistake that geometry change for the user's scrolling away", source)
 

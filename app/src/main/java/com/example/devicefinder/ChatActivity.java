@@ -66,6 +66,7 @@ public class ChatActivity extends Activity {
     //      若无 volatile，跨线程可见性无保证，可能出现"手机收到消息但聊天页不刷新"
     public static volatile boolean isForeground = false;
     private boolean isAtBottom = true; // 【新增】是否在最底部
+    private static final int CHAT_BOTTOM_THRESHOLD_PX = 50;
     // A keyboard-driven viewport resize is not user scrolling; preserve the prior bottom intent.
     private int lastScrollViewportHeight = -1;
 
@@ -121,7 +122,7 @@ public class ChatActivity extends Activity {
             lastScrollViewportHeight = viewportHeight;
             int diff = (scrollView.getChildAt(0).getBottom()
                     - (viewportHeight + scrollView.getScrollY()));
-            isAtBottom = diff <= 50; // 留50像素余量
+            isAtBottom = diff <= CHAT_BOTTOM_THRESHOLD_PX;
             if (isAtBottom) {
                 tvNewMsg.setVisibility(View.GONE);
             }
