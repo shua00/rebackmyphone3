@@ -2622,12 +2622,34 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private void closeLanTransferResources() {
+        final LanTransferTcpListener listenerToDrain;
+        final LanTransferStore storeToClose;
         synchronized (lanTransferListenerLock) {
+            listenerToDrain = lanTransferTcpListener;
             closeLanTransferListenerLocked();
-            LanTransferStore store = lanTransferStore;
+            storeToClose = lanTransferStore;
             lanTransferStore = null;
             lanTransferFilesystem = null;
-            if (store != null) store.closeStore();
+        }
+        if (storeToClose == null) return;
+        Runnable closeStore = () -> {
+            try {
+                storeToClose.closeStore();
+                FileLogger.log(this, "LAN_TRANSFER", "Transfer SQLite store closed after TCP sessions drained");
+            } catch (Exception failure) {
+                FileLogger.log(this, "LAN_TRANSFER", "Transfer SQLite close failed: "
+                        + failure.getClass().getSimpleName());
+            }
+        };
+        if (listenerToDrain != null && !listenerToDrain.isTerminated()) {
+            Thread closer = new Thread(() -> {
+                listenerToDrain.awaitTermination();
+                closeStore.run();
+            }, "LanTransfer-Store-Close");
+            closer.setDaemon(true);
+            closer.start();
+        } else {
+            closeStore.run();
         }
     }
 
