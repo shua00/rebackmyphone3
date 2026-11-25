@@ -34,7 +34,7 @@ public class LanTransferFilesystemTest {
  }
  @Test public void corruptStagedFileInvalidatesReceiptOnRestartReconcile()throws Exception{
   byte[] data=new byte[4096];Arrays.fill(data,(byte)9);start("fs-2",data,4096);writeChunk("fs-2",0,data,5);
-  File staged=new File(new File(new File(context.getFilesDir(),"lan-transfer-staging"),"fs-2"),"0.part");
+  File staged=new File(new File(new File(context.getFilesDir(),"lan-transfer-staging"),"fs-2"),"payload.part");
   try(FileOutputStream out=new FileOutputStream(staged,false)){out.write(new byte[]{1,2,3});out.getFD().sync();}
   assertEquals(Arrays.asList(0),fs.reconcile("fs-2",6));assertTrue(store.loadChunkReceipts("fs-2").isEmpty());
  }

@@ -738,3 +738,11 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 缺块控制面 | MissingPage(indexes, more) 最多 128 项 | 新分页测试待 CI |
 | 完成发布 | whole-file hash → fsync → 原子 rename → completed；崩溃窗口可核验恢复 | 待 CI |
 | 资源效率 | 不再为最小块尺寸创建几十万文件；避免逐块全目录扫描和全量缺块数组 | 待大文件压力验收 |
+
+
+## 47. 单 staging 文件持久化/发布恢复门禁（2026-11-25）
+
+- 每块写入后都 fsync 数据文件与其任务目录，再提交 receipt，覆盖 crash-recovery 下文件已存在但目录项可能未持久化的情况。
+- 完成恢复先核验已发布目标，再检查 staging receipts；避免 rename 后进程崩溃导致已发布文件被误删回执。
+- completed 重复恢复核验目标并清理 staging 残留。
+- 新 SHA CI 验证中。

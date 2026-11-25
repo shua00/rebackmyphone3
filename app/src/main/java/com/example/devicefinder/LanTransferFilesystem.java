@@ -117,7 +117,7 @@ public final class LanTransferFilesystem {
         if(expected<=0||payload.length!=expected)throw new IOException("Chunk length mismatch");
         String digest=hashBytes(payload);File data=stagingFile(id),dir=data.getParentFile();
         LanTransferStore.ChunkReceipt receipt=store.getChunkReceipt(id,index);
-        boolean created=!existsNoFollow(data);
+        existsNoFollow(data);
         if(receipt!=null) {
             requireRegularFile(data);
             try(RandomAccessFile raf=new RandomAccessFile(data,"r")) {
@@ -135,7 +135,7 @@ public final class LanTransferFilesystem {
             if(raf.length()>t.offer.sizeBytes)raf.setLength(t.offer.sizeBytes);
             raf.seek((long)index*t.chunkSizeBytes);raf.write(payload);syncFile(raf);
         }
-        if(created)syncDirectory(dir);
+        syncDirectory(dir);
         store.recordDurableChunk(id,index,payload.length,digest,data.getCanonicalPath(),nowMs);
         return true;
     }
@@ -190,25 +190,28 @@ public final class LanTransferFilesystem {
         LanTransferStore.Transfer t=store.getTransfer(id);
         if(t==null)throw new IOException("Unknown transfer");
         File target=new File(publishedRoot,id+"-"+t.offer.filename);
+        ensureDirectory(publishedRoot);
         if("completed".equals(t.state)) {
             requireRegularFile(target);
             if(target.length()!=t.offer.sizeBytes||!t.offer.sha256.equals(hashFile(target)))
                 throw new SecurityException("Published file no longer matches completed transfer");
+            cleanupStaging(id);
+            return target;
+        }
+        // Recover the rename-before-ledger-commit crash window before reconciling staging receipts.
+        if(existsNoFollow(target)) {
+            requireRegularFile(target);
+            if(!"verifying".equals(t.state)||target.length()!=t.offer.sizeBytes
+                    ||!t.offer.sha256.equals(hashFile(target)))
+                throw new IOException("Published destination conflicts with transfer state or hash");
+            store.markCompletedAfterPublish(id,t.offer.sha256,target.getCanonicalPath(),nowMs);
+            cleanupStaging(id);
             return target;
         }
         LanTransferStore.MissingPage missing=reconcilePage(id,nowMs);
         if(!missing.indexes.isEmpty())throw new IOException("Transfer still has missing chunks");
         if("transferring".equals(t.state))store.transition(id,"verifying",nowMs);
         else if(!"verifying".equals(t.state))throw new IOException("Transfer is not ready to verify");
-        ensureDirectory(publishedRoot);
-        if(existsNoFollow(target)) {
-            requireRegularFile(target);
-            if(target.length()==t.offer.sizeBytes&&t.offer.sha256.equals(hashFile(target))) {
-                store.markCompletedAfterPublish(id,t.offer.sha256,target.getCanonicalPath(),nowMs);
-                cleanupStaging(id);return target;
-            }
-            throw new IOException("Published destination exists with different content");
-        }
         File data=stagingFile(id);
         if(t.offer.sizeBytes==0&&!existsNoFollow(data)) {
             try(RandomAccessFile empty=new RandomAccessFile(data,"rw")){empty.setLength(0);syncFile(empty);}
