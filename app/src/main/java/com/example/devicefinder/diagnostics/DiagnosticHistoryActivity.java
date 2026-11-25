@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -12,12 +13,13 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+import com.example.devicefinder.BuildInfo;
 import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Local diagnostic history, detail, share, and SAF export screen. */
+/** Local diagnostic history, manual test execution, detail, share, and SAF export screen. */
 public final class DiagnosticHistoryActivity extends Activity {
     private static final int REQUEST_SAVE_REPORT = 7610;
     private final ExecutorService io = Executors.newSingleThreadExecutor(r -> {
@@ -28,8 +30,10 @@ public final class DiagnosticHistoryActivity extends Activity {
     private final Handler main = new Handler(Looper.getMainLooper());
     private LinearLayout rows;
     private TextView status;
+    private Button run;
     private DiagnosticRun pendingExport;
     private DiagnosticReportExporter.Format pendingFormat;
+    private volatile boolean running;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -44,19 +48,23 @@ public final class DiagnosticHistoryActivity extends Activity {
         root.addView(title);
 
         TextView description = new TextView(this);
-        description.setText("报告仅保存在本机独立诊断数据库中。最多保留 100 份，超过 30 天自动清理。导出或分享前可查看完整内容。");
+        description.setText("本机只读诊断：检查 Android 运行环境、网络连接状态和应用安装信息。不采集聊天/文件内容，不执行 Shell，不修改业务数据。报告保存在独立诊断数据库中。");
         description.setTextSize(13f);
         root.addView(description);
 
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
+        run = new Button(this);
+        run.setText("运行本机诊断");
+        run.setOnClickListener(v -> startLocalDiagnostic());
         Button refresh = new Button(this);
         refresh.setText("刷新");
         refresh.setOnClickListener(v -> loadHistory());
         Button clear = new Button(this);
         clear.setText("清空历史");
         clear.setOnClickListener(v -> confirmClear());
-        actions.addView(refresh, new LinearLayout.LayoutParams(0, -2, 1f));
+        actions.addView(run, new LinearLayout.LayoutParams(0, -2, 1.4f));
+        actions.addView(refresh, new LinearLayout.LayoutParams(0, -2, 0.8f));
         actions.addView(clear, new LinearLayout.LayoutParams(0, -2, 1f));
         root.addView(actions);
 
@@ -78,8 +86,57 @@ public final class DiagnosticHistoryActivity extends Activity {
         loadHistory();
     }
 
+    private void startLocalDiagnostic() {
+        if (running) return;
+        running = true;
+        run.setEnabled(false);
+        run.setText("诊断执行中…");
+        status.setText("正在执行只读诊断探针并保存报告…");
+        io.execute(() -> {
+            try {
+                List<DiagnosticExecutor.TestCase> tests =
+                        DiagnosticProbeCatalog.localReadOnlyTests(getApplicationContext());
+                DiagnosticRun.Metadata metadata = DiagnosticRun.Metadata.createForFeature(
+                        "android_local", System.currentTimeMillis(), BuildInfo.BUILD_VERSION,
+                        BuildInfo.BUILD_VERSION, Build.MODEL == null ? "unknown" : Build.MODEL,
+                        Build.VERSION.SDK_INT,
+                        DiagnosticProbeCatalog.detectNetworkType(getApplicationContext()),
+                        "READ_ONLY", "LOCAL");
+                DiagnosticRun recorded;
+                try (DiagnosticRunHistoryStore history =
+                             new DiagnosticRunHistoryStore(getApplicationContext())) {
+                    DiagnosticRunRecorder recorder =
+                            new DiagnosticRunRecorder(DiagnosticRunRecorder.sqlite(history));
+                    recorded = recorder.executeAndRecord(metadata, tests, tests.size(), null, null);
+                }
+                final DiagnosticRun result = recorded;
+                main.post(() -> {
+                    status.setText("诊断完成并已保存：PASS " + result.count(DiagnosticRun.Status.PASS)
+                            + "，FAIL " + result.count(DiagnosticRun.Status.FAIL)
+                            + "，SKIPPED " + result.count(DiagnosticRun.Status.SKIPPED));
+                    finishRunUi();
+                    loadHistory();
+                    showReportActions(result);
+                });
+            } catch (Exception error) {
+                main.post(() -> {
+                    status.setText("诊断或报告保存失败：" + safeMessage(error));
+                    finishRunUi();
+                });
+            }
+        });
+    }
+
+    private void finishRunUi() {
+        running = false;
+        if (run != null) {
+            run.setEnabled(true);
+            run.setText("运行本机诊断");
+        }
+    }
+
     private void loadHistory() {
-        status.setText("正在读取诊断报告…");
+        status.setText(running ? "诊断执行中…" : "正在读取诊断报告…");
         io.execute(() -> {
             List<DiagnosticRun> reports;
             try (DiagnosticRunHistoryStore store = new DiagnosticRunHistoryStore(this)) {
@@ -94,10 +151,10 @@ public final class DiagnosticHistoryActivity extends Activity {
 
     private void render(List<DiagnosticRun> reports) {
         rows.removeAllViews();
-        status.setText("共 " + reports.size() + " 份报告");
+        if (!running) status.setText("共 " + reports.size() + " 份报告");
         if (reports.isEmpty()) {
             TextView empty = new TextView(this);
-            empty.setText("暂无诊断报告。完成诊断测试并保存结果后，报告会显示在这里。");
+            empty.setText("暂无诊断报告。点击“运行本机诊断”生成第一份报告。");
             empty.setPadding(0, dp(18), 0, dp(18));
             rows.addView(empty);
             return;
@@ -172,8 +229,7 @@ public final class DiagnosticHistoryActivity extends Activity {
                 main.post(() -> Toast.makeText(this, "报告已导出：" + destination.getLastPathSegment(),
                         Toast.LENGTH_LONG).show());
             } catch (IOException | RuntimeException error) {
-                main.post(() -> Toast.makeText(this, "导出失败：" + safeMessage(error),
-                        Toast.LENGTH_LONG).show());
+                main.post(() -> Toast.makeText(this, "导出失败：" + safeMessage(error), Toast.LENGTH_LONG).show());
             }
         });
     }
@@ -213,7 +269,6 @@ public final class DiagnosticHistoryActivity extends Activity {
 
     private static String safeMessage(Throwable error) {
         String message = error == null ? null : error.getMessage();
-        return message == null || message.trim().isEmpty()
-                ? "未知错误" : message;
+        return message == null || message.trim().isEmpty() ? "未知错误" : message;
     }
 }
