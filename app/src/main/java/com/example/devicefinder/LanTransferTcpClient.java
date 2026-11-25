@@ -77,7 +77,7 @@ public final class LanTransferTcpClient {
             }
         }
         if (source.length() != beforeLength || source.lastModified() != beforeModified
-                || !source.getCanonicalPath().equals(expectedPath))
+                || !source.getCanonicalPath().equals(expectedPath) || !hashFile(source).equals(digest))
             throw new IOException("Source file changed during transfer");
 
         send(socket, new LanTransferFrameCodec.Frame("complete", offer.transferId,
