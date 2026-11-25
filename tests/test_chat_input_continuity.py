@@ -41,7 +41,8 @@ class ChatInputContinuityTests(unittest.TestCase):
         self.assertIn("btnSend.setOnClickListener(v -> sendMessage());", source)
         self.assertIn("sendMessage();", source)
         self.assertIn("EditorInfo.IME_ACTION_SEND", source)
-        self.assertIn("restoreChatInputFocus(true);", source)
+        self.assertIn("restoreChatInputFocus(keepKeyboardVisible);", source)
+        self.assertIn("isComposerImeVisible();", source)
 
     def test_lifecycle_focus_restore_does_not_force_open_keyboard(self):
         source = JAVA.read_text(encoding="utf-8")
