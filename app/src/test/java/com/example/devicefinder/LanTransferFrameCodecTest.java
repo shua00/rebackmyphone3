@@ -2,6 +2,9 @@ package com.example.devicefinder;
 
 import org.json.JSONObject;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.robolectric.RobolectricTestRunner;
+import org.robolectric.annotation.Config;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.concurrent.ExecutorService;
@@ -10,6 +13,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import static org.junit.Assert.*;
 
+@RunWith(RobolectricTestRunner.class)
+@Config(sdk = 34)
 public class LanTransferFrameCodecTest {
     private static final byte[] KEY="0123456789abcdef-session-key".getBytes(java.nio.charset.StandardCharsets.UTF_8);
 
