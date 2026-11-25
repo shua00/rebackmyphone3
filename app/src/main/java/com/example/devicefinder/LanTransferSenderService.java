@@ -104,7 +104,8 @@ public final class LanTransferSenderService extends Service {
             retry=current!=null && ("offered".equals(current.state) || "paused".equals(current.state));
         } catch(Exception failure) {
             FileLogger.log(this,"LAN_TRANSFER","Sender job failed: "+failure.getClass().getSimpleName());
-            updateNotification("文件发送暂不可用，可稍后重试");
+            getSharedPreferences(PREFS,MODE_PRIVATE).edit().remove(JOB).commit();
+            updateNotification("文件发送任务遇到不可恢复错误，请检查配对/文件后重新发起");
         } finally {
             if(store!=null) store.closeStore();
             if(retry && !isDestroyed()) {
