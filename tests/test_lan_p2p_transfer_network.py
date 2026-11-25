@@ -7,6 +7,7 @@ from pathlib import Path
 from lan_p2p_transfer import TransferLimits, TransferOffer, TransferState
 from lan_p2p_transfer_files import TransferFilesystem
 from lan_p2p_transfer_network import TransferTcpServer, connect_transfer_peer
+from lan_p2p_transfer_auth import authenticate_tcp_client, authenticate_tcp_server
 from lan_p2p_transfer_sender import send_file_over_session
 from lan_p2p_transfer_store import TransferStore
 
@@ -31,12 +32,12 @@ class TransferTcpNetworkTests(unittest.TestCase):
             source, offer, store, files = self._prepared(root, payload)
             errors = []
             server = TransferTcpServer(store, files, local_peer_id="receiver",
-                authenticate_peer=lambda conn, addr: ("sender", self.SECRET),
+                authenticate_peer=lambda conn, addr: authenticate_tcp_server(conn, "receiver", self.SECRET, authorize_peer=lambda peer: peer == "sender"),
                 now_ms=lambda: 10, host="127.0.0.1", port=0,
                 socket_timeout_seconds=2, on_error=errors.append).start()
             try:
                 with connect_transfer_peer(*server.address,
-                    lambda sock: ("receiver", self.SECRET), timeout_seconds=2) as connection:
+                    lambda sock: authenticate_tcp_client(sock, "sender", "receiver", self.SECRET), timeout_seconds=2) as connection:
                     remaining = send_file_over_session(connection.sock, str(source), offer,
                         local_peer_id="sender", remote_peer_id=connection.peer_id,
                         session_secret=connection.session_secret, chunk_size_bytes=4096)

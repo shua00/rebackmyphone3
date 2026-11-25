@@ -548,3 +548,17 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 **自动化/CI 证据：** commit `af26e7eafbafb11824d850cd14312fa38f97d4fa`；[Actions #783](https://github.com/shua00/rebackmyphone3/actions/runs/45521791700) 成功，Python 编译检查及 296 项测试通过，Android build 按路径规则跳过。
 
 **阶段判定：** 本批补齐 Python 真实 TCP socket 监听/客户端生命周期的可运行基础设施。身份认证仍由调用方回调提供，当前尚未把现有 peer challenge 代码接入回调；server 实例关闭后不可重启，需新建实例。不能宣称生产认证链路或 Android/PC 文件传输已完成。
+
+
+## 29. TCP 双向认证协议（2026-11-25）
+
+| 验收点 | 协议约束 | 证据状态 |
+|---|---|---|
+| 双向挑战 | client/server 双方随机 32-byte nonce；双方分别证明持有 PSK | 本批新增 Python/Java 实现与自动化测试 |
+| 身份绑定 | HMAC transcript 同时绑定 client peer ID、server peer ID 和双方 nonce；客户端校验预期 server ID | 自动化待本批 CI |
+| 防重放 | 每次握手均使用新随机 nonce；旧 proof 不匹配新 transcript | 覆盖随机 nonce 与错误密钥/身份拒绝；不声称抵御共享密钥泄露 |
+| 准入 | 服务端认证成功前还必须调用 trusted peer registry 授权 | Python callback 已强制；Android server API 同样要求 Predicate |
+| 会话密钥 | 独立 session domain HMAC-SHA256 派生 32-byte key；与控制帧认证绑定 | Python/Java 相同协议实现；需 CI 互通测试 |
+| 安全边界 | 群组 PSK 不是设备独立私钥；被授权设备持有共享密钥时可伪造其他 peer ID | 必须在产品文档/配对策略中保留此限制 |
+
+**本批完成条件：** Python 认证单测、真实 TCP listener 集成、Android loopback 认证和 CI Android/Python 两项均通过。真实 Wi-Fi 双机传输仍属于实机验收，不能由 loopback 替代。
