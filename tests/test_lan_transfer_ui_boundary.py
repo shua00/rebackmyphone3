@@ -36,6 +36,7 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
         self.assertIn('ACTION_FEATURE_TOGGLED', sender)
         self.assertIn('worker.pause()', sender)
         self.assertIn('retry && LanTransferFeature.isEnabled(this)', sender)
+        self.assertIn('if (!hasPendingJob(context)) return;', sender)
 
 
     def test_pairing_adds_a_peer_without_replacing_existing_trust(self):

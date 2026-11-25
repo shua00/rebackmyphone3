@@ -184,7 +184,7 @@ public class ChatActivity extends Activity {
         fileTransfer.setPadding(24, 20, 24, 20);
         fileTransfer.setChecked(LanTransferFeature.isEnabled(this));
         TextView explanation = new TextView(this);
-        explanation.setText("开启后，聊天输入区显示附件入口，并可进入独立文件管理页面。关闭后隐藏入口并停止本机文件接收监听；不会删除配对密钥、文件或历史任务。对讲消息通道不受影响。");
+        explanation.setText("开启后，聊天输入区显示附件入口，并可进入独立文件管理页面。关闭后隐藏入口、停止本机接收监听，并在当前 TCP 会话结束后暂停发送任务；不会删除配对密钥、文件或历史任务。对讲消息通道不受影响。");
         explanation.setTextSize(13f);
         explanation.setPadding(24, 0, 24, 12);
         android.widget.LinearLayout content = new android.widget.LinearLayout(this);

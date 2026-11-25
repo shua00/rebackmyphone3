@@ -38,6 +38,7 @@ public final class LanTransferSenderService extends Service {
     }
     public static void onFeatureToggled(Context context, boolean enabled) {
         if (enabled) { resumeIfPending(context); return; }
+        if (!hasPendingJob(context)) return;
         Intent intent = new Intent(context, LanTransferSenderService.class).setAction(ACTION_FEATURE_TOGGLED);
         try { context.startService(intent); }
         catch (Exception failure) {
