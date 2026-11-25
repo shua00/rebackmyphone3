@@ -58,6 +58,7 @@ public final class LanTransferCredentials {
                 .getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         if (!prefs.edit().putString(CIPHER_KEY, envelope.toString()).commit())
             throw new IllegalStateException("Unable to persist encrypted transfer credentials");
+        notifyService(context);
     }
 
     public static Value load(Context context) throws Exception {
@@ -88,6 +89,14 @@ public final class LanTransferCredentials {
             keyStore.load(null);
             if (keyStore.containsAlias(KEY_ALIAS)) keyStore.deleteEntry(KEY_ALIAS);
         }
+        notifyService(context);
+    }
+
+    private static void notifyService(Context context) {
+        android.content.Intent intent = new android.content.Intent(context, TrackingService.class)
+                .setAction("ACTION_LAN_TRANSFER_CREDENTIALS_UPDATED");
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent);
+        else context.startService(intent);
     }
 
     private static SecretKey getOrCreateKey() throws Exception {
