@@ -1,4 +1,18 @@
 ================================================================================
+v8.53 — 2026-11-25 · Android/Python Offer 协议对齐与 teardown drain
+================================================================================
+
+【第 3 阶段：跨端 Offer 控制面与生命周期】
+--------------------------------------------------------------------------------
+- Android LNP2 FrameCodec 与 Python TCP codec 同时支持 offer/offer_ack；Python receiver session 实现相同的 authenticated Offer 校验、7 天时效窗口、chunk size 固定、幂等持久化和 offered 不自动接受。
+- Python sender 新增 send_offer_over_session，先校验本地源文件大小/SHA256，再发 Offer 并验证 offer_ack。
+- 新增 Python 网络层和 sender 测试：Offer 持久化、重复 Offer 幂等、接收端仍保持 OFFERED；#858/#859/#860/#861 通过。
+- Android #847/#848 暴露了 Offer 帧种类未加入 FrameCodec allowlist 的问题，已补齐 offer/offer_ack 并增加 codec round-trip 测试；#855 构建通过。#856 暴露 Service teardown 中 startup worker 被中断太晚，已将 interrupt 提前到文件传输资源 drain 之前。
+- Listener 新增 awaitTermination；Service teardown 关闭 listener 后，等会话 worker 退出再关闭独立 TransferStore，避免 SQLite 与活动 session 并发关闭。
+- 当前 #862–#865 正验证 teardown、Offer 完整双端流程及 worker drain；未完成前不标记本轮全量通过。
+- UI/配对尚缺：可信 peer allow-list 配置界面、incoming Offer 列表/接受/拒绝、文件选择/发送、进度和保存位置。
+
+================================================================================
 v8.52 — 2026-11-25 · Android Offer 控制帧与显式接收决策
 ================================================================================
 
