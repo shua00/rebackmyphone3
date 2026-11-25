@@ -47,6 +47,7 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
         self.assertIn("SHA-256", snapshot)
         self.assertIn("MAX_FILE_BYTES", snapshot)
         self.assertIn("LanTransferSenderService.enqueue", activity)
+        self.assertIn("LanTransferSenderService.resumeIfPending(this)", activity)
         self.assertIn("startForeground", service)
         self.assertIn("cancelPersistedLocalJob", service)
         self.assertIn("worker.cancel()", service)
