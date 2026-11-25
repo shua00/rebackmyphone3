@@ -1,4 +1,17 @@
 ================================================================================
+v8.50 — 2026-11-25 · Android TCP listener、网络生命周期与安全凭据
+================================================================================
+
+【第 3 阶段：生产接入基础】
+--------------------------------------------------------------------------------
+- 新增 LanTransferTcpListener：仅绑定调用方选定的 Wi-Fi IPv4 地址；每台设备最多 2 个并发会话，采用 SynchronousQueue，过载时立即拒绝，不排队占用空闲 socket；监听关闭会关闭所有会话 socket 并等待 worker 退出。
+- 新增 LanTransferCredentials：使用 AndroidKeyStore AES-GCM 加密独立文件传输组密钥与明确 peer allow-list；密钥至少 32 UTF-8 字节，peer 列表必须显式配置，默认没有凭据即不开启 TCP 监听。
+- TrackingService 已接入独立 transfer listener 的网络回调刷新和 onDestroy 关闭；监听按选定 Wi-Fi Network/接口/IPv4 地址指纹重建，不走 cellular 默认路由。
+- 安全边界：accepted socket 已建立连接，不再错误调用 Network.bindSocket；listener 绑定具体 Wi-Fi 本地地址，网络失效时关闭旧 listener 并重建。
+- Listener loopback/lifecycle 测试 #831 通过；AndroidKeyStore 构建 #832 通过。TrackingService 接线及并发 admission 最新 Actions 仍在运行，不能提前标记本条整体验收通过。
+- 尚未完成：密钥/peer allow-list 的用户配对配置 UI；Android 发送 Offer/Accept 控制面与跨设备密钥配对流程；真实 Wi-Fi 漫游/切换真机验证。
+
+================================================================================
 v8.49 — 2026-11-25 · Android TCP 发送端与双端会话互通
 ================================================================================
 
