@@ -111,7 +111,7 @@ class TransferSenderIntegrationTests(unittest.TestCase):
             store.transition(offer.transfer_id, TransferState.ACCEPTED, 2)
             store.transition(offer.transfer_id, TransferState.TRANSFERRING, 3)
 
-            for expected_remaining in ((128, 129), ()):
+            for expected_remaining in (tuple(range(128, 140)), ()):
                 server, client = socket.socketpair()
                 errors = []
                 def serve():

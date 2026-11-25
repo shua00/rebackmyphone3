@@ -75,7 +75,8 @@ def send_file_over_session(
         raise TransferValidationError("receiver did not return a missing-chunk list")
     indexes = reply.metadata.get("indexes") if isinstance(reply.metadata, dict) else None
     more = reply.metadata.get("more") if isinstance(reply.metadata, dict) else None
-    if not isinstance(indexes, list) or len(indexes) > page_limit or not isinstance(more, bool):
+    if (not isinstance(indexes, list) or len(indexes) > page_limit
+            or not isinstance(more, bool) or (more and not indexes)):
         raise TransferValidationError("receiver returned an invalid missing-chunk list")
     missing = []
     previous = -1
@@ -120,7 +121,8 @@ def send_file_over_session(
     if complete.kind == "missing":
         remaining = complete.metadata.get("indexes") if isinstance(complete.metadata, dict) else None
         more = complete.metadata.get("more") if isinstance(complete.metadata, dict) else None
-        if not isinstance(remaining, list) or len(remaining) > page_limit or not isinstance(more, bool):
+        if (not isinstance(remaining, list) or len(remaining) > page_limit
+                or not isinstance(more, bool) or (more and not remaining)):
             raise TransferValidationError("receiver returned malformed remaining chunks")
         previous = -1
         for index in remaining:
