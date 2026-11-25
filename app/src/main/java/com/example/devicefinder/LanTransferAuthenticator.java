@@ -12,7 +12,6 @@ import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Arrays;
-import java.util.function.Predicate;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
@@ -25,6 +24,9 @@ public final class LanTransferAuthenticator {
     private static final byte[] SESSION_DOMAIN = "lan-transfer-v1/session\0".getBytes(StandardCharsets.UTF_8);
     private static final SecureRandom RANDOM = new SecureRandom();
     private LanTransferAuthenticator() {}
+
+    /** API-21-compatible trust policy; avoids java.util.function on older Android releases. */
+    public interface TrustedPeerAuthorizer { boolean isTrusted(String peerId); }
 
     public static final class AuthenticatedPeer {
         public final String peerId;
@@ -55,7 +57,7 @@ public final class LanTransferAuthenticator {
     }
 
     public static AuthenticatedPeer authenticateServer(Socket socket, String localPeerId,
-            String sharedSecret, Predicate<String> authorizePeer) throws IOException, GeneralSecurityException {
+            String sharedSecret, TrustedPeerAuthorizer authorizePeer) throws IOException, GeneralSecurityException {
         if (authorizePeer == null) throw new IllegalArgumentException("Trusted-peer authorization is required");
         byte[] serverId = peerBytes(localPeerId), key = deriveKey(sharedSecret);
         DataInputStream in = new DataInputStream(socket.getInputStream());
@@ -65,7 +67,7 @@ public final class LanTransferAuthenticator {
         byte[] clientId = readPeerId(in);
         String clientName = decodePeer(clientId);
         byte[] clientNonce = new byte[NONCE_BYTES]; in.readFully(clientNonce);
-        if (!authorizePeer.test(clientName)) throw new SecurityException("Untrusted TCP peer");
+        if (!authorizePeer.isTrusted(clientName)) throw new SecurityException("Untrusted TCP peer");
         byte[] serverNonce = nonce(), transcript = transcript(clientId, serverId, clientNonce, serverNonce);
         out.writeShort(serverId.length); out.write(serverId); out.write(serverNonce);
         out.write(hmac(key, concat(SERVER_DOMAIN, transcript))); out.flush();
