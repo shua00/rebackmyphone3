@@ -50,6 +50,7 @@ DeviceFinder 局域网救援/调试终端 (Ultimate 终极完全体)
 - 📥 物理拉日志：无视手机休眠，通过 exec-out 瞬间抽干本地日志
 - 🛠️ 指令发射：模拟开机广播、断网、发 ACTION
 - 🔍 权限检查：强制 UTF-8 解析，防止 Windows GBK 报错闪退
+- 🛡️ Root Shell：通过 su 请求目标设备 Root 授权，获批后提供不设命令白名单的交互式 Shell
 
 【四、未来功能预演 (T 菜单)】
 - 🏃 传感器探底：一键获取硬件层全量传感器（气压计/计步器/光线）
@@ -79,6 +80,7 @@ import gzip
 import os
 import re
 import subprocess
+import shlex
 import threading
 import concurrent.futures
 import urllib.request
@@ -1434,6 +1436,59 @@ def install_any_apk(device):
                     print(f"    {I.err} 安装异常: {e}")
             print(f"\n{I.ok} 批量安装完成: 成功 {success_count}/{len(targets)}")
 
+def adb_root_shell_console(device):
+    """Request target-device superuser access through its installed su/root manager."""
+    if not device:
+        return
+    print(f"\n{I.warn} 正在请求设备 {device} 的 Root Shell 授权...")
+    print("如果设备安装了 Magisk 等 Root 管理器，请在设备端处理授权提示。")
+    try:
+        probe = subprocess.run(
+            ["adb", "-s", device, "shell", "su -c " + shlex.quote("id")],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            encoding="utf-8", errors="replace", timeout=30)
+    except subprocess.TimeoutExpired:
+        print(f"{I.err} Root 授权等待超时；请检查设备端授权提示。")
+        return
+    except Exception as exc:
+        print(f"{I.err} Root 请求失败: {exc}")
+        return
+
+    probe_output = (probe.stdout or "").strip()
+    if probe_output:
+        print(probe_output)
+    if probe.returncode != 0 or "uid=0" not in probe_output:
+        print(f"{I.warn} 未获得 Root 权限（可能未 Root、授权被拒绝或 su 不可用）。")
+        return
+
+    print(f"{I.ok} 已获得目标设备 Root Shell。")
+    print("输入任意 Shell 命令执行；输入 exit / quit 返回。")
+    while True:
+        try:
+            command = input(f"root@{device}:# ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\\n退出 Root Shell。")
+            return
+        if command.lower() in ("exit", "quit"):
+            return
+        if not command:
+            continue
+        try:
+            remote_command = "su -c " + shlex.quote(command)
+            result = subprocess.run(
+                ["adb", "-s", device, "shell", remote_command],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                encoding="utf-8", errors="replace", timeout=300)
+            if result.stdout:
+                print(result.stdout, end="" if result.stdout.endswith("\\n") else "\\n")
+            if result.returncode != 0:
+                print(f"{I.warn} 命令退出码: {result.returncode}")
+        except subprocess.TimeoutExpired:
+            print(f"{I.err} 命令执行超时（300 秒）。")
+        except Exception as exc:
+            print(f"{I.err} 命令执行失败: {exc}")
+
+
 def menu_e_adb_manager():
     while True:
         print("\n" + "=" * 50)
@@ -1456,7 +1511,7 @@ def menu_e_adb_manager():
         print("  [15] 安装任意第三方 APK (支持 URL/批量)")
         print("  [0] 返回上一级")
         print("=" * 50)
-        c = input("请输入编号 (0-15): ").strip()
+        c = input("请输入编号 (0-16): ").strip()
         if c == '0': return
         if c == '1':
             device = choose_adb_device()
