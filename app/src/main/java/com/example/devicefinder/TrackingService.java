@@ -289,6 +289,9 @@ public class TrackingService extends Service implements LocationListener {
     private volatile LanTransferTcpListener lanTransferTcpListener;
     private volatile String lanTransferListenerFingerprint;
     private volatile String lanTransferCredentialsFingerprint;
+    // File-transfer discovery owns a separate UDP socket/port and endpoint directory.
+    private volatile LanTransferDiscovery lanTransferDiscovery;
+    private volatile String lanTransferDiscoveryFingerprint;
     private final Object lanTransferListenerLock = new Object();
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRetryInFlight =
             new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -2541,6 +2544,7 @@ public class TrackingService extends Service implements LocationListener {
      * absent credentials means the file-transfer listener remains closed.
      */
     private void refreshLanTransferTcpListener(String reason) {
+        refreshLanTransferDiscovery(reason);
         if (!LanTransferFeature.isEnabled(this)) {
             stopLanTransferTcpListener("file-transfer feature disabled");
             return;
@@ -2619,6 +2623,81 @@ public class TrackingService extends Service implements LocationListener {
         }
     }
 
+    /** Start/refresh file-transfer discovery independently of credentials and chat UDP state. */
+    private void refreshLanTransferDiscovery(String reason) {
+        if (!LanTransferFeature.isEnabled(this) || serviceDestroyed
+                || Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+            stopLanTransferDiscovery();
+            return;
+        }
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            Network selected = selectWifiLanNetwork(cm);
+            if (selected == null) { stopLanTransferDiscovery(); return; }
+            LinkProperties links = cm.getLinkProperties(selected);
+            if (links == null || links.getInterfaceName() == null || links.getLinkAddresses() == null) {
+                stopLanTransferDiscovery(); return;
+            }
+            java.net.Inet4Address local = null;
+            int prefix = -1;
+            for (LinkAddress item : links.getLinkAddresses()) {
+                java.net.InetAddress address = item.getAddress();
+                if (address instanceof java.net.Inet4Address && !address.isLoopbackAddress()
+                        && !address.isLinkLocalAddress()) {
+                    local = (java.net.Inet4Address) address;
+                    prefix = item.getPrefixLength();
+                    break;
+                }
+            }
+            if (local == null || prefix < 1 || prefix > 30) {
+                stopLanTransferDiscovery(); return;
+            }
+            byte[] raw = local.getAddress();
+            int value = ((raw[0] & 255) << 24) | ((raw[1] & 255) << 16)
+                    | ((raw[2] & 255) << 8) | (raw[3] & 255);
+            int mask = (int) (0xffffffffL << (32 - prefix));
+            int broadcastValue = (value & mask) | (~mask);
+            byte[] broadcastBytes = new byte[] {
+                    (byte) (broadcastValue >>> 24), (byte) (broadcastValue >>> 16),
+                    (byte) (broadcastValue >>> 8), (byte) broadcastValue };
+            java.net.Inet4Address broadcast =
+                    (java.net.Inet4Address) java.net.InetAddress.getByAddress(broadcastBytes);
+            String fingerprint = selected.toString() + "|" + links.getInterfaceName()
+                    + "|" + local.getHostAddress() + "/" + prefix;
+            synchronized (lanTransferListenerLock) {
+                if (serviceDestroyed) return;
+                if (fingerprint.equals(lanTransferDiscoveryFingerprint)
+                        && lanTransferDiscovery != null && lanTransferDiscovery.isRunning()) return;
+                closeLanTransferDiscoveryLocked();
+                LanTransferPeerDirectory.activateNetwork(this, fingerprint);
+                LanTransferDiscovery discovery = new LanTransferDiscovery(this, selected,
+                        getUniqueDeviceId(), local, broadcast, fingerprint,
+                        () -> lanTransferTcpListener == null ? 0 : lanTransferTcpListener.getBoundPort());
+                discovery.start();
+                lanTransferDiscovery = discovery;
+                lanTransferDiscoveryFingerprint = fingerprint;
+                FileLogger.log(this, "LAN_TRANSFER", "Independent discovery active on "
+                        + links.getInterfaceName() + " address=" + local.getHostAddress()
+                        + " reason=" + reason);
+            }
+        } catch (Exception failure) {
+            FileLogger.log(this, "LAN_TRANSFER", "Independent discovery reconcile failed: "
+                    + failure.getClass().getSimpleName());
+            // Preserve an existing discovery socket after a transient snapshot failure.
+        }
+    }
+
+    private void stopLanTransferDiscovery() {
+        synchronized (lanTransferListenerLock) { closeLanTransferDiscoveryLocked(); }
+    }
+
+    private void closeLanTransferDiscoveryLocked() {
+        LanTransferDiscovery old = lanTransferDiscovery;
+        lanTransferDiscovery = null;
+        lanTransferDiscoveryFingerprint = null;
+        if (old != null) old.close();
+    }
+
     private String transferCredentialsFingerprint(LanTransferCredentials.Value credentials)
             throws java.security.GeneralSecurityException {
         java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
@@ -2655,6 +2734,7 @@ public class TrackingService extends Service implements LocationListener {
         synchronized (lanTransferListenerLock) {
             listenerToDrain = lanTransferTcpListener;
             closeLanTransferListenerLocked();
+            closeLanTransferDiscoveryLocked();
             storeToClose = lanTransferStore;
             lanTransferStore = null;
             lanTransferFilesystem = null;
