@@ -35,8 +35,8 @@ public class DiagnosticRunHistoryStoreTest {
     }
 
     @Test public void saveIsIdempotentAndListReturnsNewestFirst() {
-        DiagnosticRun older = run("run-older", 1700000000000L, "chat");
-        DiagnosticRun newer = run("run-newer", 1700000001000L, "file_transfer");
+        DiagnosticRun older = run("run-older", System.currentTimeMillis() - 2000L, "chat");
+        DiagnosticRun newer = run("run-newer", System.currentTimeMillis() - 1000L, "file_transfer");
         store.save(older);
         store.save(older);
         store.save(newer);
@@ -46,9 +46,9 @@ public class DiagnosticRunHistoryStoreTest {
     }
 
     @Test public void conflictingRunIdCannotOverwriteExistingReport() {
-        store.save(run("run-same", 1700000000000L, "chat"));
+        store.save(run("run-same", System.currentTimeMillis() - 1000L, "chat"));
         try {
-            store.save(run("run-same", 1700000000000L, "different"));
+            store.save(run("run-same", System.currentTimeMillis() - 1000L, "different"));
             fail("conflicting run id must be rejected");
         } catch (IllegalStateException expected) {
             assertTrue(expected.getMessage().contains("different content"));
@@ -57,8 +57,8 @@ public class DiagnosticRunHistoryStoreTest {
     }
 
     @Test public void deleteAndClearOnlyAffectHistory() {
-        store.save(run("run-a", 1700000000000L, "chat"));
-        store.save(run("run-b", 1700000001000L, "chat"));
+        store.save(run("run-a", System.currentTimeMillis() - 2000L, "chat"));
+        store.save(run("run-b", System.currentTimeMillis() - 1000L, "chat"));
         assertTrue(store.delete("run-a"));
         assertFalse(store.delete("run-a"));
         assertEquals(1, store.list(10).size());
