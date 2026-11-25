@@ -85,9 +85,12 @@ public final class LanTransferSenderWorker implements Runnable {
         } catch (GeneralSecurityException securityFailure) {
             failIfTransferring();
             notifyState("failed");
-        } catch (IOException | RuntimeException failure) {
+        } catch (IOException failure) {
             pauseIfTransferring();
             notifyState("paused");
+        } catch (RuntimeException invalidTask) {
+            failIfTransferring();
+            notifyState("failed");
         }
     }
 
@@ -208,7 +211,8 @@ public final class LanTransferSenderWorker implements Runnable {
     private void failIfTransferring() {
         try {
             String state = requireLocalTask().state;
-            if ("transferring".equals(state) || "paused".equals(state))
+            if ("offered".equals(state) || "accepted".equals(state)
+                    || "transferring".equals(state) || "paused".equals(state))
                 store.transition(offer.transferId, "failed", System.currentTimeMillis());
         } catch (Exception ignored) {}
     }
