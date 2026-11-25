@@ -162,10 +162,13 @@ public class ChatActivity extends Activity {
     private void sendMessage() {
         String msg = inputMsg.getText().toString().trim();
         if (!msg.isEmpty()) {
+            // Capture the IME state before clearing text or posting focus restoration.
+            // A send continues typing only when the user had the keyboard open already.
+            boolean keepKeyboardVisible = isComposerImeVisible();
             inputMsg.setText("");
-            // Restore focus after the Button click has fully completed. An immediate
-            // requestFocus() can be overwritten by the Button's own focus dispatch.
-            restoreChatInputFocus(true);
+            // Restore focus after the Button click has completed; never reopen a keyboard
+            // that the user had deliberately dismissed before sending.
+            restoreChatInputFocus(keepKeyboardVisible);
 
             // 【新增】拦截暗号清空指令
             if ("/clear".equalsIgnoreCase(msg)) {
@@ -224,6 +227,26 @@ public class ChatActivity extends Activity {
             refreshHandler.removeCallbacks(deliveryStatusPoll);
             refreshHandler.postDelayed(deliveryStatusPoll, 500L);
         }
+    }
+
+    /**
+     * Detect actual IME visibility rather than editor focus. Focus can remain on the
+     * composer after the user hides the keyboard, so it is not a safe proxy.
+     */
+    private boolean isComposerImeVisible() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            android.view.WindowInsets insets = getWindow().getDecorView().getRootWindowInsets();
+            return insets != null && insets.isVisible(android.view.WindowInsets.Type.ime());
+        }
+
+        // Pre-Android 11 fallback for adjustResize devices. The threshold ignores
+        // status/navigation bars and small layout changes.
+        android.graphics.Rect visibleFrame = new android.graphics.Rect();
+        getWindow().getDecorView().getWindowVisibleDisplayFrame(visibleFrame);
+        int screenHeight = getResources().getDisplayMetrics().heightPixels;
+        float density = getResources().getDisplayMetrics().density;
+        int obscuredHeight = screenHeight - visibleFrame.bottom;
+        return obscuredHeight > (int) (150f * density);
     }
 
     /**

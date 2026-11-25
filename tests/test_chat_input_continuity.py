@@ -20,6 +20,21 @@ class ChatInputContinuityTests(unittest.TestCase):
         self.assertIn("if (hasFocus && pendingComposerImeRestore)", source)
         self.assertIn("COMPOSER_IME_RESTORE_DELAY_MS", source)
 
+    def test_send_preserves_only_the_keyboard_visibility_present_before_send(self):
+        source = JAVA.read_text(encoding="utf-8")
+        send = source.split("private void sendMessage()", 1)[1].split("private boolean isComposerImeVisible()", 1)[0]
+        self.assertIn("boolean keepKeyboardVisible = isComposerImeVisible();", send)
+        self.assertLess(send.index("isComposerImeVisible();"), send.index('inputMsg.setText("");'))
+        self.assertIn("restoreChatInputFocus(keepKeyboardVisible);", send)
+        self.assertNotIn("restoreChatInputFocus(true);", send)
+
+    def test_keyboard_visibility_is_not_inferred_from_editor_focus(self):
+        source = JAVA.read_text(encoding="utf-8")
+        helper = source.split("private boolean isComposerImeVisible()", 1)[1].split("/**", 1)[0]
+        self.assertIn("WindowInsets.Type.ime()", helper)
+        self.assertIn("getWindowVisibleDisplayFrame", helper)
+        self.assertIn("150f * density", helper)
+
     def test_button_and_ime_send_share_the_same_send_path(self):
         source = JAVA.read_text(encoding="utf-8")
         self.assertIn("btnSend.setOnClickListener(v -> sendMessage());", source)
