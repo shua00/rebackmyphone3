@@ -769,3 +769,9 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | Robolectric 测试 | 注入 DurableFileOps fake：验证目录目标存在与同目录 rename；不模拟声称系统调用已成功 | 用于逻辑/顺序测试 |
 | ACK 前顺序 | 数据文件 fsync → 任务目录 sync → SQLite receipt | 测试替身验证调用顺序；设备级持久性仍待真机 |
 | 安全 | canonical path symlink 检查仍由生产/测试共用代码执行 | symlink 测试待 CI |
+
+
+## 51. DurableFileOps 编译接线修正（2026-11-25）
+
+- 目录创建改为实例方法以调用注入的 `fileOps.syncDirectory(parent)`；补回 OsConstants 导入并修复 atomicRename 声明。
+- 生产默认路径仍为 Android Os 系统调用，测试替身仅由 Robolectric 构造函数注入。

@@ -3,6 +3,7 @@ package com.example.devicefinder;
 import android.content.Context;
 import android.system.ErrnoException;
 import android.system.Os;
+import android.system.OsConstants;
 import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileDescriptor;
@@ -73,7 +74,7 @@ public final class LanTransferFilesystem {
             if(!file.delete())throw new IOException("Unable to unlink transfer symlink");
         } else if(file.exists()&&!file.delete())throw new IOException("Unable to delete transfer file");
     }
-    private static void ensureDirectory(File dir)throws IOException {
+    private void ensureDirectory(File dir)throws IOException {
         rejectSymlink(dir);
         if(!dir.exists()) {
             if(!dir.mkdir()&&!dir.isDirectory())throw new IOException("Unable to create transfer directory");
@@ -119,7 +120,7 @@ public final class LanTransferFilesystem {
     private static void requireRegularFile(File f)throws IOException {
         rejectSymlink(f);if(!f.exists()||!f.isFile())throw new IOException("Expected regular transfer file");
     }
-    private void atomicRename(File from,File to)throwsIOException {
+    private void atomicRename(File from,File to)throws IOException {
         rejectSymlink(from);rejectSymlink(to);
         fileOps.atomicRename(from,to);
         syncDirectory(to.getParentFile());
