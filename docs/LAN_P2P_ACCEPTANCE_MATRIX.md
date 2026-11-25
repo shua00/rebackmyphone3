@@ -913,3 +913,16 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 限制 | worker 提供最大会话数、Offer 等待期限、退避、取消标志与进度回调 | 当前尚未由 TrackingService 调度；没有 SAF 文件选择、私有快照、重启恢复、通知进度和发送 UI，不能宣称端到端发送已完成 |
 | 自动化 | tests/test_lan_transfer_ui_boundary.py 增加发送端源码守卫 | Actions 结果未确认；Android 编译和跨端实网测试待后续批次 |
 
+
+
+## 25. Android SAF 发送入口与后台任务服务（2026-11-25）
+
+| 项目 | 实现 | 验收边界 |
+|---|---|---|
+| SAF 选择 | 独立 LanTransferActivity 使用 ACTION_OPEN_DOCUMENT；选择后将内容复制到应用私有 outbox，计算实际长度与 SHA-256 | 不依赖外部 URI 在 Activity 关闭后继续可读；原始文档不修改 |
+| 快照约束 | 单文件上限复用 TransferStore 的 2 GiB 限制；读取失败、大小不一致或超限删除不完整快照 | 完成后的快照当前保留；尚无清理策略 UI |
+| 目标确认 | 用户输入目标 Peer ID、LAN 主机地址和 TCP 端口；必须匹配 credentials trustedPeerIds | 不自动猜测地址；不通过 UDP 聊天通道发送文件 |
+| 后台执行 | 独立 LanTransferSenderService 使用 dataSync 前台服务与单线程 executor；任务元数据先写 SharedPreferences，再运行 worker | 当前一次仅接受一个待发送任务；没有并发任务列表 |
+| 网络选择 | 仅选择 active Wi-Fi 或唯一 Wi-Fi 候选；多候选歧义直接拒绝 | 复用 TrackingService 网络选择原则；仍需验证双 Wi-Fi、蜂窝默认路由和网络切换 |
+| 重试恢复 | offered/paused 任务保留元数据，服务每 60 秒重试；START_STICKY 重启时重新读取任务 | 需验证系统进程回收与设备重启；目前没有独立 BootReceiver 扫描恢复 |
+| 隔离 | 发送 UI/后台服务独立于 ChatActivity、聊天 UDP 队列与 TrackingService 维护线程池 | 源码守卫已增加；Android 构建、设备实测与 Android/Python 互通待验收 |
