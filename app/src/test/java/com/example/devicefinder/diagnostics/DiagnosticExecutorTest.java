@@ -62,7 +62,7 @@ public class DiagnosticExecutorTest {
         DiagnosticRun run = DiagnosticExecutor.execute(metadata(),
                 Collections.singletonList(timeout), 1, null, null);
         assertEquals("TIMEOUT", run.cases.get(0).failureCode);
-        assertFalse(LanTransferDiagnosticReport.toJson(run).contains("10.0.0.1"));
+        assertFalse(DiagnosticJsonReport.toJson(run).contains("10.0.0.1"));
     }
 
     @Test public void ioAndSecurityFailuresHaveDifferentStableCodes() {

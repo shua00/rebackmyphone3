@@ -24,7 +24,7 @@ public class DiagnosticRunTest {
         assertEquals(1, run.count(DiagnosticRun.Status.FAIL));
         assertEquals(1, run.count(DiagnosticRun.Status.SKIPPED));
         assertFalse(run.isCompleteAndPassing());
-        String json = LanTransferDiagnosticReport.toJson(run);
+        String json = DiagnosticJsonReport.toJson(run);
         assertTrue(json.contains("\"failureCode\":\"PEER_TIMEOUT\""));
         assertTrue(json.contains("\"acceptancePassed\":false"));
     }
@@ -37,7 +37,7 @@ public class DiagnosticRunTest {
                 new DiagnosticRun.CaseResult("message_round_trip",
                         DiagnosticRun.Status.PASS, 42, "", metrics)), 1);
         assertTrue(run.isCompleteAndPassing());
-        assertTrue(LanTransferDiagnosticReport.toJson(run).contains("\"roundTripMs\":42"));
+        assertTrue(DiagnosticJsonReport.toJson(run).contains("\"roundTripMs\":42"));
     }
 
     @Test public void incompleteSelectedSubsetCannotBeReportedAsFullAcceptance() {
@@ -45,13 +45,13 @@ public class DiagnosticRunTest {
                 new DiagnosticRun.CaseResult("discovery",
                         DiagnosticRun.Status.PASS, 10, "", Collections.emptyMap())), 8);
         assertFalse(run.isCompleteAndPassing());
-        assertTrue(LanTransferDiagnosticReport.toJson(run).contains("\"expectedCaseCount\":8"));
+        assertTrue(DiagnosticJsonReport.toJson(run).contains("\"expectedCaseCount\":8"));
     }
 
     @Test public void reportEscapesMetadataAndNeverAddsUnprovidedSensitiveFields() {
         DiagnosticRun.Metadata safe = DiagnosticRun.Metadata.create(
                 1000, "v\"1", "abc", "Device\\Model", 34, "wifi", "SECURE", "receiver");
-        String json = LanTransferDiagnosticReport.toJson(
+        String json = DiagnosticJsonReport.toJson(
                 new DiagnosticRun(safe, Collections.emptyList(), 1));
         assertTrue(json.contains("v\\\"1"));
         assertFalse(json.contains("peerSecret"));

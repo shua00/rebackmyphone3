@@ -8,11 +8,11 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Immutable, transport-independent result model for repeatable LAN acceptance runs.
+ * Immutable, feature-independent result model for reusable diagnostic runs.
  *
  * The model deliberately has no Android, socket, chat, or file-transfer dependencies so it can
  * be reused by an optional in-app diagnostic UI, instrumentation tests, and offline analysis.
- * Callers must never place credentials, raw peer IDs, IP addresses, payloads, or file contents
+ * Callers must never place credentials, raw device identifiers, IP addresses, payloads, or file contents
  * in this report.
  */
 public final class DiagnosticRun {

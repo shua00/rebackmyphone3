@@ -9,7 +9,7 @@ import java.util.concurrent.TimeoutException;
 
 /**
  * Small deterministic runner for diagnostic probes. It does not create sockets or mutate
- * production transfer state: concrete probes must call the real production interfaces.
+ * production feature state: concrete probes must call the real production interfaces.
  * Invoke from a dedicated background executor, never the Android main thread.
  */
 public final class DiagnosticExecutor {
