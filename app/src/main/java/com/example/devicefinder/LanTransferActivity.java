@@ -25,7 +25,6 @@ import android.widget.TextView;
 import android.widget.Toast;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -108,6 +107,7 @@ public final class LanTransferActivity extends Activity {
             .setTitle("LAN 文件传输安全配对")
             .setMessage("两台设备使用相同共享密钥，并分别填写对方设备 ID。只信任明确配置的对端；密钥由 AndroidKeyStore 加密保存。")
             .setView(form)
+            .setNeutralButton("清除全部配对", (dialog, which) -> confirmClearPairing())
             .setNegativeButton("取消", null)
             .setPositiveButton("保存并启用", (dialog, which) -> {
                 String value = secret.getText().toString();
@@ -131,6 +131,31 @@ public final class LanTransferActivity extends Activity {
             }).show();
     }
 
+
+    private void confirmClearPairing() {
+        if (LanTransferSenderService.hasPendingJob(this)) {
+            new AlertDialog.Builder(this)
+                .setTitle("暂不能清除配对")
+                .setMessage("当前仍有待处理的文件发送任务。请先完成或取消本机发送，再清除全部配对，避免活动任务继续使用旧凭据。")
+                .setPositiveButton("知道了", null)
+                .show();
+            return;
+        }
+        new AlertDialog.Builder(this)
+            .setTitle("清除全部文件传输配对")
+            .setMessage("这会清除本机保存的共享密钥和全部可信设备名单，并关闭文件传输监听。不会删除已收发文件、传输历史，也不会擦除或停用对端设备。确定继续？")
+            .setNegativeButton("保留配对", null)
+            .setPositiveButton("清除全部配对", (dialog, which) -> {
+                try {
+                    LanTransferCredentials.clear(this);
+                    status.setText("全部文件传输配对已清除；重新配对后才能发送或接收文件");
+                    refreshOffers();
+                } catch (Exception failure) {
+                    status.setText("清除配对失败：" + failure.getClass().getSimpleName());
+                }
+            })
+            .show();
+    }
 
     private void pickFileForSending() {
         Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT);

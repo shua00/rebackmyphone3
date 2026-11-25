@@ -26,6 +26,10 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
         self.assertIn("merged.addAll(existingPeerIds);", credentials)
         self.assertIn("Existing trusted peers cannot be rebound to a different group secret", credentials)
         self.assertNotIn("Collections.singleton(peerId)", activity)
+        self.assertIn('setNeutralButton("清除全部配对"', activity)
+        self.assertIn("LanTransferSenderService.hasPendingJob(this)", activity)
+        self.assertIn("LanTransferCredentials.clear(this);", activity)
+        self.assertIn("不会删除已收发文件", activity)
 
     def test_transfer_controls_live_in_dedicated_internal_activity(self):
         manifest = (ROOT / "app/src/main/AndroidManifest.xml").read_text(encoding="utf-8")
