@@ -103,7 +103,6 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
         self.assertIn("worker.pause()", service)
         self.assertIn("pauseRequested", worker)
         self.assertIn("notifyPausedAtBoundary()", worker)
-        self.assertIn('"paused".equals(b)', store)
         self.assertIn('notifyState("paused")', worker)
         self.assertIn("resumeIfPending", service)
         self.assertIn("cancelLocal", activity)
@@ -122,6 +121,7 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
     def test_sender_worker_is_bounded_resumable_and_wifi_only(self):
         worker = (JAVA / "LanTransferSenderWorker.java").read_text(encoding="utf-8")
         store = (JAVA / "LanTransferStore.java").read_text(encoding="utf-8")
+        self.assertIn('"paused".equals(b)', store)
         client = (JAVA / "LanTransferTcpClient.java").read_text(encoding="utf-8")
         self.assertIn("trustedPeerIds.contains(offer.targetPeerId)", worker)
         self.assertIn("currentWifiNetwork()", worker)
