@@ -795,3 +795,13 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 设备级持久化 | 生产默认 AndroidDurableFileOps 的真实 Os 系统调用 | 尚待真机验收 |
 
 **批次 2 判定：** Android 独立账本与文件 staging/恢复逻辑的 CI 自动化通过；生产 TCP 接入、文件 UI、网络变化与真实设备文件系统验证继续推进。
+
+
+## 54. Android authenticated TCP session adapter（2026-11-25）
+
+- 新增 `LanTransferTcpSession`，把 PSK 双向认证、LNP2 帧校验、固定 Offer 参与方、独立 Store/Filesystem 连接为一个有界服务端会话。
+- Chunk ACK 只在 `LanTransferFilesystem.writeChunk` 返回后发送；该路径先完成数据文件 sync、任务目录 sync，再提交 SQLite receipt。
+- Missing 查询限制每页 1–128 个索引；每连接最多 64 帧；socket 读超时默认 15 秒；拒绝未授权 peer。
+- Robolectric loopback 测试覆盖 missing → chunk → durable ACK → whole-file publish → complete，以及不可信 peer 拒绝。
+- **未完成项**：生产 listener/端口准入、Wi-Fi `Network` 绑定、连接并发上限、TrackingService 生命周期接线、Android 发送端和 UI 尚未接入；不能据此宣布 Android TCP 生产链路完成。
+- 当前会话类要求调用方传入已经连接的 socket；生产网络与生命周期 owner 仍由后续工作包负责。
