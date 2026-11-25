@@ -1467,7 +1467,7 @@ def adb_root_shell_console(device):
         try:
             command = input(f"root@{device}:# ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\\n退出 Root Shell。")
+            print("\n退出 Root Shell。")
             return
         if command.lower() in ("exit", "quit"):
             return
@@ -1480,7 +1480,7 @@ def adb_root_shell_console(device):
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 encoding="utf-8", errors="replace", timeout=300)
             if result.stdout:
-                print(result.stdout, end="" if result.stdout.endswith("\\n") else "\\n")
+                print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
             if result.returncode != 0:
                 print(f"{I.warn} 命令退出码: {result.returncode}")
         except subprocess.TimeoutExpired:
