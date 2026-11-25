@@ -936,7 +936,7 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 |---|---|---|
 | 任务查询 | loadRecentTransfers(localPeerId, 50) 仅返回本机作为 sender 或 target 的最近任务；按账本更新时间倒序，查询上限 100 | UI 历史不是审计日志；旧任务仍保存在 SQLite，但只展示最近 50 条 |
 | 状态展示 | 独立 LanTransferActivity 显示收发方向、对端 Peer ID、文件名、大小、状态和更新时间；只对接收方 offered 任务显示接受/拒绝 | 发送任务状态来自同一 SQLite ledger；后台 worker 广播触发刷新，页面恢复时也主动刷新 |
-| 完成文件 | Transfer DTO 暴露账本 published_path；接收方 completed 任务显示“保存到设备文件夹”，由 ACTION_CREATE_DOCUMENT 让用户选择目标 | 不暴露私有 file URI；保存前 canonical path 必须位于应用私有 lan-transfer-received 目录的直接子项；复制失败保留原文件 |
+| 完成文件 | Transfer DTO 暴露账本 published_path；接收方 completed 任务显示“保存到设备文件夹”，由 ACTION_CREATE_DOCUMENT 让用户选择目标 | 不暴露私有 file URI；保存前 canonical path 必须位于应用私有 lan-transfer-received 目录的直接子项；流式复制校验字节数和 Offer SHA-256，失败时尝试删除目标文档并保留私有原文件 |
 | 隔离与线程 | SAF 文件复制使用独立 LanTransferActivity executor；不接入 ChatActivity、不占用聊天 UDP 发送/ACK 队列 | 仍需设备上验证文件提供方、目标存储权限/空间与 Activity 退出时取消行为 |
 | 自动化门禁 | tests/test_lan_transfer_ui_boundary.py 增加历史查询、SAF 导出与 published path 边界守卫 | CI 构建/测试结果以本批 Actions run 为准；不等价于真机互传 |
 
