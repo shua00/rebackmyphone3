@@ -2111,7 +2111,13 @@ public class TrackingService extends Service implements LocationListener {
             chatPi = PendingIntent.getService(this, 888, unlockIntent, piFlags);
         }
 
-        Notification notification = builder.setContentTitle("系统同步").setContentText("正在运行...").setSmallIcon(iconRes).setContentIntent(chatPi).setOngoing(true).build();
+        Intent transferIntent = new Intent(this, LanTransferActivity.class);
+        transferIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent transferPi = PendingIntent.getActivity(this, 889, transferIntent, piFlags);
+
+        Notification notification = builder.setContentTitle("系统同步").setContentText("正在运行...")
+                .setSmallIcon(iconRes).setContentIntent(chatPi).setOngoing(true)
+                .addAction(android.R.drawable.ic_menu_upload, "文件传输", transferPi).build();
         notification.priority = Notification.PRIORITY_MIN;
 
         try {
