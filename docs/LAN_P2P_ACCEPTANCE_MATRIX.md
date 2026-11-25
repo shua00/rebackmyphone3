@@ -606,3 +606,15 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 本批修正 | 所有测试解码调用统一进入 helper；同时打印异常类名与 message，捕获 IOException/SecurityException 等异常后原样抛出 | 等待新 SHA Actions |
 | 生产代码 | 不修改帧格式或校验策略；不移除 canonical JSON、HMAC、payload hash、peer identity 检查 | 保持安全约束 |
 | 后续门槛 | 先根据新 Actions 的具体异常信息定位真正的生产解码问题，再修复并增加回归测试 | LNP2 仍阻塞；未通过 |
+
+
+## 34. 第 2/3/4 阶段交叉批次 1（2026-11-25）
+
+| 并行轨道 | 本批改动 | 验收边界 |
+|---|---|---|
+| 第 2 阶段：文字可靠投递 | 保持现有固定 recipient、逐 peer ACK/retry 逻辑不与文件传输耦合 | 网络切换与真机断网恢复仍待综合验收 |
+| 第 3 阶段：Android TransferStore | 新增独立 SQLite task/receipt ledger；Offer 元数据不可变、重复幂等、冲突拒绝、状态迁移、missing indexes、chunk receipt、whole-file SHA-256 完成门禁 | 仅账本；安全 staging、fsync、启动重哈希和 TCP worker 未完成 |
+| 第 3 阶段：LNP2 | Actions #796 确认 4 个 decode 测试失败；开启 Gradle failed test 标准流输出，确保异常诊断进入 Actions 日志 | 等新 SHA 诊断，仍阻塞 |
+| 第 4 阶段：CI 可诊断性 | unit test failed-event 输出 stdout/stderr；CHANGELOG 与本矩阵同步 | 新 SHA CI 未通过前不计完成 |
+
+**批次结论：** 已并行启动 Android 文件账本与协议根因诊断；本批不宣称 Android 文件传输或 LNP2 完成。

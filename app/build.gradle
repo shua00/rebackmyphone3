@@ -38,6 +38,12 @@ android {
     // Robolectric runs against the Android framework in the local JVM test task.
     testOptions {
         unitTests.includeAndroidResources = true
+        unitTests.all {
+            testLogging {
+                events "failed"
+                showStandardStreams = true
+            }
+        }
     }
 }
 
