@@ -85,14 +85,13 @@ public final class LanTransferSenderWorker implements Runnable {
             if (pauseRequested.get()) notifyPausedAtBoundary();
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
-            pauseIfTransferring();
-            notifyState("paused");
+            notifyPausedAtBoundary();
         } catch (GeneralSecurityException securityFailure) {
             failIfTransferring();
             notifyState("failed");
         } catch (IOException failure) {
-            pauseIfTransferring();
-            notifyState("paused");
+            if (pauseRequested.get()) notifyPausedAtBoundary();
+            else { pauseIfTransferring(); notifyState("paused"); }
         } catch (RuntimeException invalidTask) {
             failIfTransferring();
             notifyState("failed");
@@ -134,6 +133,7 @@ public final class LanTransferSenderWorker implements Runnable {
             } catch (IOException retryable) {
                 // A missing route or transient socket failure does not alter the immutable Offer.
             }
+            if (pauseRequested.get()) { notifyPausedAtBoundary(); return; }
             sleepBackoff(backoff);
             backoff = Math.min(MAX_BACKOFF_MS, backoff * 2L);
         }
@@ -174,9 +174,9 @@ public final class LanTransferSenderWorker implements Runnable {
                 // The next authenticated session re-queries the receiver's current missing page.
                 backoff = 1000L;
             } catch (IOException retryable) {
+                if (pauseRequested.get()) { notifyPausedAtBoundary(); break; }
                 pauseIfTransferring();
                 notifyState("paused");
-                if (pauseRequested.get()) break;
                 sleepBackoff(backoff);
                 if (pauseRequested.get()) break;
                 backoff = Math.min(MAX_BACKOFF_MS, backoff * 2L);
@@ -250,7 +250,7 @@ public final class LanTransferSenderWorker implements Runnable {
     }
 
     private void sleepBackoff(long delayMs) throws InterruptedException {
-        if (cancelled.get()) return;
+        if (cancelled.get() || pauseRequested.get()) return;
         Thread.sleep(Math.max(250L, Math.min(MAX_BACKOFF_MS, delayMs)));
     }
 
