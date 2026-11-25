@@ -51,6 +51,11 @@ public class LanTransferStoreTest {
   LanTransferStore.MissingPage third=store.getMissingChunkPage("task-pages",256,128);
   assertEquals(44,third.indexes.size());assertFalse(third.more);
  }
+ @Test public void outgoingOfferCanReachFailedOnRemoteTerminalOrSecurityFailure(){
+  store.createOffer(offer("task-failed",1),1100,4096);
+  assertTrue(store.transition("task-failed","failed",1200));
+  assertEquals("failed",store.getTransfer("task-failed").state);
+ }
  @Test public void traversalAndInvalidChunkSizeAreRejected(){
   try{store.createOffer(new LanTransferStore.Offer("task-5","sender","receiver","../evil",1,HASH,1,"x"),1,4096);fail();}catch(IllegalArgumentException expected){}
   try{store.createOffer(offer("task-6",1),1,1024);fail();}catch(IllegalArgumentException expected){}
