@@ -100,9 +100,7 @@ public final class LanTransferTcpSession {
                     throw new IOException("Transfer is not accepting chunks");
                 boolean inserted = filesystem.writeChunk(frame.transferId, frame.index,
                         frame.payload, now);
-                responseMetadata = new JSONObject();
-                responseMetadata.put("index", frame.index);
-                responseMetadata.put("new_receipt", inserted);
+                responseMetadata = ackMetadata(frame.index, inserted);
                 responseKind = "chunk_ack";
             } else if ("missing".equals(frame.kind)) {
                 int limit = requestedPageLimit(frame.metadata);
@@ -112,8 +110,7 @@ public final class LanTransferTcpSession {
                 responseKind = "missing";
             } else if ("complete".equals(frame.kind)) {
                 if ("completed".equals(transfer.state)) {
-                    responseMetadata = new JSONObject();
-                    responseMetadata.put("state", "completed");
+                    responseMetadata = stateMetadata("completed");
                     responseKind = "complete";
                 } else {
                     LanTransferStore.MissingPage page = filesystem.reconcilePage(frame.transferId, now);
@@ -122,24 +119,27 @@ public final class LanTransferTcpSession {
                         responseKind = "missing";
                     } else {
                         filesystem.assembleAndPublish(frame.transferId, now);
-                        responseMetadata = new JSONObject();
-                        responseMetadata.put("state", "completed");
+                        responseMetadata = stateMetadata("completed");
                         responseKind = "complete";
                     }
                 }
             } else if ("cancel".equals(frame.kind)) {
                 if (!isTerminal(transfer.state)) filesystem.cancelAndCleanup(frame.transferId, now);
                 LanTransferStore.Transfer after = store.getTransfer(frame.transferId);
-                responseMetadata = new JSONObject();
-                responseMetadata.put("state", after == null ? "unknown" : after.state);
+                responseMetadata = stateMetadata(after == null ? "unknown" : after.state);
                 responseKind = "cancel";
             } else {
                 throw new IOException("Unsupported transfer request kind");
             }
 
-            LanTransferFrameCodec.send(socket, new LanTransferFrameCodec.Frame(
-                    responseKind, frame.transferId, localPeerId, peer.peerId,
-                    null, new byte[0], responseMetadata), peer.sessionKey, maxPayloadBytes);
+            try {
+                LanTransferFrameCodec.send(socket, new LanTransferFrameCodec.Frame(
+                        responseKind, frame.transferId, localPeerId, peer.peerId,
+                        null, new byte[0], responseMetadata), peer.sessionKey, maxPayloadBytes);
+            } catch (Exception sendFailure) {
+                if (sendFailure instanceof IOException) throw (IOException) sendFailure;
+                throw new IOException("Unable to send LNP2 response", sendFailure);
+            }
             handled++;
         }
         return handled;
@@ -161,13 +161,27 @@ public final class LanTransferTcpSession {
         }
     }
 
+    private static JSONObject ackMetadata(int index, boolean inserted) throws IOException {
+        JSONObject result = new JSONObject();
+        try { result.put("index", index); result.put("new_receipt", inserted); }
+        catch (org.json.JSONException invalid) { throw new IOException("Unable to encode chunk ACK", invalid); }
+        return result;
+    }
+
+    private static JSONObject stateMetadata(String state) throws IOException {
+        JSONObject result = new JSONObject();
+        try { result.put("state", state); }
+        catch (org.json.JSONException invalid) { throw new IOException("Unable to encode transfer state", invalid); }
+        return result;
+    }
+
     private static JSONObject missingMetadata(LanTransferStore.MissingPage page)
-            throws org.json.JSONException {
+            throws IOException {
         JSONObject result = new JSONObject();
         JSONArray indexes = new JSONArray();
         for (Integer index : page.indexes) indexes.put(index);
-        result.put("indexes", indexes);
-        result.put("more", page.more);
+        try { result.put("indexes", indexes); result.put("more", page.more); }
+        catch (org.json.JSONException invalid) { throw new IOException("Unable to encode missing page", invalid); }
         return result;
     }
 
