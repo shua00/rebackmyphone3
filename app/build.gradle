@@ -4,6 +4,7 @@ plugins {
 
 // Diagnostics are enabled for development/acceptance builds by default.
 // Release slimming: ./gradlew assembleRelease -PincludeDiagnostics=false
+// CI verifies both variants; keep the opt-out build path free of diagnostics package classes.
 def includeDiagnostics = providers.gradleProperty("includeDiagnostics")
         .map { it.toBoolean() }.getOrElse(true)
 
