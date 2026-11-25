@@ -1035,6 +1035,12 @@ public class TrackingService extends Service implements LocationListener {
             } else if ("ACTION_LAN_TRANSFER_CREDENTIALS_UPDATED".equals(action)) {
                 executeMaintenance("lan-transfer-credentials", () ->
                         refreshLanTransferTcpListener("credentials updated"));
+            } else if ("ACTION_LAN_TRANSFER_ACCEPT".equals(action)
+                    || "ACTION_LAN_TRANSFER_REJECT".equals(action)
+                    || "ACTION_LAN_TRANSFER_CANCEL".equals(action)) {
+                String transferId = intent.getStringExtra("transfer_id");
+                executeMaintenance("lan-transfer-user-action", () ->
+                        handleLanTransferUserAction(action, transferId));
             } else if ("ACTION_HEARTBEAT".equals(action)) {
                 long actual = System.currentTimeMillis();
                 long drift = lastHeartbeatExpectedAt > 0 ? actual - lastHeartbeatExpectedAt : -1;
@@ -2452,6 +2458,47 @@ public class TrackingService extends Service implements LocationListener {
         }
     }
 
+
+
+    /** Explicit UI/service action boundary for incoming Offer acceptance, rejection and cancellation. */
+    private void handleLanTransferUserAction(String action, String transferId) {
+        if (transferId == null || transferId.isEmpty()) {
+            FileLogger.log(this, "LAN_TRANSFER", "Transfer action rejected: missing transfer_id");
+            return;
+        }
+        try {
+            synchronized (lanTransferListenerLock) {
+                if (lanTransferStore == null) lanTransferStore = new LanTransferStore(this);
+                if (lanTransferFilesystem == null)
+                    lanTransferFilesystem = new LanTransferFilesystem(this, lanTransferStore);
+                LanTransferStore.Transfer transfer = lanTransferStore.getTransfer(transferId);
+                if (transfer == null) throw new IllegalArgumentException("Unknown transfer task");
+                String localId = getUniqueDeviceId();
+                if (!localId.equals(transfer.offer.targetPeerId)
+                        && !localId.equals(transfer.offer.senderPeerId))
+                    throw new SecurityException("Transfer does not belong to this device");
+                long now = System.currentTimeMillis();
+                if ("ACTION_LAN_TRANSFER_ACCEPT".equals(action)) {
+                    if (!localId.equals(transfer.offer.targetPeerId) || !"offered".equals(transfer.state))
+                        throw new IllegalStateException("Only an incoming offered task can be accepted");
+                    lanTransferStore.transition(transferId, "accepted", now);
+                    lanTransferStore.transition(transferId, "transferring", now);
+                } else if ("ACTION_LAN_TRANSFER_REJECT".equals(action)) {
+                    if (!localId.equals(transfer.offer.targetPeerId) || !"offered".equals(transfer.state))
+                        throw new IllegalStateException("Only an incoming offered task can be rejected");
+                    lanTransferStore.transition(transferId, "rejected", now);
+                } else if ("ACTION_LAN_TRANSFER_CANCEL".equals(action)) {
+                    lanTransferFilesystem.cancelAndCleanup(transferId, now);
+                }
+                LanTransferStore.Transfer after = lanTransferStore.getTransfer(transferId);
+                FileLogger.log(this, "LAN_TRANSFER", "User action=" + action
+                        + " transfer=" + transferId + " state=" + (after == null ? "missing" : after.state));
+            }
+        } catch (Exception failure) {
+            FileLogger.log(this, "LAN_TRANSFER", "User action failed action=" + action
+                    + " error=" + failure.getClass().getSimpleName());
+        }
+    }
 
     /**
      * Reconcile the dedicated TCP file-transfer listener against the selected Wi-Fi LAN.
