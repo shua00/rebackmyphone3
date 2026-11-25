@@ -83,7 +83,7 @@ public class DiagnosticBatchCoordinatorTest {
         assertEquals(original.reportJson, decoded.reportJson);
         try {
             new DiagnosticBatchEnvelope("b", "e", "r", "p", 0, 1,
-                    new String(new char[DiagnosticBatchEnvelope.MAX_REPORT_JSON_CHARS + 1]).replace('\\0', 'x'));
+                    new String(new char[DiagnosticBatchEnvelope.MAX_REPORT_JSON_CHARS + 1]).replace((char) 0, 'x'));
             fail("oversized payload accepted");
         } catch (IllegalArgumentException expected) { }
     }
