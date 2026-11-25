@@ -113,7 +113,7 @@ public class LanTransferTcpSessionTest {
 
     @Test
     public void untrustedPeerIsRejectedBeforeAnyTransferFrameIsProcessed() throws Exception {
-        Context context = ApplicationProvider.getApplicationContext();
+        Context context = RuntimeEnvironment.getApplication();
         LanTransferStore store = new LanTransferStore(context);
         LanTransferFilesystem filesystem = new LanTransferFilesystem(context, store,
                 LanTransferFilesystem.DEFAULT_STAGING_QUOTA_BYTES, fileOps());
