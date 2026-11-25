@@ -193,10 +193,15 @@ public final class LanTransferFrameCodec {
     }
     private static int number(JSONObject o,String key) throws Exception { return integer(o.get(key),key); }
     private static int integer(Object v,String field) throws IOException {
-        if(!(v instanceof Integer||v instanceof Long)) throw new IOException("Invalid "+field);
-        long n=((Number)v).longValue();
-        if(n<Integer.MIN_VALUE||n>Integer.MAX_VALUE) throw new IOException("Out of range "+field);
-        return (int)n;
+        if (!(v instanceof Number)) throw new IOException("Invalid "+field);
+        try {
+            long exact = new java.math.BigDecimal(v.toString()).longValueExact();
+            if (exact < Integer.MIN_VALUE || exact > Integer.MAX_VALUE)
+                throw new IOException("Out of range "+field);
+            return (int) exact;
+        } catch (NumberFormatException | ArithmeticException invalid) {
+            throw new IOException("Invalid integral "+field, invalid);
+        }
     }
     private static JSONObject withoutAuth(JSONObject source) throws Exception {
         JSONObject copy=new JSONObject(); Iterator<String> it=source.keys();
@@ -230,7 +235,14 @@ public final class LanTransferFrameCodec {
             return out.append(']').toString();
         }
         if(value instanceof String)return JSONObject.quote((String)value);
-        if(value instanceof Boolean||value instanceof Integer||value instanceof Long)return value.toString();
-        throw new IllegalArgumentException("Unsupported/non-integral JSON value");
+        if(value instanceof Boolean)return value.toString();
+        if(value instanceof Number) {
+            try {
+                return new java.math.BigDecimal(value.toString()).stripTrailingZeros().toPlainString();
+            } catch (NumberFormatException invalid) {
+                throw new IllegalArgumentException("Unsupported JSON number", invalid);
+            }
+        }
+        throw new IllegalArgumentException("Unsupported JSON value");
     }
 }

@@ -574,3 +574,14 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 
 
 **帧编解码测试隔离修正：** Actions #789/#790 暴露 Robolectric Socket shadow 与 loopback 测试不兼容；编解码层现拆为纯字节流 `encodeFrame/decodeFrame`，单测不再依赖 Socket。真实 TCP 网络集成仍由独立网络层测试覆盖。固定 Python golden frame 用于逐字节跨语言互通验收。
+
+## 31. Android LNP2 帧解码数值类型兼容修正（2026-11-25）
+
+| 项目 | 修正内容 | 验收状态 |
+|---|---|---|
+| 失败证据 | Actions #793：Python job 成功；Android unit test 18 项中 4 项在 decodeFrame 抛 IOException，故整轮失败 | 已保留失败记录，不回写为成功 |
+| JSON 数值读取 | 以 BigDecimal.longValueExact 读取整数，兼容 Android JSON parser 的 Number 子类型，同时拒绝小数、溢出和非数值 | 代码修正已提交，等待新 SHA CI |
+| Canonical JSON | Number 统一经 BigDecimal 规范化；只允许 canonical raw header 与规范化结果完全一致 | 等待 Android golden frame 与 round-trip 复验 |
+| 安全约束 | 不改变 HMAC、payload SHA-256、sender/target 固定身份、header/metadata/payload 上限 | 等待 CI |
+| 阶段边界 | 仅修复 Android 帧编解码兼容性；Android TransferStore、staging、TCP worker、产品 UI 和真机互通仍未完成 | 未通过端到端验收 |
+
