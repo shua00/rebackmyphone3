@@ -118,16 +118,10 @@ public final class LanTransferActivity extends Activity {
                     return;
                 }
                 try {
-                    Set<String> trustedPeerIds = new HashSet<>();
                     LanTransferCredentials.Value existing = LanTransferCredentials.load(this);
-                    if (existing != null) {
-                        if (!existing.sharedSecret.equals(value)) {
-                            throw new IllegalArgumentException(
-                                    "已有配对使用不同共享密钥；如需更换密钥，请先明确清除旧配对");
-                        }
-                        trustedPeerIds.addAll(existing.trustedPeerIds);
-                    }
-                    trustedPeerIds.add(peerId);
+                    Set<String> trustedPeerIds = LanTransferCredentials.mergeTrustedPeerIds(
+                            existing == null ? Collections.emptySet() : existing.trustedPeerIds,
+                            existing == null ? null : existing.sharedSecret, value, peerId);
                     LanTransferCredentials.provision(this, value, trustedPeerIds);
                     Toast.makeText(this, "配对凭据已保存；已保留原可信设备并添加新设备", Toast.LENGTH_LONG).show();
                     refreshOffers();

@@ -79,6 +79,23 @@ public final class LanTransferCredentials {
         return new Value(secret, peers);
     }
 
+    static Set<String> mergeTrustedPeerIds(Set<String> existingPeerIds,
+            String existingSecret, String requestedSecret, String newPeerId) {
+        if (existingPeerIds != null && !existingPeerIds.isEmpty()
+                && (existingSecret == null || !existingSecret.equals(requestedSecret))) {
+            throw new IllegalArgumentException(
+                    "Existing trusted peers cannot be rebound to a different group secret");
+        }
+        if (existingSecret != null && !existingSecret.equals(requestedSecret)) {
+            throw new IllegalArgumentException("Existing pairing uses a different group secret");
+        }
+        Set<String> merged = new HashSet<>();
+        if (existingPeerIds != null) merged.addAll(existingPeerIds);
+        merged.add(newPeerId);
+        validate(requestedSecret, merged);
+        return Collections.unmodifiableSet(merged);
+    }
+
     public static void clear(Context context) throws Exception {
         context.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit().remove(CIPHER_KEY).commit();

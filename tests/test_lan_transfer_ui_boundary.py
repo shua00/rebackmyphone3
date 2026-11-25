@@ -20,9 +20,11 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
     def test_pairing_adds_a_peer_without_replacing_existing_trust(self):
         activity = (JAVA / "LanTransferActivity.java").read_text(encoding="utf-8")
         self.assertIn("LanTransferCredentials.Value existing = LanTransferCredentials.load(this);", activity)
-        self.assertIn("trustedPeerIds.addAll(existing.trustedPeerIds);", activity)
-        self.assertIn("trustedPeerIds.add(peerId);", activity)
+        self.assertIn("LanTransferCredentials.mergeTrustedPeerIds(", activity)
         self.assertIn("LanTransferCredentials.provision(this, value, trustedPeerIds);", activity)
+        credentials = (JAVA / "LanTransferCredentials.java").read_text(encoding="utf-8")
+        self.assertIn("merged.addAll(existingPeerIds);", credentials)
+        self.assertIn("Existing trusted peers cannot be rebound to a different group secret", credentials)
         self.assertNotIn("Collections.singleton(peerId)", activity)
 
     def test_transfer_controls_live_in_dedicated_internal_activity(self):
