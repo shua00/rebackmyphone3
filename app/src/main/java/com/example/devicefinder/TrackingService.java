@@ -283,6 +283,12 @@ public class TrackingService extends Service implements LocationListener {
     private static final long LAN_PEER_CHALLENGE_TIMEOUT_MS = LanChatRetryPolicy.PEER_CHALLENGE_TIMEOUT_MS;
     private final Object lanChatQueueLock = new Object();
     private volatile LanChatStore lanChatStore;
+    // File-transfer transport has its own durable ledger and lifecycle; it never shares chat Outbox.
+    private volatile LanTransferStore lanTransferStore;
+    private volatile LanTransferFilesystem lanTransferFilesystem;
+    private volatile LanTransferTcpListener lanTransferTcpListener;
+    private volatile String lanTransferListenerFingerprint;
+    private final Object lanTransferListenerLock = new Object();
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRetryInFlight =
             new java.util.concurrent.atomic.AtomicBoolean(false);
     // Coalesce a recovery event that arrives while a retry batch is already in flight.
@@ -2398,6 +2404,9 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private void refreshWifiLanTransport(String reason) {
+        // File transfer has a separate TCP listener and is disabled until AndroidKeyStore
+        // credentials plus an explicit peer allow-list have been provisioned.
+        refreshLanTransferTcpListener(reason);
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
             String current = buildWifiLanFingerprint(cm);
@@ -2436,6 +2445,101 @@ public class TrackingService extends Service implements LocationListener {
             // 队列补发改由 UDP socket 重新绑定成功后触发，避免对着已关闭/未就绪 socket 空跑。
         } catch (Exception e) {
             FileLogger.log(this, "NETWORK", "Wi-Fi LAN refresh failed: " + e.getClass().getSimpleName());
+        }
+    }
+
+
+    /**
+     * Reconcile the dedicated TCP file-transfer listener against the selected Wi-Fi LAN.
+     * No fallback to the default cellular route is permitted. The listener binds to the
+     * selected Wi-Fi IPv4 address and is recreated whenever Network/interface/address changes.
+     * Credentials are encrypted by AndroidKeyStore and include an explicit peer allow-list;
+     * absent credentials means the file-transfer listener remains closed.
+     */
+    private void refreshLanTransferTcpListener(String reason) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || serviceDestroyed) {
+            stopLanTransferTcpListener("unsupported or service destroyed");
+            return;
+        }
+        try {
+            LanTransferCredentials.Value credentials = LanTransferCredentials.load(this);
+            if (credentials == null) {
+                stopLanTransferTcpListener("credentials not provisioned");
+                return;
+            }
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            Network selected = selectWifiLanNetwork(cm);
+            if (selected == null) {
+                stopLanTransferTcpListener("no selected Wi-Fi network");
+                return;
+            }
+            LinkProperties links = cm.getLinkProperties(selected);
+            if (links == null || links.getInterfaceName() == null || links.getLinkAddresses() == null) {
+                stopLanTransferTcpListener("incomplete Wi-Fi link properties");
+                return;
+            }
+            java.net.Inet4Address bindAddress = null;
+            for (LinkAddress linkAddress : links.getLinkAddresses()) {
+                java.net.InetAddress address = linkAddress.getAddress();
+                if (address instanceof java.net.Inet4Address && !address.isLoopbackAddress()
+                        && !address.isLinkLocalAddress()) {
+                    bindAddress = (java.net.Inet4Address) address;
+                    break;
+                }
+            }
+            if (bindAddress == null) {
+                stopLanTransferTcpListener("no usable Wi-Fi IPv4 address");
+                return;
+            }
+            String fingerprint = selected.toString() + "|" + links.getInterfaceName()
+                    + "|" + bindAddress.getHostAddress();
+            synchronized (lanTransferListenerLock) {
+                if (serviceDestroyed) return;
+                if (fingerprint.equals(lanTransferListenerFingerprint)
+                        && lanTransferTcpListener != null && lanTransferTcpListener.isRunning()) return;
+                closeLanTransferListenerLocked();
+                if (lanTransferStore == null) lanTransferStore = new LanTransferStore(this);
+                if (lanTransferFilesystem == null)
+                    lanTransferFilesystem = new LanTransferFilesystem(this, lanTransferStore);
+                LanTransferTcpListener listener = new LanTransferTcpListener(this,
+                        lanTransferStore, lanTransferFilesystem, getUniqueDeviceId(),
+                        credentials.sharedSecret, credentials.trustedPeerIds::contains,
+                        (stage, failure) -> FileLogger.log(this, "LAN_TRANSFER",
+                                "TCP listener stage=" + stage + " error=" + failure.getClass().getSimpleName()));
+                listener.start(bindAddress, LanTransferTcpListener.DEFAULT_PORT);
+                lanTransferTcpListener = listener;
+                lanTransferListenerFingerprint = fingerprint;
+                FileLogger.log(this, "LAN_TRANSFER", "TCP listener active on selected Wi-Fi "
+                        + links.getInterfaceName() + " address=" + bindAddress.getHostAddress()
+                        + " reason=" + reason);
+            }
+        } catch (Exception failure) {
+            FileLogger.log(this, "LAN_TRANSFER", "TCP listener reconcile failed: "
+                    + failure.getClass().getSimpleName());
+            // A transient snapshot failure does not prove the old LAN path is gone.
+        }
+    }
+
+    private void stopLanTransferTcpListener(String reason) {
+        synchronized (lanTransferListenerLock) {
+            closeLanTransferListenerLocked();
+        }
+    }
+
+    private void closeLanTransferListenerLocked() {
+        LanTransferTcpListener old = lanTransferTcpListener;
+        lanTransferTcpListener = null;
+        lanTransferListenerFingerprint = null;
+        if (old != null) old.close();
+    }
+
+    private void closeLanTransferResources() {
+        synchronized (lanTransferListenerLock) {
+            closeLanTransferListenerLocked();
+            LanTransferStore store = lanTransferStore;
+            lanTransferStore = null;
+            lanTransferFilesystem = null;
+            if (store != null) store.closeStore();
         }
     }
 
@@ -7172,6 +7276,8 @@ public class TrackingService extends Service implements LocationListener {
         logLifecycle("SERVICE_DESTROY", "isForegroundStarted=" + isForegroundStarted);
         FileLogger.log(this, "SERVICE", "🛑 服务销毁");
         serviceDestroyed = true;
+        // Stop the independent file-transfer listener before closing its SQLite ledger.
+        closeLanTransferResources();
         // Stop UDP ingress before shutting down its consumers. A packet already being
         // handled may still be rejected during teardown; its sender will retry because
         // no ACK can be sent on the closed socket. Accepted IO tasks are drained below.
