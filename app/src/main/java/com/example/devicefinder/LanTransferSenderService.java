@@ -12,6 +12,8 @@ import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.Handler;
+import android.os.Looper;
 import org.json.JSONObject;
 import java.io.File;
 import java.util.ArrayList;
@@ -26,6 +28,7 @@ public final class LanTransferSenderService extends Service {
     private static final String JOB="active_job_v1";
     private static final int NOTIFICATION_ID=8842;
     private ExecutorService executor;
+    private final Handler retryHandler = new Handler(Looper.getMainLooper());
 
     public static void enqueue(Context context, LanTransferStore.Offer offer, String host, int port, String path) throws Exception {
         JSONObject j=new JSONObject();
@@ -61,6 +64,7 @@ public final class LanTransferSenderService extends Service {
 
     private void runJob(JSONObject j,int startId) {
         LanTransferStore store=null;
+        boolean retry=false;
         try {
             LanTransferCredentials.Value credentials=LanTransferCredentials.load(this);
             if(credentials==null) throw new SecurityException("Transfer credentials are not provisioned");
@@ -73,7 +77,6 @@ public final class LanTransferSenderService extends Service {
             if(!source.getPath().startsWith(new File(getFilesDir(),"lan-transfer-outbox").getCanonicalPath()+File.separator))
                 throw new SecurityException("Snapshot path is outside private outbox");
             store=new LanTransferStore(this);
-            final LanTransferStore taskStore=store;
             LanTransferSenderWorker worker=new LanTransferSenderWorker(store,credentials,()->selectWifiNetwork(),
                 source,offer,local,j.getString("host"),j.getInt("port"),LanTransferStore.DEFAULT_CHUNK_SIZE,
                 LanTransferSenderWorker.DEFAULT_MAX_TRANSFER_SESSIONS,LanTransferSenderWorker.DEFAULT_OFFER_WAIT_MS,
@@ -90,12 +93,24 @@ public final class LanTransferSenderService extends Service {
                     @Override public void onProgress(int sent,int batch) { updateNotification("文件传输中："+sent+"/"+batch+" 块"); }
                 });
             worker.run();
+            LanTransferStore.Transfer current=store.getTransfer(offer.transferId);
+            retry=current!=null && ("offered".equals(current.state) || "paused".equals(current.state));
         } catch(Exception failure) {
             FileLogger.log(this,"LAN_TRANSFER","Sender job failed: "+failure.getClass().getSimpleName());
             updateNotification("文件发送暂不可用，可稍后重试");
         } finally {
             if(store!=null) store.closeStore();
-            stopSelf(startId);
+            if(retry && !isDestroyed()) {
+                updateNotification("等待对端接受或网络恢复，稍后自动重试");
+                retryHandler.postDelayed(() -> {
+                    if(executor!=null && !executor.isShutdown()) {
+                        try { executor.execute(() -> runJob(j,startId)); }
+                        catch(java.util.concurrent.RejectedExecutionException ignored) { stopSelf(startId); }
+                    }
+                }, 60000L);
+            } else {
+                stopSelf(startId);
+            }
         }
     }
 
@@ -132,6 +147,6 @@ public final class LanTransferSenderService extends Service {
         NotificationManager nm=(NotificationManager)getSystemService(NOTIFICATION_SERVICE);
         if(nm!=null)nm.notify(NOTIFICATION_ID,notification(text));
     }
-    @Override public void onDestroy() { if(executor!=null)executor.shutdownNow();super.onDestroy(); }
+    @Override public void onDestroy() { retryHandler.removeCallbacksAndMessages(null);if(executor!=null)executor.shutdownNow();super.onDestroy(); }
     @Override public IBinder onBind(Intent intent) { return null; }
 }
