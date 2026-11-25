@@ -781,3 +781,17 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 
 - Actions #816 文件系统测试仅 1 项失败：重开 Store 后测试重建 Filesystem 时忘记注入 Robolectric DurableFileOps，错误走到 Android Os.open 默认路径。
 - 已统一重启后的测试构造注入 fake；生产默认实现未改变。
+
+
+## 53. 第 2/3/4 阶段交叉批次 2 CI 结果（2026-11-25）
+
+| 验收项 | Actions #817 / d151a879 | 结论 |
+|---|---|---|
+| Python validate | success | 通过 |
+| Android `testDebugUnitTest` | success | 通过；包含 TransferStore、TransferFilesystem、LNP2 与 retry policy 测试 |
+| Android `assembleDebug` | success | 通过，APK artifact 上传成功 |
+| 单文件 staging | offset 写入、fsync/目录 sync 调用、chunk receipt、resume/reconcile、symlink、quota | 自动化逻辑通过 |
+| 整文件发布 | whole-file SHA-256、atomic rename、rename 后账本提交前 crash recovery | 自动化逻辑通过 |
+| 设备级持久化 | 生产默认 AndroidDurableFileOps 的真实 Os 系统调用 | 尚待真机验收 |
+
+**批次 2 判定：** Android 独立账本与文件 staging/恢复逻辑的 CI 自动化通过；生产 TCP 接入、文件 UI、网络变化与真实设备文件系统验证继续推进。

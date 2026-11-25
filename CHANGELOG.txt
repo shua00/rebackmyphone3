@@ -1,4 +1,23 @@
 ================================================================================
+v8.46 — 2026-11-25 · 第 2/3/4 阶段交叉批次 2 自动化验收通过
+================================================================================
+
+【CI 验收】Android TransferFilesystem + TransferStore
+--------------------------------------------------------------------------------
+- Actions #817 对应 d151a879：validate-python、Android testDebugUnitTest、assembleDebug 全部 success，APK artifact 上传成功。
+- LanTransferFilesystem 的单 staging 文件、chunk offset 写入、文件/目录持久化调用顺序、receipt after durable write、重启 rehash、损坏回执撤销、symlink unlink、missing page more、quota 和 rename-before-ledger crash recovery 测试全部通过。
+- LanTransferStore 的 Offer 冲突/幂等、状态迁移、chunk receipt、缺块分页与活动任务预留测试通过。
+- LNP2 golden cross-language、错误 peer/key、trailing bytes 与文字消息 retry policy 测试也在本 SHA 的 Android testDebugUnitTest 中通过。
+- Robolectric 使用 DurableFileOps fake 验证调用顺序和文件逻辑；生产默认 AndroidDurableFileOps 的 Os.open/fsync/rename 系统调用仍需真机验收，不能将 fake 测试等同于设备文件系统验收。
+
+【第 2 阶段】
+--------------------------------------------------------------------------------
+- 文字消息固定收件快照、逐 peer ACK/retry 的既有逻辑保持独立；retry backoff/wake policy 回归已通过。
+- 网络切换、Wi-Fi 临时消失后恢复、真机收发时延仍在第 4 批综合测试和真机验收中。
+
+================================================================================
+
+================================================================================
 v8.45 — 2026-11-25 · 修正 TransferFilesystem 重启测试的 file ops 注入
 ================================================================================
 
