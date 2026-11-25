@@ -9,6 +9,9 @@ import android.content.IntentFilter;
 import android.net.Uri;
 import android.text.TextUtils;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
@@ -38,6 +41,8 @@ public final class LanTransferActivity extends Activity {
     private Button refreshButton;
     private boolean receiverRegistered;
     private static final int REQUEST_PICK_TRANSFER_FILE = 7401;
+    private static final int REQUEST_SAVE_RECEIVED_FILE = 7402;
+    private LanTransferStore.Transfer pendingSaveTransfer;
 
     private final BroadcastReceiver updates = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) { refreshOffers(); }
@@ -130,7 +135,15 @@ public final class LanTransferActivity extends Activity {
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != REQUEST_PICK_TRANSFER_FILE || resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        if (requestCode == REQUEST_SAVE_RECEIVED_FILE) {
+            LanTransferStore.Transfer transfer = pendingSaveTransfer;
+            pendingSaveTransfer = null;
+            if (resultCode == RESULT_OK && data != null && data.getData() != null && transfer != null)
+                copyCompletedFileToUserLocation(transfer, data.getData());
+            return;
+        }
+        if (requestCode != REQUEST_PICK_TRANSFER_FILE || resultCode != RESULT_OK
+                || data == null || data.getData() == null) return;
         Uri uri = data.getData();
         try {
             int grants = data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION;
@@ -139,6 +152,48 @@ public final class LanTransferActivity extends Activity {
             // The private snapshot below is independent of the provider after it completes.
         }
         showOutgoingDestinationDialog(uri);
+    }
+
+    private void requestSaveCompletedFile(LanTransferStore.Transfer transfer) {
+        if (transfer == null || !"completed".equals(transfer.state)
+                || TextUtils.isEmpty(transfer.publishedPath)) {
+            Toast.makeText(this, "完成文件路径不可用", Toast.LENGTH_LONG).show();
+            return;
+        }
+        pendingSaveTransfer = transfer;
+        Intent create = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        create.addCategory(Intent.CATEGORY_OPENABLE);
+        create.setType(TextUtils.isEmpty(transfer.offer.mimeType) ? "application/octet-stream" : transfer.offer.mimeType);
+        create.putExtra(Intent.EXTRA_TITLE, transfer.offer.filename);
+        startActivityForResult(create, REQUEST_SAVE_RECEIVED_FILE);
+    }
+
+    private void copyCompletedFileToUserLocation(LanTransferStore.Transfer transfer, Uri destination) {
+        try {
+            io.execute(() -> {
+                try {
+                    File receivedRoot = new File(getFilesDir(), "lan-transfer-received").getCanonicalFile();
+                    File source = new File(transfer.publishedPath).getCanonicalFile();
+                    if (!source.isFile() || !receivedRoot.equals(source.getParentFile()))
+                        throw new SecurityException("Published file is outside the private received directory");
+                    try (InputStream input = new FileInputStream(source);
+                         OutputStream output = getContentResolver().openOutputStream(destination, "w")) {
+                        if (output == null) throw new java.io.IOException("Unable to open destination document");
+                        byte[] buffer = new byte[64 * 1024];
+                        int count;
+                        while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+                        output.flush();
+                    }
+                    runOnUiThread(() -> Toast.makeText(this, "文件已保存到所选位置：" + transfer.offer.filename,
+                            Toast.LENGTH_LONG).show());
+                } catch (Exception failure) {
+                    runOnUiThread(() -> Toast.makeText(this, "保存失败：" + failure.getClass().getSimpleName(),
+                            Toast.LENGTH_LONG).show());
+                }
+            });
+        } catch (RejectedExecutionException stopped) {
+            Toast.makeText(this, "文件界面正在关闭，请重新打开", Toast.LENGTH_LONG).show();
+        }
     }
 
     private void showOutgoingDestinationDialog(Uri uri) {
@@ -191,24 +246,25 @@ public final class LanTransferActivity extends Activity {
         if (isFinishing() || isDestroyed() || io.isShutdown()) return;
         try {
             io.execute(() -> {
-                List<LanTransferStore.Transfer> offers = Collections.emptyList();
+                List<LanTransferStore.Transfer> transfers = Collections.emptyList();
                 String error = null;
                 LanTransferStore store = null;
                 try {
                     store = new LanTransferStore(getApplicationContext());
-                    offers = store.loadIncomingOffers(TrackingService.getUniqueDeviceId(getApplicationContext()), 50);
+                    transfers = store.loadRecentTransfers(
+                            TrackingService.getUniqueDeviceId(getApplicationContext()), 50);
                 } catch (Exception failure) {
                     error = failure.getClass().getSimpleName();
                 } finally {
                     if (store != null) store.closeStore();
                 }
-                final List<LanTransferStore.Transfer> result = offers;
+                final List<LanTransferStore.Transfer> result = transfers;
                 final String failure = error;
                 runOnUiThread(() -> {
                     if (isFinishing() || isDestroyed()) return;
                     status.setText(failure == null
-                        ? (result.isEmpty() ? "没有待处理的文件请求" : "待处理文件请求：" + result.size())
-                        : "读取文件请求失败：" + failure);
+                        ? (result.isEmpty() ? "暂无文件传输任务" : "最近文件传输任务：" + result.size())
+                        : "读取文件传输任务失败：" + failure);
                     renderOffers(result);
                 });
             });
@@ -217,30 +273,49 @@ public final class LanTransferActivity extends Activity {
         }
     }
 
-    private void renderOffers(List<LanTransferStore.Transfer> offers) {
+    private void renderOffers(List<LanTransferStore.Transfer> transfers) {
         offerList.removeAllViews();
-        for (LanTransferStore.Transfer transfer : offers) {
+        String localPeerId = TrackingService.getUniqueDeviceId(this);
+        for (LanTransferStore.Transfer transfer : transfers) {
+            boolean incoming = localPeerId.equals(transfer.offer.targetPeerId);
             TextView detail = new TextView(this);
             detail.setPadding(0, 12, 0, 4);
-            detail.setText(transfer.offer.filename + "\n发送方：" + transfer.offer.senderPeerId
-                + "\n大小：" + android.text.format.Formatter.formatFileSize(this, transfer.offer.sizeBytes)
-                + "\n状态：" + transfer.state);
+            detail.setText(transfer.offer.filename
+                + (incoming ? "\\n接收自：" : "\\n发送给：")
+                + (incoming ? transfer.offer.senderPeerId : transfer.offer.targetPeerId)
+                + "\\n大小：" + android.text.format.Formatter.formatFileSize(this, transfer.offer.sizeBytes)
+                + "\\n方向：" + (incoming ? "接收" : "发送")
+                + "\\n状态：" + transfer.state
+                + "\\n更新时间：" + android.text.format.DateFormat.format("yyyy-MM-dd HH:mm:ss", transfer.updatedAtMs));
             offerList.addView(detail);
-            LinearLayout actions = new LinearLayout(this);
-            Button accept = new Button(this);
-            accept.setText("接受");
-            Button reject = new Button(this);
-            reject.setText("拒绝");
-            actions.addView(accept, new LinearLayout.LayoutParams(0, -2, 1));
-            actions.addView(reject, new LinearLayout.LayoutParams(0, -2, 1));
-            offerList.addView(actions);
-            accept.setOnClickListener(v -> submitTransferAction("ACTION_LAN_TRANSFER_ACCEPT", transfer.offer.transferId));
-            reject.setOnClickListener(v -> new AlertDialog.Builder(this)
-                .setMessage("确定拒绝来自 " + transfer.offer.senderPeerId + " 的文件请求？")
-                .setNegativeButton("取消", null)
-                .setPositiveButton("拒绝", (dialog, which) ->
-                    submitTransferAction("ACTION_LAN_TRANSFER_REJECT", transfer.offer.transferId))
-                .show());
+            if (incoming && "offered".equals(transfer.state)) {
+                LinearLayout actions = new LinearLayout(this);
+                Button accept = new Button(this);
+                accept.setText("接受");
+                Button reject = new Button(this);
+                reject.setText("拒绝");
+                actions.addView(accept, new LinearLayout.LayoutParams(0, -2, 1));
+                actions.addView(reject, new LinearLayout.LayoutParams(0, -2, 1));
+                offerList.addView(actions);
+                accept.setOnClickListener(v -> submitTransferAction(
+                        "ACTION_LAN_TRANSFER_ACCEPT", transfer.offer.transferId));
+                reject.setOnClickListener(v -> new AlertDialog.Builder(this)
+                    .setMessage("确定拒绝来自 " + transfer.offer.senderPeerId + " 的文件请求？")
+                    .setNegativeButton("取消", null)
+                    .setPositiveButton("拒绝", (dialog, which) ->
+                        submitTransferAction("ACTION_LAN_TRANSFER_REJECT", transfer.offer.transferId))
+                    .show());
+            } else if (incoming && "completed".equals(transfer.state)
+                    && !TextUtils.isEmpty(transfer.publishedPath)) {
+                Button save = new Button(this);
+                save.setText("保存到设备文件夹…");
+                offerList.addView(save);
+                save.setOnClickListener(v -> requestSaveCompletedFile(transfer));
+            }
+            View separator = new View(this);
+            separator.setBackgroundColor(0x22334455);
+            offerList.addView(separator, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, (int) (1 * getResources().getDisplayMetrics().density)));
         }
     }
 
