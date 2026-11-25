@@ -10,8 +10,8 @@ v8.63 — 2026-11-25 · 聊天投递状态刷新时序收敛
 
 【验证边界】
 --------------------------------------------------------------------------------
-- 父提交 86a793a 的 Actions run 45559033080：Python validation、Android Java 编译、Robolectric/JUnit、Debug APK 构建及 APK artifact 上传均 success；artifact ID 14996667952。
-- 本次轮询时序修正后的新提交仍须由后续 Actions 重新验证；父提交结果不能冒充新 HEAD 的构建结果。
+- Actions run 45559033080（提交 86a793a）与最终代码提交 93d1b6a 的 run 45559306825 均 success；最终提交验证包含 Python validation、Android Java 编译、testDebugUnitTest、Debug APK 构建及 artifact 上传。
+- 最终代码提交 artifact ID 14997257094；父提交 artifact ID 14996667952。CI 只证明自动化构建/测试，不替代 Android 真机网络与 UI 验收。
 - 离线 Peer 自动化测试实际执行 SQLite store close/reopen，模拟账本恢复；不等于完整 TrackingService 销毁/重建或真机断网恢复测试。
 
 ================================================================================
