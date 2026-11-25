@@ -805,3 +805,12 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 - Robolectric loopback 测试覆盖 missing → chunk → durable ACK → whole-file publish → complete，以及不可信 peer 拒绝。
 - **未完成项**：生产 listener/端口准入、Wi-Fi `Network` 绑定、连接并发上限、TrackingService 生命周期接线、Android 发送端和 UI 尚未接入；不能据此宣布 Android TCP 生产链路完成。
 - 当前会话类要求调用方传入已经连接的 socket；生产网络与生命周期 owner 仍由后续工作包负责。
+
+
+## 55. TCP 会话编译与分页问题闭环（2026-11-25）
+
+- #818：首版 `LanTransferTcpSession` 的 checked exceptions 编译失败；修正后 #819 构建通过。
+- #820：测试依赖了工程未配置的 `androidx.test.core`；改用 Robolectric `RuntimeEnvironment`。
+- #821：测试仍残留第二处旧 context 引用；已修复并加入 staging/published 目录清理，保证可重复运行。
+- complete 响应使用当前连接协商的 missing page limit，保持 Python sender 与 Android receiver 的分页约束一致。
+- #824 运行针对当前测试文件最终修正；状态待验收，未提前标记通过。
