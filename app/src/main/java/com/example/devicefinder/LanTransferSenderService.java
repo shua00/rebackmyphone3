@@ -114,6 +114,12 @@ public final class LanTransferSenderService extends Service {
             return START_STICKY;
         }
         if(intent!=null && !ACTION_SEND.equals(intent.getAction())) { stopSelf(startId);return START_NOT_STICKY; }
+        if (!LanTransferFeature.isEnabled(this)) {
+            jobActive.set(false);
+            stopForeground(true);
+            stopSelf(startId);
+            return START_NOT_STICKY;
+        }
         try {
             String raw=getSharedPreferences(PREFS,MODE_PRIVATE).getString(JOB,null);
             if(raw==null) { stopForeground(true);stopSelf(startId);return START_NOT_STICKY; }
