@@ -55,6 +55,8 @@ public class ChatActivity extends Activity {
     private ExecutorService deliveryStatusExecutor;
     private final AtomicBoolean deliveryStatusRefreshQueued = new AtomicBoolean(false);
     private boolean deliveryStatusAwaitingNewOutbox = false;
+    private boolean pendingComposerImeRestore = false;
+    private static final long COMPOSER_IME_RESTORE_DELAY_MS = 80L;
     private long deliveryStatusAwaitingSinceMs = 0L;
     private int deliveryStatusEmptyPolls = 0;
     private static final long DELIVERY_STATUS_REFRESH_MS = 2_000L;
@@ -222,20 +224,32 @@ public class ChatActivity extends Activity {
     private void restoreChatInputFocus(boolean keepKeyboardVisible) {
         if (inputMsg == null) return;
         inputMsg.post(() -> {
-            if (isFinishing()) return;
+            if (isFinishing() || inputMsg == null) return;
             inputMsg.requestFocus();
             inputMsg.setSelection(inputMsg.length());
             if (!keepKeyboardVisible) return;
 
-            inputMsg.postDelayed(() -> {
-                if (isFinishing() || !hasWindowFocus() || inputMsg == null) return;
-                InputMethodManager imm =
-                        (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
-                if (imm != null) {
-                    imm.showSoftInput(inputMsg, InputMethodManager.SHOW_IMPLICIT);
-                }
-            }, 80L);
+            // Sending is an explicit continuation of typing. If the window temporarily
+            // loses focus during the click/IME transition, retry once it regains focus.
+            pendingComposerImeRestore = true;
+            scheduleComposerImeRestore();
         });
+    }
+
+    private void scheduleComposerImeRestore() {
+        if (!pendingComposerImeRestore || inputMsg == null || !hasWindowFocus()) return;
+        inputMsg.postDelayed(() -> {
+            if (!pendingComposerImeRestore || isFinishing() || inputMsg == null
+                    || !hasWindowFocus()) return;
+            InputMethodManager imm =
+                    (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (imm != null) {
+                imm.showSoftInput(inputMsg, InputMethodManager.SHOW_IMPLICIT);
+            }
+            // Clear after the explicit send-triggered attempt. A later user dismissal
+            // must remain respected and must not be undone by unrelated focus changes.
+            pendingComposerImeRestore = false;
+        }, COMPOSER_IME_RESTORE_DELAY_MS);
     }
 
     /**
@@ -369,8 +383,17 @@ public class ChatActivity extends Activity {
 
     // 删掉 onPause 里的 finishAndRemoveTask，保留正常的生命周期
     @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && pendingComposerImeRestore) {
+            scheduleComposerImeRestore();
+        }
+    }
+
+    @Override
     protected void onPause() {
         super.onPause();
+        pendingComposerImeRestore = false;
         isForeground = false;
         refreshHandler.removeCallbacks(deliveryStatusPoll);
     }

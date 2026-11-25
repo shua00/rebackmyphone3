@@ -16,6 +16,9 @@ class ChatInputContinuityTests(unittest.TestCase):
         self.assertIn("inputMsg.setSelection(inputMsg.length());", source)
         self.assertIn("imm.showSoftInput(inputMsg, InputMethodManager.SHOW_IMPLICIT);", source)
         self.assertIn("inputMsg.postDelayed(", source)
+        self.assertIn("pendingComposerImeRestore = true;", source)
+        self.assertIn("if (hasFocus && pendingComposerImeRestore)", source)
+        self.assertIn("COMPOSER_IME_RESTORE_DELAY_MS", source)
 
     def test_button_and_ime_send_share_the_same_send_path(self):
         source = JAVA.read_text(encoding="utf-8")
@@ -28,6 +31,7 @@ class ChatInputContinuityTests(unittest.TestCase):
         source = JAVA.read_text(encoding="utf-8")
         self.assertIn("restoreChatInputFocus(false);", source)
         self.assertIn("if (!keepKeyboardVisible) return;", source)
+        self.assertIn("pendingComposerImeRestore = false;", source)
 
     def test_send_button_does_not_steal_editor_focus(self):
         layout = LAYOUT.read_text(encoding="utf-8")
