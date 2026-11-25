@@ -391,15 +391,12 @@ public final class LanTransferActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
-        refreshOffers();
-    }
-
-    @Override protected void onResume() {
-        super.onResume();
         if (!LanTransferFeature.isEnabled(this)) {
             Toast.makeText(this, "文件传输已关闭", Toast.LENGTH_SHORT).show();
             finish();
+            return;
         }
+        refreshOffers();
     }
 
     @Override protected void onDestroy() {
