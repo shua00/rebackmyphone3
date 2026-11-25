@@ -545,4 +545,6 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 关闭与错误 | shutdown 关闭 listener/活动 socket，再等待 accept/worker 退出；错误通过回调暴露 | 进程被强杀时仍依赖 OS 回收，重启后任务恢复由账本/磁盘 reconcile 负责 |
 | 集成测试 | 新增 loopback TCP 端到端文件传输、并发准入拒绝、认证失败关闭、空闲超时回收测试 | loopback 不是双设备 LAN 真机验收 |
 
-**阶段判定：** 本批补齐 Python 真实 TCP socket 监听/客户端生命周期的可运行基础设施。身份认证仍由调用方回调提供，当前尚未把现有 peer challenge 代码接入回调；因此不能宣称生产认证链路或 Android/PC 文件传输已完成。
+**自动化/CI 证据：** commit `af26e7eafbafb11824d850cd14312fa38f97d4fa`；[Actions #783](https://github.com/shua00/rebackmyphone3/actions/runs/45521791700) 成功，Python 编译检查及 296 项测试通过，Android build 按路径规则跳过。
+
+**阶段判定：** 本批补齐 Python 真实 TCP socket 监听/客户端生命周期的可运行基础设施。身份认证仍由调用方回调提供，当前尚未把现有 peer challenge 代码接入回调；server 实例关闭后不可重启，需新建实例。不能宣称生产认证链路或 Android/PC 文件传输已完成。
