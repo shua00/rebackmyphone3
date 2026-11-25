@@ -51,6 +51,66 @@ public class LanChatStorePersistenceTest {
     }
 
     @Test
+    public void knownOfflinePeersWithoutCurrentRoutesAreFrozenAndNeverExpandedAfterRestart() {
+        SQLiteDatabase db = store.getWritableDatabase();
+        db.execSQL("INSERT INTO lan_peers(peer_id,endpoint_ip,endpoint_port,last_seen_at,status) " +
+                "VALUES(?,?,?,?,?)",
+                new Object[]{"android-offline-route", "192.0.2.30", 8888, 100L, "offline"});
+        db.execSQL("INSERT INTO lan_peers(peer_id,endpoint_ip,endpoint_port,last_seen_at,status) " +
+                "VALUES(?,?,?,?,?)",
+                new Object[]{"android-offline-no-route", "", 0, 90L, "offline"});
+
+        assertTrue(store.enqueueWithRecipientSnapshot(
+                "android-offline-fixed", "desktop-peer", "offline recipient body",
+                1234L, Collections.emptyMap()));
+        List<LanChatStore.Target> initial = store.loadTargets("android-offline-fixed");
+        assertEquals(2, initial.size());
+        assertEquals("android-offline-no-route", initial.get(0).peerId);
+        assertEquals("", initial.get(0).endpointIp);
+        assertEquals("android-offline-route", initial.get(1).peerId);
+        assertEquals("192.0.2.30", initial.get(1).endpointIp);
+
+        store.closeStore();
+        store = new LanChatStore(context);
+        db = store.getWritableDatabase();
+        db.execSQL("INSERT INTO lan_peers(peer_id,endpoint_ip,endpoint_port,last_seen_at,status) " +
+                "VALUES(?,?,?,?,?)",
+                new Object[]{"android-late-joiner", "192.0.2.31", 8888, 200L, "active"});
+
+        List<LanChatStore.Target> afterRestart = store.loadTargets("android-offline-fixed");
+        assertEquals(2, afterRestart.size());
+        assertEquals("android-offline-no-route", afterRestart.get(0).peerId);
+        assertEquals("android-offline-route", afterRestart.get(1).peerId);
+        assertFalse(store.acknowledge("android-offline-fixed", "android-late-joiner"));
+    }
+
+    @Test
+    public void recentDeliverySummaryReflectsPartialAndCompleteDurableAcks() {
+        Map<String, InetSocketAddress> routes = new java.util.LinkedHashMap<>();
+        routes.put("android-a", new InetSocketAddress("192.0.2.10", 8888));
+        routes.put("android-b", new InetSocketAddress("192.0.2.11", 8888));
+        assertTrue(store.enqueueWithRecipientSnapshot(
+                "android-summary", "desktop-peer", "summary body", 1234L, routes));
+
+        List<LanChatStore.DeliverySummary> summary = store.loadRecentDeliverySummaries(3);
+        assertEquals(1, summary.size());
+        assertEquals(2, summary.get(0).totalTargets);
+        assertEquals(0, summary.get(0).ackedTargets);
+        assertEquals("pending", summary.get(0).state);
+
+        assertTrue(store.acknowledge("android-summary", "android-a"));
+        summary = store.loadRecentDeliverySummaries(3);
+        assertEquals(1, summary.get(0).ackedTargets);
+        assertEquals(2, summary.get(0).totalTargets);
+        assertEquals("pending", summary.get(0).state);
+
+        assertTrue(store.acknowledge("android-summary", "android-b"));
+        summary = store.loadRecentDeliverySummaries(3);
+        assertEquals(2, summary.get(0).ackedTargets);
+        assertEquals("delivered", summary.get(0).state);
+    }
+
+    @Test
     public void fixedRecipientOutboxAndAckSurviveCloseAndReopen() {
         Map<String, InetSocketAddress> routes = Collections.singletonMap(
                 "android-a", new InetSocketAddress("192.0.2.10", 8888));

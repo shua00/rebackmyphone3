@@ -52,13 +52,13 @@
 | S01 | 原有功能完整保留 | 只增强可靠性，不删除、弱化或擅自改变 rescue2.py、chat.py、server2.py、Android 原有找回/定位/设备管理/网页管理/控制/聊天等功能 | 变更审查+回归 |
 | S02 | 悬浮留言最高优先级 | 原远程留言/关怀提醒的接收、悬浮显示、关闭、已读、历史和服务端队列行为保持原样；不得因对讲改造退化 | 回归+实机 |
 | S03 | 留言与对讲严格隔离 | 留言使用 `FIND_ME_FLOAT_MSG`/`custom_msg` 与 `showFloatingMessage(content)`；LAN 对讲使用 v2 JSON `chat.message`/`chat.ack`，Android 通过 `persistIncomingLanChat()` 持久化 Inbox/历史后通知对讲 UI；跨网络网页/HTTP 对讲继续使用独立 `chat_msg` 动作。旧字符串式 `FIND_ME_CHAT`/`FIND_ME_CHAT_ACK`/`FIND_ME_PEER_*` 不属于 v2-only 接收协议。两类消息的类型、队列、历史、去重命名空间、清理和 UI 入口不得混用 | 代码+自动化+实机 |
-| S04 | Android 聊天窗口行为不变 | 打开、关闭、返回、隐藏、刷新及历史行为保持既有体验；不得修改 `ChatActivity.java` | diff 审查+回归 |
+| S04 | Android 聊天窗口行为与边界 | 打开、关闭、返回、隐藏、刷新及历史行为保持既有体验；不得把文件传输业务接入 `ChatActivity.java`；允许用户明确授权的输入焦点与逐消息投递状态最小改动 | diff 审查+回归 |
 | S05 | LAN 直连优先、HTTP 兜底准确 | 同 LAN 只有在握手/端点验证成功后才标记 UDP 可达；不能仅凭私有 IP 或同网段推断。跨 LAN 使用现有 HTTP/云端路径；网络切换时使旧 UDP endpoint 失效 | 代码+互通/实机 |
 | S06 | 稳定身份与动态路由分离 | peer_id/service_id 持久稳定；IP/端口只是临时 endpoint；network_scope 仅作辅助提示，不作身份或认证依据；同主机不同逻辑服务保持不同 peer | 自动化+重启测试 |
 | S07 | 持久化消息账本 | Outbox、Inbox、逐设备 targets、去重记录、ACK 状态通过事务持久化；服务/应用重启后可恢复；增量 schema 迁移不丢旧数据 | 迁移/故障注入 |
 | S08 | 固定收件人集合 | 有已知成员时创建消息即固定所有目标（包括暂时离线成员）；无已知成员时只在有界首次发现窗口纳入响应设备；窗口结束即冻结；后来加入者不无限加入旧消息 | 自动化+边界测试 |
 | S09 | 逐设备 ACK 语义 | ACK 必须核对 message_id、目标 peer、receiver scope、认证信息及当前登记来源 endpoint；只确认对应设备；ACK 表示收件箱已持久化，不表示已读 | 代码+伪造/错配测试 |
-| S10 | 空目标与部分送达 | 空目标不得判为 delivered；全部固定目标 ACK 后才能整体 delivered；部分 ACK 只重试未 ACK 目标；超时/过期必须明确显示，不能静默成功或静默删除 | 自动化+故障注入 |
+| S10 | 空目标与部分送达 | 空目标不得判为 delivered；全部固定目标 ACK 后才能整体 delivered；部分 ACK 只重试未 ACK 目标；聊天窗口逐消息显示发现中、部分送达、全部送达、暂停/未发现等状态；超时/过期不得静默成功或删除 | 自动化+故障注入 |
 | S11 | ACK 丢失与重复包 | 接收端先事务提交再 ACK；ACK 丢失时相同 message_id 重发；重复包重新 ACK，但不重复写历史/触发 UI | 自动化+实机 |
 | S12 | 数据库失败安全 | 收件箱写入/事务失败时不得发送 stored ACK；发送箱写入失败时不得假装已发送；错误必须可诊断，原待发送数据不能被覆盖 | 故障注入 |
 | S13 | 队列容量与过期策略 | Android 原有 50 条队列约束不得被静默扩大或破坏；队列满明确拒绝新消息、不覆盖旧待发送项；过期保留可诊断状态 | 自动化 |
@@ -941,3 +941,17 @@ v2.8.21 静态回归测试和 CI 已通过；真实 socket 故障注入及三服
 | 自动化门禁 | tests/test_lan_transfer_ui_boundary.py 增加历史查询、SAF 导出与 published path 边界守卫 | Actions 45555771696（c3fee0f）Python validation 与 Android build success、APK artifact 已上传；45555634695（1e44fba）含新增 Android Store JUnit 测试的构建/测试 success；45555787743 Python 310 项测试 success，Android build 按路径规则 skipped。自动化不等价于真机互传 |
 
 **剩余真机验收**：Android↔Android、Android↔Python；接收完成后关闭/重启应用再保存；取消 SAF 保存、目标空间不足、文件被外部删除/篡改；Wi-Fi 切换/断网恢复和大文件续传。
+
+
+## 27. Android 离线固定收件人与逐消息投递状态（2026-11-25）
+
+| 项目 | 实现 | 验收边界 |
+|---|---|---|
+| 固定目标身份 | 新消息事务读取持久化 `lan_peers`；每个历史 Peer ID 都进入 `lan_outbox_targets`，不再因 endpoint_ip/port 暂时为空而被丢弃 | endpoint 为空时只能保留目标身份，不得直接发送；后续必须重新发现并完成 nonce challenge |
+| endpoint 与身份分离 | `last_endpoint` 仅作路由挑战候选；无效/缺失 endpoint 记录为空；有效 verified route 可更新同一 Peer 的候选 endpoint | IP/端口变化仍须重新验证；Peer ID 固定不代表旧 IP 可信 |
+| 旧消息不可扩张 | 创建时已有固定 target 后，后上线设备不会被加入；只有初始目标为空且发现窗口仍开放的消息可收集发现响应 | 需验证超过 10 秒、服务重启、网络切换及新 Peer 加入 |
+| 状态读取 | `loadRecentDeliverySummaries` 从 Outbox 与 targets 聚合最近消息状态、固定目标数和持久化 ACK 数 | 账本是唯一状态来源；数据库查询失败显示暂不可用，不伪装为空队列 |
+| 聊天窗口状态 | 显示最近 3 条外发消息的时间、正文摘要、状态和 ACK/目标数；区分全部送达、部分送达、等待确认、发现中、重试暂停及未发现设备 | 不表示已读；只在窗口可见时异步刷新，离开窗口停止轮询 |
+| 自动化 | Robolectric/JUnit 覆盖无 endpoint 离线 Peer、服务关闭/重启后目标保持、晚加入设备不扩张，以及 0/N、部分 ACK、N/N 汇总；Python 源码守卫检查 UI/账本边界 | CI 结果待本批 Actions；源码测试不替代真实 Android 设备验收 |
+
+**真机回归门禁**：A 与 B 曾完成握手；B 断网/离线；A 重启 TrackingService 后发送消息；等待超过 10 秒再让 B 上线，B 必须收到该消息且后来加入的 C 不得收到旧消息。另验证 2 个目标中仅 1 个 ACK 时 UI 显示部分送达，第二个 ACK 落库后显示全部送达。此项未完成前不宣布 P1 整体验收通过。

@@ -34,6 +34,15 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
+
 public class ChatActivity extends Activity {
 
     private TextView chatText;
@@ -41,6 +50,14 @@ public class ChatActivity extends Activity {
     private EditText inputMsg;
     private Button btnSend;
     private TextView tvNewMsg; // 【新增】新消息标签
+    private TextView tvDeliveryStatus;
+    private ExecutorService deliveryStatusExecutor;
+    private final AtomicBoolean deliveryStatusRefreshQueued = new AtomicBoolean(false);
+    private boolean deliveryStatusAwaitingNewOutbox = false;
+    private long deliveryStatusAwaitingSinceMs = 0L;
+    private int deliveryStatusEmptyPolls = 0;
+    private static final long DELIVERY_STATUS_REFRESH_MS = 2_000L;
+    private final Runnable deliveryStatusPoll = () -> refreshDeliveryStatusAsync();
 
     // [M1] volatile：TrackingService 的 UDP 接收线程读此字段决定是否 sendBroadcast，
     //      若无 volatile，跨线程可见性无保证，可能出现"手机收到消息但聊天页不刷新"
@@ -80,6 +97,8 @@ public class ChatActivity extends Activity {
         inputMsg = findViewById(R.id.inputMsg);
         btnSend = findViewById(R.id.btnSend);
         tvNewMsg = findViewById(R.id.tvNewMsg); // 绑定新标签
+        tvDeliveryStatus = findViewById(R.id.tvDeliveryStatus);
+        deliveryStatusExecutor = Executors.newSingleThreadExecutor();
 
         // 【新增】监听滚动，判断是否滑到了底部
         scrollView.getViewTreeObserver().addOnScrollChangedListener(() -> {
@@ -160,6 +179,9 @@ public class ChatActivity extends Activity {
             Intent intent = new Intent(this, TrackingService.class);
             intent.setAction("ACTION_SEND_UDP_CHAT");
             intent.putExtra("message", msg);
+            deliveryStatusAwaitingNewOutbox = true;
+            deliveryStatusAwaitingSinceMs = System.currentTimeMillis();
+            deliveryStatusEmptyPolls = 0;
             // [C2] 原 startService 在服务被 kill 时会抛 IllegalStateException（Android 8+）；
             //      先按原行为调用，失败再兜底用 startForegroundService 复活服务
             try {
@@ -180,6 +202,8 @@ public class ChatActivity extends Activity {
                 android.util.Log.e("ChatActivity", "启动 UDP 发送异常: " + e.getMessage());
                 Toast.makeText(this, "⚠️ 发送失败，请稍后重试", Toast.LENGTH_SHORT).show();
             }
+            refreshHandler.removeCallbacks(deliveryStatusPoll);
+            refreshHandler.postDelayed(deliveryStatusPoll, 500L);
         }
     }
 
@@ -195,6 +219,102 @@ public class ChatActivity extends Activity {
             inputMsg.requestFocus();
             inputMsg.setSelection(inputMsg.length());
         });
+    }
+
+    /**
+     * Render progress from the same durable Outbox/target ledger used by retry.
+     * SQLite reads stay off the main thread; polling runs only while this screen is visible.
+     */
+    private void refreshDeliveryStatusAsync() {
+        if (!isForeground || isFinishing() || tvDeliveryStatus == null
+                || deliveryStatusExecutor == null
+                || !deliveryStatusRefreshQueued.compareAndSet(false, true)) return;
+        final boolean awaitingNewOutbox = deliveryStatusAwaitingNewOutbox;
+        final long awaitingSinceMs = deliveryStatusAwaitingSinceMs;
+        final int emptyPollCount = deliveryStatusEmptyPolls;
+        try {
+            deliveryStatusExecutor.execute(() -> {
+                String display = "";
+                boolean hasPending = false;
+                boolean queryFailed = false;
+                boolean matchedAwaitedOutbox = false;
+                try {
+                    LanChatStore store = new LanChatStore(getApplicationContext());
+                    try {
+                        List<LanChatStore.DeliverySummary> summaries =
+                                store.loadRecentDeliverySummaries(3);
+                        if (!summaries.isEmpty()) {
+                            StringBuilder text = new StringBuilder("发送状态");
+                            SimpleDateFormat timeFormat = new SimpleDateFormat("HH:mm", Locale.getDefault());
+                            for (LanChatStore.DeliverySummary item : summaries) {
+                                if (awaitingNewOutbox && item.createdAtMs >= awaitingSinceMs) {
+                                    matchedAwaitedOutbox = true;
+                                }
+                                String stateLabel;
+                                if ("delivered".equals(item.state)) {
+                                    stateLabel = "全部送达";
+                                } else if ("waiting_peers".equals(item.state)) {
+                                    stateLabel = "未发现收件设备";
+                                } else if ("discovery_pending".equals(item.state)) {
+                                    stateLabel = "正在发现收件设备";
+                                    hasPending = true;
+                                } else if ("retry_paused".equals(item.state)) {
+                                    stateLabel = "重试已暂停，等待恢复";
+                                } else if ("expired".equals(item.state)) {
+                                    stateLabel = "已过期";
+                                } else if ("pending".equals(item.state)) {
+                                    stateLabel = item.ackedTargets > 0 ? "部分送达" : "等待设备确认";
+                                    hasPending = true;
+                                } else {
+                                    stateLabel = "状态：" + item.state;
+                                }
+
+                                String body = item.body == null ? "" : item.body.replace('\n', ' ').trim();
+                                if (body.length() > 18) body = body.substring(0, 18) + "…";
+                                text.append('\n').append(timeFormat.format(new Date(item.createdAtMs)))
+                                        .append("  ").append(body).append(" — ").append(stateLabel);
+                                if (item.totalTargets > 0) {
+                                    text.append(" (").append(item.ackedTargets).append('/')
+                                            .append(item.totalTargets).append(')');
+                                }
+                            }
+                            display = text.toString();
+                        }
+                    } finally {
+                        store.closeStore();
+                    }
+                } catch (Exception e) {
+                    queryFailed = true;
+                    android.util.Log.w("ChatActivity", "读取 LAN 投递状态失败: " + e.getClass().getSimpleName());
+                }
+
+                final String resultText = queryFailed ? "发送状态暂不可用" : display;
+                final boolean readFailed = queryFailed;
+                final boolean foundAwaitedOutbox = matchedAwaitedOutbox;
+                final boolean retryPending = hasPending
+                        || (awaitingNewOutbox && !foundAwaitedOutbox
+                            && !readFailed && emptyPollCount < 5);
+                runOnUiThread(() -> {
+                    deliveryStatusRefreshQueued.set(false);
+                    if (isFinishing() || !isForeground || tvDeliveryStatus == null) return;
+                    tvDeliveryStatus.setText(resultText);
+                    tvDeliveryStatus.setVisibility(resultText.isEmpty() ? View.GONE : View.VISIBLE);
+                    if (foundAwaitedOutbox) {
+                        deliveryStatusAwaitingNewOutbox = false;
+                        deliveryStatusEmptyPolls = 0;
+                    } else if (awaitingNewOutbox && !readFailed) {
+                        deliveryStatusEmptyPolls++;
+                        if (deliveryStatusEmptyPolls >= 5) deliveryStatusAwaitingNewOutbox = false;
+                    }
+                    refreshHandler.removeCallbacks(deliveryStatusPoll);
+                    if (retryPending) {
+                        refreshHandler.postDelayed(deliveryStatusPoll, DELIVERY_STATUS_REFRESH_MS);
+                    }
+                });
+            });
+        } catch (RejectedExecutionException e) {
+            deliveryStatusRefreshQueued.set(false);
+        }
     }
 
     private void refreshHistory(boolean isNewMessage) {
@@ -214,6 +334,7 @@ public class ChatActivity extends Activity {
                 tvNewMsg.setVisibility(View.VISIBLE);
             }
         }
+        refreshDeliveryStatusAsync();
     }
 
     @Override
@@ -231,6 +352,7 @@ public class ChatActivity extends Activity {
     protected void onPause() {
         super.onPause();
         isForeground = false;
+        refreshHandler.removeCallbacks(deliveryStatusPoll);
     }
 
     @Override
@@ -242,6 +364,11 @@ public class ChatActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        refreshHandler.removeCallbacks(deliveryStatusPoll);
+        if (deliveryStatusExecutor != null) {
+            deliveryStatusExecutor.shutdownNow();
+            deliveryStatusExecutor = null;
+        }
         // ★ 修复：双保险，防止极端情况下没走 onPause 导致后台一直发无用广播
         isForeground = false;
         

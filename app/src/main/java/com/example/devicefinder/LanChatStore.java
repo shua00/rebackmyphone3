@@ -91,6 +91,26 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
+    /** Read-only per-message delivery summary for the chat window. */
+    public static final class DeliverySummary {
+        public final String messageId;
+        public final String body;
+        public final long createdAtMs;
+        public final String state;
+        public final int totalTargets;
+        public final int ackedTargets;
+
+        DeliverySummary(String id, String body, long createdAtMs, String state,
+                        int totalTargets, int ackedTargets) {
+            this.messageId = id;
+            this.body = body;
+            this.createdAtMs = createdAtMs;
+            this.state = state;
+            this.totalTargets = totalTargets;
+            this.ackedTargets = ackedTargets;
+        }
+    }
+
     public LanChatStore(Context context) {
         super(context.getApplicationContext(), DB_NAME, null, DB_VERSION);
         setWriteAheadLoggingEnabled(true);
@@ -331,21 +351,29 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     if (peerId == null || peerId.isEmpty() || senderPeerId.equals(peerId)
                             || endpoint == null || endpoint.getAddress() == null) continue;
                     if (!LanP2pProtocol.isValidPeerId(peerId)) return false;
+                    int port = endpoint.getPort();
+                    if (!(port == 8888 || port == 8887 || port == 8889 || port == 8890)) continue;
                     recipients.put(peerId, new Target(peerId, "pending", 0,
-                            endpoint.getAddress().getHostAddress(), endpoint.getPort()));
+                            endpoint.getAddress().getHostAddress(), port));
                 }
             }
 
             int inserted = 0;
             for (Target target : recipients.values()) {
-                if (target.endpointIp == null || target.endpointIp.isEmpty()
-                        || !(target.endpointPort == 8888 || target.endpointPort == 8887
-                             || target.endpointPort == 8889 || target.endpointPort == 8890)) continue;
+                // Freeze the peer identity independently from current route availability.
+                // An offline known peer without an endpoint remains a target and must be
+                // rediscovered/authenticated before a future unicast attempt.
+                String endpoint = "";
+                if (target.endpointIp != null && !target.endpointIp.isEmpty()
+                        && (target.endpointPort == 8888 || target.endpointPort == 8887
+                            || target.endpointPort == 8889 || target.endpointPort == 8890)) {
+                    endpoint = target.endpointIp + ":" + target.endpointPort;
+                }
                 ContentValues row = new ContentValues();
                 row.put("message_id", messageId);
                 row.put("peer_id", target.peerId);
                 row.put("status", "pending");
-                row.put("last_endpoint", target.endpointIp + ":" + target.endpointPort);
+                row.put("last_endpoint", endpoint);
                 long rowId = db.insertWithOnConflict("lan_outbox_targets", null, row,
                         SQLiteDatabase.CONFLICT_IGNORE);
                 if (rowId < 0 && !rowExists(db, "lan_outbox_targets",
@@ -520,6 +548,32 @@ public final class LanChatStore extends SQLiteOpenHelper {
             return new AckProgress(total, acked);
         } catch (Exception e) {
             return null;
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
+    /**
+     * Read recent outgoing messages with their durable per-recipient ACK totals.
+     * This is a presentation projection only; the SQLite outbox remains authoritative.
+     * Query failures propagate so the UI never mistakes a storage error for an empty queue.
+     */
+    public List<DeliverySummary> loadRecentDeliverySummaries(int limit) {
+        ArrayList<DeliverySummary> result = new ArrayList<>();
+        Cursor c = null;
+        try {
+            c = getReadableDatabase().rawQuery(
+                    "SELECT o.message_id,o.body,o.created_at_ms,o.state,COUNT(t.peer_id)," +
+                    "COALESCE(SUM(CASE WHEN t.status='acked' THEN 1 ELSE 0 END),0) " +
+                    "FROM lan_outbox o LEFT JOIN lan_outbox_targets t ON t.message_id=o.message_id " +
+                    "GROUP BY o.message_id,o.body,o.created_at_ms,o.state " +
+                    "ORDER BY o.created_at_ms DESC LIMIT ?",
+                    new String[]{String.valueOf(Math.max(1, Math.min(20, limit)))});
+            while (c.moveToNext()) {
+                result.add(new DeliverySummary(c.getString(0), c.getString(1), c.getLong(2),
+                        c.getString(3), c.getInt(4), c.getInt(5)));
+            }
+            return result;
         } finally {
             if (c != null) c.close();
         }
