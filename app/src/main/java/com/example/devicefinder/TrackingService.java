@@ -2556,6 +2556,12 @@ public class TrackingService extends Service implements LocationListener {
         final LanTransferCredentials.Value credentials;
         try {
             credentials = LanTransferCredentials.load(this);
+        } catch (SecurityException permissionFailure) {
+            stopLanTransferTcpListener("credential access permission denied");
+            LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_PERMISSION_DENIED);
+            FileLogger.log(this, "LAN_TRANSFER", "Secure credentials access denied: "
+                    + permissionFailure.getClass().getSimpleName());
+            return;
         } catch (Exception credentialFailure) {
             stopLanTransferTcpListener("credential decryption or validation failed");
             FileLogger.log(this, "LAN_TRANSFER", "Secure credentials unavailable; listener closed: "
@@ -2617,6 +2623,12 @@ public class TrackingService extends Service implements LocationListener {
                         + links.getInterfaceName() + " address=" + bindAddress.getHostAddress()
                         + " reason=" + reason);
             }
+        } catch (SecurityException permissionFailure) {
+            if (lanTransferTcpListener == null || !lanTransferTcpListener.isRunning())
+                LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_PERMISSION_DENIED);
+            FileLogger.log(this, "LAN_TRANSFER", "TCP listener permission denied: "
+                    + permissionFailure.getClass().getSimpleName());
+            // Keep a previously running listener and its last-known-good route intact.
         } catch (Exception failure) {
             if (lanTransferTcpListener == null)
                 LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_FAILED);
@@ -2684,6 +2696,12 @@ public class TrackingService extends Service implements LocationListener {
                         + links.getInterfaceName() + " address=" + local.getHostAddress()
                         + " reason=" + reason);
             }
+        } catch (SecurityException permissionFailure) {
+            if (lanTransferDiscovery == null || !lanTransferDiscovery.isRunning())
+                LanTransferRuntimeDiagnostics.publishDiscoveryState(LanTransferRuntimeDiagnostics.STATE_PERMISSION_DENIED);
+            FileLogger.log(this, "LAN_TRANSFER", "Independent discovery permission denied: "
+                    + permissionFailure.getClass().getSimpleName());
+            // Preserve an existing discovery socket after a transient permission failure.
         } catch (Exception failure) {
             if (lanTransferDiscovery == null || !lanTransferDiscovery.isRunning())
                 LanTransferRuntimeDiagnostics.publishDiscoveryState(LanTransferRuntimeDiagnostics.STATE_FAILED);

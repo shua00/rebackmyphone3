@@ -55,6 +55,19 @@ public class LanTransferRuntimeDiagnosticsTest {
                 LanTransferRuntimeDiagnostics.snapshot(context, NOW);
         assertEquals(0, snapshot.freshPeerCount);
     }
+    @Test public void permissionDeniedIsDistinctFromFailureAndStopped() {
+        assertEquals(4, LanTransferRuntimeDiagnostics.STATE_PERMISSION_DENIED);
+        LanTransferRuntimeDiagnostics.publishDiscoveryState(
+                LanTransferRuntimeDiagnostics.STATE_PERMISSION_DENIED);
+        LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_FAILED);
+        LanTransferRuntimeDiagnostics.Snapshot snapshot =
+                LanTransferRuntimeDiagnostics.snapshot(context, NOW);
+        assertEquals(LanTransferRuntimeDiagnostics.STATE_PERMISSION_DENIED, snapshot.discoveryState);
+        assertEquals(LanTransferRuntimeDiagnostics.STATE_FAILED, snapshot.tcpListenerState);
+        LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_STOPPED);
+        assertEquals(LanTransferRuntimeDiagnostics.STATE_STOPPED,
+                LanTransferRuntimeDiagnostics.snapshot(context, NOW).tcpListenerState);
+    }
     @Test public void failedAndStoppedStatesRemainDistinct() {
         LanTransferRuntimeDiagnostics.publishDiscoveryState(LanTransferRuntimeDiagnostics.STATE_FAILED);
         LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_STOPPED);

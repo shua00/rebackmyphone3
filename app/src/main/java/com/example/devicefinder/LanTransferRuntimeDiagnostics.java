@@ -9,6 +9,8 @@ public final class LanTransferRuntimeDiagnostics {
     public static final int STATE_STOPPED = 1;
     public static final int STATE_RUNNING = 2;
     public static final int STATE_FAILED = 3;
+    // Stable diagnostic wire/report code: an Android permission blocked this subsystem.
+    public static final int STATE_PERMISSION_DENIED = 4;
     private static volatile int discoveryState = STATE_UNKNOWN;
     private static volatile int tcpListenerState = STATE_UNKNOWN;
 
@@ -43,7 +45,7 @@ public final class LanTransferRuntimeDiagnostics {
         discoveryState = STATE_UNKNOWN;
         tcpListenerState = STATE_UNKNOWN;
     }
-    private static boolean validState(int state) { return state >= STATE_UNKNOWN && state <= STATE_FAILED; }
+    private static boolean validState(int state) { return state >= STATE_UNKNOWN && state <= STATE_PERMISSION_DENIED; }
 
     public static final class Snapshot {
         public final int discoveryState, tcpListenerState, freshPeerCount;
