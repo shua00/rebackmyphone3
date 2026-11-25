@@ -7,30 +7,21 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-/**
- * Immutable, feature-independent result model for reusable diagnostic runs.
- *
- * The model deliberately has no Android, socket, chat, or file-transfer dependencies so it can
- * be reused by an optional in-app diagnostic UI, instrumentation tests, and offline analysis.
- * Callers must never place credentials, raw device identifiers, IP addresses, payloads, or file contents
- * in this report.
- */
+/** Immutable, feature-independent result model for reusable diagnostic runs. */
 public final class DiagnosticRun {
     public static final int SCHEMA_VERSION = 1;
-    public enum Status { PASS, FAIL, SKIPPED }
+    public enum Status { PASS, FAIL, SKIPPED, TIMEOUT, CANCELLED }
 
     public static final class Metadata {
         public final String runId;
         public final long startedAtEpochMs;
         public final String featureId, appVersion, commit, deviceModel, networkType, profile, side;
         public final int androidApi;
-
         public Metadata(String runId, long startedAtEpochMs, String appVersion, String commit,
                 String deviceModel, int androidApi, String networkType, String profile, String side) {
             this("lan_transfer", runId, startedAtEpochMs, appVersion, commit, deviceModel,
                     androidApi, networkType, profile, side);
         }
-
         public Metadata(String featureId, String runId, long startedAtEpochMs, String appVersion,
                 String commit, String deviceModel, int androidApi, String networkType,
                 String profile, String side) {
@@ -47,13 +38,11 @@ public final class DiagnosticRun {
             if (startedAtEpochMs <= 0 || androidApi < 1)
                 throw new IllegalArgumentException("Invalid diagnostic metadata");
         }
-
         public static Metadata create(long startedAtEpochMs, String appVersion, String commit,
                 String deviceModel, int androidApi, String networkType, String profile, String side) {
             return createForFeature("lan_transfer", startedAtEpochMs, appVersion, commit,
                     deviceModel, androidApi, networkType, profile, side);
         }
-
         public static Metadata createForFeature(String featureId, long startedAtEpochMs,
                 String appVersion, String commit, String deviceModel, int androidApi,
                 String networkType, String profile, String side) {
@@ -67,7 +56,6 @@ public final class DiagnosticRun {
         public final Status status;
         public final long durationMs;
         public final Map<String, Long> metrics;
-
         public CaseResult(String caseId, Status status, long durationMs, String failureCode,
                 Map<String, Long> metrics) {
             this.caseId = bounded(caseId, 80, "caseId");
@@ -79,8 +67,9 @@ public final class DiagnosticRun {
                     ? "" : bounded(failureCode, 80, "failureCode");
             if (status == Status.PASS && !this.failureCode.isEmpty())
                 throw new IllegalArgumentException("Passing case cannot have a failure code");
-            if (status == Status.FAIL && this.failureCode.isEmpty())
-                throw new IllegalArgumentException("Failed case requires a stable failure code");
+            if ((status == Status.FAIL || status == Status.TIMEOUT || status == Status.CANCELLED)
+                    && this.failureCode.isEmpty())
+                throw new IllegalArgumentException("Unsuccessful case requires a stable failure code");
             LinkedHashMap<String, Long> copy = new LinkedHashMap<>();
             if (metrics != null) {
                 if (metrics.size() > 32) throw new IllegalArgumentException("Too many diagnostic metrics");
@@ -98,7 +87,6 @@ public final class DiagnosticRun {
     public final Metadata metadata;
     public final List<CaseResult> cases;
     public final int expectedCaseCount;
-
     public DiagnosticRun(Metadata metadata, List<CaseResult> cases, int expectedCaseCount) {
         if (metadata == null || cases == null || cases.size() > 128
                 || expectedCaseCount < 1 || expectedCaseCount > 128 || cases.size() > expectedCaseCount)
@@ -114,18 +102,16 @@ public final class DiagnosticRun {
         }
         this.cases = Collections.unmodifiableList(copy);
     }
-
     public int count(Status status) {
         int count = 0;
         for (CaseResult result : cases) if (result.status == status) count++;
         return count;
     }
-
     public boolean isCompleteAndPassing() {
         return cases.size() == expectedCaseCount && count(Status.FAIL) == 0
-                && count(Status.SKIPPED) == 0 && expectedCaseCount > 0;
+                && count(Status.SKIPPED) == 0 && count(Status.TIMEOUT) == 0
+                && count(Status.CANCELLED) == 0 && expectedCaseCount > 0;
     }
-
     private static String bounded(String value, int max, String field) {
         if (value == null || value.trim().isEmpty() || value.length() > max)
             throw new IllegalArgumentException("Invalid " + field);

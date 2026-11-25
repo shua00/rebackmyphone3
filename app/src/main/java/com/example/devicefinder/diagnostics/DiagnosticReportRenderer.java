@@ -5,7 +5,6 @@ import java.util.Map;
 /** Offline human-readable report views. No Android or external rendering dependencies. */
 public final class DiagnosticReportRenderer {
     private DiagnosticReportRenderer() {}
-
     public static String toMarkdown(DiagnosticRun run) {
         requireRun(run);
         DiagnosticRun.Metadata m=run.metadata;
@@ -26,18 +25,19 @@ public final class DiagnosticReportRenderer {
            .append("- Cases: ").append(run.cases.size()).append(" / ").append(run.expectedCaseCount).append("\n")
            .append("- Passed: ").append(run.count(DiagnosticRun.Status.PASS)).append("\n")
            .append("- Failed: ").append(run.count(DiagnosticRun.Status.FAIL)).append("\n")
-           .append("- Skipped: ").append(run.count(DiagnosticRun.Status.SKIPPED)).append("\n\n")
+           .append("- Skipped: ").append(run.count(DiagnosticRun.Status.SKIPPED)).append("\n")
+           .append("- Timed out: ").append(run.count(DiagnosticRun.Status.TIMEOUT)).append("\n")
+           .append("- Cancelled: ").append(run.count(DiagnosticRun.Status.CANCELLED)).append("\n\n")
            .append("## Test cases\n\n| Test | Status | Duration (ms) | Failure code | Metrics |\n")
            .append("|---|---|---:|---|---|\n");
         for(DiagnosticRun.CaseResult c:run.cases) out.append("| ").append(md(c.caseId)).append(" | ")
                 .append(c.status.name()).append(" | ").append(c.durationMs).append(" | ")
                 .append(md(c.failureCode)).append(" | ").append(md(metrics(c.metrics))).append(" |\n");
         out.append("\n## AI analysis notes\n\nCompare reports with matching schema versions. ")
-           .append("Missing or skipped cases are not passes. Correlate device-side reports by run ID ")
-           .append("and feature ID before diagnosing peer-to-peer failures.\n");
+           .append("Missing, skipped, timed-out, and cancelled cases are not passes. ")
+           .append("Correlate device-side reports by run ID and feature ID.\n");
         return out.toString();
     }
-
     public static String toHtml(DiagnosticRun run) {
         requireRun(run);
         DiagnosticRun.Metadata m=run.metadata;
@@ -64,17 +64,17 @@ public final class DiagnosticReportRenderer {
         tile(out,"Passed",Integer.toString(run.count(DiagnosticRun.Status.PASS)));
         tile(out,"Failed",Integer.toString(run.count(DiagnosticRun.Status.FAIL)));
         tile(out,"Skipped",Integer.toString(run.count(DiagnosticRun.Status.SKIPPED)));
+        tile(out,"Timed out",Integer.toString(run.count(DiagnosticRun.Status.TIMEOUT)));
+        tile(out,"Cancelled",Integer.toString(run.count(DiagnosticRun.Status.CANCELLED)));
         out.append("</div><h2>Test cases</h2><table><thead><tr><th>Test</th><th>Status</th><th>Duration (ms)</th><th>Failure code</th><th>Metrics</th></tr></thead><tbody>");
         for(DiagnosticRun.CaseResult c:run.cases) out.append("<tr><td>").append(html(c.caseId))
                 .append("</td><td>").append(c.status.name()).append("</td><td>").append(c.durationMs)
                 .append("</td><td>").append(html(c.failureCode)).append("</td><td><code>")
                 .append(html(metrics(c.metrics))).append("</code></td></tr>");
-        out.append("</tbody></table><h2>AI analysis notes</h2><p>Compare matching schema versions; ")
-           .append("missing or skipped tests are not passes. Correlate reports by feature and run ID.</p>")
+        out.append("</tbody></table><h2>AI analysis notes</h2><p>Missing, skipped, timed-out, and cancelled tests are not passes.</p>")
            .append("</main></body></html>");
         return out.toString();
     }
-
     private static void requireRun(DiagnosticRun run){if(run==null)throw new IllegalArgumentException("Diagnostic run is required");}
     private static String metrics(Map<String,Long> values){StringBuilder b=new StringBuilder();for(Map.Entry<String,Long> e:values.entrySet()){if(b.length()>0)b.append(", ");b.append(e.getKey()).append('=').append(e.getValue());}return b.toString();}
     private static String md(String s){return s.replace("\\","\\\\").replace("|","\\|").replace("\r"," ").replace("\n"," ");}
