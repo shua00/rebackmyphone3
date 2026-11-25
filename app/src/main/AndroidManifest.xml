@@ -85,6 +85,13 @@
             android:stopWithTask="false"
             android:foregroundServiceType="location|dataSync" />
 
+        <service
+            android:name=".LanTransferSenderService"
+            android:enabled="true"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- 保活 JobService 声明 -->
         <service
             android:name=".KeepAliveJobService"
