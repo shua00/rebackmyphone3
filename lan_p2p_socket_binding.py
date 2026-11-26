@@ -38,7 +38,8 @@ def validate_endpoint_on_path(path: Any, remote_address: str) -> None:
 def bind_socket_to_path(sock: socket.socket, path: Any, *,
                         remote_address: str | None = None,
                         platform: str | None = None,
-                        socket_module: Any = socket,\n                        bind_source_address: bool = True) -> SocketBinding:
+                        socket_module: Any = socket,
+                        bind_source_address: bool = True) -> SocketBinding:
     """Bind an unconnected IPv4 socket to a named interface and its source address.
 
     Linux uses SO_BINDTODEVICE, Windows uses IP_UNICAST_IF, and macOS uses
@@ -87,6 +88,7 @@ def bind_socket_to_path(sock: socket.socket, path: Any, *,
     else:
         raise OSError("interface-bound IPv4 sockets are unsupported on this platform")
 
-    # Pin the source address too; interface binding alone does not select a source IP.
-    sock.bind((local, 0))
+    # Pin the source address for clients; listeners bind their configured port afterwards.
+    if bind_source_address:
+        sock.bind((local, 0))
     return SocketBinding(path.interface_name, index, local, os_name)
