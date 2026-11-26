@@ -3084,6 +3084,7 @@ public class TrackingService extends Service implements LocationListener {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
             Network selected = selectWifiLanNetwork(cm);
             if (selected == null) {
+                closeLanTransferPairingInitiators();
                 stopLanTransferPairingControlHost();
                 return;
             }
@@ -3104,6 +3105,7 @@ public class TrackingService extends Service implements LocationListener {
                 }
             }
             if (bindAddress == null || bindPrefix < 1 || bindPrefix > 32) {
+                closeLanTransferPairingInitiators();
                 stopLanTransferPairingControlHost();
                 return;
             }
@@ -3219,7 +3221,8 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private void stopLanTransferPairingControlHost() {
-        closeLanTransferPairingInitiators();
+        // An incomplete LinkProperties snapshot is not proof that the previous Network died.
+        // Callers invalidate provisional sessions only for a confirmed path loss/change.
         synchronized (lanTransferListenerLock) { closeLanTransferPairingControlHostLocked(); }
     }
 
