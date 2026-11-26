@@ -226,10 +226,35 @@ public final class LanTransferFrameCodec {
         StringBuilder out=new StringBuilder("{");
         for(int i=0;i<keys.size();i++){
             if(i>0)out.append(',');
-            String key=keys.get(i);out.append(JSONObject.quote(key)).append(':').append(canonicalValue(object.get(key)));
+            String key=keys.get(i);out.append(quoteCanonical(key)).append(':').append(canonicalValue(object.get(key)));
         }
         return out.append('}').toString();
     }
+    /** Python json.dumps(ensure_ascii=false) compatible quoting; notably does not escape '/'. */
+    private static String quoteCanonical(String value) {
+        StringBuilder out=new StringBuilder(value.length()+2).append('"');
+        for(int i=0;i<value.length();i++) {
+            char ch=value.charAt(i);
+            switch(ch) {
+                case '"': out.append("\\\""); break;
+                case '\\\\': out.append("\\\\\\\\"); break;
+                case '\\b': out.append("\\\\b"); break;
+                case '\\f': out.append("\\\\f"); break;
+                case '\\n': out.append("\\\\n"); break;
+                case '\\r': out.append("\\\\r"); break;
+                case '\\t': out.append("\\\\t"); break;
+                default:
+                    if(ch<0x20) {
+                        out.append("\\\\u");
+                        String hex=Integer.toHexString(ch);
+                        for(int pad=hex.length();pad<4;pad++) out.append('0');
+                        out.append(hex);
+                    } else out.append(ch);
+            }
+        }
+        return out.append('"').toString();
+    }
+
     private static String canonicalValue(Object value) throws Exception {
         if(value==null||value==JSONObject.NULL)return "null";
         if(value instanceof JSONObject)return canonical((JSONObject)value);
@@ -238,7 +263,7 @@ public final class LanTransferFrameCodec {
             for(int i=0;i<a.length();i++){if(i>0)out.append(',');out.append(canonicalValue(a.get(i)));}
             return out.append(']').toString();
         }
-        if(value instanceof String)return JSONObject.quote((String)value);
+        if(value instanceof String)return quoteCanonical((String)value);
         if(value instanceof Boolean)return value.toString();
         if(value instanceof Number) {
             try {
