@@ -1259,6 +1259,22 @@ public final class LanChatStore extends SQLiteOpenHelper {
      * Freeze the fragment count for one already-snapshotted recipient and initialize its
      * durable selective-ACK bitmap. Re-entry is idempotent; a different count is rejected.
      */
+    /** Stable creation timestamp shared by every retry of one logical message. */
+    public long getMessageCreatedAtMs(String messageId) {
+        if (messageId == null || messageId.isEmpty()) return -1L;
+        Cursor c = null;
+        try {
+            c = getReadableDatabase().rawQuery(
+                    "SELECT created_at_ms FROM lan_outbox WHERE message_id=?",
+                    new String[]{messageId});
+            return c.moveToFirst() ? c.getLong(0) : -1L;
+        } catch (Exception failure) {
+            return -1L;
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
     public boolean initializeTargetFragmentProgress(String messageId, String peerId, int fragmentCount) {
         if (messageId == null || messageId.isEmpty() || peerId == null || peerId.isEmpty()
                 || fragmentCount < 1 || fragmentCount > 1024) return false;

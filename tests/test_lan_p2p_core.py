@@ -401,6 +401,13 @@ class LanP2PCoreTests(unittest.TestCase):
                 # exception handler, which closes the socket before the next bind.
                 self.assertNotIn("except Exception as recv_err:", listener)
 
+    def test_android_outbox_exposes_stable_message_timestamp_for_fragment_retries(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        method = extract_java_method(store, "public long getMessageCreatedAtMs(")
+        self.assertIn("SELECT created_at_ms FROM lan_outbox", method)
+        self.assertIn("return -1L", method)
+
     def test_android_outbox_persists_per_recipient_fragment_ack_bitmap(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
@@ -5556,6 +5563,29 @@ class LongChatReceiveAndRescueDiagnosticsTests(unittest.TestCase):
         self.assertLess(receiver.index("persistIncomingLanChat("), receiver.index("sendAuthenticatedChatAck("))
         self.assertIn("partial cache retained", receiver)
         self.assertIn("no final chat.ack sent", receiver)
+
+    def test_android_long_chat_sender_uses_bounded_selective_ack_windows(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        sender = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
+        builder = extract_java_method(source, "private java.util.List<byte[]> buildAuthenticatedLanChatFragmentPackets(")
+        handler = extract_java_method(source, "private boolean handleAuthenticatedLanPacket(")
+        ack = extract_java_method(source, "private void processAuthenticatedLanChatFragmentAck(")
+        self.assertIn("preparedPeerFragmentPackets", sender)
+        self.assertIn("initializeTargetFragmentProgress(", sender)
+        self.assertIn("loadTargetFragmentAckBitmap(", sender)
+        self.assertIn("windowStart + 8", sender)
+        self.assertIn("bitmap.charAt(i) == '1'", sender)
+        self.assertIn("CHAT_FRAGMENT_COMPLETION_PROBE", sender)
+        self.assertIn("LanP2pFragments.split(body)", builder)
+        self.assertIn("LanP2pProtocol.MAX_DATAGRAM_BYTES", builder)
+        self.assertIn('"chat.fragment.ack".equals(type)', handler)
+        self.assertIn("acknowledgeTargetFragment(", ack)
+        self.assertIn("matchesExpectedAckEndpoint(", ack)
+        self.assertIn("finalDelivery=false", ack)
+        # Final delivery remains a distinct inbox-backed chat.ack, not a fragment ACK.
+        receiver = extract_java_method(source, "private void processAuthenticatedLanChatFragment(")
+        self.assertLess(receiver.index("persistIncomingLanChat("), receiver.index("sendAuthenticatedChatAck("))
 
     def test_rescue2_has_bounded_rotating_file_diagnostics_and_traceback_hooks(self):
         repo_root = Path(__file__).resolve().parents[1]

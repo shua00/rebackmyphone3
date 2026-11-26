@@ -5401,6 +5401,12 @@ public class TrackingService extends Service implements LocationListener {
             // only on the durable message/peer snapshot, not on the selected route. This keeps JSON
             // canonicalization and HMAC work out of the shared sender lock and before attempt charging.
             final String senderPeerId = getUniqueDeviceId();
+            final long messageCreatedAtMs = store.getMessageCreatedAtMs(messageId);
+            if (messageCreatedAtMs <= 0L) {
+                FileLogger.log(this, "CHAT", "⚠️ 无法读取消息稳定创建时间，拒绝构建分片以避免会话元数据漂移 message="
+                        + messageId);
+                return;
+            }
             final java.util.Map<String, byte[]> preparedPeerPackets = new java.util.HashMap<>();
             final java.util.Map<String, java.util.List<byte[]>> preparedPeerFragmentPackets =
                     new java.util.HashMap<>();
@@ -5419,7 +5425,7 @@ public class TrackingService extends Service implements LocationListener {
                     java.util.List<byte[]> broadcastFragments = null;
                     try {
                         broadcastPacket = buildAuthenticatedLanChatPacket(
-                                senderPeerId, "*", messageId, message);
+                                senderPeerId, "*", messageId, message, messageCreatedAtMs);
                     } catch (Exception oversizedSinglePacket) {
                         broadcastFragments = buildAuthenticatedLanChatFragmentPackets(
                                 senderPeerId, "*", messageId, message);
@@ -5433,7 +5439,7 @@ public class TrackingService extends Service implements LocationListener {
                         if (target == null || target.peerId == null || "acked".equals(target.status)) continue;
                         try {
                             preparedPeerPackets.put(target.peerId,
-                                    buildAuthenticatedLanChatPacket(senderPeerId, target.peerId, messageId, message));
+                                    buildAuthenticatedLanChatPacket(senderPeerId, target.peerId, messageId, message, messageCreatedAtMs));
                         } catch (Exception oversizedSinglePacket) {
                             preparedPeerFragmentPackets.put(target.peerId,
                                     buildAuthenticatedLanChatFragmentPackets(
@@ -6439,10 +6445,11 @@ public class TrackingService extends Service implements LocationListener {
 
     /** Build one logical long message as independently authenticated, MTU-bounded fragments. */
     private java.util.List<byte[]> buildAuthenticatedLanChatFragmentPackets(
-            String senderId, String targetPeerId, String messageId, String body) throws Exception {
+            String senderId, String targetPeerId, String messageId, String body,
+            long createdAtMs) throws Exception {
         java.util.List<LanP2pFragments.Fragment> fragments = LanP2pFragments.split(body);
         java.util.List<byte[]> packets = new java.util.ArrayList<>(fragments.size());
-        long createdAtMs = System.currentTimeMillis();
+        if (createdAtMs <= 0L) throw new IllegalArgumentException("Invalid stable chat timestamp");
         for (LanP2pFragments.Fragment fragment : fragments) {
             JSONObject packet = LanP2pProtocol.create(
                     "chat.fragment", senderId, "android", "android-main");
