@@ -5,10 +5,13 @@ import android.content.SharedPreferences;
 import android.util.Base64;
 import org.json.JSONObject;
 import java.nio.charset.StandardCharsets;
+import java.security.AlgorithmParameters;
 import java.security.KeyFactory;
 import java.security.MessageDigest;
 import java.security.PublicKey;
 import java.security.Signature;
+import java.security.spec.ECGenParameterSpec;
+import java.security.spec.ECParameterSpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Locale;
 
@@ -145,9 +148,17 @@ public final class Rescue2AdminTrustStore {
             throw new IllegalArgumentException("Invalid administrator EC public key", invalidKey);
         }
         if (!"EC".equalsIgnoreCase(key.getAlgorithm())
-                || !(key instanceof java.security.interfaces.ECPublicKey)
-                || ((java.security.interfaces.ECPublicKey) key).getParams().getCurve().getField().getFieldSize() != 256)
+                || !(key instanceof java.security.interfaces.ECPublicKey))
             throw new IllegalArgumentException("Administrator key must be P-256");
+        AlgorithmParameters parameters = AlgorithmParameters.getInstance("EC");
+        parameters.init(new ECGenParameterSpec("secp256r1"));
+        ECParameterSpec expected = parameters.getParameterSpec(ECParameterSpec.class);
+        ECParameterSpec actual = ((java.security.interfaces.ECPublicKey) key).getParams();
+        if (!actual.getCurve().equals(expected.getCurve())
+                || !actual.getGenerator().equals(expected.getGenerator())
+                || !actual.getOrder().equals(expected.getOrder())
+                || actual.getCofactor() != expected.getCofactor())
+            throw new IllegalArgumentException("Administrator key must use secp256r1/P-256");
         return key;
     }
 

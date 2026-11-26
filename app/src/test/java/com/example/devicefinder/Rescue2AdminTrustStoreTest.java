@@ -30,10 +30,12 @@ public class Rescue2AdminTrustStoreTest {
         byte[] signature = signer.sign();
 
         assertTrue(store.isTrusted(fingerprint));
+        assertTrue(store.listTrustedFingerprints().contains(fingerprint));
         assertTrue(store.verify(fingerprint, payload, signature));
         assertFalse(store.verify(fingerprint, "tampered".getBytes(StandardCharsets.UTF_8), signature));
         assertTrue(store.revoke(fingerprint));
         assertFalse(store.isTrusted(fingerprint));
+        assertFalse(store.listTrustedFingerprints().contains(fingerprint));
         assertFalse(store.verify(fingerprint, payload, signature));
         assertFalse(store.revoke(fingerprint));
     }
