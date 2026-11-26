@@ -86,12 +86,14 @@ public final class DiagnosticTaskEnvelope {
             throw new IllegalArgumentException("Invalid diagnostic task fields");
         for (String key : required) if (!json.has(key))
             throw new IllegalArgumentException("Missing diagnostic task field: " + key);
-        if (json.getInt("schemaVersion") != SCHEMA_VERSION)
+        if (requireInteger(json, "schemaVersion") != SCHEMA_VERSION)
             throw new IllegalArgumentException("Unsupported diagnostic task schema");
-        return new DiagnosticTaskEnvelope(json.getString("taskId"),
-                json.getString("adminKeyFingerprint"), readArray(json.getJSONArray("targetParticipantIds")),
-                readArray(json.getJSONArray("probeIds")), json.getLong("createdAtEpochMs"),
-                json.getLong("expiresAtEpochMs"), json.getString("nonce"));
+        return new DiagnosticTaskEnvelope(requireString(json, "taskId"),
+                requireString(json, "adminKeyFingerprint"),
+                readArray(requireArray(json, "targetParticipantIds")),
+                readArray(requireArray(json, "probeIds")),
+                requireInteger(json, "createdAtEpochMs"),
+                requireInteger(json, "expiresAtEpochMs"), requireString(json, "nonce"));
     }
 
     private static List<String> immutableTokens(List<String> values, String field, int maximum) {
@@ -119,9 +121,29 @@ public final class DiagnosticTaskEnvelope {
         }
         json.append(']');
     }
+    private static String requireString(JSONObject json, String key) throws JSONException {
+        Object value = json.get(key);
+        if (!(value instanceof String)) throw new IllegalArgumentException("Invalid string field: " + key);
+        return (String) value;
+    }
+    private static long requireInteger(JSONObject json, String key) throws JSONException {
+        Object value = json.get(key);
+        if (!(value instanceof Integer) && !(value instanceof Long))
+            throw new IllegalArgumentException("Invalid integer field: " + key);
+        return ((Number) value).longValue();
+    }
+    private static JSONArray requireArray(JSONObject json, String key) throws JSONException {
+        Object value = json.get(key);
+        if (!(value instanceof JSONArray)) throw new IllegalArgumentException("Invalid array field: " + key);
+        return (JSONArray) value;
+    }
     private static List<String> readArray(JSONArray array) throws JSONException {
         ArrayList<String> values = new ArrayList<>();
-        for (int i = 0; i < array.length(); i++) values.add(array.getString(i));
+        for (int i = 0; i < array.length(); i++) {
+            Object value = array.get(i);
+            if (!(value instanceof String)) throw new IllegalArgumentException("Array values must be strings");
+            values.add((String) value);
+        }
         return values;
     }
 }

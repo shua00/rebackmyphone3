@@ -72,6 +72,24 @@ public class DiagnosticTaskEnvelopeTest {
         } catch (IllegalArgumentException expected) { }
     }
 
+    @Test public void rejectsWrongJsonPrimitiveTypesLikePythonProtocol() throws Exception {
+        String encoded = task().toJson();
+        try {
+            DiagnosticTaskEnvelope.fromJson(encoded.replace("\\"createdAtEpochMs\\":1800000000000",
+                    "\\"createdAtEpochMs\\":\\"1800000000000\\""));
+            fail("string timestamp accepted");
+        } catch (IllegalArgumentException expected) { }
+        try {
+            DiagnosticTaskEnvelope.fromJson(encoded.replace("\\"targetParticipantIds\\":[\\"phone-a\\",\\"phone-b\\"]",
+                    "\\"targetParticipantIds\\":[1,\\"phone-b\\"]"));
+            fail("numeric target accepted");
+        } catch (IllegalArgumentException expected) { }
+        try {
+            DiagnosticTaskEnvelope.fromJson(encoded.replace("\\"schemaVersion\\":1", "\\"schemaVersion\\":true"));
+            fail("boolean schema accepted");
+        } catch (IllegalArgumentException expected) { }
+    }
+
     @Test public void expiryIsHalfOpen() {
         DiagnosticTaskEnvelope task = task();
         assertFalse(task.isValidAt(task.createdAtEpochMs - 1));

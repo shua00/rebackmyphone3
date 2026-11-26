@@ -45,5 +45,11 @@ public class DiagnosticTaskVerifierTest {
                 signature, "phone-a", 1800000000100L, store).errorCode);
         assertEquals("MALFORMED_TASK", DiagnosticTaskVerifier.verify("{", signature,
                 "phone-a", 1800000000100L, store).errorCode);
+        DiagnosticTaskReplayStore replay = new DiagnosticTaskReplayStore(context);
+        assertTrue(DiagnosticTaskVerifier.verifyAndConsume(json, signature, "phone-a",
+                1800000000100L, store, replay).accepted);
+        assertEquals("REPLAYED_OR_UNAVAILABLE", DiagnosticTaskVerifier.verifyAndConsume(
+                json, signature, "phone-a", 1800000000200L, store,
+                new DiagnosticTaskReplayStore(context)).errorCode);
     }
 }
