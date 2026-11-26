@@ -141,12 +141,19 @@ public final class LanTransferSenderWorker implements Runnable {
         JSONObject acknowledgement = null;
         while (!cancelled.get() && !pauseRequested.get() && System.currentTimeMillis() < offerDeadline) {
             try {
-                Network network = networks.currentWifiNetwork();
-                if (network == null) throw new IOException("No selected Wi-Fi LAN network");
+                LanNetworkPath path = networks.currentLanNetworkPath();
                 Endpoint endpoint = currentEndpoint();
-                acknowledgement = LanTransferTcpClient.sendOffer(network, endpoint.host, endpoint.port,
-                        source, offer, localPeerId, offer.targetPeerId, requirePeerSecret(),
-                        chunkSizeBytes, 1024 * 1024, (int) CONNECT_TIMEOUT_MS);
+                if (path != null) {
+                    acknowledgement = LanTransferTcpClient.sendOffer(path, endpoint.host, endpoint.port,
+                            source, offer, localPeerId, offer.targetPeerId, requirePeerSecret(),
+                            chunkSizeBytes, 1024 * 1024, (int) CONNECT_TIMEOUT_MS);
+                } else {
+                    Network network = networks.currentWifiNetwork();
+                    if (network == null) throw new IOException("No selected Wi-Fi LAN network");
+                    acknowledgement = LanTransferTcpClient.sendOffer(network, endpoint.host, endpoint.port,
+                            source, offer, localPeerId, offer.targetPeerId, requirePeerSecret(),
+                            chunkSizeBytes, 1024 * 1024, (int) CONNECT_TIMEOUT_MS);
+                }
                 String remoteState = acknowledgement.optString("state", "");
                 if ("rejected".equals(remoteState) || "cancelled".equals(remoteState)
                         || "expired".equals(remoteState) || "failed".equals(remoteState)) {
@@ -186,15 +193,24 @@ public final class LanTransferSenderWorker implements Runnable {
         backoff = 1000L;
         for (int session = 0; session < maxSessions && !cancelled.get() && !pauseRequested.get(); session++) {
             try {
-                Network network = networks.currentWifiNetwork();
-                if (network == null) throw new IOException("No selected Wi-Fi LAN network");
+                LanNetworkPath path = networks.currentLanNetworkPath();
                 Endpoint endpoint = currentEndpoint();
-                List<Integer> missing = LanTransferTcpClient.connectAndSend(network,
-                        endpoint.host, endpoint.port, source, offer, localPeerId, offer.targetPeerId,
-                        requirePeerSecret(), chunkSizeBytes,
-                        LanTransferTcpClient.DEFAULT_CHUNKS_PER_SESSION, 1024 * 1024,
-                        (int) CONNECT_TIMEOUT_MS,
-                        (sent, batch) -> { if (listener != null) listener.onProgress(sent, batch); });
+                List<Integer> missing;
+                if (path != null) {
+                    missing = LanTransferTcpClient.connectAndSend(path, endpoint.host, endpoint.port,
+                            source, offer, localPeerId, offer.targetPeerId, requirePeerSecret(),
+                            chunkSizeBytes, LanTransferTcpClient.DEFAULT_CHUNKS_PER_SESSION,
+                            1024 * 1024, (int) CONNECT_TIMEOUT_MS,
+                            (sent, batch) -> { if (listener != null) listener.onProgress(sent, batch); });
+                } else {
+                    Network network = networks.currentWifiNetwork();
+                    if (network == null) throw new IOException("No selected Wi-Fi LAN network");
+                    missing = LanTransferTcpClient.connectAndSend(network, endpoint.host, endpoint.port,
+                            source, offer, localPeerId, offer.targetPeerId, requirePeerSecret(),
+                            chunkSizeBytes, LanTransferTcpClient.DEFAULT_CHUNKS_PER_SESSION,
+                            1024 * 1024, (int) CONNECT_TIMEOUT_MS,
+                            (sent, batch) -> { if (listener != null) listener.onProgress(sent, batch); });
+                }
                 if (missing == null) throw new IOException("Sender returned no transfer result");
                 if (missing.isEmpty()) {
                     store.markSenderCompleted(offer.transferId, localPeerId, System.currentTimeMillis());
