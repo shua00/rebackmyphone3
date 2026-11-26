@@ -71,7 +71,7 @@ public class DiagnosticTaskRunAdapterTest {
         } catch (SecurityException expected) { }
         assertTrue(consent.approve(fingerprint, envelope.taskId, 1800000000200L));
 
-        DiagnosticRun run = DiagnosticTaskRunAdapter.execute(context, verified, consent, history,
+        DiagnosticRun run = DiagnosticTaskRunAdapter.execute(context, verified, trust, consent, history,
                 1800000000300L, null, null);
         assertEquals(1, run.cases.size());
         assertEquals(DiagnosticRun.Status.PASS, run.cases.get(0).status);
