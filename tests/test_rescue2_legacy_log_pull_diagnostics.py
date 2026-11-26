@@ -1,4 +1,5 @@
 """Regression tests for the preserved Rescue2 legacy multi-device log pull path."""
+import ast
 from pathlib import Path
 import unittest
 
@@ -7,10 +8,27 @@ SOURCE = ROOT / "rescue2.py"
 
 
 class Rescue2LegacyLogPullDiagnosticsTests(unittest.TestCase):
-    def test_legacy_pull_entrypoint_and_protocol_remain_available(self):
+    @staticmethod
+    def _pull_logs_multi_source():
         source = SOURCE.read_text(encoding="utf-8")
-        body = source.split("def pull_logs_multi(target_ips, temp_url, clear_after):", 1)[1]
-        body = body.split("\\n# ===== ADB 核心模块", 1)[0]
+        tree = ast.parse(source, filename=str(SOURCE))
+        function = next(
+            node for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "pull_logs_multi"
+        )
+        return source, ast.get_source_segment(source, function)
+
+    def test_function_source_is_bounded_to_pull_entrypoint(self):
+        source, body = self._pull_logs_multi_source()
+        self.assertIsNotNone(body)
+        self.assertIn("def pull_logs_multi(", body)
+        self.assertNotIn("def menu_e_adb_manager(", body)
+        self.assertNotIn("# ===== ADB 核心模块", body)
+        self.assertGreater(len(source), len(body))
+
+    def test_legacy_pull_entrypoint_and_protocol_remain_available(self):
+        _, body = self._pull_logs_multi_source()
         self.assertIn("FIND_ME_UPLOAD_LOG:{RESCUE_SECRET}:{temp_url}", body)
         self.assertIn("send_udp(cmd, ip, quiet=True, no_retry=True)", body)
         self.assertIn("deadline = time.time() + 30", body)
@@ -18,9 +36,7 @@ class Rescue2LegacyLogPullDiagnosticsTests(unittest.TestCase):
         self.assertIn("missing = [ip for ip in target_ips if ip not in received_ips]", body)
 
     def test_legacy_log_pull_emits_bounded_summary_events(self):
-        source = SOURCE.read_text(encoding="utf-8")
-        body = source.split("def pull_logs_multi(target_ips, temp_url, clear_after):", 1)[1]
-        body = body.split("\\n# ===== ADB 核心模块", 1)[0]
+        _, body = self._pull_logs_multi_source()
         for event in ("legacy_log_pull_rejected", "legacy_log_pull_started",
                       "legacy_log_pull_dispatched", "legacy_log_pull_completed"):
             self.assertIn(event, body)
