@@ -141,7 +141,7 @@ public class LanTransferAuthenticatorTest {
     public void androidMatchesSharedPythonAuthenticationDerivationVector() throws Exception {
         byte[] secretBytes = new byte[32];
         java.util.Arrays.fill(secretBytes,(byte)'x');
-        String secret = android.util.Base64.encodeToString(secretBytes,android.util.Base64.NO_WRAP);
+        String secret = java.util.Base64.getEncoder().encodeToString(secretBytes);
         byte[] key = invokePrivate("deriveKey", new Class<?>[]{String.class}, secret);
         assertEquals("80d0e9e112555fb1910dc6a60c103f1a0b1e3639ac1060517fcaf215263c5af7",
                 hex(key));
