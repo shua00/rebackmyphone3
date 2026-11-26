@@ -1904,7 +1904,7 @@ class LanP2PCoreTests(unittest.TestCase):
         store = (
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         ).read_text(encoding="utf-8")
-        self.assertIn("DB_VERSION = 10", store)
+        self.assertIn("DB_VERSION = 11", store)
         self.assertIn("retry_attempt_count INTEGER NOT NULL DEFAULT 0", store)
         self.assertIn("state='retry_paused'", store)
         self.assertIn("'retry_paused' ELSE state", store)
@@ -1978,9 +1978,9 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("SUM(CASE WHEN status!='acked'", progress)
         self.assertIn("retry_attempt_count<?", attempt)
         self.assertIn("last_recovery_at_ms INTEGER NOT NULL DEFAULT 0", store)
-        self.assertIn("DB_VERSION = 10", store)
+        self.assertIn("DB_VERSION = 11", store)
         self.assertIn("idx_lan_targets_retry", store)
-        self.assertIn("DB_VERSION = 10", store)
+        self.assertIn("DB_VERSION = 11", store)
         self.assertIn("retry_attempt_count=0,last_retry_at_ms=0", store)
         ack = extract_java_method(store, "public boolean acknowledge(")
         self.assertIn('hasRetryBudget ? "pending" : "retry_paused"', ack)
@@ -5511,7 +5511,7 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
     def test_android_fragment_receive_cache_is_durable_bounded_and_separate_from_final_ack(self):
         repo_root = Path(__file__).resolve().parents[1]
         store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
-        self.assertIn("DB_VERSION = 10", store)
+        self.assertIn("DB_VERSION = 11", store)
         self.assertIn("CREATE TABLE IF NOT EXISTS lan_chat_fragment_sessions", store)
         self.assertIn("CREATE TABLE IF NOT EXISTS lan_chat_fragments", store)
         self.assertIn("FRAGMENT_SESSION_TTL_MS = 30L * 60L * 1000L", store)
