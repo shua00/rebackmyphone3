@@ -183,6 +183,13 @@ class Rescue2AdminIdentity:
         return self._require_key().sign(_SIGNATURE_DOMAIN + canonical_payload,
                                         ec.ECDSA(hashes.SHA256()))
 
+    def sign_task_envelope(self, envelope) -> tuple[bytes, bytes]:
+        """Return canonical UTF-8 JSON and detached signature for a matching task envelope."""
+        if getattr(envelope, "admin_key_fingerprint", None) != self.fingerprint:
+            raise ValueError("Task envelope fingerprint does not identify this Rescue2 administrator")
+        canonical = envelope.to_json().encode("utf-8")
+        return canonical, self.sign_task_payload(canonical)
+
     @staticmethod
     def verify_task_signature(public_key_der: bytes, canonical_payload: bytes,
                               signature_der: bytes) -> bool:
