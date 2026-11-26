@@ -147,8 +147,15 @@ public class LanTransferFrameCodecTest {
                     vector.getString("sender_peer_id"),vector.getString("target_peer_id"));
             assertEquals(kind,decoded.kind);
             assertArrayEquals(payload,decoded.payload);
-            assertEquals(metadata==null?null:metadata.toString(),
-                    decoded.metadata==null?null:decoded.metadata.toString());
+            assertEquals(metadata==null,decoded.metadata==null);
+            if(metadata!=null) {
+                assertEquals(metadata.length(),decoded.metadata.length());
+                java.util.Iterator<String> keys=metadata.keys();
+                while(keys.hasNext()) {
+                    String field=keys.next();
+                    assertEquals(metadata.get(field).toString(),decoded.metadata.get(field).toString());
+                }
+            }
         }
     }
 
