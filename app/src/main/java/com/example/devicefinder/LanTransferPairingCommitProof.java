@@ -41,6 +41,8 @@ public final class LanTransferPairingCommitProof {
             String remotePeerId, String sessionId, byte[] peerSecret, long sequence,
             int connectTimeoutMs, int readTimeoutMs)
             throws GeneralSecurityException, java.io.IOException {
+        if (address == null || !address.isLoopbackAddress())
+            throw new java.io.IOException("Unbound pairing commit is restricted to loopback tests");
         sendCommitInternal(null, address, port, localPeerId, remotePeerId, sessionId,
                 peerSecret, sequence, connectTimeoutMs, readTimeoutMs);
     }
