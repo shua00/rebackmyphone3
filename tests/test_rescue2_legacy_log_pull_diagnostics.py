@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "rescue2.py"
 
 
-class Rescue2LegacyLogPullDiagnosticsTests(unittest.TestCase):
+class Rescue2LegacyLogPullCompatibilityTests(unittest.TestCase):
     @staticmethod
     def _pull_logs_multi_source():
         source = SOURCE.read_text(encoding="utf-8")
@@ -35,16 +35,18 @@ class Rescue2LegacyLogPullDiagnosticsTests(unittest.TestCase):
         self.assertIn('info.get("last_log", 0) >= send_time', body)
         self.assertIn("missing = [ip for ip in target_ips if ip not in received_ips]", body)
 
-    def test_legacy_log_pull_emits_bounded_summary_events(self):
+    def test_legacy_pull_path_is_not_coupled_to_diagnostic_logger(self):
         _, body = self._pull_logs_multi_source()
-        for event in ("legacy_log_pull_rejected", "legacy_log_pull_started",
-                      "legacy_log_pull_dispatched", "legacy_log_pull_completed"):
-            self.assertIn(event, body)
-        for field in ("target_count=len(target_ips)", "received_count=len(received_ips)",
-                      "missing_count=len(missing)", "duration_ms=duration_ms"):
-            self.assertIn(field, body)
+        self.assertNotIn("_diag_event(", body)
+        self.assertNotIn("_diag_exception(", body)
+        self.assertIn("if not target_ips or target_ips == [\"255.255.255.255\"]:", body)
+        self.assertIn("for ip in target_ips:", body)
+        self.assertIn("time.sleep(0.1)", body)
+        self.assertIn("time.sleep(0.5)", body)
+        self.assertIn("if len(received_ips) >= len(target_ips): break", body)
+        self.assertIn("if missing: print", body)
 
-    def test_diagnostic_logger_filters_sensitive_field_names(self):
+    def test_optional_diagnostic_logger_filters_sensitive_field_names(self):
         source = SOURCE.read_text(encoding="utf-8")
         self.assertIn('blocked = ("secret", "token", "password", "body", "content", "payload", "raw", "auth")', source)
         self.assertIn("def _diag_event(event, level=logging.INFO, **fields):", source)
