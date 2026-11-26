@@ -3237,7 +3237,9 @@ public class TrackingService extends Service implements LocationListener {
                         && lanTransferDiscovery != null && lanTransferDiscovery.isRunning()) return;
                 closeLanTransferDiscoveryLocked();
                 LanTransferPeerDirectory.activateNetwork(this, fingerprint);
-                LanTransferDiscovery discovery = new LanTransferDiscovery(this, selected,
+                LanNetworkPath selectedPath = LanNetworkPath.fromAndroidNetwork(selected,
+                        links.getInterfaceName(), local, prefix, broadcast);
+                LanTransferDiscovery discovery = new LanTransferDiscovery(this, selectedPath,
                         getUniqueDeviceId(), local, broadcast, fingerprint,
                         () -> lanTransferTcpListener == null ? 0 : lanTransferTcpListener.getBoundPort());
                 discovery.start();
