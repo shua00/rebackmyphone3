@@ -65,6 +65,8 @@ public class Rescue2AdminTrustStoreTest {
                 .put("keyType", "EC-P256")
                 .put("fingerprint", fingerprint)
                 .put("publicKeySpki", encoded).toString();
+        assertEquals(fingerprint, store.previewExportedIdentity(document));
+        assertFalse(store.isTrusted(fingerprint));
         assertEquals(fingerprint, store.trustExportedIdentity(document));
         assertTrue(store.isTrusted(fingerprint));
         try {

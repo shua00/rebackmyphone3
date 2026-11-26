@@ -57,8 +57,17 @@ public final class Rescue2AdminTrustStore {
         return fingerprint;
     }
 
-    /** Imports the public-only JSON exported by Rescue2 after explicit user approval. */
+    /** Validates a public-only enrollment document without changing the trust registry. */
+    public synchronized String previewExportedIdentity(String encodedJson) throws Exception {
+        return fingerprint(parseExportedPublicKey(encodedJson).getEncoded());
+    }
+
+    /** Imports the public-only JSON exported by Rescue2 after the UI obtains explicit approval. */
     public synchronized String trustExportedIdentity(String encodedJson) throws Exception {
+        return trustP256PublicKey(parseExportedPublicKey(encodedJson).getEncoded());
+    }
+
+    private static PublicKey parseExportedPublicKey(String encodedJson) throws Exception {
         if (encodedJson == null || encodedJson.length() > 8 * 1024)
             throw new IllegalArgumentException("Invalid Rescue2 identity document size");
         JSONObject document = new JSONObject(encodedJson);
@@ -86,7 +95,7 @@ public final class Rescue2AdminTrustStore {
         PublicKey validated = decodeP256(publicKey);
         if (!expectedFingerprint.equals(fingerprint(validated.getEncoded())))
             throw new SecurityException("Rescue2 identity fingerprint does not match its public key");
-        return trustP256PublicKey(validated.getEncoded());
+        return validated;
     }
 
     /** Lists only active administrator fingerprints; no public key bytes or secrets are exposed. */

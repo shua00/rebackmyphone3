@@ -197,7 +197,13 @@ public class ChatActivity extends Activity {
         content.setOrientation(android.widget.LinearLayout.VERTICAL);
         content.addView(fileTransfer);
         content.addView(explanation);
-        AlertDialog.Builder builder = new AlertDialog.Builder(this).setTitle("聊天与文件传输设置").setView(content)
+        Button adminTrust = new Button(this);
+        adminTrust.setText("Rescue2 管理员信任管理");
+        adminTrust.setOnClickListener(v ->
+                startActivity(new Intent(this, Rescue2AdminTrustActivity.class)));
+        content.addView(adminTrust);
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(this).setTitle("聊天、文件与管理端设置").setView(content)
                 .setNegativeButton("取消", null)
                 .setPositiveButton("保存", (dialog, which) -> {
                     boolean enabled = fileTransfer.isChecked();

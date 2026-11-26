@@ -219,6 +219,11 @@
             android:enabled="${diagnosticsEnabled}"
             android:exported="false" />
 
+        <!-- Rescue2 管理员身份信任与撤销；属于核心功能，不随 diagnostics 开关剥离 -->
+        <activity
+            android:name=".Rescue2AdminTrustActivity"
+            android:exported="false" />
+
         <!-- 局域网聊天界面 -->
         <activity
             android:name=".ChatActivity"
