@@ -287,6 +287,9 @@ public class TrackingService extends Service implements LocationListener {
     private volatile LanTransferStore lanTransferStore;
     private volatile LanTransferFilesystem lanTransferFilesystem;
     private volatile LanTransferTcpListener lanTransferTcpListener;
+    // Pairing control has its own TCP listener and pending in-memory ceremony state.
+    private volatile LanTransferPairingControlHost lanTransferPairingControlHost;
+    private volatile String lanTransferPairingControlFingerprint;
     private volatile String lanTransferListenerFingerprint;
     private volatile String lanTransferCredentialsFingerprint;
     // File-transfer discovery owns a separate UDP socket/port and endpoint directory.
@@ -2544,6 +2547,9 @@ public class TrackingService extends Service implements LocationListener {
      * absent credentials means the file-transfer listener remains closed.
      */
     private void refreshLanTransferTcpListener(String reason) {
+        // Pairing must be available before the first peer credential exists. Its listener is
+        // deliberately independent of the credential-gated file-data listener.
+        refreshLanTransferPairingControlHost(reason);
         refreshLanTransferDiscovery(reason);
         if (!LanTransferFeature.isEnabled(this)) {
             stopLanTransferTcpListener("file-transfer feature disabled");
@@ -2636,6 +2642,86 @@ public class TrackingService extends Service implements LocationListener {
                     + failure.getClass().getSimpleName());
             // A transient snapshot failure does not prove the old LAN path is gone.
         }
+    }
+
+    /**
+     * Own the pairing control listener for the TrackingService lifetime. This control
+     * endpoint is separate from the file-data TCP port and does not require existing
+     * peer credentials, because its purpose is to establish the first credential.
+     */
+    private void refreshLanTransferPairingControlHost(String reason) {
+        if (!LanTransferFeature.isEnabled(this) || serviceDestroyed) {
+            stopLanTransferPairingControlHost();
+            return;
+        }
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            Network selected = selectWifiLanNetwork(cm);
+            if (selected == null) {
+                stopLanTransferPairingControlHost();
+                return;
+            }
+            LinkProperties links = cm.getLinkProperties(selected);
+            if (links == null || links.getInterfaceName() == null || links.getLinkAddresses() == null) {
+                stopLanTransferPairingControlHost();
+                return;
+            }
+            java.net.Inet4Address bindAddress = null;
+            for (LinkAddress item : links.getLinkAddresses()) {
+                java.net.InetAddress address = item.getAddress();
+                if (address instanceof java.net.Inet4Address && !address.isLoopbackAddress()
+                        && !address.isLinkLocalAddress()) {
+                    bindAddress = (java.net.Inet4Address) address;
+                    break;
+                }
+            }
+            if (bindAddress == null) {
+                stopLanTransferPairingControlHost();
+                return;
+            }
+            String fingerprint = selected.toString() + "|" + links.getInterfaceName()
+                    + "|" + bindAddress.getHostAddress();
+            synchronized (lanTransferListenerLock) {
+                if (serviceDestroyed) return;
+                if (fingerprint.equals(lanTransferPairingControlFingerprint)
+                        && lanTransferPairingControlHost != null
+                        && lanTransferPairingControlHost.isRunning()) return;
+                closeLanTransferPairingControlHostLocked();
+                LanTransferPairingControlHost host = new LanTransferPairingControlHost(
+                        getUniqueDeviceId(), (sessionId, remotePeerId, sas, expiresAtElapsedMs) -> {
+                    Intent event = new Intent("ACTION_LAN_TRANSFER_PAIRING_REQUESTED")
+                            .setPackage(getPackageName())
+                            .putExtra("session_id", sessionId)
+                            .putExtra("remote_peer_id", remotePeerId)
+                            .putExtra("sas", sas)
+                            .putExtra("expires_at_elapsed_ms", expiresAtElapsedMs);
+                    sendBroadcast(event);
+                });
+                host.start(bindAddress, LanTransferPairingControlProtocol.DEFAULT_PORT);
+                lanTransferPairingControlHost = host;
+                lanTransferPairingControlFingerprint = fingerprint;
+                FileLogger.log(this, "LAN_TRANSFER", "Pairing control host active on "
+                        + links.getInterfaceName() + " address=" + bindAddress.getHostAddress()
+                        + " port=" + host.getBoundPort() + " reason=" + reason);
+            }
+        } catch (SecurityException permissionFailure) {
+            FileLogger.log(this, "LAN_TRANSFER", "Pairing control permission denied: "
+                    + permissionFailure.getClass().getSimpleName());
+        } catch (Exception failure) {
+            FileLogger.log(this, "LAN_TRANSFER", "Pairing control host reconcile failed: "
+                    + failure.getClass().getSimpleName());
+        }
+    }
+
+    private void stopLanTransferPairingControlHost() {
+        synchronized (lanTransferListenerLock) { closeLanTransferPairingControlHostLocked(); }
+    }
+
+    private void closeLanTransferPairingControlHostLocked() {
+        LanTransferPairingControlHost old = lanTransferPairingControlHost;
+        lanTransferPairingControlHost = null;
+        lanTransferPairingControlFingerprint = null;
+        if (old != null) old.close();
     }
 
     /** Start/refresh file-transfer discovery independently of credentials and chat UDP state. */
@@ -2767,6 +2853,7 @@ public class TrackingService extends Service implements LocationListener {
             listenerToDrain = lanTransferTcpListener;
             closeLanTransferListenerLocked();
             closeLanTransferDiscoveryLocked();
+            closeLanTransferPairingControlHostLocked();
             storeToClose = lanTransferStore;
             lanTransferStore = null;
             lanTransferFilesystem = null;
