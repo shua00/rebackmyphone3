@@ -21,7 +21,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
     public static final long FIRST_DISCOVERY_WINDOW_MS = LanChatRetryPolicy.FIRST_DISCOVERY_WINDOW_MS;
     private static final String DB_NAME = "lan_p2p_delivery.db";
     // v9 records attempted endpoints; v10 adds bounded, durable partial long-chat receive sessions.
-    private static final int DB_VERSION = 10;
+    private static final int DB_VERSION = 11;
     // Durable partial long-chat receive cache: strict per-message, session and global bounds.
     public static final long FRAGMENT_SESSION_TTL_MS = 30L * 60L * 1000L;
     public static final int MAX_FRAGMENT_SESSIONS = 32;
@@ -198,6 +198,8 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 "last_attempt_endpoint TEXT NOT NULL DEFAULT ''," +
                 "last_error TEXT NOT NULL DEFAULT ''," +
                 "last_recovery_at_ms INTEGER NOT NULL DEFAULT 0," +
+                "fragment_count INTEGER NOT NULL DEFAULT 0," +
+                "fragment_ack_bitmap TEXT NOT NULL DEFAULT ''," +
                 "PRIMARY KEY(message_id, peer_id)," +
                 "FOREIGN KEY(message_id) REFERENCES lan_outbox(message_id) ON DELETE CASCADE)");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_lan_targets_status ON lan_outbox_targets(message_id, status)");
@@ -312,6 +314,14 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
         if (oldVersion < 9 && !hasColumn(db, "lan_outbox_targets", "last_attempt_endpoint")) {
             db.execSQL("ALTER TABLE lan_outbox_targets ADD COLUMN last_attempt_endpoint TEXT NOT NULL DEFAULT ''");
+        }
+        if (oldVersion < 11) {
+            if (!hasColumn(db, "lan_outbox_targets", "fragment_count")) {
+                db.execSQL("ALTER TABLE lan_outbox_targets ADD COLUMN fragment_count INTEGER NOT NULL DEFAULT 0");
+            }
+            if (!hasColumn(db, "lan_outbox_targets", "fragment_ack_bitmap")) {
+                db.execSQL("ALTER TABLE lan_outbox_targets ADD COLUMN fragment_ack_bitmap TEXT NOT NULL DEFAULT ''");
+            }
         }
         if (oldVersion < 10) {
             db.execSQL("CREATE TABLE IF NOT EXISTS lan_chat_fragment_sessions (" +
@@ -1242,6 +1252,121 @@ public final class LanChatStore extends SQLiteOpenHelper {
         } finally {
             if (c != null) c.close();
         }
+    }
+
+    /**
+     * Freeze the fragment count for one already-snapshotted recipient and initialize its
+     * durable selective-ACK bitmap. Re-entry is idempotent; a different count is rejected.
+     */
+    public boolean initializeTargetFragmentProgress(String messageId, String peerId, int fragmentCount) {
+        if (messageId == null || messageId.isEmpty() || peerId == null || peerId.isEmpty()
+                || fragmentCount < 1 || fragmentCount > 1024) return false;
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            Cursor c = db.rawQuery("SELECT fragment_count,fragment_ack_bitmap,status " +
+                    "FROM lan_outbox_targets WHERE message_id=? AND peer_id=?",
+                    new String[]{messageId, peerId});
+            int existingCount;
+            String bitmap;
+            String status;
+            try {
+                if (!c.moveToFirst()) return false;
+                existingCount = c.getInt(0);
+                bitmap = c.getString(1);
+                status = c.getString(2);
+            } finally { c.close(); }
+            if ("acked".equals(status)) {
+                db.setTransactionSuccessful();
+                return true;
+            }
+            if (existingCount != 0 && existingCount != fragmentCount) return false;
+            String initial = bitmap == null ? "" : bitmap;
+            if (existingCount == 0) {
+                initial = repeatZeroes(fragmentCount);
+            } else if (initial.length() != fragmentCount) {
+                return false;
+            }
+            ContentValues values = new ContentValues();
+            values.put("fragment_count", fragmentCount);
+            values.put("fragment_ack_bitmap", initial);
+            boolean updated = db.update("lan_outbox_targets", values,
+                    "message_id=? AND peer_id=? AND status!='acked'",
+                    new String[]{messageId, peerId}) == 1;
+            if (!updated) return false;
+            db.setTransactionSuccessful();
+            return true;
+        } catch (Exception failure) {
+            return false;
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    /** Persist one authenticated fragment ACK; duplicate ACKs are idempotent. */
+    public boolean acknowledgeTargetFragment(String messageId, String peerId, int fragmentIndex) {
+        if (messageId == null || messageId.isEmpty() || peerId == null || peerId.isEmpty()
+                || fragmentIndex < 0 || fragmentIndex >= 1024) return false;
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            Cursor c = db.rawQuery("SELECT fragment_count,fragment_ack_bitmap FROM lan_outbox_targets " +
+                    "WHERE message_id=? AND peer_id=? AND status!='acked'",
+                    new String[]{messageId, peerId});
+            int count;
+            String bitmap;
+            try {
+                if (!c.moveToFirst()) return false;
+                count = c.getInt(0);
+                bitmap = c.getString(1);
+            } finally { c.close(); }
+            if (count < 1 || count > 1024 || fragmentIndex >= count
+                    || bitmap == null || bitmap.length() != count) return false;
+            if (bitmap.charAt(fragmentIndex) == '1') {
+                db.setTransactionSuccessful();
+                return true;
+            }
+            if (bitmap.charAt(fragmentIndex) != '0') return false;
+            String updatedBitmap = bitmap.substring(0, fragmentIndex) + "1"
+                    + bitmap.substring(fragmentIndex + 1);
+            ContentValues values = new ContentValues();
+            values.put("fragment_ack_bitmap", updatedBitmap);
+            if (db.update("lan_outbox_targets", values,
+                    "message_id=? AND peer_id=? AND status!='acked'",
+                    new String[]{messageId, peerId}) != 1) return false;
+            db.setTransactionSuccessful();
+            return true;
+        } catch (Exception failure) {
+            return false;
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    /** Return the durable per-target ACK bitmap, or null if no fragment session exists. */
+    public String loadTargetFragmentAckBitmap(String messageId, String peerId) {
+        if (messageId == null || messageId.isEmpty() || peerId == null || peerId.isEmpty()) return null;
+        Cursor c = null;
+        try {
+            c = getReadableDatabase().rawQuery("SELECT fragment_count,fragment_ack_bitmap " +
+                    "FROM lan_outbox_targets WHERE message_id=? AND peer_id=?",
+                    new String[]{messageId, peerId});
+            if (!c.moveToFirst()) return null;
+            int count = c.getInt(0);
+            String bitmap = c.getString(1);
+            return count >= 1 && count <= 1024 && bitmap != null && bitmap.length() == count
+                    ? bitmap : null;
+        } catch (Exception failure) {
+            return null;
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
+    private static String repeatZeroes(int count) {
+        char[] values = new char[count];
+        java.util.Arrays.fill(values, '0');
+        return new String(values);
     }
 
     public boolean acknowledge(String messageId, String peerId) {

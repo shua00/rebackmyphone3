@@ -401,6 +401,31 @@ class LanP2PCoreTests(unittest.TestCase):
                 # exception handler, which closes the socket before the next bind.
                 self.assertNotIn("except Exception as recv_err:", listener)
 
+    def test_android_outbox_persists_per_recipient_fragment_ack_bitmap(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        self.assertIn("private static final int DB_VERSION = 11;", source)
+        self.assertIn('"fragment_count INTEGER NOT NULL DEFAULT 0,"', source)
+        self.assertIn('"fragment_ack_bitmap TEXT NOT NULL DEFAULT \'\',"', source)
+        self.assertIn('if (oldVersion < 11)', source)
+        self.assertIn("initializeTargetFragmentProgress(", source)
+        self.assertIn("acknowledgeTargetFragment(", source)
+        self.assertIn("loadTargetFragmentAckBitmap(", source)
+        initialize = extract_java_method(source, "public boolean initializeTargetFragmentProgress(")
+        acknowledge = extract_java_method(source, "public boolean acknowledgeTargetFragment(")
+        self.assertIn("fragmentCount > 1024", initialize)
+        self.assertIn("existingCount != fragmentCount", initialize)
+        self.assertIn("fragmentIndex >= count", acknowledge)
+        self.assertIn("db.setTransactionSuccessful()", acknowledge)
+        self.assertIn("status!='acked'", acknowledge)
+
+    def test_rescue2_legacy_log_pull_is_preserved_as_compatibility_path(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        todo = (repo_root / "docs/LAN_P2P_TODO.md").read_text(encoding="utf-8")
+        self.assertIn("pull_logs_multi", todo)
+        self.assertIn("不得因新版诊断采集建设而删除", todo)
+        self.assertIn("旧版日志拉取兼容性必须保留", todo)
+
     def test_android_outbox_foreign_key_constraints_are_enabled_on_every_connection(self):
         source = Path(__file__).resolve().parents[1] / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         java = source.read_text(encoding="utf-8")
