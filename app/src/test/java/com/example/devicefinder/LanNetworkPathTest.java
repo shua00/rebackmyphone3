@@ -66,6 +66,29 @@ public class LanNetworkPathTest {
         }
     }
 
+    @Test public void serverListenerRejectsUnboundHotspotCandidate() throws Exception {
+        LanNetworkPath candidate = LanNetworkPath.localInterfaceCandidate(
+                "vendor_ap42", ipv4("192.168.43.1"), 24, ipv4("192.168.43.255"));
+        try {
+            LanSocketBinding.validateServerSocketAddress(candidate, ipv4("192.168.43.1"));
+            fail("listener must reject a candidate without a bindable Android Network");
+        } catch (java.io.IOException expected) {
+            assertTrue(expected.getMessage().contains("binding is unavailable"));
+        }
+    }
+
+    @Test public void serverListenerAddressMustMatchSelectedPath() throws Exception {
+        LanNetworkPath path = LanNetworkPath.fromAndroidNetwork(new android.net.Network(42),
+                "wlan0", ipv4("192.168.1.2"), 24, ipv4("192.168.1.255"));
+        try {
+            LanSocketBinding.validateServerSocketAddress(path, ipv4("192.168.1.3"));
+            fail("listener address must be from the selected path snapshot");
+        } catch (java.io.IOException expected) {
+            assertTrue(expected.getMessage().contains("does not match"));
+        }
+        LanSocketBinding.validateServerSocketAddress(path, ipv4("192.168.1.2"));
+    }
+
     @Test(expected = IllegalArgumentException.class)
     public void androidNetworkPathCannotBeCreatedWithoutNetwork() throws Exception {
         LanNetworkPath.fromAndroidNetwork(null, "wlan0", ipv4("192.168.1.2"),
