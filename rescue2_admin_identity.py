@@ -72,6 +72,14 @@ class WindowsDpapiProtector:
 
 class Rescue2AdminIdentity:
     """One independent administrator signing identity, separate from peer pairing."""
+    @staticmethod
+    def default_key_path() -> Path:
+        if os.name != "nt":
+            raise AdminIdentityError("Rescue2 administrator identity storage currently requires Windows")
+        base = os.environ.get("LOCALAPPDATA") or os.path.join(
+            os.path.expanduser("~"), "AppData", "Local")
+        return Path(base) / "RebackMyPhone3" / "rescue2_admin.key.dpapi"
+
     def __init__(self, key_path: os.PathLike | str,
                  protector: Optional[object] = None):
         self.key_path = Path(key_path)
@@ -182,6 +190,17 @@ class Rescue2AdminIdentity:
             raise ValueError("Task payload must be 1..16384 bytes")
         return self._require_key().sign(_SIGNATURE_DOMAIN + canonical_payload,
                                         ec.ECDSA(hashes.SHA256()))
+
+    def export_public_identity_file(self, destination: os.PathLike | str) -> Path:
+        """Write a public-only enrollment document without exposing private material."""
+        target = Path(destination)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        content = self.export_public_identity() + "\\n"
+        with target.open("x", encoding="utf-8", newline="\\n") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return target
 
     def sign_task_envelope(self, envelope) -> tuple[bytes, bytes]:
         """Return canonical UTF-8 JSON and detached signature for a matching task envelope."""

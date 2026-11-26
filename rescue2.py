@@ -1820,6 +1820,29 @@ def menu_f_todo():
     print("  [已完成] H1b 串行化离线补发\n  [已完成] ADB 一键保活与设备控制\n  [计划中] FMD 定位降级\n  [计划中] Cell 基站双源反查\n  [计划中] Veto 紧急宏指令\n  [计划中] Traccar 运动状态机\n  [计划中] HealthMonitor 手环化\n" + "=" * 50)
     input("按回车返回...")
 
+def menu_g_admin_identity():
+    """Manage the independent Rescue2 administrator identity; never touches RESCUE_SECRET."""
+    print("\\n" + "=" * 50 + "\\n  G. Rescue2 超级管理员身份\\n" + "=" * 50)
+    try:
+        from rescue2_admin_identity import Rescue2AdminIdentity
+        identity = Rescue2AdminIdentity(Rescue2AdminIdentity.default_key_path()).load_or_create()
+        print("  管理员密钥已就绪（Windows 当前用户 DPAPI 保护）")
+        print(f"  SHA-256 指纹: {identity.fingerprint}")
+        print("  [1] 导出公钥信任文件（可复制到 Android 导入）")
+        print("  [0] 返回")
+        choice = input("请选择: ").strip()
+        if choice == "1":
+            export_dir = os.path.abspath("admin_identity_exports")
+            filename = "rescue2_admin_" + time.strftime("%Y%m%d_%H%M%S") + ".json"
+            path = identity.export_public_identity_file(os.path.join(export_dir, filename))
+            print(f"{I.ok} 已导出公钥文件: {path}")
+            print("  文件仅包含公钥、指纹和协议版本，不包含私钥。")
+    except Exception as exc:
+        print(f"{I.err} 管理员身份不可用: {type(exc).__name__}: {exc}")
+        print("  不会回退到 RESCUE_SECRET，也不会降低旧版救援功能。")
+    input("按回车返回...")
+
+
 # ===== 主菜单 =====
 def show_devices():
     with _state_lock: devices = dict(DISCOVERED_DEVICES)
@@ -1869,7 +1892,7 @@ def print_main_menu(local_ip):
     print("  [7] 注入 ADB 保活   [8] 紧急寻找")
     
     print("\n【 设备管理与规划 】")
-    print("  [E] ADB 控制台      [T] 未来规划 (TODO)")
+    print("  [E] ADB 控制台      [G] Rescue2 管理员身份\\n  [T] 未来规划 (TODO)")
     
     print("\n【 更多分类 】")
     if is_termux():
@@ -1908,7 +1931,7 @@ def main():
     local_ip = get_local_ip()
     while True:
         print_main_menu(local_ip)
-        choice = input("请输入 (0-8, A-E, T, X): ").strip().upper().rstrip(".、,，")
+        choice = input("请输入 (0-8, A-G, T, X): ").strip().upper().rstrip(".、,，")
         if choice == '0': print("退出。"); break
         elif choice == 'X': scan_lan_devices()
         elif choice == 'A': menu_a_server_config()
@@ -1972,7 +1995,7 @@ def main():
                 for cmd in cmds: subprocess.run(["adb", "-s", device, "shell"] + cmd)
                 print(f"{I.ok} 权限已注入。")
         elif choice == '8': send_emergency()
-        else: print(f"{I.err} 无效输入: {choice!r}，请输入 0-8, A-E, T, X")
+        else: print(f"{I.err} 无效输入: {choice!r}，请输入 0-8, A-G, T, X")
 
 if __name__ == "__main__":
     print(f"[RS] rescue2.py Ultimate {BUILD_VERSION} (协议 v{PROTOCOL_VERSION})")

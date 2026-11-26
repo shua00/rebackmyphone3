@@ -28,6 +28,10 @@ class Rescue2AdminIdentityTests(unittest.TestCase):
             payload = b'{"schemaVersion":1,"taskId":"t-1"}'
             signature = first.sign_task_payload(payload)
             exported = __import__("json").loads(first.export_public_identity())
+            export_path = first.export_public_identity_file(Path(directory) / "exports" / "rescue2-admin.json")
+            self.assertEqual(__import__("json").loads(export_path.read_text(encoding="utf-8")), exported)
+            with self.assertRaises(FileExistsError):
+                first.export_public_identity_file(export_path)
 
             self.assertEqual(hashlib.sha256(public_key).hexdigest(), fingerprint)
             self.assertEqual(exported["fingerprint"], fingerprint)
