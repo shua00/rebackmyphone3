@@ -5417,8 +5417,8 @@ public class TrackingService extends Service implements LocationListener {
                 }
             }
             final long packetBuildStartedAt = android.os.SystemClock.elapsedRealtime();
-            final byte[] preparedBroadcastData;
-            final java.util.List<byte[]> preparedBroadcastFragments;
+            byte[] preparedBroadcastData;
+            java.util.List<byte[]> preparedBroadcastFragments;
             try {
                 if (pendingSnapshotTargets == 0) {
                     try {
