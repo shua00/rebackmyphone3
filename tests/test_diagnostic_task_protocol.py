@@ -50,6 +50,8 @@ class DiagnosticTaskProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             DiagnosticTaskEnvelope.from_json(encoded.replace('"nonce":', '"extra":1,"nonce":'))
         with self.assertRaises(ValueError):
+            DiagnosticTaskEnvelope.from_json(encoded.replace('"schemaVersion":1', '"schemaVersion":true'))
+        with self.assertRaises(ValueError):
             self.task(created_at_epoch_ms=True)
 
     def test_task_expiry_window_is_half_open(self):

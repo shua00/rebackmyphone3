@@ -96,6 +96,8 @@ class DiagnosticTaskEnvelope:
                     "expiresAtEpochMs", "nonce"}
         if not isinstance(data, dict) or set(data) != required:
             raise ValueError("invalid diagnostic task fields")
+        if isinstance(data["schemaVersion"], bool) or not isinstance(data["schemaVersion"], int):
+            raise ValueError("unsupported diagnostic task schema")
         return cls(
             task_id=data["taskId"],
             admin_key_fingerprint=data["adminKeyFingerprint"],
