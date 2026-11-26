@@ -2537,6 +2537,20 @@ public class TrackingService extends Service implements LocationListener {
                 lanTransferPairingInitiators.remove(initiator.sessionId(), initiator);
             }
         }
+        // A process may restart after the in-memory ceremony is gone but before COMMIT_ACK.
+        // Re-publish the encrypted durable journal so a newly resumed UI can display recovery state.
+        try {
+            for (LanTransferCredentials.PendingCommit pending :
+                    LanTransferCredentials.loadPendingCommits(this)) {
+                broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                        pending.commitId, pending.peerId, "", pending.role.toLowerCase(),
+                        "COMMIT_PENDING", 0L);
+            }
+        } catch (Exception journalFailure) {
+            FileLogger.log(this, "LAN_TRANSFER", "Unable to publish pending pairing journal: "
+                    + journalFailure.getClass().getSimpleName());
+        }
+
     }
 
     private void handleLanTransferPairingStart(String peerId, String requestedHost) {
