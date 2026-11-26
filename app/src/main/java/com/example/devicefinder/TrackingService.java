@@ -2643,6 +2643,13 @@ public class TrackingService extends Service implements LocationListener {
         if (serviceDestroyed || sessionId == null || sessionId.isEmpty()
                 || peerId == null || peerId.isEmpty()) return;
         LanTransferPairingInitiator initiator = lanTransferPairingInitiators.get(sessionId);
+        // An initiator removed by path-generation invalidation must never fall through to
+        // the responder branch merely because its in-memory session is no longer present.
+        if ("initiator".equals(role) && initiator == null) {
+            broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                    sessionId, peerId, "", "initiator", "NETWORK_PATH_CHANGED", 0L);
+            return;
+        }
         try {
             if ("ACTION_LAN_TRANSFER_PAIRING_CONFIRM".equals(action)) {
                 if (initiator != null) {
@@ -2852,8 +2859,14 @@ public class TrackingService extends Service implements LocationListener {
     private void closeLanTransferPairingInitiators() {
         for (java.util.Map.Entry<String, LanTransferPairingInitiator> entry
                 : lanTransferPairingInitiators.entrySet()) {
-            if (lanTransferPairingInitiators.remove(entry.getKey(), entry.getValue()))
+            if (lanTransferPairingInitiators.remove(entry.getKey(), entry.getValue())) {
+                if (!serviceDestroyed) {
+                    broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                            entry.getKey(), entry.getValue().remotePeerId(), "",
+                            "initiator", "NETWORK_PATH_CHANGED", 0L);
+                }
                 entry.getValue().close();
+            }
         }
     }
 
