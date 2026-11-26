@@ -286,7 +286,7 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
                 try {
                     if (!LanTransferPairingCommitProof.verify(secret, request.sessionId,
                             request.senderPeerId, localPeerId, "COMMIT", request.payload))
-                        throw new java.security.SecurityException("Pairing commit proof is invalid");
+                        throw new SecurityException("Pairing commit proof is invalid");
                     if (!listener.onPairingCommitRequested(active.sessionId,
                             active.remotePeerId, secret)) return null;
                     byte[] acknowledgement = LanTransferPairingCommitProof.create(secret,
