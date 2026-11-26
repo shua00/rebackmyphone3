@@ -122,8 +122,12 @@ public class LanTransferPairingControlHostTest {
                     LanTransferPairingControlTransport.exchange(InetAddress.getLoopbackAddress(),
                             host.getBoundPort(), confirm, 2000, 3000);
             assertEquals(LanTransferPairingControlProtocol.Type.ACK, ack.type);
-            assertEquals(1, ack.payload.length);
+            assertEquals(33, ack.payload.length);
             assertEquals(1, ack.payload[0]);
+            initiatorSession.applyRemoteConfirmation(true,
+                    java.util.Arrays.copyOfRange(ack.payload, 1, ack.payload.length), 4L);
+            assertEquals(LanTransferPairingSession.State.READY_TO_COMMIT,
+                    initiatorSession.state(4L));
             assertEquals(LanTransferPairingSession.State.READY_TO_COMMIT,
                     host.pendingSessions().get(0).state);
             byte[] committedSecret = host.takeSecretForCommit(values[0], values[1]);

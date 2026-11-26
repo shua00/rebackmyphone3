@@ -121,8 +121,11 @@ public final class LanTransferPairingControlProtocol {
             throw new IllegalArgumentException("Pairing key exchange payload is incomplete");
         if ((type == Type.CONFIRM || type == Type.REJECT) && payload.length != 32)
             throw new IllegalArgumentException("Pairing confirmation proof must be 32 bytes");
-        if (type == Type.ACK && payload.length != 1)
-            throw new IllegalArgumentException("Pairing acknowledgement must contain one status byte");
+        if (type == Type.ACK && payload.length != 1 && payload.length != 33)
+            throw new IllegalArgumentException("Pairing acknowledgement must contain a status and optional confirmation proof");
+        if (type == Type.ACK && ((payload[0] == 1) != (payload.length == 33)
+                || (payload[0] != 0 && payload[0] != 1)))
+            throw new IllegalArgumentException("Pairing acknowledgement status and proof are inconsistent");
         if (type == Type.CANCEL && payload.length != 0)
             throw new IllegalArgumentException("Pairing cancel message must be empty");
     }

@@ -191,11 +191,21 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
             } else {
                 return null;
             }
-            byte status = (byte) (active.session.state(now)
-                    == LanTransferPairingSession.State.READY_TO_COMMIT ? 1 : 0);
+            boolean ready = active.session.state(now)
+                    == LanTransferPairingSession.State.READY_TO_COMMIT;
+            byte[] acknowledgement;
+            if (ready) {
+                byte[] proof = active.session.createLocalConfirmationProof(now);
+                acknowledgement = new byte[33];
+                acknowledgement[0] = 1;
+                System.arraycopy(proof, 0, acknowledgement, 1, proof.length);
+                java.util.Arrays.fill(proof, (byte) 0);
+            } else {
+                acknowledgement = new byte[]{0};
+            }
             return new LanTransferPairingControlProtocol.Message(
                     LanTransferPairingControlProtocol.Type.ACK, request.sessionId,
-                    localPeerId, request.senderPeerId, request.sequence, new byte[]{status});
+                    localPeerId, request.senderPeerId, request.sequence, acknowledgement);
         }
         String entryKey = key(request.sessionId, request.senderPeerId);
         if (pending.containsKey(entryKey)) return null;
