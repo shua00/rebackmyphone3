@@ -129,7 +129,7 @@ class TransferListenerRuntimeTests(unittest.TestCase):
                 made.append(self)
 
             def start(self):
-                if self.kwargs["host"] == self.usb.address:
+                if self.kwargs["host"] == "10.20.0.2":
                     raise OSError("interface bind denied")
                 return self
 
