@@ -6506,6 +6506,35 @@ public class TrackingService extends Service implements LocationListener {
                 }
                 return true;
             }
+            if ("chat.fragment".equals(type)) {
+                String messageId = envelope.optString("message_id", "");
+                String targetId = envelope.optString("target_peer_id", "");
+                int sourcePort = packet.getPort();
+                if (senderId.isEmpty() || senderId.equals(getUniqueDeviceId())
+                        || messageId.isEmpty()
+                        || !(targetId.equals("*") || targetId.equals(getUniqueDeviceId()))
+                        || !(sourcePort == 8888 || sourcePort == 8887
+                             || sourcePort == 8889 || sourcePort == 8890)) return true;
+                final java.net.InetAddress ackAddress = packet.getAddress();
+                final int ackPort = sourcePort;
+                final int fragmentIndex = envelope.optInt("fragment_index", -1);
+                final int fragmentCount = envelope.optInt("fragment_count", -1);
+                final int totalBytes = envelope.optInt("total_bytes", -1);
+                final String sha256 = envelope.optString("sha256", "");
+                final long createdAtMs = envelope.optLong("created_at_ms", -1L);
+                final String base64Data = envelope.optString("fragment_data", "");
+                final String displayName = envelope.optString("display_name", senderId);
+                try {
+                    lanChatIoExecutor.execute(() -> processAuthenticatedLanChatFragment(
+                            socket, ackAddress, ackPort, senderId, messageId, targetId,
+                            fragmentIndex, fragmentCount, totalBytes, sha256, createdAtMs,
+                            base64Data, displayName, packetReceivedAtElapsedMs));
+                } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                    FileLogger.log(this, "CHAT", "⚠️ LAN fragment IO 队列已满，等待对端重传 message="
+                            + messageId + " index=" + fragmentIndex + " peer=" + senderId);
+                }
+                return true;
+            }
             if ("chat.message".equals(type)) {
                 String messageId = envelope.optString("message_id", "");
                 String targetId = envelope.optString("target_peer_id", "");
@@ -6705,6 +6734,107 @@ public class TrackingService extends Service implements LocationListener {
             FileLogger.log(this, "CHAT", "⚠️ v2 ACK 发送失败 message=" + messageId
                     + " peer=" + targetPeerId + " error=" + e.getClass().getSimpleName());
             return false;
+        }
+    }
+
+    /** A fragment ACK confirms only durable fragment-cache admission, never message delivery. */
+    private boolean sendAuthenticatedChatFragmentAck(DatagramSocket socket,
+            java.net.InetAddress address, int port, String targetPeerId,
+            String messageId, int fragmentIndex) {
+        try {
+            if (socket == null || socket.isClosed() || address == null) return false;
+            JSONObject ack = LanP2pProtocol.create(
+                    "chat.fragment.ack", getUniqueDeviceId(), "android", "android-main");
+            ack.put("target_peer_id", targetPeerId);
+            ack.put("message_id", messageId);
+            ack.put("fragment_index", fragmentIndex);
+            ack.put("status", "received");
+            byte[] bytes = LanP2pProtocol.encode(ack, RESCUE_SECRET);
+            sendLanUdpPacket(socket, new DatagramPacket(bytes, bytes.length, address, port),
+                    "CHAT_FRAGMENT_ACK_V2");
+            return !socket.isClosed();
+        } catch (Exception failure) {
+            FileLogger.log(this, "CHAT", "⚠️ fragment ACK 发送失败 message="
+                    + messageId + " index=" + fragmentIndex + " peer=" + targetPeerId
+                    + " error=" + failure.getClass().getSimpleName());
+            return false;
+        }
+    }
+
+    /**
+     * Fragment persistence and whole-message delivery are separate boundaries:
+     * only the complete UTF-8 body committed to the inbox can trigger chat.ack.
+     */
+    private void processAuthenticatedLanChatFragment(DatagramSocket socket,
+            java.net.InetAddress ackAddress, int ackPort, String senderId,
+            String messageId, String targetId, int fragmentIndex, int fragmentCount,
+            int totalBytes, String sha256, long createdAtMs, String base64Data,
+            String displayName, long packetReceivedAtElapsedMs) {
+        final String receiverScope = "android:" + getUniqueDeviceId();
+        final LanChatStore store = lanChatStore;
+        if (store == null) return;
+        long startedAt = android.os.SystemClock.elapsedRealtime();
+        String fragmentState = store.storeIncomingFragment(receiverScope, senderId,
+                messageId, fragmentIndex, fragmentCount, totalBytes, sha256,
+                createdAtMs, base64Data, System.currentTimeMillis());
+        if (!("stored".equals(fragmentState) || "duplicate".equals(fragmentState)
+                || "complete".equals(fragmentState))) {
+            FileLogger.log(this, "CHAT", "P2P fragment rejected message=" + messageId
+                    + " index=" + fragmentIndex + " peer=" + senderId);
+            return;
+        }
+
+        boolean fragmentAckSent = sendAuthenticatedChatFragmentAck(
+                socket, ackAddress, ackPort, senderId, messageId, fragmentIndex);
+        List<LanChatStore.IncomingFragment> cached = store.loadIncomingFragments(
+                receiverScope, senderId, messageId, System.currentTimeMillis());
+        if (cached.size() != fragmentCount) return;
+
+        String receiveKey = senderId + ":" + messageId;
+        if (!pendingLanChatReceives.add(receiveKey)) return;
+        try {
+            ArrayList<LanP2pFragments.Fragment> ordered = new ArrayList<>(cached.size());
+            for (LanChatStore.IncomingFragment part : cached) {
+                if (!receiverScope.equals(part.receiverScope)
+                        || !senderId.equals(part.senderPeerId)
+                        || !messageId.equals(part.messageId)
+                        || part.fragmentCount != fragmentCount
+                        || part.totalBytes != totalBytes
+                        || part.createdAtMs != createdAtMs
+                        || !sha256.equals(part.sha256)) {
+                    throw new IllegalArgumentException("Fragment session metadata mismatch");
+                }
+                ordered.add(new LanP2pFragments.Fragment(part.fragmentIndex,
+                        part.fragmentCount, part.totalBytes, part.sha256, part.base64Data));
+            }
+            // assemble() enforces ordering, exact lengths, UTF-8 validity and whole SHA-256.
+            String body = LanP2pFragments.assemble(ordered);
+            boolean stored = persistIncomingLanChat(senderId, messageId, body,
+                    displayName == null || displayName.isEmpty() ? senderId : displayName);
+            if (!stored) {
+                FileLogger.log(this, "CHAT", "P2P long message inbox commit failed message="
+                        + messageId + " peer=" + senderId + "; partial cache retained");
+                return;
+            }
+            // The durable inbox row is the delivery boundary. Partial state is disposable now.
+            boolean cacheCleared = store.deleteIncomingFragmentSession(
+                    receiverScope, senderId, messageId);
+            boolean finalAckSent = sendAuthenticatedChatAck(
+                    socket, ackAddress, ackPort, senderId, messageId);
+            scheduleLanChatInboxProjection();
+            long totalMs = android.os.SystemClock.elapsedRealtime() - packetReceivedAtElapsedMs;
+            FileLogger.log(this, "CHAT", "P2P long RX durable message=" + messageId
+                    + " sender=" + senderId + " bytes=" + totalBytes
+                    + " fragments=" + fragmentCount + " fragmentAckSent=" + fragmentAckSent
+                    + " cacheCleared=" + cacheCleared + " finalAckSent=" + finalAckSent
+                    + " queueMs=" + (startedAt - packetReceivedAtElapsedMs)
+                    + " totalMs=" + totalMs);
+        } catch (Exception failure) {
+            FileLogger.log(this, "CHAT", "⚠️ P2P long message reassembly failed message="
+                    + messageId + " peer=" + senderId + " error="
+                    + failure.getClass().getSimpleName() + "; no final chat.ack sent");
+        } finally {
+            pendingLanChatReceives.remove(receiveKey);
         }
     }
 

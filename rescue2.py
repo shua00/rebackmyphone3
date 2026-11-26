@@ -87,6 +87,8 @@ import urllib.request
 import tempfile
 import zipfile
 import shutil
+import logging
+from logging.handlers import RotatingFileHandler
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
@@ -111,7 +113,7 @@ except ImportError:
 # ============================================================
 # 脚本自身元数据 (Script Metadata)
 # ============================================================
-BUILD_VERSION = "20261111-2000"
+BUILD_VERSION = "20261126-1445"
 PROTOCOL_VERSION = 2
 PACKAGE_NAME = "com.example.devicefinder"
 
@@ -170,6 +172,48 @@ _CHAT_DEDUP_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_
 _CHAT_DEDUP_LOCK = threading.Lock()
 print_lock = threading.Lock()  # v2.0.2 补丁：全局打印锁，防多线程输出错乱
 
+# Bounded local diagnostics: never write packet bodies, chat content or credentials.
+_DIAG_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rescue2_runtime.log")
+_DIAG_LOGGER = logging.getLogger("rescue2.runtime")
+_DIAG_LOGGER.setLevel(logging.INFO)
+_DIAG_LOGGER.propagate = False
+if not _DIAG_LOGGER.handlers:
+    try:
+        _diag_handler = RotatingFileHandler(
+            _DIAG_LOG_PATH, maxBytes=4 * 1024 * 1024,
+            backupCount=4, encoding="utf-8")
+    except OSError:
+        _diag_handler = logging.StreamHandler()
+    _diag_handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s [%(threadName)s] %(message)s"))
+    _DIAG_LOGGER.addHandler(_diag_handler)
+
+
+def _diag_event(event, level=logging.INFO, **fields):
+    """Write bounded structured diagnostics while filtering sensitive field names."""
+    safe_fields = []
+    blocked = ("secret", "token", "password", "body", "content", "payload", "raw", "auth")
+    for key, value in sorted(fields.items()):
+        if any(part in key.lower() for part in blocked):
+            continue
+        rendered = str(value).replace("\\n", " ").replace("\\r", " ")[:240]
+        safe_fields.append("{}={}".format(key, rendered))
+    suffix = " " + " ".join(safe_fields) if safe_fields else ""
+    _DIAG_LOGGER.log(level, "%s%s", event, suffix)
+
+
+def _diag_exception(event, **fields):
+    """Call inside an except block to retain a traceback in the rotating log."""
+    _diag_event(event, logging.ERROR, **fields)
+    _DIAG_LOGGER.exception("traceback event=%s", event)
+
+
+def _on_v2_dispatch_error(exc, lane):
+    _diag_exception("v2_dispatch_failed", lane=lane,
+                    error_type=type(exc).__name__)
+
+
+
 def _restore_chat_history():
     """Return the last 20 messages accepted by rescue2 for terminal recovery."""
     try:
@@ -186,6 +230,7 @@ def _restore_chat_history():
         finally:
             conn.close()
     except Exception as e:
+        _diag_exception("chat_history_restore_failed", error_type=type(e).__name__)
         with print_lock:
             print(f"{I.warn} 对讲历史恢复失败: {type(e).__name__}")
         return []
@@ -221,6 +266,7 @@ def _claim_chat_message(sender, message_id, content):
                 return claim
             finally: conn.close()
     except Exception as e:
+        _diag_exception("chat_message_persist_failed", error_type=type(e).__name__)
         with print_lock: print(f"⚠️ 聊天消息持久化失败，本条不确认: {type(e).__name__}")
         return None
 
@@ -329,24 +375,41 @@ def send_udp(command_str, target_ip="255.255.255.255", quiet=False, no_retry=Fal
     if isinstance(target_ip, (list, tuple)):
         if not target_ip:
             if not quiet: print(f"{I.warn} 无有效目标，未发送")
+            _diag_event("udp_tx_skipped", reason="empty_target_list")
             return
         for ip in target_ip: send_udp(command_str, ip, quiet=quiet, no_retry=no_retry)
         return
-    if not quiet: print(f"\n{I.send} 发送指令至 {target_ip}: {command_str}")
+    command_type = str(command_str).split(":", 1)[0][:64]
     is_broadcast = (target_ip == "255.255.255.255") or target_ip.endswith(".255")
     send_times = 1 if no_retry else (3 if is_broadcast else 2)
     gap = 0.5 if is_broadcast else 0.15
+    sent_count = 0
+    _diag_event("udp_tx_start", target=target_ip, port=UDP_DEVICE_PORT,
+                command_type=command_type, attempts=send_times, broadcast=is_broadcast)
+    if not quiet: print(f"\\n{I.send} 发送指令至 {target_ip}: {command_type}")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         for i in range(send_times):
-            try: sock.sendto(command_str.encode('utf-8'), (target_ip, UDP_DEVICE_PORT))
+            try:
+                sock.sendto(command_str.encode('utf-8'), (target_ip, UDP_DEVICE_PORT))
+                sent_count += 1
             except Exception as e:
-                if not quiet: print(f"   [{i+1}/{send_times}] 发送失败: {e}")
+                _diag_exception("udp_tx_failed", target=target_ip, port=UDP_DEVICE_PORT,
+                                command_type=command_type, attempt=i + 1,
+                                error_type=type(e).__name__)
+                if not quiet: print(f"   [{i+1}/{send_times}] 发送失败: {type(e).__name__}")
                 break
             if not quiet and send_times > 1: print(f"   [{i+1}/{send_times}] 发送中...")
             if i < send_times - 1: time.sleep(gap)
-    finally: sock.close()
+    except Exception as e:
+        _diag_exception("udp_tx_socket_failed", target=target_ip, port=UDP_DEVICE_PORT,
+                        error_type=type(e).__name__)
+        raise
+    finally:
+        sock.close()
+    _diag_event("udp_tx_complete", target=target_ip, port=UDP_DEVICE_PORT,
+                command_type=command_type, sent=sent_count, attempts=send_times)
     if not quiet: print(f"{I.ok} 发送完毕。")
 
 def wait_for_response(before, wait_sec, wait_type):
@@ -505,9 +568,15 @@ def start_log_receiver():
         server = ThreadingHTTPServer(("0.0.0.0", LOG_PORT), LogReceiver)
         RECEIVER_OK = True
         local_ip = get_local_ip()
+        _diag_event("http_log_receiver_started", bind="0.0.0.0",
+                    port=LOG_PORT, advertised_ip=local_ip)
         print(f"{I.recv} 内置接收端已启动: http://{local_ip}:{LOG_PORT}/")
         server.serve_forever()
-    except Exception as e: print(f"{I.warn} 接收端启动失败: {e}")
+    except Exception as e:
+        RECEIVER_OK = False
+        _diag_exception("http_log_receiver_failed", port=LOG_PORT,
+                        error_type=type(e).__name__)
+        print(f"{I.warn} 接收端启动失败: {type(e).__name__}")
 
 def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
     """Replay due durable rows; verified peer recovery is throttled and finite."""
@@ -814,49 +883,67 @@ def send_chat_v2(body, target_ips):
 _V2_PACKET_DISPATCHER = BoundedPacketDispatcher(
     _handle_authenticated_v2_packet,
     "rescue2",
-    on_error=lambda exc, lane: print(
-        "LAN packet handler failed (rescue2/" + lane + "): " + type(exc).__name__))
+    on_error=_on_v2_dispatch_error)
 
 
 def udp_listener():
     global UDP_OK, UDP_LISTENER_SOCKET
     while True:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             sock.bind(('0.0.0.0', UDP_PORT))
             UDP_LISTENER_SOCKET = sock
             _start_v2_recovery_retry_worker()
             UDP_OK = True
             try:
                 subnet_broadcast = get_subnet_broadcast()
-            except Exception:
+            except Exception as broadcast_error:
                 subnet_broadcast = "255.255.255.255"
+                _diag_exception("udp_broadcast_address_failed", fallback=subnet_broadcast,
+                                error_type=type(broadcast_error).__name__)
             announced = send_startup_peer_beacon(
                 sock, PEER_NODE_ID, "rescue2", PEER_NODE_ID, RESCUE_SECRET,
                 UDP_PORT, [8888, 8887, 8890],
                 [subnet_broadcast, "255.255.255.255"],
                 db_path=_CHAT_DEDUP_DB, receiver_scope="rescue2")
+            _diag_event("udp_listener_started", bind="0.0.0.0", port=UDP_PORT,
+                        local_ips=",".join(get_all_local_ips()) or "unavailable",
+                        subnet_broadcast=subnet_broadcast, beacon_sent=announced)
             print(f"{I.ok} UDP 监听已启动...")
             print(f"{I.send} rescue2 startup peer beacon sent={announced}")
             while True:
                 data, addr = sock.recvfrom(4096)
                 if data[:1] == b"{":
-                    try: envelope = decode_packet(data, RESCUE_SECRET)
-                    except ValueError: envelope = None
-                    if envelope is not None:
-                        if not _V2_PACKET_DISPATCHER.submit(envelope, sock, addr):
-                            print("⚠️ rescue2 LAN packet queue full; sender retry required: " + str(envelope.get("type")))
+                    try:
+                        envelope = decode_packet(data, RESCUE_SECRET)
+                    except ValueError as decode_error:
+                        _diag_event("udp_v2_packet_rejected", logging.WARNING,
+                                    source_ip=addr[0], source_port=addr[1],
+                                    bytes=len(data), error_type=type(decode_error).__name__)
                         continue
-        except Exception:
+                    packet_type = envelope.get("type", "unknown")
+                    _diag_event("udp_v2_packet_received", source_ip=addr[0],
+                                source_port=addr[1], bytes=len(data), packet_type=packet_type)
+                    if not _V2_PACKET_DISPATCHER.submit(envelope, sock, addr):
+                        _diag_event("udp_v2_dispatch_queue_full", logging.WARNING,
+                                    source_ip=addr[0], source_port=addr[1],
+                                    packet_type=packet_type)
+                        print("⚠️ rescue2 LAN packet queue full; sender retry required: " + str(packet_type))
+                    continue
+        except Exception as listener_error:
             UDP_OK = False
+            _diag_exception("udp_listener_failed", bind="0.0.0.0", port=UDP_PORT,
+                            error_type=type(listener_error).__name__, retry_delay_seconds=10)
             time.sleep(10)
         finally:
             if UDP_LISTENER_SOCKET is sock:
                 UDP_LISTENER_SOCKET = None
             try: sock.close()
-            except Exception: pass
+            except Exception as close_error:
+                _diag_exception("udp_listener_socket_close_failed",
+                                error_type=type(close_error).__name__)
 
 # ===== ARP 查询 / 局域网扫描 =====
 def _try_ip_neigh(prefix):
@@ -1892,6 +1979,10 @@ if __name__ == "__main__":
     print("\n正在启动内置服务...")
     print(f"   环境: {env_name()}")
     print(f"   本机 IP: {get_local_ip()}")
+    print(f"   运行日志: {_DIAG_LOG_PATH}")
+    _diag_event("rescue2_startup", build_version=BUILD_VERSION,
+                protocol_version=PROTOCOL_VERSION, environment=env_name(),
+                local_ip=get_local_ip(), pid=os.getpid(), log_path=_DIAG_LOG_PATH)
     restored_chat = _restore_chat_history()
     if restored_chat:
         print(f"\n{I.chat} 已恢复最近 {len(restored_chat)} 条本机对讲记录：")

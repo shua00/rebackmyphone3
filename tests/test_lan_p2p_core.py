@@ -5513,3 +5513,38 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
                           sender_peer_type="android", service_id="devicefinder")
             self.assertLessEqual(len(encode_packet(packet, "shared-secret")), 1200)
         self.assertEqual(128, len(max_peer_id_budget_probe().encode("utf-8")))
+
+
+
+class LongChatReceiveAndRescueDiagnosticsTests(unittest.TestCase):
+    def test_android_fragment_receive_persists_then_assembles_then_final_acks(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        handler = extract_java_method(source, "private boolean handleAuthenticatedLanPacket(")
+        receiver = extract_java_method(source, "private void processAuthenticatedLanChatFragment(")
+        self.assertIn('"chat.fragment".equals(type)', handler)
+        self.assertIn("lanChatIoExecutor.execute", handler)
+        self.assertLess(receiver.index("store.storeIncomingFragment("), receiver.index("sendAuthenticatedChatFragmentAck("))
+        self.assertLess(receiver.index("sendAuthenticatedChatFragmentAck("), receiver.index("loadIncomingFragments("))
+        self.assertLess(receiver.index("LanP2pFragments.assemble(ordered)"), receiver.index("persistIncomingLanChat("))
+        self.assertLess(receiver.index("persistIncomingLanChat("), receiver.index("deleteIncomingFragmentSession("))
+        self.assertLess(receiver.index("persistIncomingLanChat("), receiver.index("sendAuthenticatedChatAck("))
+        self.assertIn("partial cache retained", receiver)
+        self.assertIn("no final chat.ack sent", receiver)
+
+    def test_rescue2_has_bounded_rotating_file_diagnostics_and_traceback_hooks(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "rescue2.py").read_text(encoding="utf-8")
+        ast.parse(source)
+        self.assertIn("RotatingFileHandler", source)
+        self.assertIn("maxBytes=4 * 1024 * 1024", source)
+        self.assertIn("backupCount=4", source)
+        self.assertIn("rescue2_runtime.log", source)
+        self.assertIn("def _diag_exception(", source)
+        self.assertIn("_DIAG_LOGGER.exception(", source)
+        self.assertIn("udp_listener_started", source)
+        self.assertIn("udp_v2_packet_received", source)
+        self.assertIn("udp_v2_packet_rejected", source)
+        self.assertIn("udp_tx_failed", source)
+        self.assertIn("http_log_receiver_failed", source)
+        self.assertIn("payload", source[source.index("def _diag_event("):source.index("def _diag_exception(")])
