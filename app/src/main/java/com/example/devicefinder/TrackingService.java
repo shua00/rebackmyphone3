@@ -6058,8 +6058,7 @@ public class TrackingService extends Service implements LocationListener {
                         if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
                         try {
                             if (preparedBroadcastData != null) {
-                                DatagramPacket p = new DatagramPacket(preparedBroadcastData,
-                                        preparedBroadcastData.length,
+                                DatagramPacket p = new DatagramPacket(preparedBroadcastData, preparedBroadcastData.length,
                                         java.net.InetAddress.getByName(target), peerPort);
                                 hadUdpDispatchAttempt.set(true);
                                 sendLanUdpPacket(socket, p, "CHAT_BROADCAST_" + peerPort);
