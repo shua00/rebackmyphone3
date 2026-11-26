@@ -426,3 +426,23 @@
 - [x] 新增服务/凭据测试：可信 Peer 精确匹配、未知 Peer 拒绝、空表/错误版本/非法 Peer ID/非法 Base64/错误密钥长度拒绝、POSIX 宽权限拒绝、唯一接口启动、路径变化重绑、无路径关闭、关闭幂等、多网卡歧义 fail-closed。
 - [ ] **本批仍未完成端到端文件传输验收**：本服务骨架和认证凭据入口不等于 Android↔Python 文件协议闭环；offer/chunk/ACK/最终 ACK/SHA-256/断点续传的真实跨端 socket 测试继续列入后续批次。
 - [ ] Linux/Windows 真实网卡绑定权限与实际出口验证仍需实机完成；CI 单测不替代平台实测。
+
+
+## 第一批次收尾与代码层完成记录（2026-11-27）
+
+- [x] 新增 `lan_p2p_transfer_provision.py`：提供交互式、非命令行明文输入的逐设备 PSK provision；验证 Peer ID、标准 Base64 和 32 字节密钥；拒绝默认覆盖；POSIX 输出文件使用 0600、临时文件原子替换和 fsync。
+- [x] 新增持久化 Python Peer ID 生成/读取：首次生成随机稳定 ID，后续从权限受限文件恢复；不从 IP/MAC/发现结果推导身份。
+- [x] 新增 `lan_p2p_transfer_host.py`：独立前台进程入口，显式传入凭据、数据目录、身份文件、网卡选择和端口；启动后报告真实 Peer ID/监听地址/端口；SIGINT/SIGTERM 时关闭服务。不会由聊天/设备管理进程自动启动。
+- [x] 新增 provision 和 identity 测试，覆盖密钥长度、Peer ID、覆盖保护、符号链接拒绝、0600 权限和身份稳定性。
+- [x] 第一批 Python 生产宿主的**代码/API/CI 范围**完成：独立服务、显式凭据 provision、稳定本地身份、真实前台启动入口、路径生命周期和 fail-closed 自动化测试均已具备。
+- [ ] **部署安全边界仍未完成**：管理员 provision 的 PSK 必须来自双方已完成认证的安全配对渠道；不能从 AndroidKeyStore 明文导出，也不能通过聊天口令推导。Python↔Android 自动配对密钥同步不是第一批完成项。
+- [ ] **操作系统实机验收仍待完成**：Linux SO_BINDTODEVICE 权限/实际出口和 Windows IP_UNICAST_IF/ACL 必须分别实测。代码与 CI 通过不等于 Linux/Windows 部署验收通过。
+- [ ] **真实跨端传输仍待完成**：Android↔Python 真实 socket 的 offer/chunk/ACK/最终完成 ACK/SHA-256/断点续传，归入第二批跨端闭环和后续真机验收。
+
+## 第二批次推进记录（2026-11-27）：Android/Python 协议黄金向量
+
+- [x] 新增 Python 跨语言测试，使用 Android `LanTransferFrameCodecTest` 已有的 Python golden wire bytes，验证 Python encoder 输出逐字节一致，并验证 Python decoder 可读取同一 wire frame。
+- [x] 新增认证黄金向量：固定 32 字节 client/server nonce、Peer ID、逐设备 Base64 PSK，逐项验证 PSK 派生 key、server proof、client proof 和 session key。
+- [x] Android `LanTransferAuthenticatorTest` 增加同一认证黄金向量断言；通过反射调用既有私有原语验证双方使用同一 UTF-8、长度前缀、domain separation、HMAC-SHA256 和 session 派生，不改变线上认证协议。
+- [ ] 继续补齐 Android/Python Offer、Chunk、Chunk ACK、Missing、Complete、Cancel 帧的跨语言双向黄金向量与状态语义验证。
+- [ ] 继续验证 Android↔Python 真实 TCP socket 认证及完整文件传输，不以共享 fixture 或各自 loopback 单测替代。
