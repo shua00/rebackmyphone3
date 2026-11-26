@@ -129,6 +129,11 @@ public final class LanTransferDiscovery implements AutoCloseable {
         }
     }
 
+    static boolean claimBeaconSlot(java.util.concurrent.atomic.AtomicLong periodic,
+            java.util.concurrent.atomic.AtomicLong manual, boolean userRequested, long nowElapsedMs) {
+        return claimBeaconSlot(userRequested ? manual : periodic, nowElapsedMs);
+    }
+
     static final class Beacon {
         final String peerId;
         final int filePort;
@@ -157,9 +162,7 @@ public final class LanTransferDiscovery implements AutoCloseable {
 
     private void announce(boolean userRequested) {
         long now = android.os.SystemClock.elapsedRealtime();
-        if (userRequested) {
-            if (!claimBeaconSlot(lastManualBeaconAtMs, now)) return;
-        } else if (!claimBeaconSlot(lastBeaconAtMs, now)) return;
+        if (!claimBeaconSlot(lastBeaconAtMs, lastManualBeaconAtMs, userRequested, now)) return;
 
         int port;
         try { port = portProvider.getListeningPort(); }
@@ -175,6 +178,9 @@ public final class LanTransferDiscovery implements AutoCloseable {
             network.bindSocket(sender);
             sender.send(new DatagramPacket(payload, payload.length,
                     broadcastAddress, UDP_PORT));
+            android.util.Log.d("LanTransferDiscovery", "Beacon sent peer=" + localPeerId
+                    + " filePort=" + port + " pairingPort="
+                    + LanTransferPairingControlProtocol.DEFAULT_PORT);
         } catch (IOException | RuntimeException failure) {
             if (!closed.get()) android.util.Log.d("LanTransferDiscovery",
                     "Beacon unavailable: " + failure.getClass().getSimpleName());
@@ -196,6 +202,9 @@ public final class LanTransferDiscovery implements AutoCloseable {
             LanTransferPeerDirectory.recordFileDiscoveryCandidate(context, beacon.peerId,
                     packet.getAddress().getHostAddress(), beacon.filePort, beacon.pairingPort,
                     networkFingerprint, System.currentTimeMillis());
+            android.util.Log.d("LanTransferDiscovery", "Candidate received peer=" + beacon.peerId
+                    + " endpoint=" + packet.getAddress().getHostAddress() + ":" + beacon.filePort
+                    + " pairingPort=" + beacon.pairingPort);
             context.sendBroadcast(new Intent("ACTION_LAN_TRANSFER_PEERS_UPDATED")
                     .setPackage(context.getPackageName()));
         } catch (RuntimeException invalid) {

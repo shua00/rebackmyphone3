@@ -67,6 +67,30 @@ public class LanTransferPeerDirectoryTest {
         assertEquals("192.168.1.11",c.host);
         assertEquals(LanTransferPeerDirectory.SOURCE_CHAT_HINT,c.source);
     }
+    @Test public void candidatesFromPreviousWifiFingerprintAreNotVisible() {
+        LanTransferPeerDirectory.recordFileDiscoveryCandidate(context, "peer-a",
+                "192.168.1.10", 38471, "wifi:old", NOW);
+        LanTransferPeerDirectory.activateNetwork(context, "wifi:new");
+        assertTrue(LanTransferPeerDirectory.loadCurrent(context, NOW + 1).isEmpty());
+        assertNull(LanTransferPeerDirectory.findCurrent(context, "peer-a", NOW + 1));
+        LanTransferPeerDirectory.activateNetwork(context, "wifi:old");
+        assertNotNull(LanTransferPeerDirectory.findCurrent(context, "peer-a", NOW + 1));
+    }
+
+    @Test public void endpointLeaseExpiresAtTtlAndRejectsFutureTimestamp() {
+        LanTransferPeerDirectory.recordFileDiscoveryCandidate(context, "peer-a",
+                "192.168.1.10", 38471, "wifi:test", NOW);
+        assertNotNull(LanTransferPeerDirectory.findCurrent(context, "peer-a",
+                NOW + LanTransferPeerDirectory.ENDPOINT_TTL_MS));
+        assertNull(LanTransferPeerDirectory.findCurrent(context, "peer-a",
+                NOW + LanTransferPeerDirectory.ENDPOINT_TTL_MS + 1));
+        LanTransferPeerDirectory.clear(context);
+        LanTransferPeerDirectory.activateNetwork(context, "wifi:test");
+        LanTransferPeerDirectory.recordFileDiscoveryCandidate(context, "peer-future",
+                "192.168.1.11", 38471, "wifi:test", NOW + 10_000);
+        assertNull(LanTransferPeerDirectory.findCurrent(context, "peer-future", NOW + 1));
+    }
+
     @Test public void devicePickerDeduplicatesAndPrefersFileDiscovery() {
         LanTransferPeerDirectory.recordChatDiscoveryHint(context,"peer-a","192.168.1.11",38471,"wifi:test",NOW+1000);
         LanTransferPeerDirectory.recordFileDiscoveryCandidate(context,"peer-a","192.168.1.10",38471,"wifi:test",NOW);

@@ -570,6 +570,7 @@ public final class LanTransferActivity extends Activity {
             finish();
             return;
         }
+        requestLanTransferDiscoveryRefresh();
         refreshOffers();
         Intent pairingQuery = new Intent(this, TrackingService.class)
                 .setAction("ACTION_LAN_TRANSFER_PAIRING_QUERY");

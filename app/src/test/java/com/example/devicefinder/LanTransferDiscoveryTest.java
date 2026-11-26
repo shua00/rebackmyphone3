@@ -18,6 +18,17 @@ public class LanTransferDiscoveryTest {
         assertTrue(LanTransferDiscovery.claimBeaconSlot(last,20_000L+LanTransferDiscovery.MIN_BEACON_INTERVAL_MS));
         assertEquals(21_000L,last.get());
     }
+    @Test public void manualRefreshAndPeriodicBeaconHaveIndependentThrottleWindows() {
+        AtomicLong periodic = new AtomicLong(Long.MIN_VALUE);
+        AtomicLong manual = new AtomicLong(Long.MIN_VALUE);
+        assertTrue(LanTransferDiscovery.claimBeaconSlot(periodic, manual, false, 40_000L));
+        assertTrue(LanTransferDiscovery.claimBeaconSlot(periodic, manual, true, 40_001L));
+        assertFalse(LanTransferDiscovery.claimBeaconSlot(periodic, manual, false, 40_500L));
+        assertFalse(LanTransferDiscovery.claimBeaconSlot(periodic, manual, true, 40_500L));
+        assertTrue(LanTransferDiscovery.claimBeaconSlot(periodic, manual, false, 41_000L));
+        assertTrue(LanTransferDiscovery.claimBeaconSlot(periodic, manual, true, 41_001L));
+    }
+
     @Test public void concurrentBeaconClaimsAreSerialized() throws Exception {
         AtomicLong last=new AtomicLong(Long.MIN_VALUE); AtomicInteger accepted=new AtomicInteger();
         CountDownLatch ready=new CountDownLatch(8), start=new CountDownLatch(1);
