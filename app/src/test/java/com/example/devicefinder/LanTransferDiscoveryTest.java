@@ -15,14 +15,14 @@ public class LanTransferDiscoveryTest {
     public void firstBeaconIsAllowedAndRapidRefreshIsThrottled() {
         AtomicLong last = new AtomicLong(Long.MIN_VALUE);
         assertTrue(LanTransferDiscovery.claimBeaconSlot(last, 10_000L));
-        assertFalse(LanTransferDiscovery.claimBeaconSlot(last, 10_999L));
+        assertFalse(LanTransferDiscovery.claimBeaconSlot(last, 10_000L + LanTransferDiscovery.MIN_BEACON_INTERVAL_MS - 1L));
         assertEquals(10_000L, last.get());
     }
 
     @Test
     public void beaconCanBeSentAtOneSecondBoundary() {
         AtomicLong last = new AtomicLong(20_000L);
-        assertTrue(LanTransferDiscovery.claimBeaconSlot(last, 21_000L));
+        assertTrue(LanTransferDiscovery.claimBeaconSlot(last, 20_000L + LanTransferDiscovery.MIN_BEACON_INTERVAL_MS));
         assertEquals(21_000L, last.get());
     }
 

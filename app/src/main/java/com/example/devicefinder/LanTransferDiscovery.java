@@ -24,6 +24,7 @@ public final class LanTransferDiscovery implements AutoCloseable {
     private static final String MAGIC = "LTFD1";
     // Small periodic beacons refresh candidate leases without high-frequency LAN scanning or port sweeps.
     private static final long BEACON_INTERVAL_MS = 15_000L;
+    static final long MIN_BEACON_INTERVAL_MS = 1_000L;
     private final Context context;
     private final Network network;
     private final String localPeerId;
@@ -120,7 +121,7 @@ public final class LanTransferDiscovery implements AutoCloseable {
             long nowElapsedMs) {
         while (true) {
             long previous = lastBeaconAtMs.get();
-            if (previous != Long.MIN_VALUE && nowElapsedMs - previous < 1000L) return false;
+            if (previous != Long.MIN_VALUE && nowElapsedMs - previous < MIN_BEACON_INTERVAL_MS) return false;
             if (lastBeaconAtMs.compareAndSet(previous, nowElapsedMs)) return true;
         }
     }
