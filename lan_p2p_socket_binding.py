@@ -75,7 +75,7 @@ def bind_socket_to_path(sock: socket.socket, path: Any, *,
         if option is None:
             raise OSError("SO_BINDTODEVICE is unavailable on this Python runtime")
         sock.setsockopt(socket_module.SOL_SOCKET, option,
-                        path.interface_name.encode("utf-8"))
+                        path.interface_name.encode("utf-8") + bytes((0,)))
     elif os_name == "win32":
         option = getattr(socket_module, "IP_UNICAST_IF", 31)
         # Windows expects the interface index in network byte order.
