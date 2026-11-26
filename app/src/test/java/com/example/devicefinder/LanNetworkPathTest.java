@@ -78,7 +78,7 @@ public class LanNetworkPathTest {
     }
 
     @Test public void serverListenerAddressMustMatchSelectedPath() throws Exception {
-        LanNetworkPath path = LanNetworkPath.fromAndroidNetwork(new android.net.Network(42),
+        LanNetworkPath path = LanNetworkPath.fromAndroidNetwork(new android.net.Network(),
                 "wlan0", ipv4("192.168.1.2"), 24, ipv4("192.168.1.255"));
         try {
             LanSocketBinding.validateServerSocketAddress(path, ipv4("192.168.1.3"));
