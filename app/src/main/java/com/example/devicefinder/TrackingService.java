@@ -3024,7 +3024,8 @@ public class TrackingService extends Service implements LocationListener {
                                     TrackingService.this, request.sessionId,
                                     request.senderPeerId, committed);
                             if ((!alreadyCommitted && (pending == null
-                                    || !"RESPONDER".equals(pending.role)))
+                                    || !"RESPONDER".equals(pending.role)
+                                    || !request.senderPeerId.equals(pending.peerId)))
                                     || !LanTransferPairingCommitProof.verify(committed,
                                             request.sessionId, request.senderPeerId,
                                             getUniqueDeviceId(), "COMMIT", request.payload))

@@ -244,4 +244,88 @@ public class LanTransferPairingControlHostTest {
             host.close();
         }
     }
+
+    @Test public void durableCommitRequiresResponderPersistenceAndSupportsAuthenticatedRetry()
+            throws Exception {
+        final CountDownLatch requested = new CountDownLatch(1);
+        final CountDownLatch staged = new CountDownLatch(1);
+        final CountDownLatch committed = new CountDownLatch(1);
+        final CountDownLatch recovered = new CountDownLatch(1);
+        final String[] values = new String[3];
+        final byte[][] stagedSecret = new byte[1][];
+        final byte[][] committedSecret = new byte[1][];
+        final int[] commitCount = new int[1];
+        LanTransferPairingControlHost.Listener listener =
+                new LanTransferPairingControlHost.Listener() {
+            @Override public void onPairingRequested(String sessionId, String peerId,
+                    String sas, long expiresAt) {
+                values[0] = sessionId; values[1] = peerId; values[2] = sas;
+                requested.countDown();
+            }
+            @Override public boolean onPairingReady(String sessionId, String peerId,
+                    byte[] secret, byte[] localProof, byte[] remoteProof, long expiresAt) {
+                if (secret.length != 32 || localProof == null || localProof.length != 32
+                        || remoteProof == null || remoteProof.length != 32) return false;
+                stagedSecret[0] = secret.clone();
+                staged.countDown();
+                return true;
+            }
+            @Override public boolean onPairingCommitRequested(String sessionId, String peerId,
+                    byte[] secret) {
+                if (!java.util.Arrays.equals(stagedSecret[0], secret)) return false;
+                committedSecret[0] = secret.clone();
+                commitCount[0]++;
+                committed.countDown();
+                return true;
+            }
+            @Override public LanTransferPairingControlProtocol.Message onPairingRecoveryMessage(
+                    LanTransferPairingControlProtocol.Message request) throws Exception {
+                if (request.type != LanTransferPairingControlProtocol.Type.COMMIT
+                        || committedSecret[0] == null
+                        || !LanTransferPairingCommitProof.verify(committedSecret[0],
+                                request.sessionId, request.senderPeerId, "receiver",
+                                "COMMIT", request.payload)) return null;
+                recovered.countDown();
+                byte[] ack = LanTransferPairingCommitProof.create(committedSecret[0],
+                        request.sessionId, "receiver", request.senderPeerId, "COMMIT_ACK");
+                try {
+                    return new LanTransferPairingControlProtocol.Message(
+                            LanTransferPairingControlProtocol.Type.COMMIT_ACK,
+                            request.sessionId, "receiver", request.senderPeerId,
+                            request.sequence, ack);
+                } finally { java.util.Arrays.fill(ack, (byte) 0); }
+            }
+        };
+        LanTransferPairingControlHost host = new LanTransferPairingControlHost("receiver", listener);
+        LanTransferPairingInitiator initiator = null;
+        try {
+            host.start(InetAddress.getLoopbackAddress(), 0);
+            initiator = LanTransferPairingInitiator.connect("sender", "receiver",
+                    InetAddress.getLoopbackAddress(), host.getBoundPort(), 2000, 3000);
+            assertTrue(requested.await(1, TimeUnit.SECONDS));
+            assertEquals(LanTransferPairingSession.State.WAITING_REMOTE_CONFIRMATION,
+                    initiator.confirmLocal(initiator.shortAuthenticationCode(), 2000, 3000));
+            byte[] responderProof = host.confirmLocalProof(values[0], values[1], values[2]);
+            java.util.Arrays.fill(responderProof, (byte) 0);
+            assertEquals(LanTransferPairingSession.State.READY_TO_COMMIT,
+                    initiator.retryConfirmation(2000, 3000));
+            assertTrue(staged.await(1, TimeUnit.SECONDS));
+            byte[] secret = initiator.copySecretForCommit();
+            try {
+                initiator.sendCommit(secret, 2000, 3000);
+                assertTrue(committed.await(1, TimeUnit.SECONDS));
+                assertArrayEquals(stagedSecret[0], secret);
+                assertTrue(host.pendingSessions().isEmpty());
+                // A fresh sequence after an ACK loss is answered from the durable receipt path.
+                initiator.sendCommit(secret, 2000, 3000);
+                assertTrue(recovered.await(1, TimeUnit.SECONDS));
+                assertEquals(1, commitCount[0]);
+            } finally { java.util.Arrays.fill(secret, (byte) 0); }
+        } finally {
+            if (initiator != null) initiator.close();
+            host.close();
+            if (stagedSecret[0] != null) java.util.Arrays.fill(stagedSecret[0], (byte) 0);
+            if (committedSecret[0] != null) java.util.Arrays.fill(committedSecret[0], (byte) 0);
+        }
+    }
 }

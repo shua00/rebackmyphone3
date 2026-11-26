@@ -55,8 +55,17 @@ public final class LanTransferActivity extends Activity {
                 showPairingPrompt(intent);
             } else if ("ACTION_LAN_TRANSFER_PAIRING_UPDATED".equals(action)) {
                 String state = intent.getStringExtra("state");
-                if (status != null && state != null)
-                    status.setText("配对状态：" + state + " · " + intent.getStringExtra("remote_peer_id"));
+                String peerId = intent.getStringExtra("remote_peer_id");
+                if (status != null && state != null) {
+                    if ("PAIRED".equals(state)) {
+                        status.setText("已完成与 " + peerId + " 的安全配对，可进行文件传输");
+                        refreshPeerList();
+                    } else if ("COMMIT_PENDING".equals(state)) {
+                        status.setText("与 " + peerId + " 的配对提交待恢复；网络恢复后会自动重试");
+                    } else {
+                        status.setText("配对状态：" + state + " · " + peerId);
+                    }
+                }
             } else {
                 refreshOffers();
             }
@@ -222,7 +231,7 @@ public final class LanTransferActivity extends Activity {
         }
         new AlertDialog.Builder(this)
             .setTitle("清除全部文件传输配对")
-            .setMessage("这会清除本机保存的共享密钥和全部可信设备名单，并关闭文件传输监听。不会删除已收发文件、传输历史，也不会擦除或停用对端设备。确定继续？")
+            .setMessage("这会清除本机保存的全部文件传输配对凭据和可信设备名单，并关闭文件传输监听。不会删除已收发文件、传输历史，也不会擦除或停用对端设备。确定继续？")
             .setNegativeButton("保留配对", null)
             .setPositiveButton("清除全部配对", (dialog, which) -> {
                 try {
