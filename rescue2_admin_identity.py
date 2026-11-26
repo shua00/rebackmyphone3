@@ -6,7 +6,9 @@ It never reads or writes the legacy RESCUE_SECRET.
 """
 from __future__ import annotations
 
+import base64
 import ctypes
+import json
 import hashlib
 import os
 import tempfile
@@ -164,6 +166,16 @@ class Rescue2AdminIdentity:
     @property
     def fingerprint(self) -> str:
         return hashlib.sha256(self.public_key_der).hexdigest()
+
+    def export_public_identity(self) -> str:
+        """Stable public-only enrollment document; it contains no private key material."""
+        public_key = base64.urlsafe_b64encode(self.public_key_der).decode("ascii").rstrip("=")
+        return json.dumps({
+            "schemaVersion": 1,
+            "keyType": "EC-P256",
+            "fingerprint": self.fingerprint,
+            "publicKeySpki": public_key,
+        }, separators=(",", ":"), ensure_ascii=True)
 
     def sign_task_payload(self, canonical_payload: bytes) -> bytes:
         if not isinstance(canonical_payload, bytes) or not canonical_payload or len(canonical_payload) > 16 * 1024:

@@ -10,6 +10,7 @@ import java.security.KeyPairGenerator;
 import java.security.Signature;
 import java.security.spec.ECGenParameterSpec;
 import java.util.Arrays;
+import java.util.Base64;
 import static org.junit.Assert.*;
 
 @RunWith(RobolectricTestRunner.class)
@@ -41,6 +42,32 @@ public class Rescue2AdminTrustStoreTest {
         assertFalse(store.isTrusted(fingerprint));
         assertFalse(store.verify(fingerprint, canonical, signature));
         assertFalse(store.revoke(fingerprint));
+    }
+
+    @Test public void importsOnlyMatchingPublicIdentityDocument() throws Exception {
+        Context context = org.robolectric.RuntimeEnvironment.getApplication();
+        Rescue2AdminTrustStore store = new Rescue2AdminTrustStore(context);
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("EC");
+        generator.initialize(new ECGenParameterSpec("secp256r1"));
+        byte[] publicKey = generator.generateKeyPair().getPublic().getEncoded();
+        String fingerprint = java.util.HexFormat.of().formatHex(
+                java.security.MessageDigest.getInstance("SHA-256").digest(publicKey));
+        String encoded = Base64.getUrlEncoder().withoutPadding().encodeToString(publicKey);
+        String document = "{\\"schemaVersion\\":1,\\"keyType\\":\\"EC-P256\\","
+                + "\\"fingerprint\\":\\"" + fingerprint + "\\","
+                + "\\"publicKeySpki\\":\\"" + encoded + "\\"}";
+        assertEquals(fingerprint, store.trustExportedIdentity(document));
+        assertTrue(store.isTrusted(fingerprint));
+        try {
+            store.trustExportedIdentity(document.replace(fingerprint, repeatZeroFingerprint()));
+            fail("mismatched fingerprint accepted");
+        } catch (SecurityException expected) { }
+    }
+
+    private static String repeatZeroFingerprint() {
+        char[] value = new char[64];
+        java.util.Arrays.fill(value, '0');
+        return new String(value);
     }
 
     @Test public void rejectsNonP256Key() throws Exception {

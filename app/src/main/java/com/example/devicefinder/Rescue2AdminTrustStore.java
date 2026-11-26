@@ -3,6 +3,7 @@ package com.example.devicefinder;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.util.Base64;
+import org.json.JSONObject;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
 import java.security.MessageDigest;
