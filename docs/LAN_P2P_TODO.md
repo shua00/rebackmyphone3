@@ -321,3 +321,16 @@
 - [ ] 本批没有实现热点 AP 接口 socket 绑定，也没有声称 Android 热点主机可用；需要基于 Android API/OEM 的真实能力继续研究和真机验证。无法安全绑定的设备必须显示路径不可用。
 - [ ] 本批未修改聊天消息协议、聊天持久化/ACK 状态机、对讲 UI 或文件传输协议；只调整独立文件发现 socket 的路径传递与绑定边界。
 - [ ] Python 端目前仓库根目录没有通用 `requirements.txt`、`pyproject.toml` 或 `setup.py`；`psutil` 仍是可选依赖，尚未解决安装策略。本批不擅自引入运行时依赖，后续需提供跨平台依赖声明/安装入口并验证 Windows/Linux。
+
+
+## 下一批推进记录（2026-11-27）：Android 监听器路径快照接入第二步
+
+- [x] 文件 TCP listener 增加显式 `start(LanNetworkPath, address, port)` 入口；启动前验证路径必须是携带真实 Android `Network` 的路径，且监听地址必须与快照本机 IPv4 完全一致。
+- [x] 配对控制 TCP host 增加相同路径快照入口；与文件 TCP 使用同一校验边界，避免各自传入任意本机地址。
+- [x] TrackingService 的文件 TCP listener、配对控制 listener 均从同一类 ConnectivityManager/LinkProperties 信息构造路径快照（接口名、IPv4、前缀、Network），指纹改为路径快照指纹；路径/地址变化会触发现有关闭并重建流程。
+- [x] 聊天 UDP listener 的绑定改为先构造 `LanNetworkPath`，再经 `LanSocketBinding.bindDatagramSocket()`；原聊天协议、消息状态机和 UDP 业务处理未改。
+- [x] 增加 TCP listener 对无 Network 热点候选拒绝、监听地址与路径地址不一致拒绝的单元测试。
+- [ ] **重要边界**：Android `ServerSocket` 不能传给 `Network.bindSocket()`；TCP 服务端通过绑定快照中的具体本机 IPv4 地址限定入站接口。这是地址绑定，不应描述成 Network API 级 socket 绑定。最终路径仍需真实设备收发验证。
+- [ ] **尚未统一出站 TCP**：配对控制客户端 `exchange()` 及文件 TCP 发起连接仍需显式传入所选路径，并在 `Socket.connect()` 前通过 `Network.bindSocket()` 绑定；本批未改调用者/会话语义，下一批优先补齐，避免多网卡/蜂窝并存时出站连接走错默认路由。
+- [ ] **路径生命周期尚需加强**：当前 TrackingService 依靠网络回调触发 refresh 和路径指纹变化重建监听器；还需审计网络回调遗漏、短暂 LinkProperties 不完整、旧候选租约失效和活跃连接关闭策略，并补充自动化测试。
+- [ ] 本批未触碰聊天协议、消息 ACK/重试/持久化、UI、文件协议、对讲音频通道，也未触碰 Rescue2 旧日志功能。
