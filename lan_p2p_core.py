@@ -1601,8 +1601,10 @@ def fragment_chat_message(message_id, target_peer_id, body, created_at_ms=0):
     """Build bounded authenticated-envelope fields for one logical long message."""
     import base64
     import hashlib
-    if not isinstance(message_id, str) or not message_id or len(message_id.encode("utf-8")) > 128:
+    if not isinstance(message_id, str) or not message_id or len(message_id.encode("utf-8", errors="strict")) > 128:
         raise ValueError("invalid message_id")
+    if type(created_at_ms) is not int or created_at_ms < 0:
+        raise ValueError("invalid created_at_ms")
     if not is_valid_peer_id(target_peer_id):
         raise ValueError("invalid target_peer_id")
     if not isinstance(body, str):
@@ -1641,6 +1643,10 @@ def assemble_chat_fragments(fragments):
     required = ("message_id", "target_peer_id", "fragment_count", "total_bytes", "sha256")
     if not isinstance(first, dict) or any(key not in first for key in required):
         raise ValueError("invalid fragment metadata")
+    if (not isinstance(first["message_id"], str) or not first["message_id"]
+            or len(first["message_id"].encode("utf-8", errors="strict")) > 128
+            or not is_valid_peer_id(first["target_peer_id"])):
+        raise ValueError("invalid fragment identity")
     count = first["fragment_count"]
     total = first["total_bytes"]
     digest = first["sha256"]
@@ -1648,14 +1654,25 @@ def assemble_chat_fragments(fragments):
         raise ValueError("invalid fragment count")
     if type(total) is not int or not 1 <= total <= MAX_CHAT_MESSAGE_BYTES:
         raise ValueError("invalid total message size")
-    if len(fragments) != count:
-        raise ValueError("incomplete chat message")
+    expected_count = (total + CHAT_FRAGMENT_RAW_BYTES - 1) // CHAT_FRAGMENT_RAW_BYTES
+    if count != expected_count or len(fragments) != count:
+        raise ValueError("incomplete or inconsistent chat fragment count")
+    if (not isinstance(digest, str) or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)):
+        raise ValueError("invalid fragment digest")
+    if "created_at_ms" in first and (
+            type(first["created_at_ms"]) is not int or first["created_at_ms"] < 0):
+        raise ValueError("invalid fragment timestamp")
     chunks = {}
     for packet in fragments:
         if not isinstance(packet, dict):
             raise ValueError("invalid fragment")
         if any(packet.get(key) != first[key] for key in required):
             raise ValueError("inconsistent fragment metadata")
+        if ("created_at_ms" in first) != ("created_at_ms" in packet):
+            raise ValueError("inconsistent fragment timestamp presence")
+        if "created_at_ms" in first and packet["created_at_ms"] != first["created_at_ms"]:
+            raise ValueError("inconsistent fragment timestamp")
         index = packet.get("fragment_index")
         if type(index) is not int or not 0 <= index < count or index in chunks:
             raise ValueError("duplicate or invalid fragment index")
@@ -1666,7 +1683,9 @@ def assemble_chat_fragments(fragments):
             chunk = base64.b64decode(encoded.encode("ascii"), validate=True)
         except Exception as exc:
             raise ValueError("invalid fragment base64") from exc
-        if not chunk or len(chunk) > CHAT_FRAGMENT_RAW_BYTES:
+        expected_length = (CHAT_FRAGMENT_RAW_BYTES if index < count - 1
+                           else total - CHAT_FRAGMENT_RAW_BYTES * (count - 1))
+        if len(chunk) != expected_length:
             raise ValueError("invalid fragment byte length")
         chunks[index] = chunk
     raw = b"".join(chunks[index] for index in range(count))

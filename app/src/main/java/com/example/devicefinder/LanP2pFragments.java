@@ -37,6 +37,7 @@ public final class LanP2pFragments {
 
     public static List<Fragment> split(String body) throws Exception {
         if (body == null) throw new IllegalArgumentException("Missing chat body");
+        requireUnicodeScalars(body);
         byte[] raw = body.getBytes(StandardCharsets.UTF_8);
         if (raw.length == 0 || raw.length > MAX_MESSAGE_BYTES) {
             throw new IllegalArgumentException("Long chat message size is outside supported range");
@@ -59,13 +60,18 @@ public final class LanP2pFragments {
     public static String assemble(List<Fragment> fragments) throws Exception {
         if (fragments == null || fragments.isEmpty()) throw new IllegalArgumentException("No fragments");
         Fragment first = fragments.get(0);
-        if (first.count < 1 || first.count > MAX_FRAGMENTS
+        if (first == null || first.count < 1 || first.count > MAX_FRAGMENTS
                 || first.totalBytes < 1 || first.totalBytes > MAX_MESSAGE_BYTES
-                || fragments.size() != first.count) throw new IllegalArgumentException("Invalid fragment set");
+                || first.count != (first.totalBytes + RAW_FRAGMENT_BYTES - 1) / RAW_FRAGMENT_BYTES
+                || fragments.size() != first.count || !isDigest(first.sha256)) {
+            throw new IllegalArgumentException("Invalid fragment set");
+        }
         Fragment[] ordered = new Fragment[first.count];
         for (Fragment fragment : fragments) {
             if (fragment == null || fragment.count != first.count
-                    || fragment.totalBytes != first.totalBytes || !first.sha256.equals(fragment.sha256)
+                    || fragment.totalBytes != first.totalBytes
+                    || !first.sha256.equals(fragment.sha256)
+                    || !isDigest(fragment.sha256)
                     || fragment.index < 0 || fragment.index >= first.count
                     || ordered[fragment.index] != null) {
                 throw new IllegalArgumentException("Inconsistent or duplicate fragment");
@@ -73,12 +79,24 @@ public final class LanP2pFragments {
             ordered[fragment.index] = fragment;
         }
         ByteArrayOutputStream output = new ByteArrayOutputStream(first.totalBytes);
-        for (Fragment fragment : ordered) {
-            if (fragment == null) throw new IllegalArgumentException("Missing fragment");
+        for (int index = 0; index < ordered.length; index++) {
+            Fragment fragment = ordered[index];
+            if (fragment == null || fragment.base64Data == null
+                    || fragment.base64Data.length() > 480) {
+                throw new IllegalArgumentException("Missing or oversized fragment");
+            }
             byte[] chunk;
-            try { chunk = Base64.decode(fragment.base64Data, Base64.DEFAULT); }
-            catch (IllegalArgumentException malformed) { throw new IllegalArgumentException("Invalid fragment Base64", malformed); }
-            if (chunk.length == 0 || chunk.length > RAW_FRAGMENT_BYTES) throw new IllegalArgumentException("Invalid fragment length");
+            try {
+                chunk = Base64.decode(fragment.base64Data, Base64.NO_WRAP);
+            } catch (IllegalArgumentException malformed) {
+                throw new IllegalArgumentException("Invalid fragment Base64", malformed);
+            }
+            String canonical = Base64.encodeToString(chunk, Base64.NO_WRAP);
+            int expectedLength = index < first.count - 1 ? RAW_FRAGMENT_BYTES
+                    : first.totalBytes - RAW_FRAGMENT_BYTES * (first.count - 1);
+            if (!canonical.equals(fragment.base64Data) || chunk.length != expectedLength) {
+                throw new IllegalArgumentException("Non-canonical or invalid fragment length");
+            }
             output.write(chunk);
         }
         byte[] raw = output.toByteArray();
@@ -93,6 +111,24 @@ public final class LanP2pFragments {
         } catch (CharacterCodingException malformed) {
             throw new IllegalArgumentException("Reassembled chat message is not valid UTF-8", malformed);
         }
+    }
+
+    private static void requireUnicodeScalars(String value) {
+        for (int i = 0; i < value.length(); i++) {
+            char ch = value.charAt(i);
+            if (Character.isHighSurrogate(ch)) {
+                if (i + 1 >= value.length() || !Character.isLowSurrogate(value.charAt(i + 1))) {
+                    throw new IllegalArgumentException("Chat body contains an unpaired surrogate");
+                }
+                i++;
+            } else if (Character.isLowSurrogate(ch)) {
+                throw new IllegalArgumentException("Chat body contains an unpaired surrogate");
+            }
+        }
+    }
+
+    private static boolean isDigest(String value) {
+        return value != null && value.matches("[0-9a-f]{64}");
     }
 
     private static String sha256(byte[] value) throws Exception {

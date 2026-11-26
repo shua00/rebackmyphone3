@@ -5466,3 +5466,32 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
         self.assertIn('MessageDigest.isEqual', protocol)
         self.assertIn('SecurityException("Chat fragment digest mismatch")', helper)
 
+
+    def test_fragment_reassembly_rejects_metadata_drift_and_noncanonical_lengths(self):
+        from lan_p2p_core import fragment_chat_message, assemble_chat_fragments
+        fragments = fragment_chat_message("metadata-check", "peer-b", "z" * 900, 456)
+        drifted = [dict(item) for item in fragments]
+        drifted[1]["created_at_ms"] = 457
+        with self.assertRaises(ValueError):
+            assemble_chat_fragments(drifted)
+        drifted = [dict(item) for item in fragments]
+        drifted[0]["fragment_data"] = drifted[0]["fragment_data"][:-4]
+        with self.assertRaises(ValueError):
+            assemble_chat_fragments(drifted)
+        drifted = [dict(item) for item in fragments]
+        drifted[0]["sha256"] = "g" * 64
+        with self.assertRaises(ValueError):
+            assemble_chat_fragments(drifted)
+
+    def test_fragment_builder_rejects_invalid_timestamp_and_packet_sizes_stay_bounded(self):
+        from lan_p2p_core import fragment_chat_message, encode_packet, max_peer_id_budget_probe
+        with self.assertRaises(ValueError):
+            fragment_chat_message("bad-time", "peer-b", "body", -1)
+        # Exercise the full authenticated envelope with the largest legal peer IDs.
+        peer_id = "p" * 128
+        fragments = fragment_chat_message("m" * 128, peer_id, "x" * 4096, 123456789)
+        for fragment in fragments:
+            packet = dict(fragment, sender_peer_id=peer_id,
+                          sender_peer_type="android", service_id="devicefinder")
+            self.assertLessEqual(len(encode_packet(packet, "shared-secret")), 1200)
+        self.assertEqual(128, len(max_peer_id_budget_probe().encode("utf-8")))
