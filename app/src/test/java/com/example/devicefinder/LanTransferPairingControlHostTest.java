@@ -328,4 +328,73 @@ public class LanTransferPairingControlHostTest {
             if (committedSecret[0] != null) java.util.Arrays.fill(committedSecret[0], (byte) 0);
         }
     }
+
+    @Test public void concurrentPeerPairingsCommitIndependently() throws Exception {
+        final CountDownLatch requested = new CountDownLatch(2);
+        final java.util.concurrent.ConcurrentHashMap<String, String[]> sessions =
+                new java.util.concurrent.ConcurrentHashMap<>();
+        final java.util.concurrent.atomic.AtomicInteger committed =
+                new java.util.concurrent.atomic.AtomicInteger();
+        LanTransferPairingControlHost host = new LanTransferPairingControlHost("receiver",
+                new LanTransferPairingControlHost.Listener() {
+            @Override public void onPairingRequested(String sessionId, String peerId,
+                    String sas, long expiresAt) {
+                sessions.put(peerId, new String[]{sessionId, sas});
+                requested.countDown();
+            }
+            @Override public boolean onPairingReady(String sessionId, String peerId,
+                    byte[] secret, byte[] localProof, byte[] remoteProof, long expiresAt) {
+                return secret.length == 32 && localProof.length == 32 && remoteProof.length == 32;
+            }
+            @Override public boolean onPairingCommitRequested(String sessionId, String peerId,
+                    byte[] secret) {
+                committed.incrementAndGet();
+                return secret.length == 32;
+            }
+        });
+        LanTransferPairingInitiator first = null, second = null;
+        try {
+            host.start(InetAddress.getLoopbackAddress(), 0);
+            first = LanTransferPairingInitiator.connect("sender-a", "receiver",
+                    InetAddress.getLoopbackAddress(), host.getBoundPort(), 2000, 3000);
+            second = LanTransferPairingInitiator.connect("sender-b", "receiver",
+                    InetAddress.getLoopbackAddress(), host.getBoundPort(), 2000, 3000);
+            assertTrue(requested.await(2, TimeUnit.SECONDS));
+            assertEquals(2, host.pendingSessions().size());
+
+            assertEquals(LanTransferPairingSession.State.WAITING_REMOTE_CONFIRMATION,
+                    first.confirmLocal(first.shortAuthenticationCode(), 2000, 3000));
+            assertEquals(LanTransferPairingSession.State.WAITING_REMOTE_CONFIRMATION,
+                    second.confirmLocal(second.shortAuthenticationCode(), 2000, 3000));
+            String[] firstSession = sessions.get("sender-a");
+            String[] secondSession = sessions.get("sender-b");
+            assertNotNull(firstSession);
+            assertNotNull(secondSession);
+            byte[] firstProof = host.confirmLocalProof(firstSession[0], "sender-a", firstSession[1]);
+            byte[] secondProof = host.confirmLocalProof(secondSession[0], "sender-b", secondSession[1]);
+            java.util.Arrays.fill(firstProof, (byte) 0);
+            java.util.Arrays.fill(secondProof, (byte) 0);
+            assertEquals(LanTransferPairingSession.State.READY_TO_COMMIT,
+                    first.retryConfirmation(2000, 3000));
+            assertEquals(LanTransferPairingSession.State.READY_TO_COMMIT,
+                    second.retryConfirmation(2000, 3000));
+
+            byte[] firstSecret = first.copySecretForCommit();
+            try { first.sendCommit(firstSecret, 2000, 3000); }
+            finally { java.util.Arrays.fill(firstSecret, (byte) 0); }
+            assertEquals(1, committed.get());
+            assertEquals(1, host.pendingSessions().size());
+            assertEquals("sender-b", host.pendingSessions().get(0).remotePeerId);
+
+            byte[] secondSecret = second.copySecretForCommit();
+            try { second.sendCommit(secondSecret, 2000, 3000); }
+            finally { java.util.Arrays.fill(secondSecret, (byte) 0); }
+            assertEquals(2, committed.get());
+            assertTrue(host.pendingSessions().isEmpty());
+        } finally {
+            if (first != null) first.close();
+            if (second != null) second.close();
+            host.close();
+        }
+    }
 }

@@ -295,6 +295,9 @@ public class TrackingService extends Service implements LocationListener {
     private final java.util.Set<String> lanTransferPairingCommitRetries =
             java.util.Collections.newSetFromMap(
                     new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+    private final java.util.Set<String> lanTransferPairingCommitPending =
+            java.util.Collections.newSetFromMap(
+                    new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
     private volatile String lanTransferListenerFingerprint;
     private volatile String lanTransferCredentialsFingerprint;
     // File-transfer discovery owns a separate UDP socket/port and endpoint directory.
@@ -2524,9 +2527,11 @@ public class TrackingService extends Service implements LocationListener {
                             initiator.sessionId(), initiator.remotePeerId(),
                             initiator.shortAuthenticationCode(), "initiator", state.name(), 0L);
                 } else {
+                    String displayState = lanTransferPairingCommitPending.contains(initiator.sessionId())
+                            ? "COMMIT_PENDING" : state.name();
                     broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
                             initiator.sessionId(), initiator.remotePeerId(), "",
-                            "initiator", state.name(), 0L);
+                            "initiator", displayState, 0L);
                 }
             } catch (IllegalStateException expired) {
                 lanTransferPairingInitiators.remove(initiator.sessionId(), initiator);
@@ -2637,17 +2642,29 @@ public class TrackingService extends Service implements LocationListener {
                     System.currentTimeMillis() + LanTransferCredentials.PENDING_COMMIT_TTL_MS);
             initiator.sendCommit(secret, 5000, 10000);
             LanTransferCredentials.finishPendingCommit(this, commitId, peerId, secret);
+            lanTransferPairingCommitPending.remove(commitId);
             lanTransferPairingInitiators.remove(commitId, initiator);
             initiator.close();
             broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
                     commitId, peerId, "", "initiator", "PAIRED", 0L);
             FileLogger.log(this, "LAN_TRANSFER", "Pairing commit acknowledged for peer");
         } catch (Exception failure) {
-            FileLogger.log(this, "LAN_TRANSFER", "Pairing commit pending recovery: "
+            FileLogger.log(this, "LAN_TRANSFER", "Pairing commit finalization deferred: "
                     + failure.getClass().getSimpleName());
-            scheduleLanPairingCommitRetry(commitId, peerId);
-            broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
-                    commitId, peerId, "", "initiator", "COMMIT_PENDING", 0L);
+            try {
+                if (LanTransferCredentials.getPendingCommit(this, commitId) != null) {
+                    lanTransferPairingCommitPending.add(commitId);
+                    scheduleLanPairingCommitRetry(commitId, peerId);
+                    broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                            commitId, peerId, "", "initiator", "COMMIT_PENDING", 0L);
+                } else {
+                    broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                            commitId, peerId, "", "initiator", "FAILED", 0L);
+                }
+            } catch (Exception journalFailure) {
+                broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                        commitId, peerId, "", "initiator", "FAILED", 0L);
+            }
         } finally {
             if (secret != null) java.util.Arrays.fill(secret, (byte) 0);
         }
@@ -2664,6 +2681,7 @@ public class TrackingService extends Service implements LocationListener {
                 if (pending == null || !"INITIATOR".equals(pending.role)) return;
                 if (pending.expiresAtMs <= System.currentTimeMillis()) {
                     LanTransferCredentials.clearExpiredPendingCommits(this, System.currentTimeMillis());
+                    lanTransferPairingCommitPending.remove(commitId);
                     broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
                             commitId, peerId, "", "initiator", "COMMIT_EXPIRED", 0L);
                     return;
@@ -2679,6 +2697,7 @@ public class TrackingService extends Service implements LocationListener {
                             getUniqueDeviceId(), peerId, commitId, secret,
                             Math.max(System.currentTimeMillis(), 2L), 5000, 8000);
                     LanTransferCredentials.finishPendingCommit(this, commitId, peerId, secret);
+                    lanTransferPairingCommitPending.remove(commitId);
                     broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
                             commitId, peerId, "", "initiator", "PAIRED", 0L);
                 } finally { java.util.Arrays.fill(secret, (byte) 0); }
@@ -2693,6 +2712,10 @@ public class TrackingService extends Service implements LocationListener {
             LanTransferCredentials.clearExpiredPendingCommits(this, System.currentTimeMillis());
             for (LanTransferCredentials.PendingCommit pending :
                     LanTransferCredentials.loadPendingCommits(this)) {
+                lanTransferPairingCommitPending.add(pending.commitId);
+                broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                        pending.commitId, pending.peerId, "", pending.role.toLowerCase(),
+                        "COMMIT_PENDING", 0L);
                 if ("INITIATOR".equals(pending.role))
                     scheduleLanPairingCommitRetry(pending.commitId, pending.peerId);
             }
@@ -2989,6 +3012,7 @@ public class TrackingService extends Service implements LocationListener {
                                     sessionId, remotePeerId, peerSecret,
                                     System.currentTimeMillis() + LanTransferCredentials.PENDING_COMMIT_TTL_MS,
                                     localProof, remoteProof, "RESPONDER");
+                            lanTransferPairingCommitPending.add(sessionId);
                             broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
                                     sessionId, remotePeerId, "", "responder", "COMMIT_PENDING", 0L);
                             return true;
@@ -3003,6 +3027,7 @@ public class TrackingService extends Service implements LocationListener {
                             String remotePeerId, byte[] peerSecret) throws Exception {
                         LanTransferCredentials.commitPeerSecret(TrackingService.this,
                                 sessionId, remotePeerId, peerSecret);
+                        lanTransferPairingCommitPending.remove(sessionId);
                         broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
                                 sessionId, remotePeerId, "", "responder", "PAIRED", 0L);
                         return true;
@@ -3033,6 +3058,7 @@ public class TrackingService extends Service implements LocationListener {
                             if (!alreadyCommitted)
                                 LanTransferCredentials.commitPeerSecret(TrackingService.this,
                                         request.sessionId, request.senderPeerId, committed);
+                            lanTransferPairingCommitPending.remove(request.sessionId);
                             broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
                                     request.sessionId, request.senderPeerId, "", "responder", "PAIRED", 0L);
                             byte[] ack = LanTransferPairingCommitProof.create(committed,
