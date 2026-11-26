@@ -90,12 +90,20 @@ def authenticate_tcp_client(sock: socket.socket, local_peer_id: str,
     return server_id.decode("utf-8"), session_key
 
 def authenticate_tcp_server(sock: socket.socket, local_peer_id: str,
-        shared_secret: str | bytes, authorize_peer: Callable[[str], bool], *,
+        shared_secret: str | bytes | None, authorize_peer: Callable[[str], bool], *,
+        secret_provider: Callable[[str], str | bytes | None] | None = None,
         nonce_factory: Callable[[int], bytes] = secrets.token_bytes) -> tuple[str, bytes]:
-    """Authenticate client PSK possession and enforce trusted-peer admission."""
+    """Authenticate a trusted peer using its own PSK, with legacy group-PSK support.
+
+    New production callers should provide secret_provider backed by the committed
+    per-peer trust store. shared_secret remains for backward-compatible tests and
+    explicitly provisioned legacy deployments; it must not be used to infer trust.
+    """
     if sock is None or not callable(authorize_peer):
         raise TransferValidationError("TCP socket and trusted-peer authorization callback are required")
-    server_id, key = _peer_bytes(local_peer_id), _key(shared_secret)
+    if secret_provider is not None and not callable(secret_provider):
+        raise TransferValidationError("per-peer secret provider must be callable")
+    server_id = _peer_bytes(local_peer_id)
     if _read_exact(sock, len(_MAGIC)) != _MAGIC:
         raise TransferValidationError("invalid LAN transfer authentication preamble")
     client_id = _read_peer_id(sock)
@@ -103,6 +111,8 @@ def authenticate_tcp_server(sock: socket.socket, local_peer_id: str,
     client_nonce = _read_exact(sock, _NONCE_BYTES)
     if not authorize_peer(client_name):
         raise TransferValidationError("TCP peer is not in the trusted peer registry")
+    peer_secret = secret_provider(client_name) if secret_provider is not None else shared_secret
+    key = _key(peer_secret)
     server_nonce = nonce_factory(_NONCE_BYTES)
     if not isinstance(server_nonce, bytes) or len(server_nonce) != _NONCE_BYTES:
         raise TransferValidationError("nonce source must return 32 bytes")
