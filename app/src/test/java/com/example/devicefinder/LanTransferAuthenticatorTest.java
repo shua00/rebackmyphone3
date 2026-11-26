@@ -150,9 +150,9 @@ public class LanTransferAuthenticatorTest {
         byte[] transcript = invokePrivate("transcript",
                 new Class<?>[]{byte[].class,byte[].class,byte[].class,byte[].class},
                 clientId,serverId,clientNonce,serverNonce);
-        byte[] serverDomain = "lan-transfer-v1/server\\0".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        byte[] clientDomain = "lan-transfer-v1/client\\0".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        byte[] sessionDomain = "lan-transfer-v1/session\\0".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] serverDomain = "lan-transfer-v1/server\0".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] clientDomain = "lan-transfer-v1/client\0".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] sessionDomain = "lan-transfer-v1/session\0".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         assertEquals("bed8741fd9deae227eeae2cf44eae2cb12399ec6ca3c7e1920a65a76fc7dac57",
                 hex(invokePrivate("hmac",new Class<?>[]{byte[].class,byte[].class},key,concat(serverDomain,transcript))));
         assertEquals("29230d3e9d9fda979422daf6f64214b520aa17cceee2cad7a1ea74c62ad39a48",
