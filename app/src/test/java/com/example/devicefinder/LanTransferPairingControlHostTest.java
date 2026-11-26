@@ -123,13 +123,12 @@ public class LanTransferPairingControlHostTest {
                             host.getBoundPort(), confirm, 2000, 3000);
             assertEquals(LanTransferPairingControlProtocol.Type.ACK, ack.type);
             assertEquals(1, ack.payload.length);
-            assertEquals(0, ack.payload[0]);
-            assertEquals(LanTransferPairingSession.State.WAITING_LOCAL_CONFIRMATION,
+            assertEquals(1, ack.payload[0]);
+            assertEquals(LanTransferPairingSession.State.READY_TO_COMMIT,
                     host.pendingSessions().get(0).state);
-            assertEquals(LanTransferPairingSession.State.WAITING_LOCAL_CONFIRMATION,
-                    host.applyRemoteConfirmation(values[0], values[1], true, initiatorProof));
-            // The host API still requires the local decision; the responder proof is generated
-            // before transport delivery and is transcript-bound for the initiating side.
+            byte[] committedSecret = host.takeSecretForCommit(values[0], values[1]);
+            assertArrayEquals(material.peerSecret, committedSecret);
+            java.util.Arrays.fill(committedSecret, (byte) 0);
             assertEquals(32, responderProof.length);
         } finally {
             host.close();
