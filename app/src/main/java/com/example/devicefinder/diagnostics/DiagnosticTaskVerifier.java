@@ -19,6 +19,16 @@ public final class DiagnosticTaskVerifier {
 
     private DiagnosticTaskVerifier() {}
 
+    public static Result verifyAndConsume(String encodedJson, byte[] signature,
+            String localParticipantId, long nowEpochMs, Rescue2AdminTrustStore trustStore,
+            DiagnosticTaskReplayStore replayStore) {
+        Result verified = verify(encodedJson, signature, localParticipantId, nowEpochMs, trustStore);
+        if (!verified.accepted) return verified;
+        if (replayStore == null || !replayStore.acceptOnce(verified.envelope, nowEpochMs))
+            return new Result(false, "REPLAYED_OR_UNAVAILABLE", null);
+        return verified;
+    }
+
     public static Result verify(String encodedJson, byte[] signature,
             String localParticipantId, long nowEpochMs, Rescue2AdminTrustStore trustStore) {
         if (trustStore == null || localParticipantId == null || localParticipantId.isEmpty())
