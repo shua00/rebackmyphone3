@@ -4248,10 +4248,38 @@ public class TrackingService extends Service implements LocationListener {
                 || links.getLinkAddresses() == null || links.getLinkAddresses().isEmpty()) {
             throw new java.io.IOException("Selected Wi-Fi network has incomplete link properties");
         }
+        java.net.Inet4Address localAddress = null;
+        int prefixLength = -1;
+        java.net.Inet4Address broadcastAddress = null;
+        for (LinkAddress item : links.getLinkAddresses()) {
+            java.net.InetAddress address = item.getAddress();
+            if (address instanceof java.net.Inet4Address && !address.isLoopbackAddress()
+                    && !address.isLinkLocalAddress()) {
+                localAddress = (java.net.Inet4Address) address;
+                prefixLength = item.getPrefixLength();
+                break;
+            }
+        }
+        if (localAddress == null || prefixLength < 1 || prefixLength > 32) {
+            throw new java.io.IOException("Selected Wi-Fi network has no usable IPv4 path");
+        }
         try {
-            selected.bindSocket(socket);
-            FileLogger.logD("CHAT", "UDP listener socket bound to selected Wi-Fi LAN network="
-                    + links.getInterfaceName());
+            java.net.NetworkInterface intf =
+                    java.net.NetworkInterface.getByName(links.getInterfaceName());
+            if (intf != null) {
+                for (java.net.InterfaceAddress item : intf.getInterfaceAddresses()) {
+                    if (localAddress.equals(item.getAddress())
+                            && item.getBroadcast() instanceof java.net.Inet4Address) {
+                        broadcastAddress = (java.net.Inet4Address) item.getBroadcast();
+                        break;
+                    }
+                }
+            }
+            LanNetworkPath selectedPath = LanNetworkPath.fromAndroidNetwork(selected,
+                    links.getInterfaceName(), localAddress, prefixLength, broadcastAddress);
+            LanSocketBinding.bindDatagramSocket(selectedPath, socket);
+            FileLogger.logD("CHAT", "UDP listener socket bound to selected LAN path="
+                    + selectedPath.diagnosticFingerprint());
             return selected;
         } catch (Exception bindError) {
             throw new java.io.IOException("Wi-Fi LAN socket binding failed", bindError);
