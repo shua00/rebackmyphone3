@@ -14,7 +14,7 @@ import java.util.List;
 /** Bounded UTF-8 fragmentation primitives for a single logical LAN chat message. */
 public final class LanP2pFragments {
     public static final int MAX_MESSAGE_BYTES = 256 * 1024;
-    public static final int RAW_FRAGMENT_BYTES = 360;
+    public static final int RAW_FRAGMENT_BYTES = 300;
     public static final int MAX_FRAGMENTS = 1024;
 
     private LanP2pFragments() {}
@@ -82,7 +82,7 @@ public final class LanP2pFragments {
         for (int index = 0; index < ordered.length; index++) {
             Fragment fragment = ordered[index];
             if (fragment == null || fragment.base64Data == null
-                    || fragment.base64Data.length() > 480) {
+                    || fragment.base64Data.length() > 400) {
                 throw new IllegalArgumentException("Missing or oversized fragment");
             }
             byte[] chunk;

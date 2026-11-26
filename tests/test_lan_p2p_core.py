@@ -5462,7 +5462,7 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
         helper = (repo_root / "app/src/main/java/com/example/devicefinder/LanP2pFragments.java").read_text(encoding="utf-8")
         self.assertIn('"chat.fragment".equals(type)', protocol)
         self.assertIn('MAX_MESSAGE_BYTES = 256 * 1024', helper)
-        self.assertIn('RAW_FRAGMENT_BYTES = 360', helper)
+        self.assertIn('RAW_FRAGMENT_BYTES = 300', helper)
         self.assertIn('MessageDigest.isEqual', protocol)
         self.assertIn('SecurityException("Chat fragment digest mismatch")', helper)
 

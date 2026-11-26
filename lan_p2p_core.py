@@ -315,7 +315,7 @@ def _validate_packet_schema(packet):
             raise ValueError("fragment index exceeds count")
         if len(packet["sha256"]) != 64 or any(c not in "0123456789abcdef" for c in packet["sha256"]):
             raise ValueError("invalid fragment digest")
-        if len(packet["fragment_data"]) > 480:
+        if len(packet["fragment_data"]) > 400:
             raise ValueError("fragment data exceeds limit")
         if "created_at_ms" in packet:
             _require_packet_integer(packet, "created_at_ms")
@@ -1593,7 +1593,7 @@ def outgoing_ack_endpoint_matches(db_path, sender_scope, message_id, peer_id,
 # Long chat messages remain one logical message. Fragment payloads are Base64 so
 # UTF-8 code points may safely cross fragment boundaries and be validated after reassembly.
 MAX_CHAT_MESSAGE_BYTES = 256 * 1024
-CHAT_FRAGMENT_RAW_BYTES = 360
+CHAT_FRAGMENT_RAW_BYTES = 300
 MAX_CHAT_MESSAGE_FRAGMENTS = 1024
 
 
@@ -1677,7 +1677,7 @@ def assemble_chat_fragments(fragments):
         if type(index) is not int or not 0 <= index < count or index in chunks:
             raise ValueError("duplicate or invalid fragment index")
         encoded = packet.get("fragment_data")
-        if not isinstance(encoded, str) or len(encoded) > 480:
+        if not isinstance(encoded, str) or len(encoded) > 400:
             raise ValueError("invalid fragment data")
         try:
             chunk = base64.b64decode(encoded.encode("ascii"), validate=True)

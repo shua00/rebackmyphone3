@@ -280,7 +280,7 @@ public final class LanP2pProtocol {
             long index = requirePacketInteger(packet, "fragment_index", 0, 1023);
             long count = requirePacketInteger(packet, "fragment_count", 1, 1024);
             requirePacketInteger(packet, "total_bytes", 1, 262144);
-            if (index >= count || packet.getString("fragment_data").length() > 480) {
+            if (index >= count || packet.getString("fragment_data").length() > 400) {
                 throw new IllegalArgumentException("Invalid fragment bounds");
             }
             String digest = packet.getString("sha256");
