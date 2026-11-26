@@ -3234,8 +3234,9 @@ class LanP2PCoreTests(unittest.TestCase):
         selector = extract_java_method(source, "private Network selectWifiLanNetwork(")
         self.assertIn("throws java.io.IOException", method)
         self.assertIn("selectWifiLanNetwork(cm)", method)
-        self.assertIn("selected.bindSocket(socket)", method)
-        self.assertLess(method.index("selected.bindSocket(socket)"),
+        self.assertIn("LanNetworkPath.fromAndroidNetwork(selected", method)
+        self.assertIn("LanSocketBinding.bindDatagramSocket(selectedPath, socket)", method)
+        self.assertLess(method.index("LanSocketBinding.bindDatagramSocket(selectedPath, socket)"),
                         method.index('FileLogger.logD("CHAT"'))
         self.assertLess(method.index('FileLogger.logD("CHAT"'),
                         method.index("return selected;"))
@@ -3260,7 +3261,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertLess(selector.index("for (Network network : cm.getAllNetworks())"),
                         selector.index("Network active = cm.getActiveNetwork()"))
         self.assertLess(method.index("selectWifiLanNetwork(cm)"),
-                        method.index("selected.bindSocket(socket)"))
+                        method.index("LanSocketBinding.bindDatagramSocket(selectedPath, socket)"))
 
     def test_outbox_queries_still_return_empty_for_a_valid_empty_ledger(self):
         from lan_p2p_core import ensure_outbox_retry_schema
