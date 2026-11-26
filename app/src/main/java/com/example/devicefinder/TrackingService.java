@@ -6812,7 +6812,7 @@ public class TrackingService extends Service implements LocationListener {
             if (!routeMatches && !persistedMatch && !attemptedMatch) return;
 
             LanChatStore.PendingMessage pending = null;
-            for (LanChatStore.PendingMessage item : store.loadPending(50)) {
+            for (LanChatStore.PendingMessage item : store.loadPending(LAN_CHAT_QUEUE_MAX)) {
                 if (messageId.equals(item.messageId)) {
                     pending = item;
                     break;
