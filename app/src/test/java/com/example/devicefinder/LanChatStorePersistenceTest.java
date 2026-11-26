@@ -354,4 +354,82 @@ public class LanChatStorePersistenceTest {
         assertTrue(store.isWaitingForPeers("android-restart-discovery"));
         assertEquals(0, store.loadTargets("android-restart-discovery").size());
     }
+    @Test
+    public void broadcastFragmentAckBitmapsArePeerScopedIdempotentAndDurable() {
+        assertTrue(store.enqueue(
+                "broadcast-fragment-ledger", "desktop-peer", "x".repeat(3000), 1234L));
+        assertEquals(LanChatStore.DISCOVERY_WINDOW_STARTED,
+                store.beginOrReadDiscoveryWindow("broadcast-fragment-ledger"));
+
+        // The first authenticated ACK from each broadcast recipient creates only a
+        // message-scoped target and records that peer's own first-flight bitmap.
+        assertTrue(store.admitBroadcastFragmentAckTarget(
+                "broadcast-fragment-ledger", "android-a", "192.0.2.10", 8888, 7));
+        assertTrue(store.admitBroadcastFragmentAckTarget(
+                "broadcast-fragment-ledger", "android-b", "192.0.2.11", 8888, 0));
+        assertFalse(store.admitBroadcastFragmentAckTarget(
+                "broadcast-fragment-ledger", "android-c", "192.0.2.12", 8888, 8));
+        assertFalse(store.acknowledgeTargetFragment(
+                "broadcast-fragment-ledger", "android-unknown", 0));
+
+        assertEquals("0000000100",
+                store.loadTargetFragmentAckBitmap("broadcast-fragment-ledger", "android-a"));
+        assertEquals("1000000000",
+                store.loadTargetFragmentAckBitmap("broadcast-fragment-ledger", "android-b"));
+
+        // Out-of-order and duplicate ACKs update only the matching peer's bitmap.
+        assertTrue(store.acknowledgeTargetFragment(
+                "broadcast-fragment-ledger", "android-a", 2));
+        assertTrue(store.acknowledgeTargetFragment(
+                "broadcast-fragment-ledger", "android-a", 2));
+        assertTrue(store.acknowledgeTargetFragment(
+                "broadcast-fragment-ledger", "android-b", 1));
+        assertEquals("0010000100",
+                store.loadTargetFragmentAckBitmap("broadcast-fragment-ledger", "android-a"));
+        assertEquals("1100000000",
+                store.loadTargetFragmentAckBitmap("broadcast-fragment-ledger", "android-b"));
+
+        // Fragment ACKs are not final delivery ACKs and must not create trusted peers.
+        assertFalse(store.allTargetsAcked("broadcast-fragment-ledger"));
+        Cursor trusted = store.getReadableDatabase().rawQuery(
+                "SELECT COUNT(*) FROM lan_peers WHERE peer_id IN (?,?)",
+                new String[]{"android-a", "android-b"});
+        try {
+            assertTrue(trusted.moveToFirst());
+            assertEquals(0, trusted.getInt(0));
+        } finally {
+            trusted.close();
+        }
+
+        store.closeStore();
+        store = new LanChatStore(context);
+        assertEquals("0010000100",
+                store.loadTargetFragmentAckBitmap("broadcast-fragment-ledger", "android-a"));
+        assertEquals("1100000000",
+                store.loadTargetFragmentAckBitmap("broadcast-fragment-ledger", "android-b"));
+        assertFalse(store.allTargetsAcked("broadcast-fragment-ledger"));
+    }
+
+    @Test
+    public void broadcastFragmentAckAdmissionIsBoundedAndCannotReopenFrozenMessages() {
+        assertTrue(store.enqueue(
+                "broadcast-fragment-bounds", "desktop-peer", "x".repeat(3000), 1234L));
+        assertEquals(LanChatStore.DISCOVERY_WINDOW_STARTED,
+                store.beginOrReadDiscoveryWindow("broadcast-fragment-bounds"));
+        assertFalse(store.admitBroadcastFragmentAckTarget(
+                "broadcast-fragment-bounds", "android-a", "192.0.2.10", 8888, -1));
+        assertFalse(store.admitBroadcastFragmentAckTarget(
+                "broadcast-fragment-bounds", "android-a", "192.0.2.10", 8888, 8));
+        assertFalse(store.admitBroadcastFragmentAckTarget(
+                "broadcast-fragment-bounds", "android-a", "192.0.2.10", 70000, 0));
+
+        SQLiteDatabase db = store.getWritableDatabase();
+        db.execSQL("UPDATE lan_outbox SET delivery_deadline_ms=1 WHERE message_id=?",
+                new Object[]{"broadcast-fragment-bounds"});
+        assertTrue(store.finalizeDiscoveryWindow("broadcast-fragment-bounds"));
+        assertFalse(store.admitBroadcastFragmentAckTarget(
+                "broadcast-fragment-bounds", "android-late", "192.0.2.13", 8888, 0));
+        assertEquals(0, store.loadTargets("broadcast-fragment-bounds").size());
+    }
+
 }
