@@ -83,7 +83,28 @@ public final class LanTransferPairingControlTransport {
             LanSocketBinding.bindStreamSocket(path, socket);
             socket.setTcpNoDelay(true);
             socket.connect(new InetSocketAddress(address, port), connectTimeoutMs);
-            return exchangeConnected(socket, frame, request, readTimeoutMs);
+            socket.setSoTimeout(readTimeoutMs);
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+            out.writeInt(frame.length);
+            out.write(frame);
+            out.flush();
+            LanTransferPairingControlProtocol.Message decoded =
+                    LanTransferPairingControlProtocol.decode(readFrame(
+                            new DataInputStream(socket.getInputStream())));
+            LanTransferPairingControlProtocol.Type expectedType =
+                    request.type == LanTransferPairingControlProtocol.Type.REQUEST
+                            ? LanTransferPairingControlProtocol.Type.RESPONSE
+                            : request.type == LanTransferPairingControlProtocol.Type.COMMIT
+                                    ? LanTransferPairingControlProtocol.Type.COMMIT_ACK
+                                    : LanTransferPairingControlProtocol.Type.ACK;
+            if (decoded.type != expectedType)
+                throw new IOException("Pairing control request received an unexpected response type");
+            if (!decoded.sessionId.equals(request.sessionId)
+                    || !decoded.senderPeerId.equals(request.targetPeerId)
+                    || !decoded.targetPeerId.equals(request.senderPeerId)
+                    || decoded.sequence != request.sequence)
+                throw new IOException("Pairing response identity, session, or sequence mismatch");
+            return decoded;
         }
     }
 
