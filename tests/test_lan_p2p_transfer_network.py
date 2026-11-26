@@ -4,7 +4,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from lan_p2p_transfer import TransferLimits, TransferOffer, TransferState
+from lan_p2p_transfer import TransferLimits, TransferOffer, TransferState, TransferValidationError
 from lan_p2p_transfer_files import TransferFilesystem
 from lan_p2p_transfer_network import TransferTcpServer, connect_transfer_peer
 from lan_p2p_transfer_auth import authenticate_tcp_client, authenticate_tcp_server
@@ -146,13 +146,13 @@ class TransferTcpNetworkTests(unittest.TestCase):
 
 
     def test_non_loopback_client_and_listener_require_explicit_path(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(TransferValidationError):
             connect_transfer_peer("192.168.1.20", 9000,
                 lambda sock: ("peer", self.SECRET), timeout_seconds=1)
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             _, _, store, files = self._prepared(root, b"x")
-            with self.assertRaises(Exception):
+            with self.assertRaises(TransferValidationError):
                 TransferTcpServer(store, files, local_peer_id="receiver",
                     authenticate_peer=lambda conn, addr: ("sender", self.SECRET),
                     now_ms=lambda: 1, host="0.0.0.0", port=0)
