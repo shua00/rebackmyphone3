@@ -6083,13 +6083,18 @@ public class TrackingService extends Service implements LocationListener {
                                 hadUdpDispatchAttempt.set(true);
                                 sendLanUdpPacket(socket, p, "CHAT_BROADCAST_" + peerPort);
                             } else if (preparedBroadcastFragments != null) {
-                                for (byte[] fragmentPacket : preparedBroadcastFragments) {
+                                // Broadcast only the first bounded flight. Authenticated
+                                // fragment ACKs can admit a message-scoped temporary target;
+                                // subsequent windows are selectively unicast to that endpoint.
+                                int firstWindowEnd = Math.min(preparedBroadcastFragments.size(), 8);
+                                for (int i = 0; i < firstWindowEnd; i++) {
                                     if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
+                                    byte[] fragmentPacket = preparedBroadcastFragments.get(i);
                                     DatagramPacket p = new DatagramPacket(fragmentPacket,
                                             fragmentPacket.length,
                                             java.net.InetAddress.getByName(target), peerPort);
                                     hadUdpDispatchAttempt.set(true);
-                                    sendLanUdpPacket(socket, p, "CHAT_FRAGMENT_BROADCAST_" + peerPort);
+                                    sendLanUdpPacket(socket, p, "CHAT_FRAGMENT_BROADCAST_WINDOW_" + peerPort);
                                 }
                             }
                         } catch (Exception e) {
@@ -6840,12 +6845,19 @@ public class TrackingService extends Service implements LocationListener {
             if (bitmap == null || bitmap.length() != packets.size()) return;
 
             int firstMissing = bitmap.indexOf('0');
-            // Fragment ACKs never imply delivery. The existing retry path handles a missing
-            // final chat.ack after all fragments have been persisted by the receiver.
-            if (firstMissing < 0 || firstMissing % 8 != 0) return;
-            int windowEnd = Math.min(packets.size(), firstMissing + 8);
             java.net.InetSocketAddress endpoint = routeMatches
                     ? liveRoute : new java.net.InetSocketAddress(sourceAddress, sourcePort);
+            if (firstMissing < 0) {
+                // All fragment ACKs are still not final delivery. Probe the receiver's
+                // durable reassembly/inbox path so it can repeat chat.ack if that ACK was lost.
+                byte[] finalProbe = packets.get(packets.size() - 1);
+                DatagramPacket probe = new DatagramPacket(
+                        finalProbe, finalProbe.length, endpoint.getAddress(), endpoint.getPort());
+                sendLanUdpPacket(socket, probe, "CHAT_FRAGMENT_COMPLETION_PROBE");
+                return;
+            }
+            if (firstMissing % 8 != 0) return;
+            int windowEnd = Math.min(packets.size(), firstMissing + 8);
             int sent = 0;
             for (int i = firstMissing; i < windowEnd; i++) {
                 if (!isCurrentLanChatSocket(socket, lanSocketGeneration.get())) return;
@@ -6888,6 +6900,13 @@ public class TrackingService extends Service implements LocationListener {
         boolean attemptedEndpointPending = !routeMatches && !persistedEndpointMatch
                 && store.matchesAttemptedAckEndpoint(messageId, senderId,
                         sourceAddress.getHostAddress(), sourcePort);
+        if (!routeMatches && !persistedEndpointMatch && !attemptedEndpointPending
+                && allowEndpointGrace) {
+            // A broadcast recipient has no fixed target row yet. Its first authenticated
+            // ACK may create a bounded, message-only target, never a trusted lan_peers row.
+            persistedEndpointMatch = store.admitBroadcastFragmentAckTarget(
+                    messageId, senderId, sourceAddress.getHostAddress(), sourcePort, fragmentIndex);
+        }
         if (!routeMatches && !persistedEndpointMatch) {
             if (allowEndpointGrace && attemptedEndpointPending) {
                 String key = "fragment:" + messageId + ":" + senderId + ":" + fragmentIndex;

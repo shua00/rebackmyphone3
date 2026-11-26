@@ -1275,6 +1275,76 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
+    /**
+     * Admit a message-scoped recipient from an authenticated broadcast fragment ACK.
+     * This does not create or update lan_peers and therefore does not establish trust.
+     * Only an ACK for the first broadcast flight (0..7) may create the temporary target;
+     * later progress is accepted only after this message-specific endpoint is pinned.
+     */
+    public boolean admitBroadcastFragmentAckTarget(String messageId, String peerId,
+            String endpointIp, int endpointPort, int fragmentIndex) {
+        if (messageId == null || messageId.isEmpty()
+                || !LanP2pProtocol.isValidPeerId(peerId)
+                || endpointIp == null || endpointIp.isEmpty()
+                || endpointPort < 1 || endpointPort > 65535
+                || fragmentIndex < 0 || fragmentIndex >= 8) return false;
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        Cursor c = null;
+        try {
+            c = db.rawQuery("SELECT body,state,delivery_deadline_ms FROM lan_outbox WHERE message_id=?",
+                    new String[]{messageId});
+            if (!c.moveToFirst()) return false;
+            String body = c.getString(0);
+            String state = c.getString(1);
+            long deadline = c.getLong(2);
+            c.close();
+            c = null;
+            long now = System.currentTimeMillis();
+            if (!"discovery_pending".equals(state) || deadline <= now || body == null) return false;
+            int bytes = body.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            int count = (bytes + LanP2pFragments.RAW_FRAGMENT_BYTES - 1)
+                    / LanP2pFragments.RAW_FRAGMENT_BYTES;
+            if (count < 2 || count > LanP2pFragments.MAX_FRAGMENTS || fragmentIndex >= count) return false;
+            if (rowExists(db, "lan_outbox_targets", "message_id=? AND peer_id=?",
+                    new String[]{messageId, peerId})) return false;
+
+            // Bound transient fan-out so an arbitrary shared-secret holder cannot grow
+            // the recipient ledger without limit during one discovery window.
+            c = db.rawQuery("SELECT COUNT(*) FROM lan_outbox_targets WHERE message_id=?",
+                    new String[]{messageId});
+            int recipients = 0;
+            try { if (c.moveToFirst()) recipients = c.getInt(0); }
+            finally { c.close(); c = null; }
+            if (recipients >= 64) return false;
+
+            String bitmap = repeatZeroes(count);
+            bitmap = bitmap.substring(0, fragmentIndex) + "1" + bitmap.substring(fragmentIndex + 1);
+            String endpoint = endpointIp + ":" + endpointPort;
+            ContentValues row = new ContentValues();
+            row.put("message_id", messageId);
+            row.put("peer_id", peerId);
+            row.put("status", "pending");
+            row.put("last_endpoint", endpoint);
+            // A valid fragment ACK is evidence only for this message's reply route.
+            // It is deliberately not copied into lan_peers or reused for other messages.
+            row.put("last_attempt_endpoint", endpoint);
+            row.put("last_sent_endpoint", endpoint);
+            row.put("last_ack_at", now);
+            row.put("fragment_count", count);
+            row.put("fragment_ack_bitmap", bitmap);
+            if (db.insertWithOnConflict("lan_outbox_targets", null, row,
+                    SQLiteDatabase.CONFLICT_IGNORE) < 0) return false;
+            db.setTransactionSuccessful();
+            return true;
+        } catch (Exception failure) {
+            return false;
+        } finally {
+            if (c != null) c.close();
+            db.endTransaction();
+        }
+    }
+
     public boolean initializeTargetFragmentProgress(String messageId, String peerId, int fragmentCount) {
         if (messageId == null || messageId.isEmpty() || peerId == null || peerId.isEmpty()
                 || fragmentCount < 1 || fragmentCount > 1024) return false;

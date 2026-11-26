@@ -5639,3 +5639,24 @@ class AndroidLanChatFragmentWindowAdvanceTests(unittest.TestCase):
         closer = extract_java_method(source, "private void closeLanChatStoreAfterExecutors(")
         self.assertIn("lanChatFragmentSendExecutor.shutdown()", destroy)
         self.assertIn("awaitLanExecutorTermination(lanChatFragmentSendExecutor)", closer)
+
+
+class AndroidLanChatBroadcastFragmentWindowTests(unittest.TestCase):
+    def test_broadcast_long_chat_starts_with_one_bounded_flight_and_admits_scoped_ack(self):
+        root = Path(__file__).resolve().parents[1]
+        service = (root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        store = (root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        sender = extract_java_method(service, "private void transmitLocalUdpMessageInternal(")
+        ack = extract_java_method(service, "private void processAuthenticatedLanChatFragmentAck(")
+        admission = extract_java_method(store, "public boolean admitBroadcastFragmentAckTarget(")
+        advance = extract_java_method(service, "private void advanceLanChatFragmentWindow(")
+        self.assertIn("Math.min(preparedBroadcastFragments.size(), 8)", sender)
+        self.assertIn("admitBroadcastFragmentAckTarget(", ack)
+        self.assertIn('"discovery_pending".equals(state)', admission)
+        self.assertIn("fragmentIndex >= 8", admission)
+        self.assertIn("recipients >= 64", admission)
+        self.assertIn('row.put("last_sent_endpoint", endpoint)', admission)
+        self.assertNotIn("upsertPeer(", admission)
+        self.assertNotIn("observePeer(", admission)
+        self.assertIn("CHAT_FRAGMENT_COMPLETION_PROBE", advance)
+        self.assertIn("finalDelivery=false", ack)
