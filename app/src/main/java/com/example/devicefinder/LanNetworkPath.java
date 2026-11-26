@@ -100,7 +100,9 @@ public final class LanNetworkPath {
 
     /** Stable path identity for cache isolation; not an authentication credential. */
     public String diagnosticFingerprint() {
-        return kind.name() + "|" + interfaceName + "|" + localAddress.getHostAddress()
+        return kind.name() + "|"
+                + (network == null ? "no-network" : network.toString()) + "|"
+                + interfaceName + "|" + localAddress.getHostAddress()
                 + "/" + prefixLength;
     }
 
