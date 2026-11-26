@@ -60,6 +60,12 @@ public final class LanTransferTcpListener implements AutoCloseable {
         this.context=context.getApplicationContext();this.store=store;this.filesystem=filesystem;this.localPeerId=localPeerId;this.peerSecrets=peerSecrets;this.authorizer=authorizer;this.failures=failures;
     }
 
+    public synchronized void start(LanNetworkPath path, InetAddress wifiAddress, int port)
+            throws IOException {
+        LanSocketBinding.validateServerSocketAddress(path, wifiAddress);
+        start(wifiAddress, port);
+    }
+
     public synchronized void start(InetAddress wifiAddress, int port) throws IOException {
         if (closed.get()) throw new IllegalStateException("Listener is closed");
         if (serverSocket != null) throw new IllegalStateException("Listener already started");
