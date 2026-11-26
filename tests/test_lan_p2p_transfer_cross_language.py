@@ -1,4 +1,5 @@
 """Golden vectors shared with Android LanTransferFrameCodecTest and authenticator tests."""
+import base64
 import hashlib
 import hmac
 import json
@@ -71,7 +72,8 @@ class CrossLanguageTransferVectors(unittest.TestCase):
                     right.close()
 
     def test_android_python_authentication_derivation_golden_vector(self):
-        secret = "eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg="
+        secret = base64.b64encode(b"x" * 32).decode("ascii")
+        self.assertEqual(32, len(base64.b64decode(secret, validate=True)))
         client_id, server_id = b"android-A", b"python-B"
         client_nonce, server_nonce = bytes(range(32)), bytes(range(32, 64))
         key = _key(secret)
