@@ -370,3 +370,13 @@
 - [ ] 路径快照在每次重连时重新选择；当前活跃 TCP 会话不会因网络回调主动中断，而是在旧 Network 断开/连接失败后按既有任务状态机暂停并恢复。后续可评估是否需要路径代数监听来更快关闭旧会话，但不得破坏已完成分块和任务恢复。
 - [ ] Android 本次代码层路径绑定仍需普通 Wi-Fi 双机真机验证；不代表 Android 热点主机无 Network 接口已经支持。
 - [ ] Python 跨平台适配仍需 Windows/Linux/macOS 实机验证实际 socket 出口和权限差异；单测仅验证 API 参数和 fail-closed 行为。
+
+## 本批推进记录补充（2026-11-27）：Python 文件 TCP 路径绑定接入
+
+- [x] connect_transfer_peer() 增加 network_path 参数；指定路径时先绑定接口及本机源 IPv4，再连接目标；目标必须是所选前缀内的 IPv4 字面地址。
+- [x] 未传路径时，Python 文件 TCP 客户端仅允许 loopback 测试连接；非 loopback 连接必须显式提供路径，防止生产连接静默使用系统默认路由。
+- [x] TransferTcpServer 增加路径参数；指定路径时先绑定接口，再绑定快照本机地址/端口；未提供路径时仅允许 loopback 监听，不再接受通配/非 loopback 监听。
+- [x] Python 绑定适配器支持 listener 模式：只做网卡绑定，由 listener 随后绑定明确端口；client 模式额外绑定源地址和临时端口。
+- [x] 新增回归测试：无路径时拒绝非 loopback 客户端/服务端端点；现有 loopback 协议集成测试继续通过。
+- [ ] **剩余限制**：目前 Python 文件 TCP 调用方需要把实际枚举的 IPv4InterfacePath 显式传入 network_path；接口绑定 API 尚未在 Windows/Linux/macOS 三个平台做真实网卡收发验收。当前 CI 只在 Ubuntu 上验证 Linux 代码路径参数和跨平台参数单测。
+- [ ] Python TransferTcpServer 的路径模式仍需由实际服务启动入口选择对应 LAN path；不可把测试 loopback 模式视为正式 LAN 节点已验收。
