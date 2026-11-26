@@ -103,12 +103,7 @@ public final class Rescue2AdminTrustStore {
     private static PublicKey decodeP256(byte[] encoded) throws Exception {
         if (encoded == null || encoded.length < 64 || encoded.length > MAX_PUBLIC_KEY_BYTES)
             throw new IllegalArgumentException("Invalid administrator public key size");
-        final PublicKey key;
-        try {
-            key = KeyFactory.getInstance("EC").generatePublic(new X509EncodedKeySpec(encoded));
-        } catch (java.security.GeneralSecurityException invalidKey) {
-            throw new IllegalArgumentException("Invalid administrator EC public key", invalidKey);
-        }
+        PublicKey key = KeyFactory.getInstance("EC").generatePublic(new X509EncodedKeySpec(encoded));
         if (!"EC".equalsIgnoreCase(key.getAlgorithm())
                 || !(key instanceof java.security.interfaces.ECPublicKey)
                 || ((java.security.interfaces.ECPublicKey) key).getParams().getCurve().getField().getFieldSize() != 256)
