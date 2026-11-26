@@ -168,9 +168,35 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
 
     private LanTransferPairingControlProtocol.Message handle(
             LanTransferPairingControlProtocol.Message request) throws Exception {
-        if (closed || request.type != LanTransferPairingControlProtocol.Type.REQUEST) return null;
+        if (closed) return null;
         long now = nowElapsedMs();
         pruneExpired(now);
+        if (request.type != LanTransferPairingControlProtocol.Type.REQUEST) {
+            String controlKey = key(request.sessionId, request.senderPeerId);
+            Entry active = pending.get(controlKey);
+            if (active == null) return null;
+            if (request.type == LanTransferPairingControlProtocol.Type.CONFIRM
+                    || request.type == LanTransferPairingControlProtocol.Type.REJECT) {
+                boolean accepted = request.type == LanTransferPairingControlProtocol.Type.CONFIRM;
+                active.session.applyRemoteConfirmation(accepted, request.payload, now);
+                LanTransferPairingSession.State state = active.session.state(now);
+                if (state == LanTransferPairingSession.State.REJECTED
+                        || state == LanTransferPairingSession.State.EXPIRED
+                        || state == LanTransferPairingSession.State.CANCELLED) {
+                    pending.remove(controlKey, active);
+                }
+            } else if (request.type == LanTransferPairingControlProtocol.Type.CANCEL) {
+                pending.remove(controlKey, active);
+                active.session.cancel(now);
+            } else {
+                return null;
+            }
+            byte status = (byte) (active.session.state(now)
+                    == LanTransferPairingSession.State.READY_TO_COMMIT ? 1 : 0);
+            return new LanTransferPairingControlProtocol.Message(
+                    LanTransferPairingControlProtocol.Type.ACK, request.sessionId,
+                    localPeerId, request.senderPeerId, request.sequence, new byte[]{status});
+        }
         String entryKey = key(request.sessionId, request.senderPeerId);
         if (pending.containsKey(entryKey)) return null;
         LanTransferPairingHandshake.ResponderResult result =

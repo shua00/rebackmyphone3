@@ -47,9 +47,12 @@ public final class LanTransferPairingControlTransport {
             LanTransferPairingControlProtocol.Message decoded =
                     LanTransferPairingControlProtocol.decode(readFrame(
                             new DataInputStream(socket.getInputStream())));
-            if (request.type == LanTransferPairingControlProtocol.Type.REQUEST
-                    && decoded.type != LanTransferPairingControlProtocol.Type.RESPONSE)
-                throw new IOException("Pairing request received a non-response message");
+            LanTransferPairingControlProtocol.Type expectedType =
+                    request.type == LanTransferPairingControlProtocol.Type.REQUEST
+                            ? LanTransferPairingControlProtocol.Type.RESPONSE
+                            : LanTransferPairingControlProtocol.Type.ACK;
+            if (decoded.type != expectedType)
+                throw new IOException("Pairing control request received an unexpected response type");
             if (!decoded.sessionId.equals(request.sessionId)
                     || !decoded.senderPeerId.equals(request.targetPeerId)
                     || !decoded.targetPeerId.equals(request.senderPeerId)
@@ -149,8 +152,11 @@ public final class LanTransferPairingControlTransport {
                                 request.sequence, nowMs)) return;
                 LanTransferPairingControlProtocol.Message response = handler.onMessage(request);
                 if (response == null) return;
-                if ((request.type == LanTransferPairingControlProtocol.Type.REQUEST
-                            && response.type != LanTransferPairingControlProtocol.Type.RESPONSE)
+                LanTransferPairingControlProtocol.Type expectedType =
+                        request.type == LanTransferPairingControlProtocol.Type.REQUEST
+                                ? LanTransferPairingControlProtocol.Type.RESPONSE
+                                : LanTransferPairingControlProtocol.Type.ACK;
+                if (response.type != expectedType
                         || !response.sessionId.equals(request.sessionId)
                         || !response.senderPeerId.equals(localPeerId)
                         || !response.targetPeerId.equals(request.senderPeerId)

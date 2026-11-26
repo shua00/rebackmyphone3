@@ -87,6 +87,55 @@ public class LanTransferPairingControlHostTest {
         }
     }
 
+
+    @Test public void controlTcpAcceptsAuthenticatedRemoteConfirmationAndAcknowledgesIt()
+            throws Exception {
+        final CountDownLatch requested = new CountDownLatch(1);
+        final String[] values = new String[3];
+        LanTransferPairingControlHost host = new LanTransferPairingControlHost("receiver",
+                (sessionId, peerId, sas, expiresAt) -> {
+                    values[0] = sessionId; values[1] = peerId; values[2] = sas;
+                    requested.countDown();
+                });
+        try {
+            host.start(InetAddress.getLoopbackAddress(), 0);
+            LanTransferPairingHandshake.InitiatorStart start =
+                    LanTransferPairingHandshake.begin("sender", "receiver",
+                            UUID.randomUUID().toString(), 1L);
+            LanTransferPairingControlProtocol.Message response =
+                    LanTransferPairingControlTransport.exchange(InetAddress.getLoopbackAddress(),
+                            host.getBoundPort(), start.request, 2000, 3000);
+            LanTransferPairingCrypto.Result material =
+                    LanTransferPairingHandshake.completeInitiator(start, response);
+            assertTrue(requested.await(1, TimeUnit.SECONDS));
+            byte[] responderProof = host.confirmLocalProof(values[0], values[1], values[2]);
+            LanTransferPairingSession initiatorSession = new LanTransferPairingSession(
+                    "sender", "receiver", LanTransferPairingSession.Role.INITIATOR,
+                    material, 2L, 120_000L);
+            initiatorSession.confirmLocal(material.shortAuthenticationCode, 3L);
+            byte[] initiatorProof = initiatorSession.createLocalConfirmationProof(3L);
+            LanTransferPairingControlProtocol.Message confirm =
+                    new LanTransferPairingControlProtocol.Message(
+                            LanTransferPairingControlProtocol.Type.CONFIRM, values[0],
+                            "sender", "receiver", 2L, initiatorProof);
+            LanTransferPairingControlProtocol.Message ack =
+                    LanTransferPairingControlTransport.exchange(InetAddress.getLoopbackAddress(),
+                            host.getBoundPort(), confirm, 2000, 3000);
+            assertEquals(LanTransferPairingControlProtocol.Type.ACK, ack.type);
+            assertEquals(1, ack.payload.length);
+            assertEquals(0, ack.payload[0]);
+            assertEquals(LanTransferPairingSession.State.WAITING_LOCAL_CONFIRMATION,
+                    host.pendingSessions().get(0).state);
+            assertEquals(LanTransferPairingSession.State.WAITING_LOCAL_CONFIRMATION,
+                    host.applyRemoteConfirmation(values[0], values[1], true, initiatorProof));
+            // The host API still requires the local decision; the responder proof is generated
+            // before transport delivery and is transcript-bound for the initiating side.
+            assertEquals(32, responderProof.length);
+        } finally {
+            host.close();
+        }
+    }
+
     private static byte[] initiatorConfirmationProofForTest(
             LanTransferPairingHandshake.InitiatorStart start,
             LanTransferPairingControlProtocol.Message response) throws Exception {

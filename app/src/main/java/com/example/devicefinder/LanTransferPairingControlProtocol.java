@@ -22,7 +22,7 @@ public final class LanTransferPairingControlProtocol {
     private static final int MAGIC = 0x4c545031; // LTP1
 
     public enum Type {
-        REQUEST(1), RESPONSE(2), CONFIRM(3), REJECT(4), CANCEL(5);
+        REQUEST(1), RESPONSE(2), CONFIRM(3), REJECT(4), CANCEL(5), ACK(6);
         final int wire;
         Type(int wire) { this.wire = wire; }
         static Type fromWire(int value) throws IOException {
@@ -121,6 +121,8 @@ public final class LanTransferPairingControlProtocol {
             throw new IllegalArgumentException("Pairing key exchange payload is incomplete");
         if ((type == Type.CONFIRM || type == Type.REJECT) && payload.length != 32)
             throw new IllegalArgumentException("Pairing confirmation proof must be 32 bytes");
+        if (type == Type.ACK && payload.length != 1)
+            throw new IllegalArgumentException("Pairing acknowledgement must contain one status byte");
         if (type == Type.CANCEL && payload.length != 0)
             throw new IllegalArgumentException("Pairing cancel message must be empty");
     }
