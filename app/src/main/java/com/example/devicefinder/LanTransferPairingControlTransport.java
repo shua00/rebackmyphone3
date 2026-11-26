@@ -47,10 +47,14 @@ public final class LanTransferPairingControlTransport {
             LanTransferPairingControlProtocol.Message decoded =
                     LanTransferPairingControlProtocol.decode(readFrame(
                             new DataInputStream(socket.getInputStream())));
+            if (request.type == LanTransferPairingControlProtocol.Type.REQUEST
+                    && decoded.type != LanTransferPairingControlProtocol.Type.RESPONSE)
+                throw new IOException("Pairing request received a non-response message");
             if (!decoded.sessionId.equals(request.sessionId)
                     || !decoded.senderPeerId.equals(request.targetPeerId)
-                    || !decoded.targetPeerId.equals(request.senderPeerId))
-                throw new IOException("Pairing response identity or session mismatch");
+                    || !decoded.targetPeerId.equals(request.senderPeerId)
+                    || decoded.sequence != request.sequence)
+                throw new IOException("Pairing response identity, session, or sequence mismatch");
             return decoded;
         }
     }
@@ -145,9 +149,12 @@ public final class LanTransferPairingControlTransport {
                                 request.sequence, nowMs)) return;
                 LanTransferPairingControlProtocol.Message response = handler.onMessage(request);
                 if (response == null) return;
-                if (!response.sessionId.equals(request.sessionId)
+                if ((request.type == LanTransferPairingControlProtocol.Type.REQUEST
+                            && response.type != LanTransferPairingControlProtocol.Type.RESPONSE)
+                        || !response.sessionId.equals(request.sessionId)
                         || !response.senderPeerId.equals(localPeerId)
-                        || !response.targetPeerId.equals(request.senderPeerId))
+                        || !response.targetPeerId.equals(request.senderPeerId)
+                        || response.sequence != request.sequence)
                     throw new IOException("Pairing handler returned a mismatched response");
                 byte[] encoded = LanTransferPairingControlProtocol.encode(response);
                 DataOutputStream out = new DataOutputStream(owned.getOutputStream());

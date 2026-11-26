@@ -67,6 +67,50 @@ public class LanTransferPairingControlTransportTest {
         }
     }
 
+    @Test public void clientRejectsWrongResponseType() throws Exception {
+        final String session = UUID.randomUUID().toString();
+        LanTransferPairingControlTransport.Server server =
+                new LanTransferPairingControlTransport.Server("receiver", request ->
+                        message(LanTransferPairingControlProtocol.Type.CONFIRM, session,
+                                "receiver", "sender", 1L, new byte[32]), 60_000L);
+        try {
+            server.start(InetAddress.getLoopbackAddress(), 0);
+            try {
+                LanTransferPairingControlTransport.exchange(InetAddress.getLoopbackAddress(),
+                        server.getBoundPort(),
+                        message(LanTransferPairingControlProtocol.Type.REQUEST, session,
+                                "sender", "receiver", 1L, new byte[64]), 2000, 3000);
+                fail("REQUEST must receive RESPONSE");
+            } catch (IOException expected) {
+                // Wrong response type is rejected at the client boundary.
+            }
+        } finally {
+            server.close();
+        }
+    }
+
+    @Test public void clientRejectsWrongResponseSequence() throws Exception {
+        final String session = UUID.randomUUID().toString();
+        LanTransferPairingControlTransport.Server server =
+                new LanTransferPairingControlTransport.Server("receiver", request ->
+                        message(LanTransferPairingControlProtocol.Type.RESPONSE, session,
+                                "receiver", "sender", 2L, new byte[64]), 60_000L);
+        try {
+            server.start(InetAddress.getLoopbackAddress(), 0);
+            try {
+                LanTransferPairingControlTransport.exchange(InetAddress.getLoopbackAddress(),
+                        server.getBoundPort(),
+                        message(LanTransferPairingControlProtocol.Type.REQUEST, session,
+                                "sender", "receiver", 1L, new byte[64]), 2000, 3000);
+                fail("mismatched response sequence must be rejected");
+            } catch (IOException expected) {
+                // Wrong sequence is rejected at the client boundary.
+            }
+        } finally {
+            server.close();
+        }
+    }
+
     @Test public void rejectsInvalidRemotePortBeforeConnecting() throws Exception {
         try {
             LanTransferPairingControlTransport.exchange(InetAddress.getLoopbackAddress(), 0,
