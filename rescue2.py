@@ -1072,15 +1072,23 @@ def periodic_probe(target_ip):
 def pull_logs_multi(target_ips, temp_url, clear_after):
     if not target_ips or target_ips == ["255.255.255.255"]:
         print(f"{I.warn} 未选择有效目标或使用了广播，已取消操作")
+        _diag_event("legacy_log_pull_rejected", reason="invalid_or_broadcast_target")
         return
     cmd = f"FIND_ME_UPLOAD_LOG:{RESCUE_SECRET}:{temp_url}" + (":clear" if clear_after else "")
     send_time = time.time()
+    started_monotonic = time.monotonic()
+    _diag_event("legacy_log_pull_started", target_count=len(target_ips),
+                clear_after=bool(clear_after), timeout_seconds=30)
     print(f"\n{I.send} 向 {len(target_ips)} 台设备发送拉日志指令...")
+    dispatched = 0
     for ip in target_ips:
         send_udp(cmd, ip, quiet=True, no_retry=True)
+        dispatched += 1
         time.sleep(0.1)
-    print(f"{I.ping} 等待手机上传（最多 30 秒）...")     
-    deadline = time.time() + 30                   
+    _diag_event("legacy_log_pull_dispatched", target_count=len(target_ips),
+                dispatched_count=dispatched)
+    print(f"{I.ping} 等待手机上传（最多 30 秒）...")
+    deadline = time.time() + 30
     received_ips = set()
     while time.time() < deadline:
         time.sleep(0.5)
@@ -1090,10 +1098,17 @@ def pull_logs_multi(target_ips, temp_url, clear_after):
                 if src_ip in target_ips and src_ip not in received_ips and info.get("last_log", 0) >= send_time:
                     received_ips.add(src_ip)
                     print(f"   {I.ok} {src_ip} 已上传 ({dev_id})")
-        if len(received_ips) >= len(target_ips): break
-    print(f"\n{I.ping} 完成: {len(received_ips)}/{len(target_ips)} 台成功")
+        if len(received_ips) >= len(target_ips):
+            break
     missing = [ip for ip in target_ips if ip not in received_ips]
-    if missing: print(f"{I.warn} 未响应: {', '.join(missing)}")
+    duration_ms = int((time.monotonic() - started_monotonic) * 1000)
+    _diag_event("legacy_log_pull_completed", target_count=len(target_ips),
+                dispatched_count=dispatched, received_count=len(received_ips),
+                missing_count=len(missing), duration_ms=duration_ms,
+                outcome="complete" if not missing else ("partial" if received_ips else "timeout"))
+    print(f"\n{I.ping} 完成: {len(received_ips)}/{len(target_ips)} 台成功")
+    if missing:
+        print(f"{I.warn} 未响应: {', '.join(missing)}")
 
 # ===== ADB 核心模块 =====
 def get_adb_devices():
