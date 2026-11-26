@@ -40,6 +40,74 @@ class TransferAuthenticationTests(unittest.TestCase):
         result,errors=self._run_pair(expected_server="other-device")
         self.assertTrue(errors); self.assertNotIn("client",result)
 
+
+    def test_per_peer_secret_provider_matches_android_credential_model(self):
+        client_secret = "base64-encoded-peer-secret-for-sender"
+        other_secret = "different-secret-for-another-peer"
+        left, right = socket.socketpair()
+        left.settimeout(1)
+        right.settimeout(1)
+        result, errors = {}, []
+
+        def server():
+            try:
+                result["server"] = authenticate_tcp_server(
+                    right, "receiver", None,
+                    authorize_peer=lambda peer: peer == "sender",
+                    secret_provider=lambda peer: {
+                        "sender": client_secret,
+                        "other": other_secret,
+                    }.get(peer),
+                )
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                right.close()
+
+        worker = threading.Thread(target=server)
+        worker.start()
+        try:
+            result["client"] = authenticate_tcp_client(
+                left, "sender", "receiver", client_secret
+            )
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            left.close()
+        worker.join(timeout=2)
+        self.assertFalse(worker.is_alive(), "per-peer auth thread leaked")
+        self.assertEqual([], errors)
+        self.assertEqual(result["client"][1], result["server"][1])
+
+    def test_per_peer_secret_provider_rejects_missing_peer_credential(self):
+        left, right = socket.socketpair()
+        left.settimeout(1)
+        right.settimeout(1)
+        errors = []
+
+        def server():
+            try:
+                authenticate_tcp_server(
+                    right, "receiver", None,
+                    authorize_peer=lambda peer: peer == "sender",
+                    secret_provider=lambda peer: None,
+                )
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                right.close()
+
+        worker = threading.Thread(target=server)
+        worker.start()
+        try:
+            with self.assertRaises(TransferValidationError):
+                authenticate_tcp_client(left, "sender", "receiver", self.SECRET)
+        finally:
+            left.close()
+        worker.join(timeout=2)
+        self.assertFalse(worker.is_alive(), "missing-credential auth thread leaked")
+        self.assertTrue(errors)
+
     def test_replayed_server_proof_is_rejected_for_fresh_client_nonce(self):
         import hashlib
         import hmac
