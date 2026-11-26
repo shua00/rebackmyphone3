@@ -1,4 +1,4 @@
-package com.example.devicefinder.diagnostics;
+package com.example.devicefinder;
 
 import android.content.Context;
 import org.junit.Test;
@@ -33,13 +33,13 @@ public class Rescue2AdminTrustStoreTest {
         byte[] signature = signer.sign();
 
         assertTrue(store.isTrusted(fingerprint));
-        assertTrue(store.verifyTaskEnvelope(task, canonical, signature));
-        assertFalse(store.verifyTaskEnvelope(task,
+        assertTrue(store.verify(fingerprint, canonical, signature));
+        assertFalse(store.verify(fingerprint,
                 (task.toJson() + " ").getBytes(StandardCharsets.UTF_8), signature));
-        assertFalse(store.verifyTaskEnvelope(task, canonical, new byte[]{1, 2, 3}));
+        assertFalse(store.verify(fingerprint, canonical, new byte[]{1, 2, 3}));
         assertTrue(store.revoke(fingerprint));
         assertFalse(store.isTrusted(fingerprint));
-        assertFalse(store.verifyTaskEnvelope(task, canonical, signature));
+        assertFalse(store.verify(fingerprint, canonical, signature));
         assertFalse(store.revoke(fingerprint));
     }
 

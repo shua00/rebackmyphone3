@@ -1,4 +1,4 @@
-package com.example.devicefinder.diagnostics;
+package com.example.devicefinder;
 
 import android.content.Context;
 import android.content.SharedPreferences;
@@ -88,16 +88,6 @@ public final class Rescue2AdminTrustStore {
         } catch (Exception invalid) {
             return false;
         }
-    }
-
-    /** Prevents verifying a signature over JSON different from the parsed task object. */
-    public synchronized boolean verifyTaskEnvelope(DiagnosticTaskEnvelope envelope, byte[] canonicalJson,
-                                                     byte[] signatureBytes) {
-        if (envelope == null || canonicalJson == null || !isTrusted(envelope.adminKeyFingerprint))
-            return false;
-        byte[] expected = envelope.toJson().getBytes(StandardCharsets.UTF_8);
-        return java.util.Arrays.equals(expected, canonicalJson)
-                && verify(envelope.adminKeyFingerprint, canonicalJson, signatureBytes);
     }
 
     private static PublicKey decodeP256(byte[] encoded) throws Exception {
