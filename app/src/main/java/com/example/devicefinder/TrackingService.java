@@ -2967,21 +2967,24 @@ public class TrackingService extends Service implements LocationListener {
                 return;
             }
             java.net.Inet4Address bindAddress = null;
+            int bindPrefix = -1;
             for (LinkAddress linkAddress : links.getLinkAddresses()) {
                 java.net.InetAddress address = linkAddress.getAddress();
                 if (address instanceof java.net.Inet4Address && !address.isLoopbackAddress()
                         && !address.isLinkLocalAddress()) {
                     bindAddress = (java.net.Inet4Address) address;
+                    bindPrefix = linkAddress.getPrefixLength();
                     break;
                 }
             }
-            if (bindAddress == null) {
-                stopLanTransferTcpListener("no usable Wi-Fi IPv4 address");
+            if (bindAddress == null || bindPrefix < 1 || bindPrefix > 32) {
+                stopLanTransferTcpListener("no usable Wi-Fi IPv4 path");
                 return;
             }
+            LanNetworkPath selectedPath = LanNetworkPath.fromAndroidNetwork(selected,
+                    links.getInterfaceName(), bindAddress, bindPrefix, null);
             String credentialFingerprint = transferCredentialsFingerprint(credentials);
-            String fingerprint = selected.toString() + "|" + links.getInterfaceName()
-                    + "|" + bindAddress.getHostAddress();
+            String fingerprint = selectedPath.diagnosticFingerprint();
             synchronized (lanTransferListenerLock) {
                 if (serviceDestroyed) return;
                 if (fingerprint.equals(lanTransferListenerFingerprint)
@@ -2996,7 +2999,7 @@ public class TrackingService extends Service implements LocationListener {
                         credentials::secretFor, credentials.trustedPeerIds::contains,
                         (stage, failure) -> FileLogger.log(this, "LAN_TRANSFER",
                                 "TCP listener stage=" + stage + " error=" + failure.getClass().getSimpleName()));
-                listener.start(bindAddress, LanTransferTcpListener.DEFAULT_PORT);
+                listener.start(selectedPath, bindAddress, LanTransferTcpListener.DEFAULT_PORT);
                 lanTransferTcpListener = listener;
                 // The discovery socket may have emitted its startup beacon before the
                 // credential-gated data listener was ready (filePort=0). Announce again
@@ -3052,20 +3055,23 @@ public class TrackingService extends Service implements LocationListener {
                 return;
             }
             java.net.Inet4Address bindAddress = null;
+            int bindPrefix = -1;
             for (LinkAddress item : links.getLinkAddresses()) {
                 java.net.InetAddress address = item.getAddress();
                 if (address instanceof java.net.Inet4Address && !address.isLoopbackAddress()
                         && !address.isLinkLocalAddress()) {
                     bindAddress = (java.net.Inet4Address) address;
+                    bindPrefix = item.getPrefixLength();
                     break;
                 }
             }
-            if (bindAddress == null) {
+            if (bindAddress == null || bindPrefix < 1 || bindPrefix > 32) {
                 stopLanTransferPairingControlHost();
                 return;
             }
-            String fingerprint = selected.toString() + "|" + links.getInterfaceName()
-                    + "|" + bindAddress.getHostAddress();
+            LanNetworkPath selectedPath = LanNetworkPath.fromAndroidNetwork(selected,
+                    links.getInterfaceName(), bindAddress, bindPrefix, null);
+            String fingerprint = selectedPath.diagnosticFingerprint();
             synchronized (lanTransferListenerLock) {
                 if (serviceDestroyed) return;
                 if (fingerprint.equals(lanTransferPairingControlFingerprint)
@@ -3154,7 +3160,7 @@ public class TrackingService extends Service implements LocationListener {
                         } finally { java.util.Arrays.fill(committed, (byte) 0); }
                     }
                 });
-                host.start(bindAddress, LanTransferPairingControlProtocol.DEFAULT_PORT);
+                host.start(selectedPath, bindAddress, LanTransferPairingControlProtocol.DEFAULT_PORT);
                 lanTransferPairingControlHost = host;
                 lanTransferPairingControlFingerprint = fingerprint;
                 FileLogger.log(this, "LAN_TRANSFER", "Pairing control host active on "
