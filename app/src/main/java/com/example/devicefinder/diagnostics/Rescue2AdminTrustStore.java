@@ -93,16 +93,11 @@ public final class Rescue2AdminTrustStore {
     /** Prevents verifying a signature over JSON different from the parsed task object. */
     public synchronized boolean verifyTaskEnvelope(DiagnosticTaskEnvelope envelope, byte[] canonicalJson,
                                                      byte[] signatureBytes) {
-        if (envelope == null || canonicalJson == null
-                || !envelope.adminKeyFingerprint.equals(getTrustedFingerprintForKey(envelope.adminKeyFingerprint)))
+        if (envelope == null || canonicalJson == null || !isTrusted(envelope.adminKeyFingerprint))
             return false;
         byte[] expected = envelope.toJson().getBytes(StandardCharsets.UTF_8);
         return java.util.Arrays.equals(expected, canonicalJson)
                 && verify(envelope.adminKeyFingerprint, canonicalJson, signatureBytes);
-    }
-
-    private String getTrustedFingerprintForKey(String fingerprint) {
-        return isTrusted(fingerprint) ? fingerprint : null;
     }
 
     private static PublicKey decodeP256(byte[] encoded) throws Exception {

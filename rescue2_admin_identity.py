@@ -42,13 +42,24 @@ class WindowsDpapiProtector:
         target = DATA_BLOB()
         crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        blob_ptr = ctypes.POINTER(DATA_BLOB)
         if protect:
             fn = crypt32.CryptProtectData
+            fn.argtypes = [blob_ptr, ctypes.c_wchar_p, blob_ptr, ctypes.c_void_p,
+                           ctypes.c_void_p, ctypes.c_uint32, blob_ptr]
+            fn.restype = ctypes.c_int
             ok = fn(ctypes.byref(source), "Rescue2 administrator identity", None, None,
                     None, 0x1, ctypes.byref(target))
         else:
             fn = crypt32.CryptUnprotectData
-            ok = fn(ctypes.byref(source), None, None, None, None, 0x1, ctypes.byref(target))
+            fn.argtypes = [blob_ptr, ctypes.POINTER(ctypes.c_wchar_p), blob_ptr,
+                           ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, blob_ptr]
+            fn.restype = ctypes.c_int
+            description = ctypes.c_wchar_p()
+            ok = fn(ctypes.byref(source), ctypes.byref(description), None, None,
+                    None, 0x1, ctypes.byref(target))
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree.restype = ctypes.c_void_p
         if not ok:
             raise AdminIdentityError("Windows DPAPI operation failed (error %d)" % ctypes.get_last_error())
         try:
@@ -89,11 +100,19 @@ class Rescue2AdminIdentity:
                 serialization.NoEncryption(),
             )
             protected = _KEY_MAGIC + self.protector.protect(private_der)
-            self._write_container(protected)
+            if not self._write_container(protected):
+                # Another Rescue2 process won the first-run race; always load its persisted key.
+                raw = self.key_path.read_bytes()
+                if not raw.startswith(_KEY_MAGIC) or len(raw) > _MAX_PRIVATE_BLOB:
+                    raise AdminIdentityError("Invalid administrator key container")
+                private_der = self.protector.unprotect(raw[len(_KEY_MAGIC):])
+                key = serialization.load_der_private_key(private_der, password=None)
+                if not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(key.curve, ec.SECP256R1):
+                    raise AdminIdentityError("Stored administrator key is not P-256")
             self._key = key
             return self
 
-    def _write_container(self, payload: bytes) -> None:
+    def _write_container(self, payload: bytes) -> bool:
         lock_path = self.key_path.with_suffix(self.key_path.suffix + ".lock")
         deadline = time.monotonic() + 5.0
         lock_fd = None
@@ -102,13 +121,13 @@ class Rescue2AdminIdentity:
                 lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             except FileExistsError:
                 if self.key_path.exists():
-                    return
+                    return False
                 if time.monotonic() >= deadline:
                     raise AdminIdentityError("Timed out waiting for administrator key creation")
                 time.sleep(0.05)
         try:
             if self.key_path.exists():
-                return
+                return False
             fd, temporary = tempfile.mkstemp(prefix=self.key_path.name + ".", dir=str(self.key_path.parent))
             try:
                 with os.fdopen(fd, "wb") as stream:
@@ -129,6 +148,7 @@ class Rescue2AdminIdentity:
                 os.unlink(lock_path)
             except FileNotFoundError:
                 pass
+        return True
 
     def _require_key(self):
         if self._key is None:
