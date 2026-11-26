@@ -19,7 +19,8 @@ public final class DiagnosticTaskRunAdapter {
             long nowEpochMs, DiagnosticExecutor.Cancellation cancellation,
             DiagnosticExecutor.Listener progress) throws Exception {
         if (context == null || verification == null || !verification.accepted
-                || verification.envelope == null || consentStore == null || history == null)
+                || !verification.replayProtected || verification.envelope == null
+                || consentStore == null || history == null)
             throw new SecurityException("A verified task, device consent and history store are required");
         DiagnosticTaskEnvelope envelope = verification.envelope;
         if (!consentStore.isApproved(envelope.adminKeyFingerprint, envelope.taskId, nowEpochMs))

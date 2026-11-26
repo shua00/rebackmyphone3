@@ -10,10 +10,16 @@ public final class DiagnosticTaskVerifier {
         public final boolean accepted;
         public final String errorCode;
         public final DiagnosticTaskEnvelope envelope;
+        /** True only when this result also passed and consumed the durable replay guard. */
+        public final boolean replayProtected;
         private Result(boolean ok, String code, DiagnosticTaskEnvelope task) {
+            this(ok, code, task, false);
+        }
+        private Result(boolean ok, String code, DiagnosticTaskEnvelope task, boolean replayProtected) {
             accepted = ok;
             errorCode = code;
             envelope = task;
+            this.replayProtected = replayProtected;
         }
     }
 
@@ -26,7 +32,7 @@ public final class DiagnosticTaskVerifier {
         if (!verified.accepted) return verified;
         if (replayStore == null || !replayStore.acceptOnce(verified.envelope, nowEpochMs))
             return new Result(false, "REPLAYED_OR_UNAVAILABLE", null);
-        return verified;
+        return new Result(true, "OK", verified.envelope, true);
     }
 
     public static Result verify(String encodedJson, byte[] signature,

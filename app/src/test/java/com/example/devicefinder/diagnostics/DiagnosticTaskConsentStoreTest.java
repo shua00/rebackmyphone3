@@ -20,7 +20,8 @@ public class DiagnosticTaskConsentStoreTest {
         Context context = org.robolectric.RuntimeEnvironment.getApplication();
         DiagnosticTaskConsentStore store = new DiagnosticTaskConsentStore(context);
         String fingerprint = repeat('a', 64);
-        assertTrue(store.registerPending(task("task-01", repeat('A', 22)), 1800000000100L));
+        DiagnosticTaskVerifier.Result verified01 = verified(task("task-01", repeat('A', 22)), 1800000000100L);
+        assertTrue(store.registerPending(verified01, 1800000000100L));
         assertEquals(DiagnosticTaskConsentStore.State.PENDING,
                 store.getState(fingerprint, "task-01", 1800000000200L));
         assertEquals(Arrays.asList("task-01"), store.pendingTaskIds(fingerprint, 1800000000200L));
@@ -29,7 +30,8 @@ public class DiagnosticTaskConsentStoreTest {
         assertEquals(DiagnosticTaskConsentStore.State.REJECTED,
                 store.getState(fingerprint, "task-01", 1800000000300L));
 
-        assertTrue(store.registerPending(task("task-02", repeat('B', 22)), 1800000000100L));
+        DiagnosticTaskVerifier.Result verified02 = verified(task("task-02", repeat('B', 22)), 1800000000100L);
+        assertTrue(store.registerPending(verified02, 1800000000100L));
         assertTrue(store.approve(fingerprint, "task-02", 1800000000200L));
         assertTrue(store.isApproved(fingerprint, "task-02", 1800000000300L));
         assertTrue(store.cancel(fingerprint, "task-02", 1800000000300L));
@@ -41,10 +43,34 @@ public class DiagnosticTaskConsentStoreTest {
     @Test public void expiresAndPrunesOldPendingTasks() {
         Context context = org.robolectric.RuntimeEnvironment.getApplication();
         DiagnosticTaskConsentStore store = new DiagnosticTaskConsentStore(context);
-        assertTrue(store.registerPending(task("task-01", repeat('A', 22)), 1800000000100L));
+        assertTrue(store.registerPending(verified(task("task-01", repeat('A', 22)), 1800000000100L), 1800000000100L));
         assertEquals(DiagnosticTaskConsentStore.State.EXPIRED,
                 store.getState(repeat('a', 64), "task-01", 1800000600000L));
         assertTrue(store.registerPending(task("task-01", repeat('B', 22)), 1800000600001L));
+    }
+
+    private DiagnosticTaskVerifier.Result verified(DiagnosticTaskEnvelope envelope, long now) {
+        // Build a test-only authenticated result through the real verifier/replay guard.
+        try {
+            android.content.Context context = org.robolectric.RuntimeEnvironment.getApplication();
+            com.example.devicefinder.Rescue2AdminTrustStore trust =
+                    new com.example.devicefinder.Rescue2AdminTrustStore(context);
+            java.security.KeyPairGenerator generator = java.security.KeyPairGenerator.getInstance("EC");
+            generator.initialize(new java.security.spec.ECGenParameterSpec("secp256r1"));
+            java.security.KeyPair pair = generator.generateKeyPair();
+            String fingerprint = trust.trustP256PublicKey(pair.getPublic().getEncoded());
+            DiagnosticTaskEnvelope signed = new DiagnosticTaskEnvelope(envelope.taskId, fingerprint,
+                    envelope.targetParticipantIds, envelope.probeIds, envelope.createdAtEpochMs,
+                    envelope.expiresAtEpochMs, envelope.nonce);
+            byte[] domain = "rebackmyphone3/rescue2-admin-task/v1\\0".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            java.security.Signature signer = java.security.Signature.getInstance("SHA256withECDSA");
+            signer.initSign(pair.getPrivate());
+            signer.update(domain);
+            signer.update(signed.toJson().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            byte[] signature = signer.sign();
+            return DiagnosticTaskVerifier.verifyAndConsume(signed.toJson(), signature,
+                    "phone-a", now, trust, new DiagnosticTaskReplayStore(context));
+        } catch (Exception failure) { throw new AssertionError(failure); }
     }
 
     private static String repeat(char c, int count) {

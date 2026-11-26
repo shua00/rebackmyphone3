@@ -56,12 +56,13 @@ public class DiagnosticTaskRunAdapterTest {
         signer.update(domain);
         signer.update(json.getBytes(StandardCharsets.UTF_8));
         byte[] signature = signer.sign();
-        DiagnosticTaskVerifier.Result verified = DiagnosticTaskVerifier.verify(
-                json, signature, "phone-a", 1800000000100L, trust);
+        DiagnosticTaskVerifier.Result verified = DiagnosticTaskVerifier.verifyAndConsume(
+                json, signature, "phone-a", 1800000000100L, trust,
+                new DiagnosticTaskReplayStore(context));
         assertTrue(verified.accepted);
 
         DiagnosticTaskConsentStore consent = new DiagnosticTaskConsentStore(context);
-        assertTrue(consent.registerPending(envelope, 1800000000100L));
+        assertTrue(consent.registerPending(verified, 1800000000100L));
         DiagnosticRunHistoryStore history = new DiagnosticRunHistoryStore(context);
         try {
             DiagnosticTaskRunAdapter.execute(context, verified, consent, history,

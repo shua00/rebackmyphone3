@@ -22,8 +22,11 @@ public final class DiagnosticTaskConsentStore {
                 .getSharedPreferences(PREFS, Context.MODE_PRIVATE);
     }
 
-    public synchronized boolean registerPending(DiagnosticTaskEnvelope envelope, long nowEpochMs) {
-        if (envelope == null || !envelope.isValidAt(nowEpochMs)) return false;
+    public synchronized boolean registerPending(DiagnosticTaskVerifier.Result verified, long nowEpochMs) {
+        if (verified == null || !verified.accepted || !verified.replayProtected
+                || verified.envelope == null) return false;
+        DiagnosticTaskEnvelope envelope = verified.envelope;
+        if (!envelope.isValidAt(nowEpochMs)) return false;
         String key = key(envelope.adminKeyFingerprint, envelope.taskId);
         String existing = preferences.getString(key, null);
         Parsed existingParsed = parse(existing);
