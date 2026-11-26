@@ -41,15 +41,36 @@ public final class LanTransferPairingCommitProof {
             String remotePeerId, String sessionId, byte[] peerSecret, long sequence,
             int connectTimeoutMs, int readTimeoutMs)
             throws GeneralSecurityException, java.io.IOException {
+        sendCommitInternal(null, address, port, localPeerId, remotePeerId, sessionId,
+                peerSecret, sequence, connectTimeoutMs, readTimeoutMs);
+    }
+
+    /** Production commit path uses the same immutable Network snapshot as the handshake. */
+    public static void sendCommit(LanNetworkPath networkPath, java.net.InetAddress address,
+            int port, String localPeerId, String remotePeerId, String sessionId,
+            byte[] peerSecret, long sequence, int connectTimeoutMs, int readTimeoutMs)
+            throws GeneralSecurityException, java.io.IOException {
+        if (networkPath == null) throw new IllegalArgumentException("Selected LAN path is required");
+        sendCommitInternal(networkPath, address, port, localPeerId, remotePeerId, sessionId,
+                peerSecret, sequence, connectTimeoutMs, readTimeoutMs);
+    }
+
+    private static void sendCommitInternal(LanNetworkPath networkPath,
+            java.net.InetAddress address, int port, String localPeerId, String remotePeerId,
+            String sessionId, byte[] peerSecret, long sequence,
+            int connectTimeoutMs, int readTimeoutMs)
+            throws GeneralSecurityException, java.io.IOException {
         byte[] proof = create(peerSecret, sessionId, localPeerId, remotePeerId, "COMMIT");
         try {
             LanTransferPairingControlProtocol.Message request =
                     new LanTransferPairingControlProtocol.Message(
                             LanTransferPairingControlProtocol.Type.COMMIT, sessionId,
                             localPeerId, remotePeerId, sequence, proof);
-            LanTransferPairingControlProtocol.Message response =
-                    LanTransferPairingControlTransport.exchange(address, port, request,
-                            connectTimeoutMs, readTimeoutMs);
+            LanTransferPairingControlProtocol.Message response = networkPath == null
+                    ? LanTransferPairingControlTransport.exchange(address, port, request,
+                            connectTimeoutMs, readTimeoutMs)
+                    : LanTransferPairingControlTransport.exchange(networkPath, address, port,
+                            request, connectTimeoutMs, readTimeoutMs);
             if (!verify(peerSecret, sessionId, remotePeerId, localPeerId,
                     "COMMIT_ACK", response.payload))
                 throw new java.io.IOException("Pairing commit acknowledgement authentication failed");
