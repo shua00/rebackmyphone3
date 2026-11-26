@@ -6,7 +6,7 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
-import java.net.Socket;
+import java.net.Socket;\nimport java.net.InetAddress;\nimport java.net.Inet4Address;
 import java.net.InetSocketAddress;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
@@ -33,6 +33,17 @@ public final class LanTransferTcpClient {
             socket.connect(new InetSocketAddress(host, port), connectTimeoutMs);
             socket.setTcpNoDelay(true);
             socket.setKeepAlive(true);
+            return sendOffer(socket, source, offer, localPeerId, remotePeerId,
+                    sharedSecret, chunkSizeBytes, maxPayloadBytes);
+        }
+    }
+
+    /** Production Offer path: validate the endpoint and bind before connect. */
+    public static JSONObject sendOffer(LanNetworkPath path, String host, int port, File source,
+            LanTransferStore.Offer offer, String localPeerId, String remotePeerId,
+            String sharedSecret, int chunkSizeBytes, int maxPayloadBytes, int connectTimeoutMs)
+            throws IOException, GeneralSecurityException {
+        try (Socket socket = connectOnPath(path, host, port, connectTimeoutMs)) {
             return sendOffer(socket, source, offer, localPeerId, remotePeerId,
                     sharedSecret, chunkSizeBytes, maxPayloadBytes);
         }
