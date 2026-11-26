@@ -1,6 +1,8 @@
 package com.example.devicefinder.diagnostics;
 
 import org.junit.Test;
+import org.json.JSONArray;
+import org.json.JSONObject;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
 import java.util.Arrays;
@@ -74,18 +76,25 @@ public class DiagnosticTaskEnvelopeTest {
 
     @Test public void rejectsWrongJsonPrimitiveTypesLikePythonProtocol() throws Exception {
         String encoded = task().toJson();
+        JSONObject wrongTimestamp = new JSONObject(encoded);
+        wrongTimestamp.put("createdAtEpochMs", "1800000000000");
         try {
-            DiagnosticTaskEnvelope.fromJson(encoded.replace("\\"createdAtEpochMs\\":1800000000000",
-                    "\\"createdAtEpochMs\\":\\"1800000000000\\""));
+            DiagnosticTaskEnvelope.fromJson(wrongTimestamp.toString());
             fail("string timestamp accepted");
         } catch (IllegalArgumentException expected) { }
+
+        JSONObject wrongTargets = new JSONObject(encoded);
+        JSONArray targets = new JSONArray().put(1).put("phone-b");
+        wrongTargets.put("targetParticipantIds", targets);
         try {
-            DiagnosticTaskEnvelope.fromJson(encoded.replace("\\"targetParticipantIds\\":[\\"phone-a\\",\\"phone-b\\"]",
-                    "\\"targetParticipantIds\\":[1,\\"phone-b\\"]"));
+            DiagnosticTaskEnvelope.fromJson(wrongTargets.toString());
             fail("numeric target accepted");
         } catch (IllegalArgumentException expected) { }
+
+        JSONObject wrongSchema = new JSONObject(encoded);
+        wrongSchema.put("schemaVersion", true);
         try {
-            DiagnosticTaskEnvelope.fromJson(encoded.replace("\\"schemaVersion\\":1", "\\"schemaVersion\\":true"));
+            DiagnosticTaskEnvelope.fromJson(wrongSchema.toString());
             fail("boolean schema accepted");
         } catch (IllegalArgumentException expected) { }
     }
