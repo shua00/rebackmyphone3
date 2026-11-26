@@ -21,8 +21,10 @@ public class Rescue2AdminTrustStoreTest {
         KeyPair pair = generator.generateKeyPair();
         String fingerprint = store.trustP256PublicKey(pair.getPublic().getEncoded());
         byte[] payload = "canonical-task-envelope".getBytes(StandardCharsets.UTF_8);
+        byte[] domain = "rebackmyphone3/rescue2-admin-task/v1\0".getBytes(StandardCharsets.UTF_8);
         Signature signer = Signature.getInstance("SHA256withECDSA");
         signer.initSign(pair.getPrivate());
+        signer.update(domain);
         signer.update(payload);
         byte[] signature = signer.sign();
 

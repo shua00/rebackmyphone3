@@ -22,6 +22,8 @@ public final class Rescue2AdminTrustStore {
     private static final String PREFS = "rescue2_admin_trust_v1";
     private static final String ACTIVE_PREFIX = "active.";
     private static final String REVOKED_PREFIX = "revoked.";
+    private static final byte[] SIGNATURE_DOMAIN =
+            "rebackmyphone3/rescue2-admin-task/v1\0".getBytes(StandardCharsets.UTF_8);
     private static final int MAX_KEYS = 16;
     private static final int MAX_PUBLIC_KEY_BYTES = 512;
     private static final int MAX_SIGNATURE_BYTES = 128;
@@ -41,21 +43,16 @@ public final class Rescue2AdminTrustStore {
         String activeKey = ACTIVE_PREFIX + fingerprint;
         String revokedKey = REVOKED_PREFIX + fingerprint;
         if (preferences.contains(activeKey)) return fingerprint;
-
         int activeCount = 0;
         for (String name : preferences.getAll().keySet())
             if (name.startsWith(ACTIVE_PREFIX)) activeCount++;
         if (activeCount >= MAX_KEYS) throw new IllegalStateException("Administrator trust limit reached");
-
-        boolean saved = preferences.edit()
-                .remove(revokedKey)
-                .putString(activeKey, Base64.encodeToString(key.getEncoded(), Base64.NO_WRAP))
-                .commit();
+        boolean saved = preferences.edit().remove(revokedKey)
+                .putString(activeKey, Base64.encodeToString(key.getEncoded(), Base64.NO_WRAP)).commit();
         if (!saved) throw new IllegalStateException("Unable to persist administrator trust");
         return fingerprint;
     }
 
-    /** Revocation is durable and prevents a later stale key record from being accepted. */
     public synchronized boolean revoke(String fingerprint) {
         if (!isFingerprint(fingerprint)) return false;
         String activeKey = ACTIVE_PREFIX + fingerprint;
@@ -67,15 +64,14 @@ public final class Rescue2AdminTrustStore {
     }
 
     public synchronized boolean isTrusted(String fingerprint) {
-        return isFingerprint(fingerprint)
-                && preferences.contains(ACTIVE_PREFIX + fingerprint)
+        return isFingerprint(fingerprint) && preferences.contains(ACTIVE_PREFIX + fingerprint)
                 && !preferences.getBoolean(REVOKED_PREFIX + fingerprint, false);
     }
 
-    /** Verify a detached ECDSA/SHA-256 signature over the exact supplied canonical bytes. */
-    public synchronized boolean verify(String fingerprint, byte[] signedBytes, byte[] signatureBytes) {
-        if (!isTrusted(fingerprint) || signedBytes == null || signedBytes.length == 0
-                || signedBytes.length > 16 * 1024 || signatureBytes == null
+    /** Verify a detached signature over domain-separated canonical task JSON bytes. */
+    public synchronized boolean verify(String fingerprint, byte[] canonicalTaskJson, byte[] signatureBytes) {
+        if (!isTrusted(fingerprint) || canonicalTaskJson == null || canonicalTaskJson.length == 0
+                || canonicalTaskJson.length > 16 * 1024 || signatureBytes == null
                 || signatureBytes.length == 0 || signatureBytes.length > MAX_SIGNATURE_BYTES)
             return false;
         try {
@@ -86,11 +82,27 @@ public final class Rescue2AdminTrustStore {
             if (!fingerprint(publicBytes).equals(fingerprint)) return false;
             Signature verifier = Signature.getInstance("SHA256withECDSA");
             verifier.initVerify(key);
-            verifier.update(signedBytes);
+            verifier.update(SIGNATURE_DOMAIN);
+            verifier.update(canonicalTaskJson);
             return verifier.verify(signatureBytes);
         } catch (Exception invalid) {
             return false;
         }
+    }
+
+    /** Prevents verifying a signature over JSON different from the parsed task object. */
+    public synchronized boolean verifyTaskEnvelope(DiagnosticTaskEnvelope envelope, byte[] canonicalJson,
+                                                     byte[] signatureBytes) {
+        if (envelope == null || canonicalJson == null
+                || !envelope.adminKeyFingerprint.equals(getTrustedFingerprintForKey(envelope.adminKeyFingerprint)))
+            return false;
+        byte[] expected = envelope.toJson().getBytes(StandardCharsets.UTF_8);
+        return java.util.Arrays.equals(expected, canonicalJson)
+                && verify(envelope.adminKeyFingerprint, canonicalJson, signatureBytes);
+    }
+
+    private String getTrustedFingerprintForKey(String fingerprint) {
+        return isTrusted(fingerprint) ? fingerprint : null;
     }
 
     private static PublicKey decodeP256(byte[] encoded) throws Exception {
