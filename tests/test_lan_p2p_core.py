@@ -5641,6 +5641,30 @@ class AndroidLanChatFragmentWindowAdvanceTests(unittest.TestCase):
         self.assertIn("awaitLanExecutorTermination(lanChatFragmentSendExecutor)", closer)
 
 
+class AndroidLanChatBroadcastFragmentAckRouteTests(unittest.TestCase):
+    def test_verified_live_route_does_not_skip_broadcast_recipient_admission(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        ack = extract_java_method(source, "private void processAuthenticatedLanChatFragmentAck(")
+        # A peer may already have a verified discovery route before it ACKs the
+        # first broadcast flight. That route must not bypass creation of its
+        # message-scoped recipient row and fragment bitmap.
+        self.assertIn(
+            "if (!persistedEndpointMatch && !attemptedEndpointPending && allowEndpointGrace)",
+            ack,
+        )
+        self.assertNotIn(
+            "if (!routeMatches && !persistedEndpointMatch && !attemptedEndpointPending",
+            ack,
+        )
+        self.assertLess(
+            ack.index("store.admitBroadcastFragmentAckTarget("),
+            ack.index("store.acknowledgeTargetFragment("),
+        )
+
+
 class AndroidLanChatBroadcastFragmentWindowTests(unittest.TestCase):
     def test_broadcast_long_chat_starts_with_one_bounded_flight_and_admits_scoped_ack(self):
         root = Path(__file__).resolve().parents[1]
