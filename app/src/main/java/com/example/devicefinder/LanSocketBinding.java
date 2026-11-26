@@ -4,6 +4,7 @@ import android.net.Network;
 import java.io.IOException;
 import java.net.DatagramSocket;
 import java.net.Socket;
+import java.net.InetAddress;
 
 /**
  * The only supported socket-binding boundary for LAN paths.
@@ -27,6 +28,19 @@ public final class LanSocketBinding {
         if (socket == null) throw new IllegalArgumentException("Socket is required");
         Network network = requireAndroidNetwork(path);
         network.bindSocket(socket);
+    }
+
+    /**
+     * ServerSocket cannot be passed to Network.bindSocket. Binding it to the exact local
+     * address from a Network-backed snapshot constrains inbound traffic to that interface.
+     * This is address binding, not a claim that Android has bound the ServerSocket via Network.
+     */
+    public static void validateServerSocketAddress(LanNetworkPath path, InetAddress address)
+            throws IOException {
+        requireAndroidNetwork(path);
+        if (address == null || !path.localAddress.equals(address)) {
+            throw new IOException("Server socket address does not match selected LAN path");
+        }
     }
 
     private static Network requireAndroidNetwork(LanNetworkPath path) throws IOException {
