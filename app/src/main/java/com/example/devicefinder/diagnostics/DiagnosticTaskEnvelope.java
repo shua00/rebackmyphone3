@@ -56,21 +56,24 @@ public final class DiagnosticTaskEnvelope {
         return nowEpochMs >= createdAtEpochMs && nowEpochMs < expiresAtEpochMs;
     }
 
+    /**
+     * Serialize the already-validated ASCII token fields without relying on Android's
+     * JSONObject.put implementation. This keeps the wire representation deterministic
+     * across Android/Robolectric versions and byte-compatible with the Python codec.
+     */
     public String toJson() {
-        try {
-            JSONObject json = new JSONObject();
-            json.put("schemaVersion", SCHEMA_VERSION);
-            json.put("taskId", taskId);
-            json.put("adminKeyFingerprint", adminKeyFingerprint);
-            json.put("targetParticipantIds", toArray(targetParticipantIds));
-            json.put("probeIds", toArray(probeIds));
-            json.put("createdAtEpochMs", createdAtEpochMs);
-            json.put("expiresAtEpochMs", expiresAtEpochMs);
-            json.put("nonce", nonce);
-            return json.toString();
-        } catch (JSONException impossible) {
-            throw new IllegalStateException("Unable to encode diagnostic task", impossible);
-        }
+        StringBuilder json = new StringBuilder(256);
+        json.append("{\"schemaVersion\":").append(SCHEMA_VERSION)
+                .append(",\"taskId\":\"").append(taskId)
+                .append("\",\"adminKeyFingerprint\":\"").append(adminKeyFingerprint)
+                .append("\",\"targetParticipantIds\":");
+        appendStringArray(json, targetParticipantIds);
+        json.append(",\"probeIds\":");
+        appendStringArray(json, probeIds);
+        json.append(",\"createdAtEpochMs\":").append(createdAtEpochMs)
+                .append(",\"expiresAtEpochMs\":").append(expiresAtEpochMs)
+                .append(",\"nonce\":\"").append(nonce).append("\"}");
+        return json.toString();
     }
 
     public static DiagnosticTaskEnvelope fromJson(String encoded) throws JSONException {
@@ -108,10 +111,13 @@ public final class DiagnosticTaskEnvelope {
             throw new IllegalArgumentException("Invalid " + field);
         return value;
     }
-    private static JSONArray toArray(List<String> values) {
-        JSONArray array = new JSONArray();
-        for (String value : values) array.put(value);
-        return array;
+    private static void appendStringArray(StringBuilder json, List<String> values) {
+        json.append('[');
+        for (int i = 0; i < values.size(); i++) {
+            if (i > 0) json.append(',');
+            json.append('"').append(values.get(i)).append('"');
+        }
+        json.append(']');
     }
     private static List<String> readArray(JSONArray array) throws JSONException {
         ArrayList<String> values = new ArrayList<>();
