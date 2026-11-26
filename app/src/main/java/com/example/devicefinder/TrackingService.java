@@ -5402,6 +5402,8 @@ public class TrackingService extends Service implements LocationListener {
             // canonicalization and HMAC work out of the shared sender lock and before attempt charging.
             final String senderPeerId = getUniqueDeviceId();
             final java.util.Map<String, byte[]> preparedPeerPackets = new java.util.HashMap<>();
+            final java.util.Map<String, java.util.List<byte[]>> preparedPeerFragmentPackets =
+                    new java.util.HashMap<>();
             int pendingSnapshotTargets = 0;
             for (LanChatStore.Target target : preparedTargets) {
                 if (target != null && target.peerId != null && !"acked".equals(target.status)) {
@@ -5410,16 +5412,33 @@ public class TrackingService extends Service implements LocationListener {
             }
             final long packetBuildStartedAt = android.os.SystemClock.elapsedRealtime();
             final byte[] preparedBroadcastData;
+            final java.util.List<byte[]> preparedBroadcastFragments;
             try {
                 if (pendingSnapshotTargets == 0) {
-                    preparedBroadcastData = buildAuthenticatedLanChatPacket(
-                            senderPeerId, "*", messageId, message);
+                    byte[] broadcastPacket = null;
+                    java.util.List<byte[]> broadcastFragments = null;
+                    try {
+                        broadcastPacket = buildAuthenticatedLanChatPacket(
+                                senderPeerId, "*", messageId, message);
+                    } catch (Exception oversizedSinglePacket) {
+                        broadcastFragments = buildAuthenticatedLanChatFragmentPackets(
+                                senderPeerId, "*", messageId, message);
+                    }
+                    preparedBroadcastData = broadcastPacket;
+                    preparedBroadcastFragments = broadcastFragments;
                 } else {
                     preparedBroadcastData = null;
+                    preparedBroadcastFragments = null;
                     for (LanChatStore.Target target : preparedTargets) {
                         if (target == null || target.peerId == null || "acked".equals(target.status)) continue;
-                        preparedPeerPackets.put(target.peerId,
-                                buildAuthenticatedLanChatPacket(senderPeerId, target.peerId, messageId, message));
+                        try {
+                            preparedPeerPackets.put(target.peerId,
+                                    buildAuthenticatedLanChatPacket(senderPeerId, target.peerId, messageId, message));
+                        } catch (Exception oversizedSinglePacket) {
+                            preparedPeerFragmentPackets.put(target.peerId,
+                                    buildAuthenticatedLanChatFragmentPackets(
+                                            senderPeerId, target.peerId, messageId, message));
+                        }
                     }
                 }
             } catch (Exception packetBuildFailure) {
@@ -5517,7 +5536,8 @@ public class TrackingService extends Service implements LocationListener {
                 if (!serviceDestroyed) {
                     transmitLocalUdpMessageInternal(message, messageId, socket, socketGeneration,
                             preparedTargets, targetLoadMs, senderPeerId, preparedPeerPackets,
-                            preparedBroadcastData, packetBuildMs, preparedBroadcastAddress,
+                            preparedPeerFragmentPackets, preparedBroadcastData, preparedBroadcastFragments,
+                            packetBuildMs, preparedBroadcastAddress,
                             preLockBroadcastLookupMs, preparedCachedEndpoints, endpointResolveMs);
                 }
             } finally {
@@ -5719,7 +5739,9 @@ public class TrackingService extends Service implements LocationListener {
             DatagramSocket socket, long socketGeneration,
             final List<LanChatStore.Target> savedTargets, long targetLoadMs,
             final String myId, final java.util.Map<String, byte[]> preparedPeerPackets,
-            final byte[] preparedBroadcastData, long packetBuildMs,
+            final java.util.Map<String, java.util.List<byte[]>> preparedPeerFragmentPackets,
+            final byte[] preparedBroadcastData, final java.util.List<byte[]> preparedBroadcastFragments,
+            long packetBuildMs,
             final String preparedBroadcastAddress, long preLockBroadcastLookupMs,
             final java.util.Map<String, java.net.InetSocketAddress> preparedCachedEndpoints,
             long endpointResolveMs) {
@@ -6023,17 +6045,30 @@ public class TrackingService extends Service implements LocationListener {
         boolean ackCleanupDeferred = false;
         try {
             if (totalPeerCount == 0 && !socket.isClosed()) {
-                // 没有经过 challenge 的 peer 时仅广播一次；首个匹配 messageId 的认证 ACK
-                // 只证明至少一个接收端已收到，不把该来源加入 verifiedChatPeers。
+                // Broadcast is permitted only inside the original discovery window. Long
+                // broadcast messages are sent as fragments; final chat.ack still adds the
+                // actual responder to the durable recipient ledger within that window.
                 for (String target : broadcasts) {
                     if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
                     for (int peerPort : new int[]{8888, 8887, 8889, 8890}) {
                         if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
                         try {
-                            DatagramPacket p = new DatagramPacket(preparedBroadcastData, preparedBroadcastData.length,
-                                    java.net.InetAddress.getByName(target), peerPort);
-                            hadUdpDispatchAttempt.set(true);
-                            sendLanUdpPacket(socket, p, "CHAT_BROADCAST_" + peerPort);
+                            if (preparedBroadcastData != null) {
+                                DatagramPacket p = new DatagramPacket(preparedBroadcastData,
+                                        preparedBroadcastData.length,
+                                        java.net.InetAddress.getByName(target), peerPort);
+                                hadUdpDispatchAttempt.set(true);
+                                sendLanUdpPacket(socket, p, "CHAT_BROADCAST_" + peerPort);
+                            } else if (preparedBroadcastFragments != null) {
+                                for (byte[] fragmentPacket : preparedBroadcastFragments) {
+                                    if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
+                                    DatagramPacket p = new DatagramPacket(fragmentPacket,
+                                            fragmentPacket.length,
+                                            java.net.InetAddress.getByName(target), peerPort);
+                                    hadUdpDispatchAttempt.set(true);
+                                    sendLanUdpPacket(socket, p, "CHAT_FRAGMENT_BROADCAST_" + peerPort);
+                                }
+                            }
                         } catch (Exception e) {
                             FileLogger.log(this, "CHAT", "⚠️ P2P 广播失败 port="
                                     + peerPort + ": " + e.getMessage());
@@ -6051,17 +6086,22 @@ public class TrackingService extends Service implements LocationListener {
                             // Resolve the immutable packet before charging the durable send budget.
                             // A missing prebuilt frame is a local preparation failure, not a UDP attempt.
                             byte[] peerData = preparedPeerPackets.get(peerId);
-                            if (peerData == null) {
+                            java.util.List<byte[]> peerFragments = preparedPeerFragmentPackets.get(peerId);
+                            if (peerData == null && (peerFragments == null || peerFragments.isEmpty())) {
                                 FileLogger.log(this, "CHAT", "⚠️ P2P 缺少预编码目标数据包，保留发送预算 peer="
                                         + peerId + " message=" + messageId);
                                 continue;
                             }
                             String attemptedEndpoint = peer.getAddress().getHostAddress() + ":" + peer.getPort();
-                            // Persist the exact endpoint before UDP dispatch; this confirms this
-                            // message only and does not promote the reusable peer route.
-                            // Recheck the durable target immediately before UDP dispatch.
-                            // ACK may have arrived after the recipient snapshot was loaded;
-                            // a failed ledger check must fail closed rather than resend to an ACKed peer.
+                            if (peerFragments != null) {
+                                if (!store.initializeTargetFragmentProgress(messageId, peerId, peerFragments.size())) {
+                                    FileLogger.log(this, "CHAT", "⚠️ 分片进度初始化失败，停止目标发送 message="
+                                            + messageId + " peer=" + peerId);
+                                    continue;
+                                }
+                            }
+                            // Persist the exact endpoint before UDP dispatch and revalidate the
+                            // immutable recipient snapshot immediately before any datagram.
                             long targetAttemptDbStartedAt = android.os.SystemClock.elapsedRealtime();
                             boolean targetAttemptAllowed;
                             try {
@@ -6075,17 +6115,59 @@ public class TrackingService extends Service implements LocationListener {
                                 }
                             }
                             if (!targetAttemptAllowed) continue;
-                            DatagramPacket p = new DatagramPacket(peerData, peerData.length,
-                                    peer.getAddress(), peer.getPort());
-                            hadUdpDispatchAttempt.set(true);
-                            sendLanUdpPacket(socket, p, verifiedRoutePeerIds.contains(peerId)
-                                    ? "CHAT_UNICAST_VERIFIED" : "CHAT_UNICAST_CACHED_ENDPOINT");
+                            boolean dispatchedAny = false;
+                            if (peerData != null) {
+                                DatagramPacket p = new DatagramPacket(peerData, peerData.length,
+                                        peer.getAddress(), peer.getPort());
+                                hadUdpDispatchAttempt.set(true);
+                                sendLanUdpPacket(socket, p, verifiedRoutePeerIds.contains(peerId)
+                                        ? "CHAT_UNICAST_VERIFIED" : "CHAT_UNICAST_CACHED_ENDPOINT");
+                                dispatchedAny = true;
+                            } else {
+                                String bitmap = store.loadTargetFragmentAckBitmap(messageId, peerId);
+                                if (bitmap == null || bitmap.length() != peerFragments.size()) {
+                                    FileLogger.log(this, "CHAT", "⚠️ 分片 ACK 位图缺失/不一致，拒绝发送 message="
+                                            + messageId + " peer=" + peerId);
+                                    continue;
+                                }
+                                int firstMissing = -1;
+                                for (int i = 0; i < bitmap.length(); i++) {
+                                    if (bitmap.charAt(i) == '0') { firstMissing = i; break; }
+                                }
+                                int windowStart = firstMissing >= 0 ? firstMissing : peerFragments.size() - 1;
+                                int windowEnd = Math.min(peerFragments.size(), windowStart + 8);
+                                // Bounded selective-repeat window. Already ACKed fragments are
+                                // skipped; when all are ACKed, resend the final fragment as a
+                                // completion probe until the whole-message chat.ack arrives.
+                                for (int i = windowStart; i < windowEnd; i++) {
+                                    if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
+                                    if (bitmap.charAt(i) == '1') continue;
+                                    byte[] fragmentPacket = peerFragments.get(i);
+                                    DatagramPacket p = new DatagramPacket(fragmentPacket,
+                                            fragmentPacket.length, peer.getAddress(), peer.getPort());
+                                    hadUdpDispatchAttempt.set(true);
+                                    sendLanUdpPacket(socket, p, verifiedRoutePeerIds.contains(peerId)
+                                            ? "CHAT_FRAGMENT_UNICAST_VERIFIED"
+                                            : "CHAT_FRAGMENT_UNICAST_CACHED_ENDPOINT");
+                                    dispatchedAny = true;
+                                }
+                                if (!dispatchedAny && firstMissing < 0) {
+                                    byte[] finalProbe = peerFragments.get(peerFragments.size() - 1);
+                                    DatagramPacket p = new DatagramPacket(finalProbe, finalProbe.length,
+                                            peer.getAddress(), peer.getPort());
+                                    hadUdpDispatchAttempt.set(true);
+                                    sendLanUdpPacket(socket, p, "CHAT_FRAGMENT_COMPLETION_PROBE");
+                                    dispatchedAny = true;
+                                }
+                                FileLogger.logD("CHAT", "P2P fragment window message=" + messageId
+                                        + " peer=" + peerId + " start=" + windowStart
+                                        + " end=" + windowEnd + " count=" + peerFragments.size()
+                                        + " dispatched=" + dispatchedAny);
+                            }
+                            if (!dispatchedAny) continue;
                             final String successfulEndpoint = peer.getAddress().getHostAddress() + ":" + peer.getPort();
                             final LanChatStore endpointStore = store;
                             try {
-                                // markAttempt() durably records only the attempted endpoint before
-                                // UDP dispatch. ACK validation still requires this post-send success
-                                // record (or a live verified route); keep the write off the FIFO lock.
                                 lanChatPeerExecutor.execute(() -> {
                                     long endpointPersistStartedAt = android.os.SystemClock.elapsedRealtime();
                                     boolean endpointPersisted = endpointStore != null
@@ -6101,9 +6183,6 @@ public class TrackingService extends Service implements LocationListener {
                                     }
                                 });
                             } catch (java.util.concurrent.RejectedExecutionException rejected) {
-                                // ACK acceptance requires successful-send evidence. If the
-                                // maintenance lane rejects this secondary write, persist it inline
-                                // as a rare saturation fallback rather than accepting last_attempt_endpoint.
                                 boolean endpointPersisted = endpointStore != null
                                         && endpointStore.recordSuccessfulSendEndpoint(
                                                 messageId, peerId, successfulEndpoint);
@@ -6358,6 +6437,32 @@ public class TrackingService extends Service implements LocationListener {
         return LanP2pProtocol.encode(packet, RESCUE_SECRET);
     }
 
+    /** Build one logical long message as independently authenticated, MTU-bounded fragments. */
+    private java.util.List<byte[]> buildAuthenticatedLanChatFragmentPackets(
+            String senderId, String targetPeerId, String messageId, String body) throws Exception {
+        java.util.List<LanP2pFragments.Fragment> fragments = LanP2pFragments.split(body);
+        java.util.List<byte[]> packets = new java.util.ArrayList<>(fragments.size());
+        long createdAtMs = System.currentTimeMillis();
+        for (LanP2pFragments.Fragment fragment : fragments) {
+            JSONObject packet = LanP2pProtocol.create(
+                    "chat.fragment", senderId, "android", "android-main");
+            packet.put("message_id", messageId);
+            packet.put("target_peer_id", targetPeerId);
+            packet.put("created_at_ms", createdAtMs);
+            packet.put("fragment_index", fragment.index);
+            packet.put("fragment_count", fragment.count);
+            packet.put("total_bytes", fragment.totalBytes);
+            packet.put("sha256", fragment.sha256);
+            packet.put("fragment_data", fragment.base64Data);
+            byte[] encoded = LanP2pProtocol.encode(packet, RESCUE_SECRET);
+            if (encoded.length > LanP2pProtocol.MAX_DATAGRAM_BYTES) {
+                throw new IllegalArgumentException("Authenticated chat fragment exceeds UDP datagram limit");
+            }
+            packets.add(encoded);
+        }
+        return packets;
+    }
+
     private boolean handleAuthenticatedLanPacket(DatagramSocket socket, DatagramPacket packet,
                                                    JSONObject envelope, long packetReceivedAtElapsedMs) {
         try {
@@ -6484,6 +6589,30 @@ public class TrackingService extends Service implements LocationListener {
                 }
                 return true;
             }
+            if ("chat.fragment.ack".equals(type)) {
+                String messageId = envelope.optString("message_id", "");
+                String targetId = envelope.optString("target_peer_id", "");
+                int sourcePort = packet.getPort();
+                int fragmentIndex = envelope.optInt("fragment_index", -1);
+                if (messageId.isEmpty() || senderId.isEmpty()
+                        || senderId.equals(getUniqueDeviceId())
+                        || !getUniqueDeviceId().equals(targetId)
+                        || fragmentIndex < 0 || fragmentIndex >= LanP2pFragments.MAX_FRAGMENTS
+                        || !"received".equals(envelope.optString("status", ""))
+                        || !(sourcePort == 8888 || sourcePort == 8887
+                             || sourcePort == 8889 || sourcePort == 8890)) return true;
+                final java.net.InetAddress sourceAddress = packet.getAddress();
+                final LanChatStore store = lanChatStore;
+                try {
+                    lanChatAckExecutor.execute(() -> processAuthenticatedLanChatFragmentAck(
+                            messageId, senderId, sourceAddress, sourcePort, fragmentIndex,
+                            store, packetReceivedAtElapsedMs, true));
+                } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                    FileLogger.log(this, "CHAT", "⚠️ fragment ACK IO 队列已满，保留位图待重传 message="
+                            + messageId + " peer=" + senderId + " index=" + fragmentIndex);
+                }
+                return true;
+            }
             if ("chat.ack".equals(type)) {
                 String messageId = envelope.optString("message_id", "");
                 String targetId = envelope.optString("target_peer_id", "");
@@ -6598,6 +6727,60 @@ public class TrackingService extends Service implements LocationListener {
      * cannot lose a race against the peer.ack route-persistence task on the IO pool.
      * This grace never bypasses either routeMatches or persistedEndpointMatch.
      */
+    /** Persist selective fragment ACKs only from the verified/successfully-used peer endpoint. */
+    private void processAuthenticatedLanChatFragmentAck(String messageId, String senderId,
+            java.net.InetAddress sourceAddress, int sourcePort, int fragmentIndex,
+            LanChatStore store, long packetReceivedAtElapsedMs, boolean allowEndpointGrace) {
+        if (store == null || sourceAddress == null) return;
+        java.net.InetSocketAddress verified = verifiedChatPeers.get(senderId);
+        boolean routeMatches = verified != null && verified.getAddress().equals(sourceAddress)
+                && verified.getPort() == sourcePort;
+        boolean persistedEndpointMatch = !routeMatches && store.matchesExpectedAckEndpoint(
+                messageId, senderId, sourceAddress.getHostAddress(), sourcePort);
+        boolean attemptedEndpointPending = !routeMatches && !persistedEndpointMatch
+                && store.matchesAttemptedAckEndpoint(messageId, senderId,
+                        sourceAddress.getHostAddress(), sourcePort);
+        if (!routeMatches && !persistedEndpointMatch) {
+            if (allowEndpointGrace && attemptedEndpointPending) {
+                String key = "fragment:" + messageId + ":" + senderId + ":" + fragmentIndex;
+                if (pendingChatAckRouteRechecks.add(key)) {
+                    boolean scheduled = scheduleLanChatTask("fragment-ack-endpoint-recheck", () -> {
+                        pendingChatAckRouteRechecks.remove(key);
+                        try {
+                            lanChatAckExecutor.execute(() -> processAuthenticatedLanChatFragmentAck(
+                                    messageId, senderId, sourceAddress, sourcePort, fragmentIndex,
+                                    store, packetReceivedAtElapsedMs, false));
+                        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                            FileLogger.log(this, "CHAT", "fragment ACK endpoint recheck queue full message="
+                                    + messageId + " peer=" + senderId);
+                        }
+                    }, 200L);
+                    if (scheduled) return;
+                    pendingChatAckRouteRechecks.remove(key);
+                }
+            }
+            FileLogger.logD("CHAT", "P2P fragment ACK rejected message=" + messageId
+                    + " peer=" + senderId + " index=" + fragmentIndex
+                    + " reason=unverified_endpoint");
+            return;
+        }
+        boolean saved = store.acknowledgeTargetFragment(messageId, senderId, fragmentIndex);
+        if (!saved) {
+            FileLogger.log(this, "CHAT", "⚠️ 分片 ACK 未能写入固定收件人位图 message="
+                    + messageId + " peer=" + senderId + " index=" + fragmentIndex);
+            return;
+        }
+        String bitmap = store.loadTargetFragmentAckBitmap(messageId, senderId);
+        int acked = 0;
+        if (bitmap != null) for (int i = 0; i < bitmap.length(); i++) {
+            if (bitmap.charAt(i) == '1') acked++;
+        }
+        FileLogger.logD("CHAT", "P2P fragment ACK persisted message=" + messageId
+                + " peer=" + senderId + " index=" + fragmentIndex
+                + " acked=" + acked + "/" + (bitmap == null ? 0 : bitmap.length())
+                + " finalDelivery=false");
+    }
+
     private void processAuthenticatedLanChatAck(String messageId, String senderId,
             java.net.InetAddress sourceAddress, int sourcePort, LanChatStore store,
             long packetReceivedAtElapsedMs, boolean allowDiscoveryGrace) {
