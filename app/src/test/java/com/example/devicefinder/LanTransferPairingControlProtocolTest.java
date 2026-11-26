@@ -27,6 +27,28 @@ public class LanTransferPairingControlProtocolTest {
         try { LanTransferPairingControlProtocol.decode(encoded);fail("unknown version rejected"); }
         catch(java.io.IOException expected) { }
     }
+    @Test public void acknowledgementEncodesReadyRejectedAndCancelledDecisions() throws Exception {
+        for (byte status : new byte[]{0, 1, 2, 3}) {
+            byte[] payload = status == 1 || status == 2
+                    ? new byte[33] : new byte[]{status};
+            payload[0] = status;
+            LanTransferPairingControlProtocol.Message message =
+                    new LanTransferPairingControlProtocol.Message(
+                            LanTransferPairingControlProtocol.Type.ACK,
+                            SESSION, "peer-b", "peer-a", 4L, payload);
+            LanTransferPairingControlProtocol.Message decoded =
+                    LanTransferPairingControlProtocol.decode(
+                            LanTransferPairingControlProtocol.encode(message));
+            assertArrayEquals(payload, decoded.payload);
+        }
+        try {
+            new LanTransferPairingControlProtocol.Message(
+                    LanTransferPairingControlProtocol.Type.ACK,
+                    SESSION, "peer-b", "peer-a", 4L, new byte[]{2});
+            fail("rejection ACK requires its authenticated proof");
+        } catch (IllegalArgumentException expected) { }
+    }
+
     @Test public void controlMessageRejectsIdentityAndSequenceErrors() {
         try { new LanTransferPairingControlProtocol.Message(LanTransferPairingControlProtocol.Type.CANCEL,
                 SESSION,"peer-a","peer-a",1,new byte[0]);fail("same peer rejected"); }

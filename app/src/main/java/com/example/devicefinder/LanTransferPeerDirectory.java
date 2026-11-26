@@ -22,12 +22,15 @@ public final class LanTransferPeerDirectory {
 
     public static final class Candidate {
         public final String peerId, host, networkFingerprint, source;
-        public final int port;
+        public final int port, pairingPort;
         public final long lastSeenAtMs;
-        private Candidate(String id, String address, int tcpPort, String network, String via, long seen) {
-            peerId=id; host=address; port=tcpPort; networkFingerprint=network; source=via; lastSeenAtMs=seen;
+        private Candidate(String id, String address, int tcpPort, int controlPort,
+                String network, String via, long seen) {
+            peerId=id; host=address; port=tcpPort; pairingPort=controlPort;
+            networkFingerprint=network; source=via; lastSeenAtMs=seen;
         }
         public boolean isConnectable() { return port >= 1 && port <= 65535; }
+        public boolean isPairingConnectable() { return pairingPort >= 1 && pairingPort <= 65535; }
         public boolean isAuthenticated() { return false; }
     }
     private LanTransferPeerDirectory() {}
@@ -46,14 +49,25 @@ public final class LanTransferPeerDirectory {
                 .getString(KEY_CURRENT_NETWORK, null);
     }
     public static void recordFileDiscoveryCandidate(Context c, String id, String host, int port,
-            String network, long now) { record(c,id,host,port,network,SOURCE_FILE_DISCOVERY,now); }
+            String network, long now) {
+        record(c, id, host, port, LanTransferPairingControlProtocol.DEFAULT_PORT,
+                network, SOURCE_FILE_DISCOVERY, now);
+    }
+    public static void recordFileDiscoveryCandidate(Context c, String id, String host,
+            int filePort, int pairingPort, String network, long now) {
+        record(c, id, host, filePort, pairingPort, network, SOURCE_FILE_DISCOVERY, now);
+    }
     /** Optional chat hint. It is usable only when no fresh file-discovery lease exists. */
     public static void recordChatDiscoveryHint(Context c, String id, String host, int port,
-            String network, long now) { record(c,id,host,port,network,SOURCE_CHAT_HINT,now); }
+            String network, long now) {
+        record(c, id, host, port, LanTransferPairingControlProtocol.DEFAULT_PORT,
+                network, SOURCE_CHAT_HINT, now);
+    }
 
     private static void record(Context context, String id, String host, int port,
-            String network, String source, long now) {
-        if (context == null || !validPeerId(id) || !validIpv4(host) || port < 0 || port > 65535
+            int pairingPort, String network, String source, long now) {
+        if (context == null || !validPeerId(id) || !validIpv4(host)
+                || port < 0 || port > 65535 || pairingPort < 1 || pairingPort > 65535
                 || !validFingerprint(network) || now <= 0L
                 || !(SOURCE_FILE_DISCOVERY.equals(source) || SOURCE_CHAT_HINT.equals(source)))
             throw new IllegalArgumentException("Invalid LAN transfer discovery candidate");
@@ -65,7 +79,7 @@ public final class LanTransferPeerDirectory {
                 if (old.peerId.equals(id) && old.networkFingerprint.equals(network)
                         && old.source.equals(source)) next.remove(i);
             }
-            next.add(new Candidate(id,host,port,network,source,now));
+            next.add(new Candidate(id,host,port,pairingPort,network,source,now));
             prune(next,now);
             Collections.sort(next,(a,b)->Long.compare(b.lastSeenAtMs,a.lastSeenAtMs));
             while(next.size()>MAX_ENTRIES*2) next.remove(next.size()-1);
@@ -129,11 +143,14 @@ public final class LanTransferPeerDirectory {
             for(int i=0;i<rows.length() && i<MAX_ENTRIES*4;i++) {
                 JSONObject row=rows.optJSONObject(i); if(row==null)continue;
                 String id=row.optString("peer_id",""), host=row.optString("host","");
-                int port=row.optInt("port",-1); String network=row.optString("network","");
+                int port=row.optInt("port",-1);
+                int pairingPort=row.optInt("pairing_port",LanTransferPairingControlProtocol.DEFAULT_PORT);
+                String network=row.optString("network","");
                 String source=row.optString("source",""); long seen=row.optLong("seen_at_ms",0L);
-                if(validPeerId(id)&&validIpv4(host)&&port>=0&&port<=65535&&validFingerprint(network)
+                if(validPeerId(id)&&validIpv4(host)&&port>=0&&port<=65535
+                        &&pairingPort>=1&&pairingPort<=65535&&validFingerprint(network)
                         &&(SOURCE_FILE_DISCOVERY.equals(source)||SOURCE_CHAT_HINT.equals(source))&&seen>0L)
-                    out.add(new Candidate(id,host,port,network,source,seen));
+                    out.add(new Candidate(id,host,port,pairingPort,network,source,seen));
             }
         } catch(Exception corrupt) { return new ArrayList<>(); }
         return out;
@@ -144,6 +161,7 @@ public final class LanTransferPeerDirectory {
             for(Candidate item:entries) {
                 JSONObject row=new JSONObject();
                 row.put("peer_id",item.peerId); row.put("host",item.host); row.put("port",item.port);
+                row.put("pairing_port",item.pairingPort);
                 row.put("network",item.networkFingerprint); row.put("source",item.source);
                 row.put("seen_at_ms",item.lastSeenAtMs); rows.put(row);
             }

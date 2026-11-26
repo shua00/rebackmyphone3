@@ -22,6 +22,18 @@ public class LanTransferPeerDirectoryTest {
     }
     @After public void tearDown() { LanTransferPeerDirectory.clear(context); }
 
+    @Test public void pairingEndpointRemainsConnectableBeforeCredentialGatedFileListenerStarts() {
+        LanTransferPeerDirectory.recordFileDiscoveryCandidate(context, "peer-a",
+                "192.168.1.10", 0, LanTransferPairingControlProtocol.DEFAULT_PORT,
+                "wifi:test", NOW);
+        LanTransferPeerDirectory.Candidate candidate =
+                LanTransferPeerDirectory.findCurrent(context, "peer-a", NOW + 1);
+        assertNotNull(candidate);
+        assertFalse(candidate.isConnectable());
+        assertTrue(candidate.isPairingConnectable());
+        assertEquals(LanTransferPairingControlProtocol.DEFAULT_PORT, candidate.pairingPort);
+    }
+
     @Test public void chatHintCannotOverwriteFreshFileDiscoveryEndpoint() {
         LanTransferPeerDirectory.recordFileDiscoveryCandidate(context,"peer-a","192.168.1.10",38471,"wifi:test",NOW);
         LanTransferPeerDirectory.recordChatDiscoveryHint(context,"peer-a","192.168.1.11",8888,"wifi:test",NOW+1000);

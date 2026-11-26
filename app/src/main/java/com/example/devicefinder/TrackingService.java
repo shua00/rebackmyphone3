@@ -290,6 +290,8 @@ public class TrackingService extends Service implements LocationListener {
     // Pairing control has its own TCP listener and pending in-memory ceremony state.
     private volatile LanTransferPairingControlHost lanTransferPairingControlHost;
     private volatile String lanTransferPairingControlFingerprint;
+    private final java.util.concurrent.ConcurrentHashMap<String, LanTransferPairingInitiator>
+            lanTransferPairingInitiators = new java.util.concurrent.ConcurrentHashMap<>();
     private volatile String lanTransferListenerFingerprint;
     private volatile String lanTransferCredentialsFingerprint;
     // File-transfer discovery owns a separate UDP socket/port and endpoint directory.
@@ -1045,6 +1047,22 @@ public class TrackingService extends Service implements LocationListener {
             } else if ("ACTION_LAN_TRANSFER_CREDENTIALS_UPDATED".equals(action)) {
                 executeMaintenance("lan-transfer-credentials", () ->
                         refreshLanTransferTcpListener("credentials updated"));
+            } else if ("ACTION_LAN_TRANSFER_PAIRING_QUERY".equals(action)) {
+                executeMaintenance("lan-pairing-query", this::publishPendingLanPairingSessions);
+            } else if ("ACTION_LAN_TRANSFER_PAIRING_START".equals(action)) {
+                String peerId = intent.getStringExtra("peer_id");
+                String peerHost = intent.getStringExtra("peer_host");
+                executeMaintenance("lan-pairing-start", () ->
+                        handleLanTransferPairingStart(peerId, peerHost));
+            } else if ("ACTION_LAN_TRANSFER_PAIRING_CONFIRM".equals(action)
+                    || "ACTION_LAN_TRANSFER_PAIRING_REJECT".equals(action)
+                    || "ACTION_LAN_TRANSFER_PAIRING_CANCEL".equals(action)) {
+                String sessionId = intent.getStringExtra("session_id");
+                String peerId = intent.getStringExtra("remote_peer_id");
+                String sas = intent.getStringExtra("sas");
+                String role = intent.getStringExtra("role");
+                executeMaintenance("lan-pairing-user-decision", () ->
+                        handleLanTransferPairingDecision(action, sessionId, peerId, sas, role));
             } else if ("ACTION_LAN_TRANSFER_ACCEPT".equals(action)
                     || "ACTION_LAN_TRANSFER_REJECT".equals(action)
                     || "ACTION_LAN_TRANSFER_CANCEL".equals(action)) {
@@ -2481,6 +2499,186 @@ public class TrackingService extends Service implements LocationListener {
 
 
 
+    private void publishPendingLanPairingSessions() {
+        if (serviceDestroyed || !LanTransferFeature.isEnabled(this)) return;
+        LanTransferPairingControlHost host = lanTransferPairingControlHost;
+        if (host != null) {
+            for (LanTransferPairingControlHost.Pending pending : host.pendingSessions()) {
+                String event = pending.state == LanTransferPairingSession.State.WAITING_LOCAL_CONFIRMATION
+                        ? "ACTION_LAN_TRANSFER_PAIRING_REQUESTED"
+                        : "ACTION_LAN_TRANSFER_PAIRING_UPDATED";
+                broadcastLanPairingEvent(event, pending.sessionId, pending.remotePeerId,
+                        pending.state == LanTransferPairingSession.State.WAITING_LOCAL_CONFIRMATION
+                                ? pending.sas : "",
+                        "responder", pending.state.name(), pending.expiresAtElapsedMs);
+            }
+        }
+        for (LanTransferPairingInitiator initiator : lanTransferPairingInitiators.values()) {
+            try {
+                LanTransferPairingSession.State state = initiator.state();
+                if (state == LanTransferPairingSession.State.WAITING_LOCAL_CONFIRMATION) {
+                    broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_REQUESTED",
+                            initiator.sessionId(), initiator.remotePeerId(),
+                            initiator.shortAuthenticationCode(), "initiator", state.name(), 0L);
+                } else {
+                    broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                            initiator.sessionId(), initiator.remotePeerId(), "",
+                            "initiator", state.name(), 0L);
+                }
+            } catch (IllegalStateException expired) {
+                lanTransferPairingInitiators.remove(initiator.sessionId(), initiator);
+            }
+        }
+    }
+
+    private void handleLanTransferPairingStart(String peerId, String requestedHost) {
+        if (serviceDestroyed || !LanTransferFeature.isEnabled(this)) return;
+        try {
+            LanTransferPeerDirectory.Candidate candidate = LanTransferPeerDirectory.findCurrent(
+                    this, peerId, System.currentTimeMillis());
+            if (candidate == null || !candidate.isPairingConnectable()
+                    || requestedHost == null || !candidate.host.equals(requestedHost))
+                throw new SecurityException("Pairing endpoint is not a fresh discovered candidate");
+            LanTransferPairingInitiator initiator = LanTransferPairingInitiator.connect(
+                    getUniqueDeviceId(), peerId, java.net.InetAddress.getByName(candidate.host),
+                    candidate.pairingPort, 5000, 10000);
+            if (lanTransferPairingInitiators.putIfAbsent(initiator.sessionId(), initiator) != null) {
+                initiator.close();
+                throw new IllegalStateException("Pairing session identifier collision");
+            }
+            broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_REQUESTED",
+                    initiator.sessionId(), peerId, initiator.shortAuthenticationCode(),
+                    "initiator", "WAITING_LOCAL_CONFIRMATION",
+                    android.os.SystemClock.elapsedRealtime() + LanTransferPairingControlHost.SESSION_TIMEOUT_MS);
+        } catch (Exception failure) {
+            FileLogger.log(this, "LAN_TRANSFER", "Pairing initiation failed: "
+                    + failure.getClass().getSimpleName());
+            broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED", "",
+                    peerId, "", "initiator", "FAILED", 0L);
+        }
+    }
+
+    private void handleLanTransferPairingDecision(String action, String sessionId,
+            String peerId, String sas, String role) {
+        if (serviceDestroyed || sessionId == null || sessionId.isEmpty()
+                || peerId == null || peerId.isEmpty()) return;
+        LanTransferPairingInitiator initiator = lanTransferPairingInitiators.get(sessionId);
+        try {
+            if ("ACTION_LAN_TRANSFER_PAIRING_CONFIRM".equals(action)) {
+                if (initiator != null) {
+                    LanTransferPairingSession.State state;
+                    if (initiator.state() == LanTransferPairingSession.State.WAITING_LOCAL_CONFIRMATION)
+                        state = initiator.confirmLocal(sas, 5000, 10000);
+                    else
+                        state = initiator.retryConfirmation(5000, 10000);
+                    broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                            sessionId, peerId, "", "initiator", state.name(), 0L);
+                    if (state == LanTransferPairingSession.State.WAITING_REMOTE_CONFIRMATION)
+                        scheduleLanPairingRetry(sessionId);
+                    else if (state == LanTransferPairingSession.State.REJECTED
+                            || state == LanTransferPairingSession.State.CANCELLED
+                            || state == LanTransferPairingSession.State.EXPIRED) {
+                        lanTransferPairingInitiators.remove(sessionId, initiator);
+                        initiator.close();
+                    }
+                } else {
+                    LanTransferPairingControlHost host = lanTransferPairingControlHost;
+                    if (host == null) throw new IllegalStateException("Pairing responder is unavailable");
+                    LanTransferPairingSession.State state = host.state(sessionId, peerId);
+                    if (state == null)
+                        throw new IllegalArgumentException("Unknown or expired pairing session");
+                    if (state == LanTransferPairingSession.State.WAITING_LOCAL_CONFIRMATION)
+                        state = host.confirmLocal(sessionId, peerId, sas);
+                    broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                            sessionId, peerId, "", "responder", state.name(), 0L);
+                }
+            } else if ("ACTION_LAN_TRANSFER_PAIRING_REJECT".equals(action)) {
+                if (initiator != null) {
+                    initiator.rejectLocal(5000, 10000);
+                    lanTransferPairingInitiators.remove(sessionId, initiator);
+                } else {
+                    LanTransferPairingControlHost host = lanTransferPairingControlHost;
+                    if (host == null) throw new IllegalStateException("Pairing responder is unavailable");
+                    host.rejectLocalForRemote(sessionId, peerId);
+                }
+                broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                        sessionId, peerId, "", role, "REJECTED", 0L);
+            } else if ("ACTION_LAN_TRANSFER_PAIRING_CANCEL".equals(action)) {
+                if (initiator != null) {
+                    initiator.cancel(3000, 5000);
+                    lanTransferPairingInitiators.remove(sessionId, initiator);
+                } else {
+                    LanTransferPairingControlHost host = lanTransferPairingControlHost;
+                    if (host != null) host.cancelPendingForRemote(sessionId, peerId);
+                }
+                broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                        sessionId, peerId, "", role, "CANCELLED", 0L);
+            }
+        } catch (Exception failure) {
+            FileLogger.log(this, "LAN_TRANSFER", "Pairing decision failed: "
+                    + failure.getClass().getSimpleName());
+            broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                    sessionId, peerId, "", role, "FAILED", 0L);
+        }
+    }
+
+    private void scheduleLanPairingRetry(String sessionId) {
+        handler.postDelayed(() -> executeMaintenance("lan-pairing-retry", () -> {
+            LanTransferPairingInitiator initiator = lanTransferPairingInitiators.get(sessionId);
+            if (initiator == null || serviceDestroyed) return;
+            try {
+                LanTransferPairingSession.State current = initiator.state();
+                if (current == LanTransferPairingSession.State.EXPIRED) {
+                    lanTransferPairingInitiators.remove(sessionId, initiator);
+                    initiator.close();
+                    broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                            sessionId, initiator.remotePeerId(), "", "initiator", "EXPIRED", 0L);
+                    return;
+                }
+                if (current != LanTransferPairingSession.State.WAITING_REMOTE_CONFIRMATION) return;
+                LanTransferPairingSession.State next = initiator.retryConfirmation(3000, 5000);
+                broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                        sessionId, initiator.remotePeerId(), "", "initiator", next.name(), 0L);
+                if (next == LanTransferPairingSession.State.WAITING_REMOTE_CONFIRMATION)
+                    scheduleLanPairingRetry(sessionId);
+                else if (next == LanTransferPairingSession.State.REJECTED
+                        || next == LanTransferPairingSession.State.CANCELLED
+                        || next == LanTransferPairingSession.State.EXPIRED) {
+                    lanTransferPairingInitiators.remove(sessionId, initiator);
+                    initiator.close();
+                }
+            } catch (Exception retryFailure) {
+                try {
+                    if (initiator.state() == LanTransferPairingSession.State.WAITING_REMOTE_CONFIRMATION)
+                        scheduleLanPairingRetry(sessionId);
+                } catch (Exception expired) {
+                    lanTransferPairingInitiators.remove(sessionId, initiator);
+                    initiator.close();
+                }
+            }
+        }), 1000L);
+    }
+
+    private void broadcastLanPairingEvent(String action, String sessionId, String peerId,
+            String sas, String role, String state, long expiresAtElapsedMs) {
+        Intent event = new Intent(action).setPackage(getPackageName())
+                .putExtra("session_id", sessionId)
+                .putExtra("remote_peer_id", peerId)
+                .putExtra("sas", sas)
+                .putExtra("role", role)
+                .putExtra("state", state)
+                .putExtra("expires_at_elapsed_ms", expiresAtElapsedMs);
+        sendBroadcast(event);
+    }
+
+    private void closeLanTransferPairingInitiators() {
+        for (java.util.Map.Entry<String, LanTransferPairingInitiator> entry
+                : lanTransferPairingInitiators.entrySet()) {
+            if (lanTransferPairingInitiators.remove(entry.getKey(), entry.getValue()))
+                entry.getValue().close();
+        }
+    }
+
     /** Explicit UI/service action boundary for incoming Offer acceptance, rejection and cancellation. */
     private void handleLanTransferUserAction(String action, String transferId) {
         if (serviceDestroyed) return;
@@ -2652,6 +2850,7 @@ public class TrackingService extends Service implements LocationListener {
     private void refreshLanTransferPairingControlHost(String reason) {
         if (!LanTransferFeature.isEnabled(this) || serviceDestroyed) {
             stopLanTransferPairingControlHost();
+            closeLanTransferPairingInitiators();
             return;
         }
         try {
@@ -2688,14 +2887,18 @@ public class TrackingService extends Service implements LocationListener {
                         && lanTransferPairingControlHost.isRunning()) return;
                 closeLanTransferPairingControlHostLocked();
                 LanTransferPairingControlHost host = new LanTransferPairingControlHost(
-                        getUniqueDeviceId(), (sessionId, remotePeerId, sas, expiresAtElapsedMs) -> {
-                    Intent event = new Intent("ACTION_LAN_TRANSFER_PAIRING_REQUESTED")
-                            .setPackage(getPackageName())
-                            .putExtra("session_id", sessionId)
-                            .putExtra("remote_peer_id", remotePeerId)
-                            .putExtra("sas", sas)
-                            .putExtra("expires_at_elapsed_ms", expiresAtElapsedMs);
-                    sendBroadcast(event);
+                        getUniqueDeviceId(), new LanTransferPairingControlHost.Listener() {
+                    @Override public void onPairingRequested(String sessionId, String remotePeerId,
+                            String sas, long expiresAtElapsedMs) {
+                        broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_REQUESTED",
+                                sessionId, remotePeerId, sas, "responder",
+                                "WAITING_LOCAL_CONFIRMATION", expiresAtElapsedMs);
+                    }
+                    @Override public void onPairingStateChanged(String sessionId, String remotePeerId,
+                            LanTransferPairingSession.State state) {
+                        broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                                sessionId, remotePeerId, "", "responder", state.name(), 0L);
+                    }
                 });
                 host.start(bindAddress, LanTransferPairingControlProtocol.DEFAULT_PORT);
                 lanTransferPairingControlHost = host;
@@ -7619,6 +7822,7 @@ public class TrackingService extends Service implements LocationListener {
         if (startupToStop != null) startupToStop.interrupt();
         // Stop the independent file-transfer listener before closing its SQLite ledger.
         closeLanTransferResources();
+        closeLanTransferPairingInitiators();
         // Stop UDP ingress before shutting down its consumers. A packet already being
         // handled may still be rejected during teardown; its sender will retry because
         // no ACK can be sent on the closed socket. Accepted IO tasks are drained below.

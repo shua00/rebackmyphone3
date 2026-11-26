@@ -47,8 +47,20 @@ public final class LanTransferActivity extends Activity {
     private LanTransferStore.Transfer pendingSaveTransfer;
     private LanTransferPeerDirectory.Candidate selectedDestination;
 
+    private String lastPairingPromptSessionId;
     private final BroadcastReceiver updates = new BroadcastReceiver() {
-        @Override public void onReceive(Context context, Intent intent) { refreshOffers(); }
+        @Override public void onReceive(Context context, Intent intent) {
+            String action = intent == null ? null : intent.getAction();
+            if ("ACTION_LAN_TRANSFER_PAIRING_REQUESTED".equals(action)) {
+                showPairingPrompt(intent);
+            } else if ("ACTION_LAN_TRANSFER_PAIRING_UPDATED".equals(action)) {
+                String state = intent.getStringExtra("state");
+                if (status != null && state != null)
+                    status.setText("配对状态：" + state + " · " + intent.getStringExtra("remote_peer_id"));
+            } else {
+                refreshOffers();
+            }
+        }
     };
 
     @Override protected void onCreate(Bundle state) {
@@ -81,6 +93,8 @@ public final class LanTransferActivity extends Activity {
         refreshButton.setOnClickListener(v -> refreshOffers());
         IntentFilter filter = new IntentFilter("ACTION_LAN_TRANSFER_UPDATED");
         filter.addAction("ACTION_LAN_TRANSFER_PEERS_UPDATED");
+        filter.addAction("ACTION_LAN_TRANSFER_PAIRING_REQUESTED");
+        filter.addAction("ACTION_LAN_TRANSFER_PAIRING_UPDATED");
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
                 registerReceiver(updates, filter, Context.RECEIVER_NOT_EXPORTED);
@@ -94,51 +108,108 @@ public final class LanTransferActivity extends Activity {
     }
 
     private void showPairingDialog(String suggestedPeerId) {
-        LinearLayout form = new LinearLayout(this);
-        form.setOrientation(LinearLayout.VERTICAL);
-        int pad = (int) (16 * getResources().getDisplayMetrics().density);
-        form.setPadding(pad, pad, pad, 0);
-        TextView identity = new TextView(this);
-        identity.setText("本机设备 ID（提供给对端）：\n" + TrackingService.getUniqueDeviceId(this));
-        form.addView(identity);
-        EditText secret = new EditText(this);
-        secret.setSingleLine(true);
-        secret.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        secret.setHint("双方一致的共享密钥（至少 32 字节）");
-        form.addView(secret);
-        EditText peer = new EditText(this);
-        peer.setSingleLine(true);
-        peer.setHint("对端设备 ID（精确匹配）");
-        if (!TextUtils.isEmpty(suggestedPeerId)) peer.setText(suggestedPeerId);
-        form.addView(peer);
+        if (!TextUtils.isEmpty(suggestedPeerId)) {
+            LanTransferPeerDirectory.Candidate candidate = LanTransferPeerDirectory.findCurrent(
+                    this, suggestedPeerId, System.currentTimeMillis());
+            if (candidate == null || !candidate.isPairingConnectable()) {
+                Toast.makeText(this, "设备发现记录已过期，请刷新设备列表", Toast.LENGTH_LONG).show();
+                refreshPeerList();
+                return;
+            }
+            startPairing(candidate);
+            return;
+        }
+        List<LanTransferPeerDirectory.Candidate> candidates =
+                LanTransferPeerDirectory.loadCurrent(this, System.currentTimeMillis());
+        if (candidates.isEmpty()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("暂未发现可配对设备")
+                    .setMessage("请确认对端已开启文件传输并处于同一可互通局域网，然后刷新设备列表。")
+                    .setPositiveButton("知道了", null)
+                    .setNeutralButton("清除全部配对", (d, w) -> confirmClearPairing())
+                    .show();
+            return;
+        }
+        String[] labels = new String[candidates.size()];
+        for (int i = 0; i < candidates.size(); i++) {
+            LanTransferPeerDirectory.Candidate item = candidates.get(i);
+            labels[i] = item.peerId + " · " + item.host
+                    + (LanTransferPeerDirectory.SOURCE_CHAT_HINT.equals(item.source)
+                        ? " · 对讲发现提示" : " · 文件传输发现");
+        }
         new AlertDialog.Builder(this)
-            .setTitle("LAN 文件传输安全配对")
-            .setMessage("两台设备使用相同共享密钥，并分别填写对方设备 ID。只信任明确配置的对端；密钥由 AndroidKeyStore 加密保存。")
-            .setView(form)
-            .setNeutralButton("清除全部配对", (dialog, which) -> confirmClearPairing())
-            .setNegativeButton("取消", null)
-            .setPositiveButton("保存并启用", (dialog, which) -> {
-                String value = secret.getText().toString();
-                String peerId = peer.getText().toString().trim();
-                secret.setText("");
-                if (value.getBytes(StandardCharsets.UTF_8).length < 32 || peerId.isEmpty()) {
-                    Toast.makeText(this, "共享密钥至少 32 字节，且必须填写对端 ID", Toast.LENGTH_LONG).show();
-                    return;
-                }
-                try {
-                    LanTransferCredentials.Value existing = LanTransferCredentials.load(this);
-                    Set<String> trustedPeerIds = LanTransferCredentials.mergeTrustedPeerIds(
-                            existing == null ? Collections.emptySet() : existing.trustedPeerIds,
-                            existing == null ? null : existing.sharedSecret, value, peerId);
-                    LanTransferCredentials.provision(this, value, trustedPeerIds);
-                    Toast.makeText(this, "配对凭据已保存；已保留原可信设备并添加新设备", Toast.LENGTH_LONG).show();
-                    refreshOffers();
-                } catch (Exception failure) {
-                    Toast.makeText(this, "配对保存失败：" + failure.getClass().getSimpleName(), Toast.LENGTH_LONG).show();
-                }
-            }).show();
+                .setTitle("选择要安全配对的设备")
+                .setItems(labels, (dialog, which) -> startPairing(candidates.get(which)))
+                .setNeutralButton("清除全部配对", (dialog, which) -> confirmClearPairing())
+                .setNegativeButton("取消", null)
+                .show();
     }
 
+    private void startPairing(LanTransferPeerDirectory.Candidate candidate) {
+        if (candidate == null || !candidate.isPairingConnectable()) return;
+        Intent intent = new Intent(this, TrackingService.class)
+                .setAction("ACTION_LAN_TRANSFER_PAIRING_START")
+                .putExtra("peer_id", candidate.peerId)
+                .putExtra("peer_host", candidate.host);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent);
+            else startService(intent);
+            status.setText("正在与 " + candidate.peerId + " 建立安全配对握手…");
+        } catch (Exception failure) {
+            Toast.makeText(this, "无法启动配对：" + failure.getClass().getSimpleName(),
+                    Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void showPairingPrompt(Intent event) {
+        if (isFinishing() || isDestroyed()) return;
+        String sessionId = event.getStringExtra("session_id");
+        String peerId = event.getStringExtra("remote_peer_id");
+        String sas = event.getStringExtra("sas");
+        String role = event.getStringExtra("role");
+        if (TextUtils.isEmpty(sessionId) || TextUtils.isEmpty(peerId)
+                || TextUtils.isEmpty(sas) || sessionId.equals(lastPairingPromptSessionId)) return;
+        lastPairingPromptSessionId = sessionId;
+        String roleText = "initiator".equals(role) ? "你发起的配对" : "收到对端配对请求";
+        String message = roleText + "\n对端设备 ID：" + peerId
+                + "\n双方设备应显示相同的六位安全码：\n\n" + sas
+                + "\n\n请通过可信方式核对两台设备上的安全码。只有完全一致才确认。";
+        new AlertDialog.Builder(this)
+                .setTitle("LAN 文件传输安全配对")
+                .setMessage(message)
+                .setPositiveButton("安全码一致，确认", (dialog, which) ->
+                        submitPairingDecision("ACTION_LAN_TRANSFER_PAIRING_CONFIRM",
+                                sessionId, peerId, sas, role))
+                .setNegativeButton("拒绝", (dialog, which) ->
+                        submitPairingDecision("ACTION_LAN_TRANSFER_PAIRING_REJECT",
+                                sessionId, peerId, sas, role))
+                .setNeutralButton("取消本次配对", (dialog, which) ->
+                        submitPairingDecision("ACTION_LAN_TRANSFER_PAIRING_CANCEL",
+                                sessionId, peerId, sas, role))
+                .setOnCancelListener(dialog -> {
+                    lastPairingPromptSessionId = null;
+                    submitPairingDecision("ACTION_LAN_TRANSFER_PAIRING_CANCEL",
+                            sessionId, peerId, sas, role);
+                })
+                .show();
+    }
+
+    private void submitPairingDecision(String action, String sessionId,
+            String peerId, String sas, String role) {
+        Intent intent = new Intent(this, TrackingService.class).setAction(action)
+                .putExtra("session_id", sessionId)
+                .putExtra("remote_peer_id", peerId)
+                .putExtra("sas", sas)
+                .putExtra("role", role);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent);
+            else startService(intent);
+            status.setText("已提交配对决定，等待对端确认…");
+        } catch (Exception failure) {
+            Toast.makeText(this, "提交配对决定失败：" + failure.getClass().getSimpleName(),
+                    Toast.LENGTH_LONG).show();
+        }
+    }
 
     private void confirmClearPairing() {
         if (LanTransferSenderService.hasPendingJob(this)) {
@@ -476,6 +547,14 @@ public final class LanTransferActivity extends Activity {
             return;
         }
         refreshOffers();
+        Intent pairingQuery = new Intent(this, TrackingService.class)
+                .setAction("ACTION_LAN_TRANSFER_PAIRING_QUERY");
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(pairingQuery);
+            else startService(pairingQuery);
+        } catch (Exception failure) {
+            if (status != null) status.setText("查询待处理配对失败：" + failure.getClass().getSimpleName());
+        }
     }
 
     @Override protected void onDestroy() {

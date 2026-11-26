@@ -114,7 +114,8 @@ public final class LanTransferDiscovery implements AutoCloseable {
         try { port = portProvider.getListeningPort(); }
         catch (RuntimeException unavailable) { port = 0; }
         if (port < 0 || port > 65535) port = 0;
-        byte[] payload = (MAGIC + "|" + localPeerId + "|" + port)
+        byte[] payload = (MAGIC + "|" + localPeerId + "|" + port + "|"
+                + LanTransferPairingControlProtocol.DEFAULT_PORT)
                 .getBytes(StandardCharsets.US_ASCII);
         DatagramSocket sender = null;
         try {
@@ -139,16 +140,23 @@ public final class LanTransferDiscovery implements AutoCloseable {
         String message = new String(packet.getData(), packet.getOffset(),
                 packet.getLength(), StandardCharsets.US_ASCII);
         String[] fields = message.split("\\|", -1);
-        if (fields.length != 3 || !MAGIC.equals(fields[0])
+        if ((fields.length != 3 && fields.length != 4) || !MAGIC.equals(fields[0])
                 || !fields[1].matches("[A-Za-z0-9._:-]{1,128}")) return;
         if (localPeerId.equals(fields[1])) return;
         final int port;
         try { port = Integer.parseInt(fields[2]); }
         catch (NumberFormatException invalid) { return; }
         if (port < 0 || port > 65535) return;
+        final int pairingPort;
+        try {
+            pairingPort = fields.length == 4
+                    ? Integer.parseInt(fields[3])
+                    : LanTransferPairingControlProtocol.DEFAULT_PORT;
+        } catch (NumberFormatException invalid) { return; }
+        if (pairingPort < 1 || pairingPort > 65535) return;
         try {
             LanTransferPeerDirectory.recordFileDiscoveryCandidate(context, fields[1],
-                    packet.getAddress().getHostAddress(), port, networkFingerprint,
+                    packet.getAddress().getHostAddress(), port, pairingPort, networkFingerprint,
                     System.currentTimeMillis());
             context.sendBroadcast(new Intent("ACTION_LAN_TRANSFER_PEERS_UPDATED")
                     .setPackage(context.getPackageName()));

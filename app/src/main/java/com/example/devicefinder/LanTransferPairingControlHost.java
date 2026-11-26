@@ -16,6 +16,8 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
     public interface Listener {
         void onPairingRequested(String sessionId, String remotePeerId, String sas,
                 long expiresAtElapsedMs);
+        default void onPairingStateChanged(String sessionId, String remotePeerId,
+                LanTransferPairingSession.State state) { }
     }
 
     public static final long SESSION_TIMEOUT_MS = 120_000L;
@@ -44,6 +46,7 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
         final String sas;
         final long expiresAtElapsedMs;
         final LanTransferPairingSession session;
+        volatile byte[] terminalAckPayload;
 
         Entry(String key, String sessionId, String remotePeerId, String sas,
                 long expiresAtElapsedMs, LanTransferPairingSession session) {
@@ -92,13 +95,22 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
         return current == null ? -1 : current.getBoundPort();
     }
 
+    public LanTransferPairingSession.State state(String sessionId, String remotePeerId) {
+        Entry entry = pending.get(key(sessionId, remotePeerId));
+        return entry == null ? null : entry.session.state(nowElapsedMs());
+    }
+
     public List<Pending> pendingSessions() {
         long now = nowElapsedMs();
         pruneExpired(now);
         List<Pending> result = new ArrayList<>();
         for (Entry entry : pending.values()) {
-            result.add(new Pending(entry.sessionId, entry.remotePeerId, entry.sas,
-                    entry.expiresAtElapsedMs, entry.session.state(now)));
+            LanTransferPairingSession.State state = entry.session.state(now);
+            if (state != LanTransferPairingSession.State.REJECTED
+                    && state != LanTransferPairingSession.State.CANCELLED
+                    && state != LanTransferPairingSession.State.EXPIRED)
+                result.add(new Pending(entry.sessionId, entry.remotePeerId, entry.sas,
+                        entry.expiresAtElapsedMs, state));
         }
         return Collections.unmodifiableList(result);
     }
@@ -120,6 +132,29 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
     public void cancelPending(String sessionId, String remotePeerId) {
         Entry entry = pending.remove(key(sessionId, remotePeerId));
         if (entry != null) entry.session.cancel(nowElapsedMs());
+    }
+
+    /** Retain a short-lived cancellation tombstone so the initiator learns the decision on retry. */
+    public void cancelPendingForRemote(String sessionId, String remotePeerId) {
+        Entry entry = pending.get(key(sessionId, remotePeerId));
+        if (entry == null || entry.terminalAckPayload != null) return;
+        entry.session.cancel(nowElapsedMs());
+        entry.terminalAckPayload = new byte[]{3};
+    }
+
+    /** Retain the transcript-bound rejection proof until the initiator's next retry. */
+    public void rejectLocalForRemote(String sessionId, String remotePeerId)
+            throws java.security.GeneralSecurityException {
+        Entry entry = pending.get(key(sessionId, remotePeerId));
+        if (entry == null) throw new IllegalArgumentException("Unknown or expired pairing session");
+        if (entry.terminalAckPayload != null
+                || entry.session.state(nowElapsedMs()) == LanTransferPairingSession.State.REJECTED) return;
+        byte[] proof = entry.session.rejectLocal(nowElapsedMs());
+        byte[] terminal = new byte[33];
+        terminal[0] = 2;
+        System.arraycopy(proof, 0, terminal, 1, proof.length);
+        java.util.Arrays.fill(proof, (byte) 0);
+        entry.terminalAckPayload = terminal;
     }
 
     /**
@@ -194,6 +229,12 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
             String controlKey = key(request.sessionId, request.senderPeerId);
             Entry active = pending.get(controlKey);
             if (active == null) return null;
+            byte[] terminal = active.terminalAckPayload;
+            if (terminal != null && request.type == LanTransferPairingControlProtocol.Type.CONFIRM) {
+                return new LanTransferPairingControlProtocol.Message(
+                        LanTransferPairingControlProtocol.Type.ACK, request.sessionId,
+                        localPeerId, request.senderPeerId, request.sequence, terminal.clone());
+            }
             if (request.type == LanTransferPairingControlProtocol.Type.CONFIRM
                     || request.type == LanTransferPairingControlProtocol.Type.REJECT) {
                 boolean accepted = request.type == LanTransferPairingControlProtocol.Type.CONFIRM;
@@ -210,8 +251,10 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
             } else {
                 return null;
             }
-            boolean ready = active.session.state(now)
-                    == LanTransferPairingSession.State.READY_TO_COMMIT;
+            LanTransferPairingSession.State updatedState = active.session.state(now);
+            try { listener.onPairingStateChanged(active.sessionId, active.remotePeerId, updatedState); }
+            catch (RuntimeException ignored) { }
+            boolean ready = updatedState == LanTransferPairingSession.State.READY_TO_COMMIT;
             byte[] acknowledgement;
             if (ready) {
                 byte[] proof = active.session.createLocalConfirmationProof(now);
@@ -252,8 +295,12 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
 
     private void pruneExpired(long now) {
         for (Entry entry : pending.values()) {
-            if (entry.session.state(now) == LanTransferPairingSession.State.EXPIRED)
-                pending.remove(entry.key);
+            if (now >= entry.expiresAtElapsedMs
+                    || entry.session.state(now) == LanTransferPairingSession.State.EXPIRED) {
+                pending.remove(entry.key, entry);
+                byte[] terminal = entry.terminalAckPayload;
+                if (terminal != null) java.util.Arrays.fill(terminal, (byte) 0);
+            }
         }
     }
 
@@ -273,7 +320,11 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
         server = null;
         if (current != null) current.close();
         long now = nowElapsedMs();
-        for (Entry entry : pending.values()) entry.session.cancel(now);
+        for (Entry entry : pending.values()) {
+            entry.session.cancel(now);
+            byte[] terminal = entry.terminalAckPayload;
+            if (terminal != null) java.util.Arrays.fill(terminal, (byte) 0);
+        }
         pending.clear();
     }
 }
