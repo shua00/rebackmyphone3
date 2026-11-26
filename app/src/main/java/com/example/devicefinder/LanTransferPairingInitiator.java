@@ -146,8 +146,14 @@ public final class LanTransferPairingInitiator implements AutoCloseable {
         ensureOpen();
         if (session.state(nowElapsedMs()) != LanTransferPairingSession.State.READY_TO_COMMIT)
             throw new IllegalStateException("Pairing session is not ready for durable commit");
-        LanTransferPairingCommitProof.sendCommit(networkPath, address, port, localPeerId, remotePeerId,
-                sessionId, peerSecret, nextSequence++, connectTimeoutMs, readTimeoutMs);
+        if (networkPath == null) {
+            LanTransferPairingCommitProof.sendCommit(address, port, localPeerId, remotePeerId,
+                    sessionId, peerSecret, nextSequence++, connectTimeoutMs, readTimeoutMs);
+        } else {
+            LanTransferPairingCommitProof.sendCommit(networkPath, address, port,
+                    localPeerId, remotePeerId, sessionId, peerSecret,
+                    nextSequence++, connectTimeoutMs, readTimeoutMs);
+        }
     }
 
     public synchronized void rejectLocal(int connectTimeoutMs, int readTimeoutMs)
@@ -175,8 +181,7 @@ public final class LanTransferPairingInitiator implements AutoCloseable {
                     new LanTransferPairingControlProtocol.Message(
                             LanTransferPairingControlProtocol.Type.CANCEL, sessionId,
                             localPeerId, remotePeerId, sequence, new byte[0]);
-            LanTransferPairingControlTransport.exchange(address, port, request,
-                    connectTimeoutMs, readTimeoutMs);
+            exchange(request, connectTimeoutMs, readTimeoutMs);
         } catch (Exception ignored) {
             // Local cancellation is authoritative locally; the remote session expires otherwise.
         } finally {
