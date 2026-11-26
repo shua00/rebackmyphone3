@@ -4,7 +4,13 @@ import static org.junit.Assert.*;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.robolectric.RobolectricTestRunner;
+import org.robolectric.annotation.Config;
+import org.robolectric.shadows.ShadowNetwork;
 
+@RunWith(RobolectricTestRunner.class)
+@Config(sdk = 34)
 public class LanNetworkPathTest {
     private static Inet4Address ipv4(String value) throws Exception {
         return (Inet4Address) InetAddress.getByName(value);
@@ -78,7 +84,7 @@ public class LanNetworkPathTest {
     }
 
     @Test public void serverListenerAddressMustMatchSelectedPath() throws Exception {
-        LanNetworkPath path = LanNetworkPath.fromAndroidNetwork(new android.net.Network(),
+        LanNetworkPath path = LanNetworkPath.fromAndroidNetwork(ShadowNetwork.newInstance(42),
                 "wlan0", ipv4("192.168.1.2"), 24, ipv4("192.168.1.255"));
         try {
             LanSocketBinding.validateServerSocketAddress(path, ipv4("192.168.1.3"));
