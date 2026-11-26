@@ -27,7 +27,9 @@ public class LanTransferDiscoveryTest {
             LanTransferPeerDirectory.activateNetwork(context, fingerprint);
             byte[] payload = "LTFD1|peer-remote|38471|38473".getBytes(StandardCharsets.US_ASCII);
             InetAddress loopback = InetAddress.getByName("127.0.0.1");
-            try (DatagramSocket receiver = new DatagramSocket(0, loopback);
+            // Match production: wildcard receive bind, with the selected network
+            // supplied separately by Network.bindSocket on Android.
+            try (DatagramSocket receiver = new DatagramSocket(0);
                  DatagramSocket sender = new DatagramSocket()) {
                 sender.send(new DatagramPacket(payload, payload.length, loopback, receiver.getLocalPort()));
                 byte[] buffer = new byte[256];

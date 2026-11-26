@@ -69,7 +69,10 @@ public final class LanTransferDiscovery implements AutoCloseable {
             socket.setReuseAddress(true);
             socket.setBroadcast(true);
             network.bindSocket(socket);
-            socket.bind(new InetSocketAddress(localAddress, UDP_PORT));
+            // Bind wildcard after pinning the socket to the selected Wi-Fi Network.
+            // A directed-broadcast packet's destination is the subnet broadcast address,
+            // not this device's unicast address; binding the latter can silently miss it.
+            socket.bind(new InetSocketAddress(UDP_PORT));
             socket.setSoTimeout(1000);
             receiver = socket;
             Thread worker = new Thread(this::runLoop, "LanTransfer-Discovery");
