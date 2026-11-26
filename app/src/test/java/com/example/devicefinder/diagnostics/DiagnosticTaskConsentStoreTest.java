@@ -1,0 +1,55 @@
+package com.example.devicefinder.diagnostics;
+
+import android.content.Context;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.robolectric.RobolectricTestRunner;
+import java.util.Arrays;
+import static org.junit.Assert.*;
+
+@RunWith(RobolectricTestRunner.class)
+public class DiagnosticTaskConsentStoreTest {
+    private DiagnosticTaskEnvelope task(String id, String nonce) {
+        char[] chars = new char[64];
+        Arrays.fill(chars, 'a');
+        return new DiagnosticTaskEnvelope(id, new String(chars), Arrays.asList("phone-a"),
+                Arrays.asList("android.runtime"), 1800000000000L, 1800000600000L, nonce);
+    }
+
+    @Test public void requiresExplicitApprovalAndEnforcesTerminalTransitions() {
+        Context context = org.robolectric.RuntimeEnvironment.getApplication();
+        DiagnosticTaskConsentStore store = new DiagnosticTaskConsentStore(context);
+        String fingerprint = repeat('a', 64);
+        assertTrue(store.registerPending(task("task-01", repeat('A', 22)), 1800000000100L));
+        assertEquals(DiagnosticTaskConsentStore.State.PENDING,
+                store.getState(fingerprint, "task-01", 1800000000200L));
+        assertEquals(Arrays.asList("task-01"), store.pendingTaskIds(fingerprint, 1800000000200L));
+        assertTrue(store.reject(fingerprint, "task-01", 1800000000200L));
+        assertFalse(store.approve(fingerprint, "task-01", 1800000000300L));
+        assertEquals(DiagnosticTaskConsentStore.State.REJECTED,
+                store.getState(fingerprint, "task-01", 1800000000300L));
+
+        assertTrue(store.registerPending(task("task-02", repeat('B', 22)), 1800000000100L));
+        assertTrue(store.approve(fingerprint, "task-02", 1800000000200L));
+        assertTrue(store.isApproved(fingerprint, "task-02", 1800000000300L));
+        assertTrue(store.cancel(fingerprint, "task-02", 1800000000300L));
+        assertFalse(store.markCompleted(fingerprint, "task-02", 1800000000400L));
+        assertEquals(DiagnosticTaskConsentStore.State.CANCELLED,
+                store.getState(fingerprint, "task-02", 1800000000400L));
+    }
+
+    @Test public void expiresAndPrunesOldPendingTasks() {
+        Context context = org.robolectric.RuntimeEnvironment.getApplication();
+        DiagnosticTaskConsentStore store = new DiagnosticTaskConsentStore(context);
+        assertTrue(store.registerPending(task("task-01", repeat('A', 22)), 1800000000100L));
+        assertEquals(DiagnosticTaskConsentStore.State.EXPIRED,
+                store.getState(repeat('a', 64), "task-01", 1800000600000L));
+        assertTrue(store.registerPending(task("task-01", repeat('B', 22)), 1800000600001L));
+    }
+
+    private static String repeat(char c, int count) {
+        char[] value = new char[count];
+        Arrays.fill(value, c);
+        return new String(value);
+    }
+}
