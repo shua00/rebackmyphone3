@@ -309,3 +309,15 @@
 - [ ] **Android 热点主机仍未打通**：`LanTransferDiscovery` 当前仍要求非空 Android `Network` 和非空广播地址，并调用 `Network.bindSocket()`；本地 AP 接口候选尚未进入 UDP/TCP 数据面。不能将本批 Python 改动描述为热点兼容完成。
 - [ ] 下一步：补齐 Python 各 OS 路径绑定能力及真实多网卡出口验证；Android 侧先建立显式的路径绑定能力/失败状态，再验证 AP 本地接口候选的实际收发，保持普通 Wi-Fi Network 绑定回归。
 
+
+
+## 下一批推进记录（2026-11-27）：Android 网络路径绑定边界第一步
+
+- [x] 新增 `LanSocketBinding`：UDP DatagramSocket 与 TCP Socket 共用同一显式绑定入口；仅接受携带真实 Android `Network` 的路径快照，并调用 `Network.bindSocket()`。
+- [x] 对 `LOCAL_INTERFACE_CANDIDATE` 明确 fail-closed：当前 Android 公共 Java API 没有可移植的热点 AP 接口 `SO_BINDTODEVICE` 替代方案；无 Network 候选不得被误当作已绑定接口，也不得静默走进程默认蜂窝/VPN 路由。
+- [x] `LanTransferDiscovery` 内部改为持有 `LanNetworkPath` 快照；保留旧构造器作为兼容入口，新生产调用从 `TrackingService` 传入包含接口名、地址、前缀、广播地址及 Network 的完整路径快照。
+- [x] 增加 UDP/TCP 对无 Network 热点接口候选的拒绝测试，确保候选不会被误用为可绑定路径。
+- [ ] 本批尚未把统一路径快照接入聊天 UDP listener、配对控制 TCP listener 和文件 TCP listener 的全部创建/重建路径；后续逐个接入并补充路径代数/生命周期回归，不能把本批称为全链路统一。
+- [ ] 本批没有实现热点 AP 接口 socket 绑定，也没有声称 Android 热点主机可用；需要基于 Android API/OEM 的真实能力继续研究和真机验证。无法安全绑定的设备必须显示路径不可用。
+- [ ] 本批未修改聊天消息协议、聊天持久化/ACK 状态机、对讲 UI 或文件传输协议；只调整独立文件发现 socket 的路径传递与绑定边界。
+- [ ] Python 端目前仓库根目录没有通用 `requirements.txt`、`pyproject.toml` 或 `setup.py`；`psutil` 仍是可选依赖，尚未解决安装策略。本批不擅自引入运行时依赖，后续需提供跨平台依赖声明/安装入口并验证 Windows/Linux。
