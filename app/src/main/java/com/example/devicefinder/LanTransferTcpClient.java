@@ -125,6 +125,42 @@ public final class LanTransferTcpClient {
         }
     }
 
+
+    /** Production resumable session using one immutable LAN path snapshot. */
+    public static List<Integer> connectAndSend(LanNetworkPath path, String host, int port,
+            File source, LanTransferStore.Offer offer, String localPeerId, String remotePeerId,
+            String sharedSecret, int chunkSizeBytes, int maxChunksPerSession,
+            int maxPayloadBytes, int connectTimeoutMs, Progress progress)
+            throws IOException, GeneralSecurityException {
+        try (Socket socket = connectOnPath(path, host, port, connectTimeoutMs)) {
+            return sendFile(socket, source, offer, localPeerId, remotePeerId, sharedSecret,
+                    chunkSizeBytes, maxChunksPerSession, maxPayloadBytes, progress);
+        }
+    }
+
+    private static Socket connectOnPath(LanNetworkPath path, String host, int port,
+            int connectTimeoutMs) throws IOException {
+        if (path == null || path.network == null || host == null || host.isEmpty()
+                || port < 1 || port > 65535 || connectTimeoutMs < 1000 || connectTimeoutMs > 60000)
+            throw new IOException("A Network-backed LAN path and valid destination are required");
+        InetAddress resolved = InetAddress.getByName(host);
+        if (!(resolved instanceof Inet4Address) || !resolved.getHostAddress().equals(host)
+                || !LanTransferIpv4Subnet.contains(path.localAddress, path.prefixLength,
+                        (Inet4Address) resolved))
+            throw new IOException("File endpoint does not belong to selected LAN path");
+        Socket socket = new Socket();
+        try {
+            LanSocketBinding.bindStreamSocket(path, socket);
+            socket.connect(new InetSocketAddress(resolved, port), connectTimeoutMs);
+            socket.setTcpNoDelay(true);
+            socket.setKeepAlive(true);
+            return socket;
+        } catch (IOException | RuntimeException failure) {
+            try { socket.close(); } catch (IOException ignored) { }
+            throw failure;
+        }
+    }
+
     /**
      * Sends one bounded batch. Reconnect and call again when missing indexes are returned;
      * each new session re-queries the receiver, so lost ACKs never expand or corrupt state.
