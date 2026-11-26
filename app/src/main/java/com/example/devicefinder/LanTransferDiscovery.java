@@ -26,7 +26,7 @@ public final class LanTransferDiscovery implements AutoCloseable {
     private static final long BEACON_INTERVAL_MS = 15_000L;
     static final long MIN_BEACON_INTERVAL_MS = 1_000L;
     private final Context context;
-    private final Network network;
+    private final LanNetworkPath networkPath;
     private final String localPeerId;
     private final Inet4Address localAddress;
     private final Inet4Address broadcastAddress;
@@ -41,23 +41,39 @@ public final class LanTransferDiscovery implements AutoCloseable {
     private volatile DatagramSocket receiver;
     private volatile Thread thread;
 
+    /** Compatibility constructor for callers that have not yet supplied a full path snapshot. */
     public LanTransferDiscovery(Context context, Network network, String localPeerId,
             Inet4Address localAddress, Inet4Address broadcastAddress,
             String networkFingerprint, PortProvider portProvider) {
-        if (context == null || network == null || localPeerId == null
+        this(context, legacyPath(network, localAddress, broadcastAddress), localPeerId,
+                localAddress, broadcastAddress, networkFingerprint, portProvider);
+    }
+
+    public LanTransferDiscovery(Context context, LanNetworkPath networkPath, String localPeerId,
+            Inet4Address localAddress, Inet4Address broadcastAddress,
+            String networkFingerprint, PortProvider portProvider) {
+        if (context == null || networkPath == null
+                || networkPath.kind != LanNetworkPath.Kind.ANDROID_NETWORK
+                || networkPath.network == null || localPeerId == null
                 || !localPeerId.matches("[A-Za-z0-9._:-]{1,128}")
                 || localAddress == null || broadcastAddress == null
                 || networkFingerprint == null || networkFingerprint.isEmpty()
                 || portProvider == null) {
-            throw new IllegalArgumentException("Invalid file-transfer discovery configuration");
+            throw new IllegalArgumentException("Discovery requires a bindable Android LAN path");
         }
         this.context = context.getApplicationContext();
-        this.network = network;
+        this.networkPath = networkPath;
         this.localPeerId = localPeerId;
         this.localAddress = localAddress;
         this.broadcastAddress = broadcastAddress;
         this.networkFingerprint = networkFingerprint;
         this.portProvider = portProvider;
+    }
+
+    private static LanNetworkPath legacyPath(Network network, Inet4Address localAddress,
+            Inet4Address broadcastAddress) {
+        return LanNetworkPath.fromAndroidNetwork(network, "legacy-network", localAddress,
+                32, broadcastAddress);
     }
 
     public synchronized void start() throws IOException {
@@ -68,7 +84,7 @@ public final class LanTransferDiscovery implements AutoCloseable {
         try {
             socket.setReuseAddress(true);
             socket.setBroadcast(true);
-            network.bindSocket(socket);
+            LanSocketBinding.bindDatagramSocket(networkPath, socket);
             // Bind wildcard after pinning the socket to the selected Wi-Fi Network.
             // A directed-broadcast packet's destination is the subnet broadcast address,
             // not this device's unicast address; binding the latter can silently miss it.
@@ -178,7 +194,7 @@ public final class LanTransferDiscovery implements AutoCloseable {
         try {
             sender = new DatagramSocket(null);
             sender.setBroadcast(true);
-            network.bindSocket(sender);
+            LanSocketBinding.bindDatagramSocket(networkPath, sender);
             sender.send(new DatagramPacket(payload, payload.length,
                     broadcastAddress, UDP_PORT));
             android.util.Log.d("LanTransferDiscovery", "Beacon sent peer=" + localPeerId
