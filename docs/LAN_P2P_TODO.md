@@ -103,7 +103,7 @@
 
 ## rescue2 日志拉取与多手机遥控诊断（安全设计）
 
-- [x] **旧版 Android 日志拉取完整保留**：`pull_logs_multi` 已恢复为 `481dc2c` 基线函数实现；旧版菜单入口、UDP 命令、逐设备派发、30 秒等待、上传识别、成功/未响应统计和 `clear_after` 行为不变。旧函数不调用诊断事件记录器；后续修改必须通过兼容回归测试。不得因新版诊断采集建设而删除或削弱旧版日志拉取功能。
+- [x] **旧版 Android 日志拉取完整保留**：`pull_logs_multi` 已恢复为 `481dc2c` 基线函数实现；旧版菜单入口、UDP 命令、逐设备派发、30 秒等待、上传识别、成功/未响应统计和 `clear_after` 行为不变。旧函数不调用诊断事件记录器；后续修改必须通过兼容回归测试。不得因新版诊断采集建设而删除或削弱旧版日志拉取功能。旧版日志拉取能力必须保留。
 - [ ] **新增独立诊断日志采集**：与旧版日志拉取并列，支持单设备/批量两种目标模式；复用 Android 诊断 Probe、报告历史和导出组件，但不得调用或修改 `pull_logs_multi`。协议、认证、任务状态与传输通道独立。
 - [x] 已完成旧版 `pull_logs_multi` 行为基线核对；新诊断任务可借鉴其多目标定向、限时等待和逐设备结果呈现，但不得复用旧 UDP 明文命令或共享救援口令。
 - [ ] 日志拉取走独立诊断控制通道；主控创建有时效任务，设备端逐任务授权并返回 taskId。必须展示目标设备和采集范围，禁止默认广播拉取。当前 Android 已有本地 DiagnosticRun/Probe/History/Export 和 transport-neutral DiagnosticBatchCoordinator/Envelope/LocalStore，但 Coordinator 的网络 Transport 仍是抽象接口，LanP2pProtocol 也尚无诊断任务消息类型；TrackingService 尚无远程诊断任务命令处理，Rescue2 尚未接入诊断批次协议。因此目前不具备真实远程单设备/批量诊断采集能力。

@@ -432,6 +432,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("pull_logs_multi", todo)
         self.assertIn("不得因新版诊断采集建设而删除", todo)
         self.assertIn("旧版日志拉取能力必须保留", todo)
+        self.assertIn("旧版日志拉取能力必须保留", todo)
 
     def test_android_outbox_foreign_key_constraints_are_enabled_on_every_connection(self):
         source = Path(__file__).resolve().parents[1] / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
