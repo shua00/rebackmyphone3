@@ -173,22 +173,69 @@ public final class DiagnosticHistoryActivity extends Activity {
     }
 
     private void showReportActions(DiagnosticRun report) {
-        String detail = DiagnosticReportRenderer.toMarkdown(report);
-        new AlertDialog.Builder(this)
+        // Keep the report body and its actions in one explicit detail surface. A message
+        // dialog combined with a choice list made the export actions easy to miss and
+        // could cause platform AlertController implementations to prioritize one body.
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(20), dp(4), dp(20), dp(4));
+
+        ScrollView detailScroll = new ScrollView(this);
+        detailScroll.setFillViewport(false);
+        TextView detailText = new TextView(this);
+        detailText.setText(DiagnosticReportRenderer.toMarkdown(report));
+        detailText.setTextIsSelectable(true);
+        detailText.setTextSize(13f);
+        detailText.setLineSpacing(dp(2), 1f);
+        detailText.setPadding(0, dp(8), 0, dp(12));
+        detailScroll.addView(detailText);
+        content.addView(detailScroll, new LinearLayout.LayoutParams(-1, dp(260)));
+
+        TextView actionsTitle = new TextView(this);
+        actionsTitle.setText("报告操作");
+        actionsTitle.setTextSize(14f);
+        actionsTitle.setPadding(0, dp(8), 0, dp(4));
+        content.addView(actionsTitle);
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle(report.metadata.featureId + " · "
                         + (report.isCompleteAndPassing() ? "PASS" : "未通过"))
-                .setMessage(detail)
-                .setItems(new String[]{"分享给 AI / 其他应用", "导出 JSON", "导出 Markdown",
-                        "导出 HTML", "删除此报告"}, (dialog, which) -> {
-                    if (which == 0) share(report);
-                    else if (which >= 1 && which <= 3) {
-                        DiagnosticReportExporter.Format format = which == 1
-                                ? DiagnosticReportExporter.Format.JSON
-                                : which == 2 ? DiagnosticReportExporter.Format.MARKDOWN
-                                : DiagnosticReportExporter.Format.HTML;
-                        save(report, format);
-                    } else if (which == 4) confirmDelete(report);
-                }).show();
+                .setView(content)
+                .setNegativeButton("关闭", null)
+                .create();
+
+        addReportAction(content, "分享给 AI / 其他应用", () -> {
+            dialog.dismiss();
+            share(report);
+        });
+        addReportAction(content, "导出 JSON", () -> {
+            dialog.dismiss();
+            save(report, DiagnosticReportExporter.Format.JSON);
+        });
+        addReportAction(content, "导出 Markdown", () -> {
+            dialog.dismiss();
+            save(report, DiagnosticReportExporter.Format.MARKDOWN);
+        });
+        addReportAction(content, "导出 HTML", () -> {
+            dialog.dismiss();
+            save(report, DiagnosticReportExporter.Format.HTML);
+        });
+        addReportAction(content, "删除此报告", () -> {
+            dialog.dismiss();
+            confirmDelete(report);
+        });
+        dialog.show();
+    }
+
+    private void addReportAction(LinearLayout parent, String label, Runnable action) {
+        Button button = new Button(this);
+        button.setText(label);
+        button.setAllCaps(false);
+        button.setOnClickListener(view -> action.run());
+        LinearLayout.LayoutParams params =
+                new LinearLayout.LayoutParams(-1, -2);
+        params.topMargin = dp(2);
+        parent.addView(button, params);
     }
 
     private void share(DiagnosticRun report) {
