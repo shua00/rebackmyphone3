@@ -1073,6 +1073,8 @@ public class TrackingService extends Service implements LocationListener {
             } else if ("ACTION_LAN_TRANSFER_CREDENTIALS_UPDATED".equals(action)) {
                 executeMaintenance("lan-transfer-credentials", () ->
                         refreshLanTransferTcpListener("credentials updated"));
+            } else if ("ACTION_LAN_TRANSFER_DISCOVERY_REFRESH".equals(action)) {
+                executeMaintenance("lan-transfer-discovery-refresh", this::refreshLanTransferDiscoveryNow);
             } else if ("ACTION_LAN_TRANSFER_PAIRING_QUERY".equals(action)) {
                 executeMaintenance("lan-pairing-query", this::publishPendingLanPairingSessions);
             } else if ("ACTION_LAN_TRANSFER_PAIRING_START".equals(action)) {
@@ -2524,6 +2526,18 @@ public class TrackingService extends Service implements LocationListener {
     }
 
 
+
+    /** User-triggered refresh; discovery hints never create or modify trust. */
+    private void refreshLanTransferDiscoveryNow() {
+        if (serviceDestroyed || !LanTransferFeature.isEnabled(this)) return;
+        LanTransferDiscovery current = lanTransferDiscovery;
+        if (current == null || !current.isRunning()) {
+            refreshLanTransferDiscovery("user requested device refresh");
+            current = lanTransferDiscovery;
+        }
+        if (current != null) current.announceNow();
+        sendBroadcast(new Intent("ACTION_LAN_TRANSFER_PEERS_UPDATED").setPackage(getPackageName()));
+    }
 
     private void publishPendingLanPairingSessions() {
         if (serviceDestroyed || !LanTransferFeature.isEnabled(this)) return;

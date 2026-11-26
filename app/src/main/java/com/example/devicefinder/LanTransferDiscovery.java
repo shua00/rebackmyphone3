@@ -32,6 +32,8 @@ public final class LanTransferDiscovery implements AutoCloseable {
     private final String networkFingerprint;
     private final PortProvider portProvider;
     private final AtomicBoolean closed = new AtomicBoolean(false);
+    private final java.util.concurrent.atomic.AtomicLong lastBeaconAtMs =
+            new java.util.concurrent.atomic.AtomicLong(Long.MIN_VALUE);
     private volatile DatagramSocket receiver;
     private volatile Thread thread;
 
@@ -78,6 +80,11 @@ public final class LanTransferDiscovery implements AutoCloseable {
 
     public boolean isRunning() { return !closed.get() && thread != null && thread.isAlive(); }
 
+    /** Request an immediate bounded beacon after an explicit user refresh. */
+    public void announceNow() {
+        if (!closed.get() && isRunning()) announce();
+    }
+
     private void runLoop() {
         long nextBeaconAt = 0L;
         byte[] buffer = new byte[256];
@@ -110,6 +117,12 @@ public final class LanTransferDiscovery implements AutoCloseable {
     }
 
     private void announce() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        while (true) {
+            long previous = lastBeaconAtMs.get();
+            if (previous != Long.MIN_VALUE && now - previous < 1000L) return;
+            if (lastBeaconAtMs.compareAndSet(previous, now)) break;
+        }
         int port;
         try { port = portProvider.getListeningPort(); }
         catch (RuntimeException unavailable) { port = 0; }

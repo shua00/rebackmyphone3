@@ -99,7 +99,10 @@ public final class LanTransferActivity extends Activity {
                     status.setText("已请求取消本机发送；当前 TCP 分块会话结束后生效");
                 }).show();
         });
-        refreshButton.setOnClickListener(v -> refreshOffers());
+        refreshButton.setOnClickListener(v -> {
+            requestLanTransferDiscoveryRefresh();
+            refreshOffers();
+        });
         IntentFilter filter = new IntentFilter("ACTION_LAN_TRANSFER_UPDATED");
         filter.addAction("ACTION_LAN_TRANSFER_PEERS_UPDATED");
         filter.addAction("ACTION_LAN_TRANSFER_PAIRING_REQUESTED");
@@ -114,6 +117,18 @@ public final class LanTransferActivity extends Activity {
         }
         LanTransferSenderService.resumeIfPending(this);
         refreshOffers();
+    }
+
+    private void requestLanTransferDiscoveryRefresh() {
+        Intent intent = new Intent(this, TrackingService.class)
+                .setAction("ACTION_LAN_TRANSFER_DISCOVERY_REFRESH");
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent);
+            else startService(intent);
+            if (status != null) status.setText("已请求刷新局域网设备列表，正在等待对端广播…");
+        } catch (Exception failure) {
+            if (status != null) status.setText("刷新设备列表失败：" + failure.getClass().getSimpleName());
+        }
     }
 
     private void showPairingDialog(String suggestedPeerId) {

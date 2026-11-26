@@ -55,7 +55,7 @@
             android:id="@+id/lanTransferRefresh"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="刷新接收请求" />
+            android:text="刷新设备列表 / 接收请求" />
         <TextView
             android:id="@+id/lanTransferStatus"
             android:layout_width="match_parent"
