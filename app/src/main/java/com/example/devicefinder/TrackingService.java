@@ -5421,17 +5421,15 @@ public class TrackingService extends Service implements LocationListener {
             final java.util.List<byte[]> preparedBroadcastFragments;
             try {
                 if (pendingSnapshotTargets == 0) {
-                    byte[] broadcastPacket = null;
-                    java.util.List<byte[]> broadcastFragments = null;
                     try {
-                        broadcastPacket = buildAuthenticatedLanChatPacket(
+                        preparedBroadcastData = buildAuthenticatedLanChatPacket(
                                 senderPeerId, "*", messageId, message);
+                        preparedBroadcastFragments = null;
                     } catch (Exception oversizedSinglePacket) {
-                        broadcastFragments = buildAuthenticatedLanChatFragmentPackets(
+                        preparedBroadcastData = null;
+                        preparedBroadcastFragments = buildAuthenticatedLanChatFragmentPackets(
                                 senderPeerId, "*", messageId, message, messageCreatedAtMs);
                     }
-                    preparedBroadcastData = broadcastPacket;
-                    preparedBroadcastFragments = broadcastFragments;
                 } else {
                     preparedBroadcastData = null;
                     preparedBroadcastFragments = null;
