@@ -117,6 +117,12 @@ class TransferTcpServer:
             if not getattr(network_path, "interface_name", None) or not getattr(network_path, "address", None):
                 raise TransferValidationError("invalid listener LAN path")
             host = str(ipaddress.IPv4Address(network_path.address))
+        else:
+            try:
+                if not ipaddress.IPv4Address(host).is_loopback:
+                    raise TransferValidationError("an explicit LAN path is required for non-loopback listeners")
+            except ipaddress.AddressValueError as exc:
+                raise TransferValidationError("an explicit LAN path is required for non-loopback listeners") from exc
         self.host, self.port, self.backlog = host, port, backlog
         self.max_connections, self.socket_timeout_seconds = max_connections, float(socket_timeout_seconds)
         self.max_frames, self.max_payload_bytes, self.on_error = max_frames, max_payload_bytes, on_error
