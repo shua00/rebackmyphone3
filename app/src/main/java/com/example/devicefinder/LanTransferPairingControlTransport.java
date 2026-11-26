@@ -29,12 +29,21 @@ public final class LanTransferPairingControlTransport {
 
     private LanTransferPairingControlTransport() {}
 
+    /** Production exchange: bind the unconnected socket to the exact selected LAN path first. */
+    public static LanTransferPairingControlProtocol.Message exchange(
+            LanNetworkPath path, InetAddress address, int port,
+            LanTransferPairingControlProtocol.Message request,
+            int connectTimeoutMs, int readTimeoutMs) throws IOException {
+        validateEndpoint(address, port, connectTimeoutMs, readTimeoutMs);
+        validatePathEndpoint(path, address);
+        return exchangeBound(path, address, port, request, connectTimeoutMs, readTimeoutMs);
+    }
+
+    /** Legacy loopback-only transport entry retained for isolated protocol tests. */
     public static LanTransferPairingControlProtocol.Message exchange(
             InetAddress address, int port, LanTransferPairingControlProtocol.Message request,
             int connectTimeoutMs, int readTimeoutMs) throws IOException {
-        if (address == null || address.isAnyLocalAddress() || address.isMulticastAddress()
-                || port < 1 || port > 65535 || connectTimeoutMs < 1 || readTimeoutMs < 1)
-            throw new IllegalArgumentException("Invalid pairing endpoint or timeout");
+        validateEndpoint(address, port, connectTimeoutMs, readTimeoutMs);
         byte[] frame = LanTransferPairingControlProtocol.encode(request);
         try (Socket socket = new Socket()) {
             socket.setTcpNoDelay(true);
@@ -61,6 +70,45 @@ public final class LanTransferPairingControlTransport {
                     || decoded.sequence != request.sequence)
                 throw new IOException("Pairing response identity, session, or sequence mismatch");
             return decoded;
+        }
+    }
+
+    private static LanTransferPairingControlProtocol.Message exchangeBound(
+            LanNetworkPath path, InetAddress address, int port,
+            LanTransferPairingControlProtocol.Message request,
+            int connectTimeoutMs, int readTimeoutMs) throws IOException {
+        if (request == null) throw new IllegalArgumentException("Pairing request is required");
+        byte[] frame = LanTransferPairingControlProtocol.encode(request);
+        try (Socket socket = new Socket()) {
+            LanSocketBinding.bindStreamSocket(path, socket);
+            socket.setTcpNoDelay(true);
+            socket.connect(new InetSocketAddress(address, port), connectTimeoutMs);
+            return exchangeConnected(socket, frame, request, readTimeoutMs);
+        }
+    }
+
+    private static void validateEndpoint(InetAddress address, int port,
+            int connectTimeoutMs, int readTimeoutMs) {
+        if (address == null || address.isAnyLocalAddress() || address.isMulticastAddress()
+                || port < 1 || port > 65535 || connectTimeoutMs < 1 || readTimeoutMs < 1)
+            throw new IllegalArgumentException("Invalid pairing endpoint or timeout");
+    }
+
+    private static void validatePathEndpoint(LanNetworkPath path, InetAddress address)
+            throws IOException {
+        if (path == null || path.kind != LanNetworkPath.Kind.ANDROID_NETWORK
+                || path.network == null)
+            throw new IOException("Pairing requires an Android Network-backed LAN path");
+        byte[] local = path.localAddress.getAddress();
+        byte[] remote = address.getAddress();
+        if (remote.length != 4 || local.length != 4)
+            throw new IOException("Pairing endpoint must be IPv4 on the selected LAN path");
+        int prefix = path.prefixLength;
+        for (int i = 0; i < 4; i++) {
+            int bits = Math.min(8, Math.max(0, prefix - i * 8));
+            int mask = bits == 0 ? 0 : (0xff << (8 - bits)) & 0xff;
+            if (((local[i] & 0xff) & mask) != ((remote[i] & 0xff) & mask))
+                throw new IOException("Pairing endpoint is outside the selected LAN subnet");
         }
     }
 
