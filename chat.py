@@ -264,9 +264,9 @@ def send_chat_v2(body, display_name, message_id):
                 sock, CHAT_DB, "chat.py", message_id, probe, RESCUE_SECRET,
                 send_lock=UDP_CHAT_SEND_LOCK, attempts=1, retry_delay_seconds=0.25)
         else:
-            subnet = get_subnet_broadcast()
-            targets = [subnet] if subnet == "255.255.255.255" else [subnet, "255.255.255.255"]
-            destinations = [(target_ip, port) for target_ip in targets
+            targets = list(get_subnet_broadcasts())
+            targets.append("255.255.255.255")
+            destinations = [(target_ip, port) for target_ip in dict.fromkeys(targets)
                             for port in (UDP_DEVICE_PORT, 8887, 8889)]
             send_discovery_broadcast_with_retries(
                 sock, CHAT_DB, "chat.py", message_id, broadcast_bytes, destinations,
@@ -540,14 +540,12 @@ def udp_listener():
             udp_sock.bind(('0.0.0.0', UDP_PORT))
             UDP_LISTENER_SOCKET = udp_sock
             _start_v2_recovery_retry_worker()
-            try:
-                subnet_broadcast = get_subnet_broadcast()
-            except Exception:
-                subnet_broadcast = "255.255.255.255"
+            subnet_broadcasts = list(get_subnet_broadcasts())
+            subnet_broadcasts.append("255.255.255.255")
             announced = send_startup_peer_beacon(
                 udp_sock, PEER_NODE_ID, "chat.py", PEER_NODE_ID, RESCUE_SECRET,
                 UDP_PORT, [8888, 8887, 8889],
-                [subnet_broadcast, "255.255.255.255"],
+                list(dict.fromkeys(subnet_broadcasts)),
                 db_path=CHAT_DB, receiver_scope="chat.py")
             print(f"🎧 UDP 监听已启动 (端口 {UDP_PORT})，等待对讲机消息...")
             print(f"📡 chat.py startup peer beacon sent={announced}")
