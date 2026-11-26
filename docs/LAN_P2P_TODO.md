@@ -446,3 +446,14 @@
 - [x] Android `LanTransferAuthenticatorTest` 增加同一认证黄金向量断言；通过反射调用既有私有原语验证双方使用同一 UTF-8、长度前缀、domain separation、HMAC-SHA256 和 session 派生，不改变线上认证协议。
 - [ ] 继续补齐 Android/Python Offer、Chunk、Chunk ACK、Missing、Complete、Cancel 帧的跨语言双向黄金向量与状态语义验证。
 - [ ] 继续验证 Android↔Python 真实 TCP socket 认证及完整文件传输，不以共享 fixture 或各自 loopback 单测替代。
+
+
+## 第二批次推进补充（2026-11-27）：帧协议跨语言一致性修正
+
+- [x] 新增共享 fixture：`app/src/test/resources/lan_p2p_frame_vectors.json`，包含 Offer、Offer ACK、Chunk、Chunk ACK、Missing、Complete、Cancel 共 7 种帧的完整 wire hex、元数据、分片索引和 payload。
+- [x] Python 测试逐种帧验证编码结果与共享 wire hex 完全一致，并从 socket stream 解码同一 wire frame；Android 单测从同一 fixture 读取，逐种帧验证 Java 编码字节及解码结果。
+- [x] 跨语言审计发现并修正真实协议差异：Android 原 canonical JSON 使用 `JSONObject.quote()`，会把 MIME 类型中的正斜杠编码为 `\\/`，而 Python `json.dumps(ensure_ascii=False)` 输出原始 `/`，导致 HMAC 与帧字节不一致。Android codec 现使用与 Python 一致的 JSON 字符串转义（不转义正斜杠、控制字符按 JSON 规范转义）。
+- [x] 认证向量使用 Android 实际存储格式：Base64 编码的 32 字节逐设备密钥；双方验证 SHA-256 key derivation、server/client HMAC proof 和 session key。
+- [x] Python CI 已通过 410 项测试；共享七帧向量、认证向量和服务信任撤销测试均包含在内。
+- [ ] Android 单测/APK 构建正在对最新修正重新执行。此前 Android 失败分别定位为测试向量 NUL 转义写错、Android JSON 正斜杠转义不兼容；均已修正并提交，不能把先前失败运行计为通过。
+- [ ] 仍需补齐真实 Android↔Python TCP socket 双端运行测试，以及完整 offer/accept/chunk ACK/missing/complete 状态语义、SHA-256、断点续传重启测试。黄金向量只证明序列化/认证原语兼容，不替代端到端传输验收。
