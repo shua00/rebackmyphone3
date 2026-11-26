@@ -80,6 +80,12 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
         this.listener = listener;
     }
 
+    public synchronized void start(LanNetworkPath path, InetAddress bindAddress, int port)
+            throws java.io.IOException {
+        LanSocketBinding.validateServerSocketAddress(path, bindAddress);
+        start(bindAddress, port);
+    }
+
     public synchronized void start(InetAddress bindAddress, int port) throws java.io.IOException {
         if (closed || server != null) throw new IllegalStateException("Pairing host is not startable");
         LanTransferPairingControlTransport.Server created =
