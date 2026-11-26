@@ -38,6 +38,34 @@ public class LanNetworkPathTest {
         assertTrue(path.toString().contains("broadcast=none"));
     }
 
+    @Test public void hotspotCandidateCannotBeUsedForDatagramSocketBinding() throws Exception {
+        LanNetworkPath candidate = LanNetworkPath.localInterfaceCandidate(
+                "vendor_ap42", ipv4("192.168.43.1"), 24, ipv4("192.168.43.255"));
+        java.net.DatagramSocket socket = new java.net.DatagramSocket(null);
+        try {
+            LanSocketBinding.bindDatagramSocket(candidate, socket);
+            fail("candidate must not silently use the process default network");
+        } catch (java.io.IOException expected) {
+            assertTrue(expected.getMessage().contains("binding is unavailable"));
+        } finally {
+            socket.close();
+        }
+    }
+
+    @Test public void hotspotCandidateCannotBeUsedForStreamSocketBinding() throws Exception {
+        LanNetworkPath candidate = LanNetworkPath.localInterfaceCandidate(
+                "vendor_ap42", ipv4("192.168.43.1"), 24, ipv4("192.168.43.255"));
+        java.net.Socket socket = new java.net.Socket();
+        try {
+            LanSocketBinding.bindStreamSocket(candidate, socket);
+            fail("candidate must not silently use the process default network");
+        } catch (java.io.IOException expected) {
+            assertTrue(expected.getMessage().contains("binding is unavailable"));
+        } finally {
+            socket.close();
+        }
+    }
+
     @Test(expected = IllegalArgumentException.class)
     public void androidNetworkPathCannotBeCreatedWithoutNetwork() throws Exception {
         LanNetworkPath.fromAndroidNetwork(null, "wlan0", ipv4("192.168.1.2"),
