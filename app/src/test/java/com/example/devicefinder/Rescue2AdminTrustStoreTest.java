@@ -2,6 +2,7 @@ package com.example.devicefinder;
 
 import android.content.Context;
 import org.junit.Test;
+import org.json.JSONObject;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
 import java.nio.charset.StandardCharsets;
@@ -57,9 +58,11 @@ public class Rescue2AdminTrustStoreTest {
         String fingerprint = java.util.HexFormat.of().formatHex(
                 java.security.MessageDigest.getInstance("SHA-256").digest(publicKey));
         String encoded = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(publicKey);
-        String document = "{\\"schemaVersion\\":1,\\"keyType\\":\\"EC-P256\\","
-                + "\\"fingerprint\\":\\"" + fingerprint + "\\","
-                + "\\"publicKeySpki\\":\\"" + encoded + "\\"}";
+        String document = new JSONObject()
+                .put("schemaVersion", 1)
+                .put("keyType", "EC-P256")
+                .put("fingerprint", fingerprint)
+                .put("publicKeySpki", encoded).toString();
         assertEquals(fingerprint, store.trustExportedIdentity(document));
         assertTrue(store.isTrusted(fingerprint));
         try {
