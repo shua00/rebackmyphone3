@@ -42,13 +42,43 @@ public class DiagnosticTaskConsentStoreTest {
                 store.getState(fingerprint02, "task-02", 1800000000400L));
     }
 
-    @Test public void expiresAndPrunesOldPendingTasks() {
+    @Test public void expiresAndPrunesOldPendingTasks() throws Exception {
         Context context = org.robolectric.RuntimeEnvironment.getApplication();
         DiagnosticTaskConsentStore store = new DiagnosticTaskConsentStore(context);
-        assertTrue(store.registerPending(verified(task("task-01", repeat('A', 22)), 1800000000100L), 1800000000100L));
+        com.example.devicefinder.Rescue2AdminTrustStore trust =
+                new com.example.devicefinder.Rescue2AdminTrustStore(context);
+        java.security.KeyPairGenerator generator = java.security.KeyPairGenerator.getInstance("EC");
+        generator.initialize(new java.security.spec.ECGenParameterSpec("secp256r1"));
+        java.security.KeyPair pair = generator.generateKeyPair();
+        String fingerprint = trust.trustP256PublicKey(pair.getPublic().getEncoded());
+
+        DiagnosticTaskEnvelope first = new DiagnosticTaskEnvelope("task-01", fingerprint,
+                Arrays.asList("phone-a"), Arrays.asList("android.runtime"),
+                1800000000000L, 1800000600000L, repeat('A', 22));
+        DiagnosticTaskVerifier.Result firstVerified = verifyWith(first, pair, trust, context, 1800000000100L);
+        assertTrue(store.registerPending(firstVerified, 1800000000100L));
         assertEquals(DiagnosticTaskConsentStore.State.EXPIRED,
-                store.getState(repeat('a', 64), "task-01", 1800000600000L));
-        assertTrue(store.registerPending(task("task-01", repeat('B', 22)), 1800000600001L));
+                store.getState(fingerprint, "task-01", 1800000600000L));
+
+        DiagnosticTaskEnvelope second = new DiagnosticTaskEnvelope("task-01", fingerprint,
+                Arrays.asList("phone-a"), Arrays.asList("android.runtime"),
+                1800000600001L, 1800001200001L, repeat('B', 22));
+        DiagnosticTaskVerifier.Result secondVerified = verifyWith(second, pair, trust, context, 1800000600100L);
+        assertTrue(store.registerPending(secondVerified, 1800000600100L));
+        assertEquals(DiagnosticTaskConsentStore.State.PENDING,
+                store.getState(fingerprint, "task-01", 1800000600200L));
+    }
+
+    private DiagnosticTaskVerifier.Result verifyWith(DiagnosticTaskEnvelope envelope,
+            java.security.KeyPair pair, com.example.devicefinder.Rescue2AdminTrustStore trust,
+            Context context, long now) throws Exception {
+        byte[] domain = "rebackmyphone3/rescue2-admin-task/v1\\0".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        java.security.Signature signer = java.security.Signature.getInstance("SHA256withECDSA");
+        signer.initSign(pair.getPrivate());
+        signer.update(domain);
+        signer.update(envelope.toJson().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        return DiagnosticTaskVerifier.verifyAndConsume(envelope.toJson(), signer.sign(),
+                "phone-a", now, trust, new DiagnosticTaskReplayStore(context));
     }
 
     private DiagnosticTaskVerifier.Result verified(DiagnosticTaskEnvelope envelope, long now) {
