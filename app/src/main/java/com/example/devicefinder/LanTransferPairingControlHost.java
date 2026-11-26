@@ -128,7 +128,8 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
         Entry entry = pending.get(key(sessionId, remotePeerId));
         if (entry == null) throw new IllegalArgumentException("Unknown or expired pairing session");
         LanTransferPairingSession.State state = confirmLocal(sessionId, remotePeerId, sas);
-        if (state != LanTransferPairingSession.State.WAITING_REMOTE_CONFIRMATION)
+        if (state != LanTransferPairingSession.State.WAITING_REMOTE_CONFIRMATION
+                && state != LanTransferPairingSession.State.READY_TO_COMMIT)
             throw new IllegalStateException("Local confirmation was rejected or session is not awaiting peer confirmation");
         return entry.session.createLocalConfirmationProof(nowElapsedMs());
     }

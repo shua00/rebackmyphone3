@@ -59,10 +59,26 @@ public final class LanTransferPairingSession {
         return proof;
     }
     public synchronized void applyRemoteConfirmation(boolean accepted,byte[] proof,long now)throws GeneralSecurityException {
-        requireActive(now);if(remoteConfirmed)throw new IllegalStateException("Remote confirmation already recorded");
+        expireIfNeeded(now);
+        if(terminalState!=null)throw new IllegalStateException("Pairing session is terminal");
         byte[] expected=confirmationProof(opposite(localRole),accepted);
-        if(proof==null||!MessageDigest.isEqual(expected,proof)){terminate(State.REJECTED);return;}
-        if(!accepted){terminate(State.REJECTED);return;}remoteConfirmed=true;
+        if(remoteConfirmed) {
+            // A peer may retry CONFIRM with a fresh transport sequence after its ACK was
+            // lost. Accept only the exact same transcript-bound decision; never apply it twice.
+            boolean identical=proof!=null&&MessageDigest.isEqual(expected,proof);
+            Arrays.fill(expected,(byte)0);
+            if(identical)return;
+            terminate(State.REJECTED);
+            throw new SecurityException("Conflicting remote confirmation replay");
+        }
+        if(localConfirmed&&remoteConfirmed) {
+            Arrays.fill(expected,(byte)0);
+            throw new IllegalStateException("Pairing is ready to commit");
+        }
+        if(proof==null||!MessageDigest.isEqual(expected,proof)){Arrays.fill(expected,(byte)0);terminate(State.REJECTED);return;}
+        Arrays.fill(expected,(byte)0);
+        if(!accepted){terminate(State.REJECTED);return;}
+        remoteConfirmed=true;
     }
     public synchronized void cancel(long now){expireIfNeeded(now);if(terminalState==null)terminate(State.CANCELLED);}
     public synchronized void disconnect(long now){cancel(now);}

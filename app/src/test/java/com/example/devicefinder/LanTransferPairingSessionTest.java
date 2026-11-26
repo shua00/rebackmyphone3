@@ -39,6 +39,42 @@ public class LanTransferPairingSessionTest {
         assertArrayEquals(a.peerSecretForCommit(NOW + 4), b.peerSecretForCommit(NOW + 4));
     }
 
+    @Test public void identicalRemoteConfirmationRetryIsIdempotentAfterReady() throws Exception {
+        LanTransferPairingCrypto.Result[] pair = materialPair();
+        LanTransferPairingSession a = new LanTransferPairingSession("peer-a", "peer-b",
+                LanTransferPairingSession.Role.INITIATOR, pair[0], NOW, TTL);
+        LanTransferPairingSession b = new LanTransferPairingSession("peer-b", "peer-a",
+                LanTransferPairingSession.Role.RESPONDER, pair[1], NOW, TTL);
+        a.confirmLocal(pair[0].shortAuthenticationCode, NOW + 1);
+        b.confirmLocal(pair[1].shortAuthenticationCode, NOW + 1);
+        byte[] proofB = b.createLocalConfirmationProof(NOW + 2);
+        a.applyRemoteConfirmation(true, proofB, NOW + 3);
+        assertEquals(LanTransferPairingSession.State.READY_TO_COMMIT, a.state(NOW + 3));
+        a.applyRemoteConfirmation(true, proofB.clone(), NOW + 4);
+        assertEquals(LanTransferPairingSession.State.READY_TO_COMMIT, a.state(NOW + 4));
+        assertEquals(32, a.peerSecretForCommit(NOW + 4).length);
+    }
+
+    @Test public void conflictingRemoteConfirmationRetryRejectsReadySession() throws Exception {
+        LanTransferPairingCrypto.Result[] pair = materialPair();
+        LanTransferPairingSession a = new LanTransferPairingSession("peer-a", "peer-b",
+                LanTransferPairingSession.Role.INITIATOR, pair[0], NOW, TTL);
+        LanTransferPairingSession b = new LanTransferPairingSession("peer-b", "peer-a",
+                LanTransferPairingSession.Role.RESPONDER, pair[1], NOW, TTL);
+        a.confirmLocal(pair[0].shortAuthenticationCode, NOW + 1);
+        b.confirmLocal(pair[1].shortAuthenticationCode, NOW + 1);
+        byte[] proofB = b.createLocalConfirmationProof(NOW + 2);
+        a.applyRemoteConfirmation(true, proofB, NOW + 3);
+        proofB[0] ^= 1;
+        try {
+            a.applyRemoteConfirmation(true, proofB, NOW + 4);
+            fail("conflicting replay must be rejected");
+        } catch (SecurityException expected) { }
+        assertEquals(LanTransferPairingSession.State.REJECTED, a.state(NOW + 4));
+        try { a.peerSecretForCommit(NOW + 4); fail("rejected session must not commit"); }
+        catch (IllegalStateException expected) { }
+    }
+
     @Test public void wrongSasRejectsAndDestroysSessionMaterial() throws Exception {
         LanTransferPairingCrypto.Result[] pair = materialPair();
         LanTransferPairingSession session = new LanTransferPairingSession("peer-a", "peer-b",

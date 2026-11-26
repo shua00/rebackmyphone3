@@ -150,6 +150,38 @@ public class LanTransferPairingControlHostTest {
         return session.createLocalConfirmationProof(2L);
     }
 
+    @Test public void responderCanConfirmLocallyAfterRemoteConfirmationArrivesFirst()
+            throws Exception {
+        final CountDownLatch requested = new CountDownLatch(1);
+        final String[] values = new String[3];
+        LanTransferPairingControlHost host = new LanTransferPairingControlHost("receiver",
+                (sessionId, peerId, sas, expiresAt) -> {
+                    values[0] = sessionId; values[1] = peerId; values[2] = sas;
+                    requested.countDown();
+                });
+        try {
+            host.start(InetAddress.getLoopbackAddress(), 0);
+            LanTransferPairingHandshake.InitiatorStart start =
+                    LanTransferPairingHandshake.begin("sender", "receiver",
+                            UUID.randomUUID().toString(), 1L);
+            LanTransferPairingControlProtocol.Message response =
+                    LanTransferPairingControlTransport.exchange(InetAddress.getLoopbackAddress(),
+                            host.getBoundPort(), start.request, 2000, 3000);
+            LanTransferPairingCrypto.Result initiator =
+                    LanTransferPairingHandshake.completeInitiator(start, response);
+            assertTrue(requested.await(1, TimeUnit.SECONDS));
+            byte[] initiatorProof = initiatorConfirmationProofForTest(start, response);
+            assertEquals(LanTransferPairingSession.State.WAITING_LOCAL_CONFIRMATION,
+                    host.applyRemoteConfirmation(values[0], values[1], true, initiatorProof));
+            byte[] responderProof = host.confirmLocalProof(values[0], values[1], values[2]);
+            assertEquals(32, responderProof.length);
+            assertEquals(LanTransferPairingSession.State.READY_TO_COMMIT,
+                    host.pendingSessions().get(0).state);
+        } finally {
+            host.close();
+        }
+    }
+
     @Test public void localSasMismatchRejectsAndRemovesPendingSession() throws Exception {
         final CountDownLatch requested = new CountDownLatch(1);
         final String[] sessionAndPeer = new String[3];
