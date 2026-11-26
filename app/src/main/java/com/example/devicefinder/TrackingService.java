@@ -6163,7 +6163,12 @@ public class TrackingService extends Service implements LocationListener {
                                 for (int i = 0; i < bitmap.length(); i++) {
                                     if (bitmap.charAt(i) == '0') { firstMissing = i; break; }
                                 }
-                                int windowStart = firstMissing >= 0 ? firstMissing : peerFragments.size() - 1;
+                                // Keep retry windows aligned with the original 8-fragment
+                                // flight boundaries. Starting at an arbitrary firstMissing index
+                                // after a lost tail fragment would shift the window and make the
+                                // ACK-driven boundary detector wait for a whole-message retry.
+                                int windowStart = firstMissing >= 0
+                                        ? (firstMissing / 8) * 8 : peerFragments.size() - 1;
                                 int windowEnd = Math.min(peerFragments.size(), windowStart + 8);
                                 // Bounded selective-repeat window. Already ACKed fragments are
                                 // skipped; when all are ACKed, resend the final fragment as a

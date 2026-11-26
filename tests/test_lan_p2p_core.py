@@ -5574,8 +5574,14 @@ class LongChatReceiveAndRescueDiagnosticsTests(unittest.TestCase):
         self.assertIn("preparedPeerFragmentPackets", sender)
         self.assertIn("initializeTargetFragmentProgress(", sender)
         self.assertIn("loadTargetFragmentAckBitmap(", sender)
+        self.assertIn("(firstMissing / 8) * 8", sender)
         self.assertIn("windowStart + 8", sender)
         self.assertIn("bitmap.charAt(i) == '1'", sender)
+        # The retry planner must preserve the same fixed 8-fragment flight boundary.
+        for first_missing in (0, 1, 7, 8, 9, 15, 16, 255, 256, 873):
+            aligned_start = (first_missing // 8) * 8
+            self.assertLessEqual(first_missing - aligned_start, 7)
+            self.assertLessEqual(min(1024, aligned_start + 8) - aligned_start, 8)
         self.assertIn("CHAT_FRAGMENT_COMPLETION_PROBE", sender)
         self.assertIn("LanP2pFragments.split(body)", builder)
         self.assertIn("LanP2pProtocol.MAX_DATAGRAM_BYTES", builder)
