@@ -56,7 +56,7 @@ class LanSocketBindingTests(unittest.TestCase):
         self.assertEqual(7, result.interface_index)
         self.assertEqual(("192.168.40.2", 0), sock.bound)
         self.assertEqual(FakeSocketModule.SO_BINDTODEVICE, sock.options[0][1])
-        self.assertEqual(b"wlan-test\\0", sock.options[0][2])
+        self.assertEqual(b"wlan-test", sock.options[0][2])
 
     def test_windows_uses_ip_unicast_if_and_network_order_index(self):
         sock = FakeSocket()
