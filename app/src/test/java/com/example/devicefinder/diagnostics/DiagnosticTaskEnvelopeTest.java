@@ -19,7 +19,9 @@ public class DiagnosticTaskEnvelopeTest {
 
     @Test public void pythonCompatibleJsonRoundTrips() throws Exception {
         DiagnosticTaskEnvelope original = task();
-        DiagnosticTaskEnvelope decoded = DiagnosticTaskEnvelope.fromJson(original.toJson());
+        String encoded = original.toJson();
+        assertNotNull(encoded);
+        DiagnosticTaskEnvelope decoded = DiagnosticTaskEnvelope.fromJson(encoded);
         assertEquals(original.taskId, decoded.taskId);
         assertEquals(original.adminKeyFingerprint, decoded.adminKeyFingerprint);
         assertEquals(original.targetParticipantIds, decoded.targetParticipantIds);
@@ -36,7 +38,7 @@ public class DiagnosticTaskEnvelopeTest {
         } catch (IllegalArgumentException expected) { }
     }
 
-    @Test public void rejectsDuplicateTargetsAndExpiredOrOverlongTasks() {
+    @Test public void rejectsDuplicateTargetsAndOverlongTasks() {
         try {
             new DiagnosticTaskEnvelope("task-01", repeat('a', 64),
                     Arrays.asList("phone-a", "phone-a"), Arrays.asList("android.runtime"),
@@ -51,16 +53,16 @@ public class DiagnosticTaskEnvelopeTest {
         } catch (IllegalArgumentException expected) { }
     }
 
-
     @Test public void rejectsUnknownAndMissingJsonFields() throws Exception {
         String encoded = task().toJson();
+        String withUnknown = encoded.replace("\"nonce\":", "\"extra\":true,\"nonce\":");
         try {
-            DiagnosticTaskEnvelope.fromJson(encoded.replace("\\\"nonce\\\":", "\\\"extra\\\":true,\\\"nonce\\\":"));
+            DiagnosticTaskEnvelope.fromJson(withUnknown);
             fail("unknown field accepted");
         } catch (IllegalArgumentException expected) { }
+        String withoutNonce = encoded.replace(",\"nonce\":\"" + repeat('A', 22) + "\"", "");
         try {
-            DiagnosticTaskEnvelope.fromJson(encoded.replace(",\\\"nonce\\\":\\\""
-                    + repeat('A', 22) + "\\\"", ""));
+            DiagnosticTaskEnvelope.fromJson(withoutNonce);
             fail("missing field accepted");
         } catch (IllegalArgumentException expected) { }
     }
