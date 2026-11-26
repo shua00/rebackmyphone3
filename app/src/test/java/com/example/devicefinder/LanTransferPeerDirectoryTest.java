@@ -22,6 +22,17 @@ public class LanTransferPeerDirectoryTest {
     }
     @After public void tearDown() { LanTransferPeerDirectory.clear(context); }
 
+    @Test public void legacyDiscoveryRecordsDefaultToTheDedicatedPairingPort() {
+        LanTransferPeerDirectory.recordFileDiscoveryCandidate(context, "legacy-peer",
+                "192.168.1.12", 0, "wifi:test", NOW);
+        LanTransferPeerDirectory.Candidate candidate =
+                LanTransferPeerDirectory.findCurrent(context, "legacy-peer", NOW + 1);
+        assertNotNull(candidate);
+        assertEquals(0, candidate.port);
+        assertTrue(candidate.isPairingConnectable());
+        assertEquals(LanTransferPairingControlProtocol.DEFAULT_PORT, candidate.pairingPort);
+    }
+
     @Test public void pairingEndpointRemainsConnectableBeforeCredentialGatedFileListenerStarts() {
         LanTransferPeerDirectory.recordFileDiscoveryCandidate(context, "peer-a",
                 "192.168.1.10", 0, LanTransferPairingControlProtocol.DEFAULT_PORT,
