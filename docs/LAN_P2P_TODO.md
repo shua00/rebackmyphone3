@@ -1,6 +1,6 @@
 # LAN P2P 后续 TODO 与验收门槛
 
-更新：2026-11-26
+更新：2026-11-27
 
 ## 当前优先级：第 4 批——主动发现刷新、网络切换恢复与综合回归
 
@@ -76,6 +76,7 @@
 ## 后续架构 TODO：rescue2 超级管理权限
 - [ ] **Rescue2 超级管理员权限（不可削弱的既有能力约束）**：Rescue2 是独立 L2 超级管理端，不设置应用层权限等级、业务功能白名单或 Shell/ADB 命令白名单；保留并持续扩展既有完整救援、设备管理、任意合法 Shell/ADB 操作及临时扩展能力。管理员身份/签名只用于让设备识别并认证 Rescue2 管理端，不得反向变成限制 Rescue2 可执行功能的权限系统。
 - [ ] **Android 系统能力边界**：Rescue2 超级管理员身份不等于自动获得 Android Root；实际操作仍受设备 UID、SELinux、沙箱、ADB 可用性和系统授权约束。普通设备已有 Root 时，Rescue2 应可按设备现有授权流程申请并使用 Root；不得伪造或绕过 Root 授权。
+- [x] Android 端新增 `Rescue2AdminTrustStore`：独立保存 Rescue2 P-256 公钥、SHA-256 指纹、显式信任与持久化撤销；提供 ECDSA/SHA-256 detached signature 验签入口。该类仅认证管理端身份，不定义或收窄 Rescue2 操作权限；尚未接入网络任务处理。
 - [ ] **诊断参与端隔离**：只读 Probe 白名单仅约束普通 Android 诊断参与端的自动诊断任务，不约束 Rescue2 管理端自身，也不限制 Rescue2 通过合法 Shell/ADB 执行其他管理任务。
 - [ ] 独立 CommunicationPolicyManager：策略版本化、签名验证、作用域、有效期、撤销、审计。
 - [ ] rescue2 可管理对讲和文件传输策略，但不绕过 Android OS sandbox 或接收端授权。
