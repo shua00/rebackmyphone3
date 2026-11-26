@@ -33,8 +33,9 @@ public class DiagnosticTaskReplayStoreTest {
                 1800000000000L, 1800000600000L);
         assertFalse(afterRestart.acceptOnce(reusedTaskId, 1800000000200L));
 
-        DiagnosticTaskEnvelope fresh = task("task-03", "CCCCCCCCCCCCCCCCCCCCCC",
+        // The same task ID and nonce may be reused only after the previous task's expiry.
+        DiagnosticTaskEnvelope reusedAfterExpiry = task("task-01", "AAAAAAAAAAAAAAAAAAAAAA",
                 1800003600000L, 1800004200000L);
-        assertTrue(afterRestart.acceptOnce(fresh, 1800003600100L));
+        assertTrue(afterRestart.acceptOnce(reusedAfterExpiry, 1800003600100L));
     }
 }

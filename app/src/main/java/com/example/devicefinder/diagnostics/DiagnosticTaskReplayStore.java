@@ -30,16 +30,29 @@ public final class DiagnosticTaskReplayStore {
         Map<String, ?> all = preferences.getAll();
         SharedPreferences.Editor editor = preferences.edit();
         int activeEntries = 0;
+        boolean taskAlreadySeen = false;
+        boolean nonceAlreadySeen = false;
         for (Map.Entry<String, ?> entry : all.entrySet()) {
             if (!(entry.getKey().startsWith(TASK_PREFIX) || entry.getKey().startsWith(NONCE_PREFIX)))
                 continue;
             Object value = entry.getValue();
             if (!(value instanceof Long)) return false;
-            if (((Long) value) <= nowEpochMs) editor.remove(entry.getKey());
-            else activeEntries++;
+            if (((Long) value) <= nowEpochMs) {
+                editor.remove(entry.getKey());
+                continue;
+            }
+            activeEntries++;
+            if (entry.getKey().equals(taskKey)) taskAlreadySeen = true;
+            if (entry.getKey().equals(nonceKey)) nonceAlreadySeen = true;
         }
-        if (all.containsKey(taskKey) || all.containsKey(nonceKey)) return false;
-        if (activeEntries >= MAX_ENTRIES) return false;
+        if (taskAlreadySeen || nonceAlreadySeen) {
+            editor.commit(); // Persist pruning even when this request is a replay.
+            return false;
+        }
+        if (activeEntries >= MAX_ENTRIES) {
+            editor.commit();
+            return false;
+        }
         editor.putLong(taskKey, envelope.expiresAtEpochMs);
         editor.putLong(nonceKey, envelope.expiresAtEpochMs);
         return editor.commit();
