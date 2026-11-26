@@ -182,6 +182,43 @@ public class LanTransferPairingControlHostTest {
         }
     }
 
+    @Test public void explicitLocalRejectionProducesAuthenticatedProofAndDestroysPendingSession()
+            throws Exception {
+        final CountDownLatch requested = new CountDownLatch(1);
+        final String[] values = new String[3];
+        LanTransferPairingControlHost host = new LanTransferPairingControlHost("receiver",
+                (sessionId, peerId, sas, expiresAt) -> {
+                    values[0] = sessionId; values[1] = peerId; values[2] = sas;
+                    requested.countDown();
+                });
+        try {
+            host.start(InetAddress.getLoopbackAddress(), 0);
+            LanTransferPairingHandshake.InitiatorStart start =
+                    LanTransferPairingHandshake.begin("sender", "receiver",
+                            UUID.randomUUID().toString(), 1L);
+            LanTransferPairingControlProtocol.Message response =
+                    LanTransferPairingControlTransport.exchange(InetAddress.getLoopbackAddress(),
+                            host.getBoundPort(), start.request, 2000, 3000);
+            LanTransferPairingCrypto.Result material =
+                    LanTransferPairingHandshake.completeInitiator(start, response);
+            assertTrue(requested.await(1, TimeUnit.SECONDS));
+
+            byte[] rejectionProof = host.rejectLocalProof(values[0], values[1]);
+            LanTransferPairingSession initiator = new LanTransferPairingSession(
+                    "sender", "receiver", LanTransferPairingSession.Role.INITIATOR,
+                    material, 2L, 120_000L);
+            initiator.applyRemoteConfirmation(false, rejectionProof, 3L);
+            assertEquals(LanTransferPairingSession.State.REJECTED, initiator.state(3L));
+            assertTrue(host.pendingSessions().isEmpty());
+            try {
+                host.rejectLocalProof(values[0], values[1]);
+                fail("a rejected session must not be reusable");
+            } catch (IllegalArgumentException expected) { }
+        } finally {
+            host.close();
+        }
+    }
+
     @Test public void localSasMismatchRejectsAndRemovesPendingSession() throws Exception {
         final CountDownLatch requested = new CountDownLatch(1);
         final String[] sessionAndPeer = new String[3];

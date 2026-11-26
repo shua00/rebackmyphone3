@@ -122,6 +122,24 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
         if (entry != null) entry.session.cancel(nowElapsedMs());
     }
 
+    /**
+     * Records an explicit local rejection and returns its transcript-bound proof for delivery
+     * to the initiator. The provisional session is destroyed immediately; callers must send
+     * the returned proof before treating the remote side as informed.
+     */
+    public byte[] rejectLocalProof(String sessionId, String remotePeerId)
+            throws java.security.GeneralSecurityException {
+        String entryKey = key(sessionId, remotePeerId);
+        Entry entry = pending.get(entryKey);
+        if (entry == null) throw new IllegalArgumentException("Unknown or expired pairing session");
+        byte[] proof = entry.session.rejectLocal(nowElapsedMs());
+        if (!pending.remove(entryKey, entry)) {
+            java.util.Arrays.fill(proof, (byte) 0);
+            throw new IllegalStateException("Pairing session changed before rejection handoff");
+        }
+        return proof;
+    }
+
     /** Records the local SAS decision and returns its transcript-bound proof for the peer. */
     public byte[] confirmLocalProof(String sessionId, String remotePeerId, String sas)
             throws java.security.GeneralSecurityException {
