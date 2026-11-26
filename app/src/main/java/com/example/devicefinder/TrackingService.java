@@ -5428,7 +5428,7 @@ public class TrackingService extends Service implements LocationListener {
                                 senderPeerId, "*", messageId, message, messageCreatedAtMs);
                     } catch (Exception oversizedSinglePacket) {
                         broadcastFragments = buildAuthenticatedLanChatFragmentPackets(
-                                senderPeerId, "*", messageId, message);
+                                senderPeerId, "*", messageId, message, messageCreatedAtMs);
                     }
                     preparedBroadcastData = broadcastPacket;
                     preparedBroadcastFragments = broadcastFragments;
@@ -5439,7 +5439,7 @@ public class TrackingService extends Service implements LocationListener {
                         if (target == null || target.peerId == null || "acked".equals(target.status)) continue;
                         try {
                             preparedPeerPackets.put(target.peerId,
-                                    buildAuthenticatedLanChatPacket(senderPeerId, target.peerId, messageId, message, messageCreatedAtMs));
+                                    buildAuthenticatedLanChatPacket(senderPeerId, target.peerId, messageId, message));
                         } catch (Exception oversizedSinglePacket) {
                             preparedPeerFragmentPackets.put(target.peerId,
                                     buildAuthenticatedLanChatFragmentPackets(
