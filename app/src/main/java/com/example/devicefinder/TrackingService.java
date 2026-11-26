@@ -2973,6 +2973,11 @@ public class TrackingService extends Service implements LocationListener {
                                 "TCP listener stage=" + stage + " error=" + failure.getClass().getSimpleName()));
                 listener.start(bindAddress, LanTransferTcpListener.DEFAULT_PORT);
                 lanTransferTcpListener = listener;
+                // The discovery socket may have emitted its startup beacon before the
+                // credential-gated data listener was ready (filePort=0). Announce again
+                // now so peers learn the usable TCP endpoint without waiting 15 seconds.
+                LanTransferDiscovery discovery = lanTransferDiscovery;
+                if (discovery != null) discovery.announceNow();
                 LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_RUNNING);
                 lanTransferListenerFingerprint = fingerprint;
                 lanTransferCredentialsFingerprint = credentialFingerprint;
