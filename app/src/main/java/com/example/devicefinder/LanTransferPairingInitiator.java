@@ -58,6 +58,8 @@ public final class LanTransferPairingInitiator implements AutoCloseable {
         if (address == null || address.isAnyLocalAddress() || address.isMulticastAddress()
                 || port < 1 || port > 65535)
             throw new IllegalArgumentException("A concrete pairing endpoint is required");
+        if (networkPath == null && !address.isLoopbackAddress())
+            throw new IOException("Unbound pairing initiator is restricted to loopback tests");
         String sessionId = UUID.randomUUID().toString();
         LanTransferPairingHandshake.InitiatorStart start =
                 LanTransferPairingHandshake.begin(localPeerId, remotePeerId, sessionId, 1L);
