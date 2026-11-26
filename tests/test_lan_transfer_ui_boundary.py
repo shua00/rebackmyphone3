@@ -50,7 +50,7 @@ class LanTransferUiBoundaryTests(unittest.TestCase):
         self.assertIn("ACTION_LAN_TRANSFER_PAIRING_CANCEL", activity)
         self.assertIn("LanTransferPairingInitiator.connect", service)
         self.assertIn("shortAuthenticationCode()", service)
-        self.assertIn("LanTransferCredentials.mergePeerSecret", credentials)
+        self.assertIn("void mergePeerSecret(Context c,String peerId,byte[] peerSecret)", credentials)
         self.assertIn("for(Map.Entry<String,String> e:existing.entrySet())", credentials)
         self.assertIn("merged.put(peerId,Base64.encodeToString(peerSecret,Base64.NO_WRAP));", credentials)
         self.assertNotIn("LanTransferCredentials.provision", activity)
