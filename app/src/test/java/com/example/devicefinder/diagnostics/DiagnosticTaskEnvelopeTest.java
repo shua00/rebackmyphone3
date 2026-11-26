@@ -1,9 +1,12 @@
 package com.example.devicefinder.diagnostics;
 
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.robolectric.RobolectricTestRunner;
 import java.util.Arrays;
 import static org.junit.Assert.*;
 
+@RunWith(RobolectricTestRunner.class)
 public class DiagnosticTaskEnvelopeTest {
     private DiagnosticTaskEnvelope task() {
         return new DiagnosticTaskEnvelope("task-01", repeat('a', 64),
@@ -27,6 +30,8 @@ public class DiagnosticTaskEnvelopeTest {
         assertEquals(original.targetParticipantIds, decoded.targetParticipantIds);
         assertEquals(original.probeIds, decoded.probeIds);
         assertEquals(original.nonce, decoded.nonce);
+        assertEquals(original.createdAtEpochMs, decoded.createdAtEpochMs);
+        assertEquals(original.expiresAtEpochMs, decoded.expiresAtEpochMs);
     }
 
     @Test public void rejectsShellAndUnregisteredProbeNames() {
@@ -60,7 +65,7 @@ public class DiagnosticTaskEnvelopeTest {
             DiagnosticTaskEnvelope.fromJson(withUnknown);
             fail("unknown field accepted");
         } catch (IllegalArgumentException expected) { }
-        String withoutNonce = encoded.replace(",\"nonce\":\"" + repeat('A', 22) + "\"", "");
+        String withoutNonce = encoded.replace(",\"nonce\":\"" + repeat('A', 22) + "\"}", "}");
         try {
             DiagnosticTaskEnvelope.fromJson(withoutNonce);
             fail("missing field accepted");
