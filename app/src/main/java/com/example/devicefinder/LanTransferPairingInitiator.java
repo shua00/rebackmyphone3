@@ -11,18 +11,21 @@ import java.util.concurrent.TimeUnit;
 public final class LanTransferPairingInitiator implements AutoCloseable {
     private final String localPeerId, remotePeerId, sessionId, sas;
     private final InetAddress address;
+    private final LanNetworkPath networkPath;
     private final int port;
     private final LanTransferPairingSession session;
     private long nextSequence = 2L;
     private boolean closed;
 
     private LanTransferPairingInitiator(String localPeerId, String remotePeerId,
-            InetAddress address, int port, LanTransferPairingCrypto.Result material,
+            InetAddress address, int port, LanNetworkPath networkPath,
+            LanTransferPairingCrypto.Result material,
             String sessionId, long nowElapsedMs) {
         this.localPeerId = localPeerId;
         this.remotePeerId = remotePeerId;
         this.address = address;
         this.port = port;
+        this.networkPath = networkPath;
         this.sas = material.shortAuthenticationCode;
         this.sessionId = sessionId;
         this.session = new LanTransferPairingSession(localPeerId, remotePeerId,
@@ -30,8 +33,27 @@ public final class LanTransferPairingInitiator implements AutoCloseable {
                 LanTransferPairingControlHost.SESSION_TIMEOUT_MS);
     }
 
+    /** Legacy loopback entry retained for isolated protocol tests. */
     public static LanTransferPairingInitiator connect(String localPeerId, String remotePeerId,
             InetAddress address, int port, int connectTimeoutMs, int readTimeoutMs)
+            throws GeneralSecurityException, IOException {
+        return connectInternal(localPeerId, remotePeerId, address, port, null,
+                connectTimeoutMs, readTimeoutMs);
+    }
+
+    /** Production entry: every pairing control exchange is pinned to this immutable path. */
+    public static LanTransferPairingInitiator connect(String localPeerId, String remotePeerId,
+            LanNetworkPath networkPath, InetAddress address, int port,
+            int connectTimeoutMs, int readTimeoutMs)
+            throws GeneralSecurityException, IOException {
+        if (networkPath == null) throw new IllegalArgumentException("Selected LAN path is required");
+        return connectInternal(localPeerId, remotePeerId, address, port, networkPath,
+                connectTimeoutMs, readTimeoutMs);
+    }
+
+    private static LanTransferPairingInitiator connectInternal(String localPeerId, String remotePeerId,
+            InetAddress address, int port, LanNetworkPath networkPath,
+            int connectTimeoutMs, int readTimeoutMs)
             throws GeneralSecurityException, IOException {
         if (address == null || address.isAnyLocalAddress() || address.isMulticastAddress()
                 || port < 1 || port > 65535)
@@ -39,13 +61,15 @@ public final class LanTransferPairingInitiator implements AutoCloseable {
         String sessionId = UUID.randomUUID().toString();
         LanTransferPairingHandshake.InitiatorStart start =
                 LanTransferPairingHandshake.begin(localPeerId, remotePeerId, sessionId, 1L);
-        LanTransferPairingControlProtocol.Message response =
-                LanTransferPairingControlTransport.exchange(address, port, start.request,
-                        connectTimeoutMs, readTimeoutMs);
+        LanTransferPairingControlProtocol.Message response = networkPath == null
+                ? LanTransferPairingControlTransport.exchange(address, port, start.request,
+                        connectTimeoutMs, readTimeoutMs)
+                : LanTransferPairingControlTransport.exchange(networkPath, address, port,
+                        start.request, connectTimeoutMs, readTimeoutMs);
         LanTransferPairingCrypto.Result material =
                 LanTransferPairingHandshake.completeInitiator(start, response);
         return new LanTransferPairingInitiator(localPeerId, remotePeerId, address, port,
-                material, sessionId, nowElapsedMs());
+                networkPath, material, sessionId, nowElapsedMs());
     }
 
     public String sessionId() { return sessionId; }
@@ -94,8 +118,7 @@ public final class LanTransferPairingInitiator implements AutoCloseable {
                             LanTransferPairingControlProtocol.Type.CONFIRM, sessionId,
                             localPeerId, remotePeerId, sequence, proof);
             LanTransferPairingControlProtocol.Message ack =
-                    LanTransferPairingControlTransport.exchange(address, port, request,
-                            connectTimeoutMs, readTimeoutMs);
+                    exchange(request, connectTimeoutMs, readTimeoutMs);
             if (ack.payload[0] == 1 || ack.payload[0] == 2) {
                 byte[] remoteProof = Arrays.copyOfRange(ack.payload, 1, ack.payload.length);
                 try { session.applyRemoteConfirmation(ack.payload[0] == 1, remoteProof, nowElapsedMs()); }
@@ -123,7 +146,7 @@ public final class LanTransferPairingInitiator implements AutoCloseable {
         ensureOpen();
         if (session.state(nowElapsedMs()) != LanTransferPairingSession.State.READY_TO_COMMIT)
             throw new IllegalStateException("Pairing session is not ready for durable commit");
-        LanTransferPairingCommitProof.sendCommit(address, port, localPeerId, remotePeerId,
+        LanTransferPairingCommitProof.sendCommit(networkPath, address, port, localPeerId, remotePeerId,
                 sessionId, peerSecret, nextSequence++, connectTimeoutMs, readTimeoutMs);
     }
 
@@ -137,8 +160,7 @@ public final class LanTransferPairingInitiator implements AutoCloseable {
                     new LanTransferPairingControlProtocol.Message(
                             LanTransferPairingControlProtocol.Type.REJECT, sessionId,
                             localPeerId, remotePeerId, sequence, proof);
-            LanTransferPairingControlTransport.exchange(address, port, request,
-                    connectTimeoutMs, readTimeoutMs);
+            exchange(request, connectTimeoutMs, readTimeoutMs);
         } finally {
             Arrays.fill(proof, (byte) 0);
             closed = true;
@@ -161,6 +183,16 @@ public final class LanTransferPairingInitiator implements AutoCloseable {
             session.cancel(nowElapsedMs());
             closed = true;
         }
+    }
+
+    private LanTransferPairingControlProtocol.Message exchange(
+            LanTransferPairingControlProtocol.Message request,
+            int connectTimeoutMs, int readTimeoutMs) throws IOException {
+        return networkPath == null
+                ? LanTransferPairingControlTransport.exchange(address, port, request,
+                        connectTimeoutMs, readTimeoutMs)
+                : LanTransferPairingControlTransport.exchange(networkPath, address, port,
+                        request, connectTimeoutMs, readTimeoutMs);
     }
 
     private void ensureOpen() {
