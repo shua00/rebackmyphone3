@@ -5483,6 +5483,24 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             assemble_chat_fragments(drifted)
 
+    def test_android_fragment_receive_cache_is_durable_bounded_and_separate_from_final_ack(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        self.assertIn("DB_VERSION = 10", store)
+        self.assertIn("CREATE TABLE IF NOT EXISTS lan_chat_fragment_sessions", store)
+        self.assertIn("CREATE TABLE IF NOT EXISTS lan_chat_fragments", store)
+        self.assertIn("FRAGMENT_SESSION_TTL_MS = 30L * 60L * 1000L", store)
+        self.assertIn("MAX_FRAGMENT_SESSIONS = 32", store)
+        self.assertIn("MAX_FRAGMENT_CACHE_CHARS = 2 * 1024 * 1024", store)
+        self.assertIn('return received == fragmentCount ? "complete" : "stored";', store)
+        self.assertIn('return "duplicate";', store)
+        self.assertIn('return "rejected";', store)
+        self.assertIn("loadIncomingFragments", store)
+        self.assertIn("deleteIncomingFragmentSession", store)
+        # The store itself must not emit a final delivery ACK.
+        self.assertNotIn("sendAuthenticatedChatAck", store)
+
+
     def test_fragment_builder_rejects_invalid_timestamp_and_packet_sizes_stay_bounded(self):
         from lan_p2p_core import fragment_chat_message, encode_packet, max_peer_id_budget_probe
         with self.assertRaises(ValueError):

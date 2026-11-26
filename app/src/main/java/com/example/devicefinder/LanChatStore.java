@@ -21,7 +21,11 @@ public final class LanChatStore extends SQLiteOpenHelper {
     public static final long FIRST_DISCOVERY_WINDOW_MS = LanChatRetryPolicy.FIRST_DISCOVERY_WINDOW_MS;
     private static final String DB_NAME = "lan_p2p_delivery.db";
     // v9 records the exact endpoint attempted before UDP dispatch.
-    private static final int DB_VERSION = 9;
+    private static final int DB_VERSION = 10;
+    // Durable partial long-chat receive cache: strict per-message, session and global bounds.
+    public static final long FRAGMENT_SESSION_TTL_MS = 30L * 60L * 1000L;
+    public static final int MAX_FRAGMENT_SESSIONS = 32;
+    public static final int MAX_FRAGMENT_CACHE_CHARS = 2 * 1024 * 1024;
     public static final int MAX_PENDING_MESSAGES = LanChatRetryPolicy.MAX_PENDING_MESSAGES;
     /** Maximum automatic sends in one retry epoch, including the original send. */
     public static final int MAX_AUTOMATIC_RETRY_ATTEMPTS = LanChatRetryPolicy.MAX_AUTOMATIC_RETRY_ATTEMPTS;
@@ -44,6 +48,33 @@ public final class LanChatStore extends SQLiteOpenHelper {
             this.createdAtMs = created;
             this.state = state;
             this.retryAttempts = retryAttempts;
+        }
+    }
+
+    /** One durable piece of an authenticated long-chat receive session. */
+    public static final class IncomingFragment {
+        public final String receiverScope;
+        public final String senderPeerId;
+        public final String messageId;
+        public final int fragmentIndex;
+        public final int fragmentCount;
+        public final int totalBytes;
+        public final String sha256;
+        public final long createdAtMs;
+        public final String base64Data;
+
+        IncomingFragment(String receiverScope, String senderPeerId, String messageId,
+                int fragmentIndex, int fragmentCount, int totalBytes, String sha256,
+                long createdAtMs, String base64Data) {
+            this.receiverScope = receiverScope;
+            this.senderPeerId = senderPeerId;
+            this.messageId = messageId;
+            this.fragmentIndex = fragmentIndex;
+            this.fragmentCount = fragmentCount;
+            this.totalBytes = totalBytes;
+            this.sha256 = sha256;
+            this.createdAtMs = createdAtMs;
+            this.base64Data = base64Data;
         }
     }
 
@@ -186,6 +217,31 @@ public final class LanChatStore extends SQLiteOpenHelper {
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_lan_inbox_received ON lan_inbox(receiver_scope, received_at_ms)");
 
         db.execSQL("CREATE TABLE IF NOT EXISTS lan_meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)");
+
+        db.execSQL("CREATE TABLE IF NOT EXISTS lan_chat_fragment_sessions (" +
+                "receiver_scope TEXT NOT NULL," +
+                "sender_peer_id TEXT NOT NULL," +
+                "message_id TEXT NOT NULL," +
+                "fragment_count INTEGER NOT NULL," +
+                "total_bytes INTEGER NOT NULL," +
+                "sha256 TEXT NOT NULL," +
+                "created_at_ms INTEGER NOT NULL," +
+                "first_seen_at_ms INTEGER NOT NULL," +
+                "expires_at_ms INTEGER NOT NULL," +
+                "PRIMARY KEY(receiver_scope,sender_peer_id,message_id))");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_lan_fragment_expiry " +
+                "ON lan_chat_fragment_sessions(expires_at_ms)");
+        db.execSQL("CREATE TABLE IF NOT EXISTS lan_chat_fragments (" +
+                "receiver_scope TEXT NOT NULL," +
+                "sender_peer_id TEXT NOT NULL," +
+                "message_id TEXT NOT NULL," +
+                "fragment_index INTEGER NOT NULL," +
+                "fragment_data TEXT NOT NULL," +
+                "PRIMARY KEY(receiver_scope,sender_peer_id,message_id,fragment_index)," +
+                "FOREIGN KEY(receiver_scope,sender_peer_id,message_id) " +
+                "REFERENCES lan_chat_fragment_sessions(receiver_scope,sender_peer_id,message_id) ON DELETE CASCADE)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_lan_fragments_session " +
+                "ON lan_chat_fragments(receiver_scope,sender_peer_id,message_id)");
     }
 
     private boolean hasColumn(SQLiteDatabase db, String table, String column) {
@@ -256,6 +312,23 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
         if (oldVersion < 9 && !hasColumn(db, "lan_outbox_targets", "last_attempt_endpoint")) {
             db.execSQL("ALTER TABLE lan_outbox_targets ADD COLUMN last_attempt_endpoint TEXT NOT NULL DEFAULT ''");
+        }
+        if (oldVersion < 10) {
+            db.execSQL("CREATE TABLE IF NOT EXISTS lan_chat_fragment_sessions (" +
+                    "receiver_scope TEXT NOT NULL,sender_peer_id TEXT NOT NULL,message_id TEXT NOT NULL," +
+                    "fragment_count INTEGER NOT NULL,total_bytes INTEGER NOT NULL,sha256 TEXT NOT NULL," +
+                    "created_at_ms INTEGER NOT NULL,first_seen_at_ms INTEGER NOT NULL,expires_at_ms INTEGER NOT NULL," +
+                    "PRIMARY KEY(receiver_scope,sender_peer_id,message_id))");
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_lan_fragment_expiry " +
+                    "ON lan_chat_fragment_sessions(expires_at_ms)");
+            db.execSQL("CREATE TABLE IF NOT EXISTS lan_chat_fragments (" +
+                    "receiver_scope TEXT NOT NULL,sender_peer_id TEXT NOT NULL,message_id TEXT NOT NULL," +
+                    "fragment_index INTEGER NOT NULL,fragment_data TEXT NOT NULL," +
+                    "PRIMARY KEY(receiver_scope,sender_peer_id,message_id,fragment_index)," +
+                    "FOREIGN KEY(receiver_scope,sender_peer_id,message_id) " +
+                    "REFERENCES lan_chat_fragment_sessions(receiver_scope,sender_peer_id,message_id) ON DELETE CASCADE)");
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_lan_fragments_session " +
+                    "ON lan_chat_fragments(receiver_scope,sender_peer_id,message_id)");
         }
         if (oldVersion < 6) {
             // Fixed-recipient rows now use target-local counters. Discard the old aggregate
@@ -1538,6 +1611,169 @@ public final class LanChatStore extends SQLiteOpenHelper {
             return false;
         } finally {
             db.endTransaction();
+        }
+    }
+
+    /**
+     * Persist one already-authenticated fragment. The return value is deliberately
+     * transport-local: stored, duplicate, complete, or rejected. It is NOT a chat.ack.
+     * Callers must still reassemble, verify the whole-message digest and commit inbox
+     * before sending the final stored ACK.
+     */
+    public String storeIncomingFragment(String receiverScope, String senderPeerId,
+            String messageId, int fragmentIndex, int fragmentCount, int totalBytes,
+            String sha256, long createdAtMs, String base64Data, long nowMs) {
+        if (receiverScope == null || receiverScope.isEmpty()
+                || !LanP2pProtocol.isValidPeerId(senderPeerId)
+                || messageId == null || messageId.isEmpty()
+                || messageId.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 128
+                || fragmentCount < 1 || fragmentCount > LanP2pFragments.MAX_FRAGMENTS
+                || totalBytes < 1 || totalBytes > LanP2pFragments.MAX_MESSAGE_BYTES
+                || fragmentCount != (totalBytes + LanP2pFragments.RAW_FRAGMENT_BYTES - 1)
+                        / LanP2pFragments.RAW_FRAGMENT_BYTES
+                || fragmentIndex < 0 || fragmentIndex >= fragmentCount
+                || createdAtMs < 0 || nowMs < 0
+                || sha256 == null || !sha256.matches("[0-9a-f]{64}")
+                || base64Data == null || base64Data.length() > 400) return "rejected";
+        final byte[] raw;
+        try {
+            raw = android.util.Base64.decode(base64Data, android.util.Base64.NO_WRAP);
+            if (!android.util.Base64.encodeToString(raw, android.util.Base64.NO_WRAP).equals(base64Data)) {
+                return "rejected";
+            }
+            int expected = fragmentIndex < fragmentCount - 1
+                    ? LanP2pFragments.RAW_FRAGMENT_BYTES
+                    : totalBytes - LanP2pFragments.RAW_FRAGMENT_BYTES * (fragmentCount - 1);
+            if (raw.length != expected) return "rejected";
+        } catch (IllegalArgumentException malformed) {
+            return "rejected";
+        }
+
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        Cursor cursor = null;
+        try {
+            db.delete("lan_chat_fragment_sessions", "expires_at_ms<=?",
+                    new String[]{String.valueOf(nowMs)});
+            cursor = db.rawQuery("SELECT fragment_count,total_bytes,sha256,created_at_ms " +
+                    "FROM lan_chat_fragment_sessions WHERE receiver_scope=? AND sender_peer_id=? AND message_id=?",
+                    new String[]{receiverScope, senderPeerId, messageId});
+            boolean exists = cursor.moveToFirst();
+            if (exists && (cursor.getInt(0) != fragmentCount || cursor.getInt(1) != totalBytes
+                    || !sha256.equals(cursor.getString(2)) || cursor.getLong(3) != createdAtMs)) {
+                return "rejected";
+            }
+            cursor.close();
+            cursor = null;
+
+            if (!exists) {
+                cursor = db.rawQuery("SELECT COUNT(*) FROM lan_chat_fragment_sessions", null);
+                int sessions = 0;
+                try { if (cursor.moveToFirst()) sessions = cursor.getInt(0); }
+                finally { cursor.close(); cursor = null; }
+                if (sessions >= MAX_FRAGMENT_SESSIONS) return "rejected";
+                ContentValues session = new ContentValues();
+                session.put("receiver_scope", receiverScope);
+                session.put("sender_peer_id", senderPeerId);
+                session.put("message_id", messageId);
+                session.put("fragment_count", fragmentCount);
+                session.put("total_bytes", totalBytes);
+                session.put("sha256", sha256);
+                session.put("created_at_ms", createdAtMs);
+                session.put("first_seen_at_ms", nowMs);
+                session.put("expires_at_ms", nowMs + FRAGMENT_SESSION_TTL_MS);
+                if (db.insertOrThrow("lan_chat_fragment_sessions", null, session) < 0) return "rejected";
+            }
+
+            cursor = db.rawQuery("SELECT fragment_data FROM lan_chat_fragments " +
+                    "WHERE receiver_scope=? AND sender_peer_id=? AND message_id=? AND fragment_index=?",
+                    new String[]{receiverScope, senderPeerId, messageId, String.valueOf(fragmentIndex)});
+            if (cursor.moveToFirst()) {
+                boolean identical = base64Data.equals(cursor.getString(0));
+                cursor.close();
+                cursor = null;
+                if (!identical) return "rejected";
+                db.setTransactionSuccessful();
+                return "duplicate";
+            }
+            cursor.close();
+            cursor = null;
+
+            cursor = db.rawQuery("SELECT COALESCE(SUM(LENGTH(fragment_data)),0) " +
+                    "FROM lan_chat_fragments", null);
+            int cachedChars = 0;
+            try { if (cursor.moveToFirst()) cachedChars = cursor.getInt(0); }
+            finally { cursor.close(); cursor = null; }
+            if (cachedChars + base64Data.length() > MAX_FRAGMENT_CACHE_CHARS) return "rejected";
+
+            ContentValues part = new ContentValues();
+            part.put("receiver_scope", receiverScope);
+            part.put("sender_peer_id", senderPeerId);
+            part.put("message_id", messageId);
+            part.put("fragment_index", fragmentIndex);
+            part.put("fragment_data", base64Data);
+            db.insertOrThrow("lan_chat_fragments", null, part);
+
+            cursor = db.rawQuery("SELECT COUNT(*) FROM lan_chat_fragments " +
+                    "WHERE receiver_scope=? AND sender_peer_id=? AND message_id=?",
+                    new String[]{receiverScope, senderPeerId, messageId});
+            int received = 0;
+            try { if (cursor.moveToFirst()) received = cursor.getInt(0); }
+            finally { cursor.close(); cursor = null; }
+            db.setTransactionSuccessful();
+            return received == fragmentCount ? "complete" : "stored";
+        } catch (Exception failure) {
+            return "rejected";
+        } finally {
+            if (cursor != null) cursor.close();
+            db.endTransaction();
+        }
+    }
+
+    /** Load one partial session in index order after process restart. */
+    public List<IncomingFragment> loadIncomingFragments(String receiverScope,
+            String senderPeerId, String messageId, long nowMs) {
+        ArrayList<IncomingFragment> result = new ArrayList<>();
+        if (receiverScope == null || senderPeerId == null || messageId == null || nowMs < 0) return result;
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        Cursor cursor = null;
+        try {
+            db.delete("lan_chat_fragment_sessions", "expires_at_ms<=?",
+                    new String[]{String.valueOf(nowMs)});
+            cursor = db.rawQuery("SELECT s.fragment_count,s.total_bytes,s.sha256,s.created_at_ms," +
+                    "f.fragment_index,f.fragment_data FROM lan_chat_fragment_sessions s " +
+                    "JOIN lan_chat_fragments f ON f.receiver_scope=s.receiver_scope " +
+                    "AND f.sender_peer_id=s.sender_peer_id AND f.message_id=s.message_id " +
+                    "WHERE s.receiver_scope=? AND s.sender_peer_id=? AND s.message_id=? " +
+                    "AND s.expires_at_ms>? ORDER BY f.fragment_index",
+                    new String[]{receiverScope, senderPeerId, messageId, String.valueOf(nowMs)});
+            while (cursor.moveToNext()) {
+                result.add(new IncomingFragment(receiverScope, senderPeerId, messageId,
+                        cursor.getInt(4), cursor.getInt(0), cursor.getInt(1),
+                        cursor.getString(2), cursor.getLong(3), cursor.getString(5)));
+            }
+            db.setTransactionSuccessful();
+        } catch (Exception failure) {
+            result.clear();
+        } finally {
+            if (cursor != null) cursor.close();
+            db.endTransaction();
+        }
+        return result;
+    }
+
+    /** Remove partial state only after the caller has durably committed the full inbox row. */
+    public boolean deleteIncomingFragmentSession(String receiverScope, String senderPeerId,
+            String messageId) {
+        if (receiverScope == null || senderPeerId == null || messageId == null) return false;
+        try {
+            SQLiteDatabase db = getWritableDatabase();
+            return db.delete("lan_chat_fragment_sessions",
+                    "receiver_scope=? AND sender_peer_id=? AND message_id=?",
+                    new String[]{receiverScope, senderPeerId, messageId}) > 0;
+        } catch (Exception failure) {
+            return false;
         }
     }
 
