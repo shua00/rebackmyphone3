@@ -196,7 +196,7 @@ class Rescue2AdminIdentity:
         target = Path(destination)
         target.parent.mkdir(parents=True, exist_ok=True)
         content = self.export_public_identity() + "\\n"
-        with target.open("x", encoding="utf-8", newline="\\n") as stream:
+        with target.open("x", encoding="utf-8") as stream:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
