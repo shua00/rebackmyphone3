@@ -2337,6 +2337,28 @@ public class TrackingService extends Service implements LocationListener {
         }
     }
 
+    /** Build one complete, immutable Network-backed IPv4 path for outbound pairing. */
+    private LanNetworkPath currentLanNetworkPath() throws java.io.IOException {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M)
+            throw new java.io.IOException("Android Network socket binding requires API 23+");
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        Network selected = selectWifiLanNetwork(cm);
+        if (selected == null) throw new java.io.IOException("No selected Wi-Fi LAN Network");
+        LinkProperties links = cm.getLinkProperties(selected);
+        if (links == null || links.getInterfaceName() == null
+                || links.getLinkAddresses() == null)
+            throw new java.io.IOException("Selected LAN Network snapshot is incomplete");
+        for (LinkAddress item : links.getLinkAddresses()) {
+            java.net.InetAddress address = item.getAddress();
+            if (address instanceof java.net.Inet4Address && !address.isLoopbackAddress()
+                    && !address.isLinkLocalAddress()) {
+                return LanNetworkPath.fromAndroidNetwork(selected, links.getInterfaceName(),
+                        (java.net.Inet4Address) address, item.getPrefixLength(), null);
+            }
+        }
+        throw new java.io.IOException("Selected LAN Network has no usable IPv4 address");
+    }
+
     private String buildWifiLanFingerprint(ConnectivityManager cm) {
         if (cm == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return "UNAVAILABLE";
         final Network selected;
@@ -2595,8 +2617,10 @@ public class TrackingService extends Service implements LocationListener {
             if (candidate == null || !candidate.isPairingConnectable()
                     || requestedHost == null || !candidate.host.equals(requestedHost))
                 throw new SecurityException("Pairing endpoint is not a fresh discovered candidate");
+            LanNetworkPath selectedPath = currentLanNetworkPath();
             LanTransferPairingInitiator initiator = LanTransferPairingInitiator.connect(
-                    getUniqueDeviceId(), peerId, java.net.InetAddress.getByName(candidate.host),
+                    getUniqueDeviceId(), peerId, selectedPath,
+                    java.net.InetAddress.getByName(candidate.host),
                     candidate.pairingPort, 5000, 10000);
             if (lanTransferPairingInitiators.putIfAbsent(initiator.sessionId(), initiator) != null) {
                 initiator.close();
@@ -2740,7 +2764,8 @@ public class TrackingService extends Service implements LocationListener {
                     throw new IllegalStateException("Peer pairing endpoint is not currently discovered");
                 byte[] secret = pending.copySecret();
                 try {
-                    LanTransferPairingCommitProof.sendCommit(
+                    LanNetworkPath selectedPath = currentLanNetworkPath();
+                    LanTransferPairingCommitProof.sendCommit(selectedPath,
                             java.net.InetAddress.getByName(candidate.host), candidate.pairingPort,
                             getUniqueDeviceId(), peerId, commitId, secret,
                             Math.max(System.currentTimeMillis(), 2L), 5000, 8000);
@@ -3077,6 +3102,9 @@ public class TrackingService extends Service implements LocationListener {
                 if (fingerprint.equals(lanTransferPairingControlFingerprint)
                         && lanTransferPairingControlHost != null
                         && lanTransferPairingControlHost.isRunning()) return;
+                // A path generation change invalidates provisional sessions tied to the old Network.
+                // Durable COMMIT journals are retained and retried below on the newly selected path.
+                closeLanTransferPairingInitiators();
                 closeLanTransferPairingControlHostLocked();
                 LanTransferPairingControlHost host = new LanTransferPairingControlHost(
                         getUniqueDeviceId(), new LanTransferPairingControlHost.Listener() {
