@@ -6914,8 +6914,7 @@ public class TrackingService extends Service implements LocationListener {
         boolean attemptedEndpointPending = !routeMatches && !persistedEndpointMatch
                 && store.matchesAttemptedAckEndpoint(messageId, senderId,
                         sourceAddress.getHostAddress(), sourcePort);
-        if (!routeMatches && !persistedEndpointMatch && !attemptedEndpointPending
-                && allowEndpointGrace) {
+        if (!persistedEndpointMatch && !attemptedEndpointPending && allowEndpointGrace) {
             // A broadcast recipient has no fixed target row yet. Its first authenticated
             // ACK may create a bounded, message-only target, never a trusted lan_peers row.
             persistedEndpointMatch = store.admitBroadcastFragmentAckTarget(
