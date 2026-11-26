@@ -54,6 +54,50 @@ public final class Rescue2AdminTrustStore {
         return fingerprint;
     }
 
+    /** Imports the public-only JSON exported by Rescue2 after explicit user approval. */
+    public synchronized String trustExportedIdentity(String encodedJson) throws Exception {
+        if (encodedJson == null || encodedJson.length() > 8 * 1024)
+            throw new IllegalArgumentException("Invalid Rescue2 identity document size");
+        JSONObject document = new JSONObject(encodedJson);
+        if (document.length() != 4 || !document.has("schemaVersion")
+                || !document.has("keyType") || !document.has("fingerprint")
+                || !document.has("publicKeySpki"))
+            throw new IllegalArgumentException("Invalid Rescue2 identity document fields");
+        Object schema = document.get("schemaVersion");
+        Object keyType = document.get("keyType");
+        Object fingerprintValue = document.get("fingerprint");
+        Object publicKeyValue = document.get("publicKeySpki");
+        if ((!(schema instanceof Integer) && !(schema instanceof Long))
+                || ((Number) schema).longValue() != 1L || !(keyType instanceof String)
+                || !"EC-P256".equals(keyType) || !(fingerprintValue instanceof String)
+                || !(publicKeyValue instanceof String))
+            throw new IllegalArgumentException("Unsupported Rescue2 identity document");
+        String expectedFingerprint = (String) fingerprintValue;
+        if (!isFingerprint(expectedFingerprint))
+            throw new IllegalArgumentException("Invalid Rescue2 identity fingerprint");
+        String encodedKey = (String) publicKeyValue;
+        if (encodedKey.length() > 1024)
+            throw new IllegalArgumentException("Public key is too large");
+        byte[] publicKey = Base64.decode(encodedKey,
+                Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
+        PublicKey validated = decodeP256(publicKey);
+        if (!expectedFingerprint.equals(fingerprint(validated.getEncoded())))
+            throw new SecurityException("Rescue2 identity fingerprint does not match its public key");
+        return trustP256PublicKey(validated.getEncoded());
+    }
+
+    /** Lists only active administrator fingerprints; no public key bytes or secrets are exposed. */
+    public synchronized java.util.List<String> listTrustedFingerprints() {
+        java.util.ArrayList<String> result = new java.util.ArrayList<>();
+        for (String name : preferences.getAll().keySet()) {
+            if (!name.startsWith(ACTIVE_PREFIX)) continue;
+            String fingerprint = name.substring(ACTIVE_PREFIX.length());
+            if (isTrusted(fingerprint)) result.add(fingerprint);
+        }
+        java.util.Collections.sort(result);
+        return java.util.Collections.unmodifiableList(result);
+    }
+
     public synchronized boolean revoke(String fingerprint) {
         if (!isFingerprint(fingerprint)) return false;
         String activeKey = ACTIVE_PREFIX + fingerprint;
