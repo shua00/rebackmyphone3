@@ -144,6 +144,19 @@ class TransferTcpNetworkTests(unittest.TestCase):
             self.assertEqual(b"", accepted[0].recv(1))
             accepted[0].close()
 
+
+    def test_non_loopback_client_and_listener_require_explicit_path(self):
+        with self.assertRaises(Exception):
+            connect_transfer_peer("192.168.1.20", 9000,
+                lambda sock: ("peer", self.SECRET), timeout_seconds=1)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _, _, store, files = self._prepared(root, b"x")
+            with self.assertRaises(Exception):
+                TransferTcpServer(store, files, local_peer_id="receiver",
+                    authenticate_peer=lambda conn, addr: ("sender", self.SECRET),
+                    now_ms=lambda: 1, host="0.0.0.0", port=0)
+
     def test_idle_socket_timeout_releases_worker(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
