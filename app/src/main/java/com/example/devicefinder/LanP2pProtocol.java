@@ -28,7 +28,8 @@ public final class LanP2pProtocol {
     public static JSONObject create(String type, String senderPeerId,
                                     String senderPeerType, String serviceId) throws Exception {
         if (!("peer.hello".equals(type) || "peer.ack".equals(type)
-                || "chat.message".equals(type) || "chat.ack".equals(type))) {
+                || "chat.message".equals(type) || "chat.ack".equals(type)
+                || "chat.fragment".equals(type) || "chat.fragment.ack".equals(type))) {
             throw new IllegalArgumentException("Unsupported LAN P2P packet type");
         }
         JSONObject packet = new JSONObject();
@@ -268,6 +269,33 @@ public final class LanP2pProtocol {
                     || !"stored".equals(packet.getString("status"))) {
                 throw new IllegalArgumentException("Invalid chat ACK status");
             }
+        } else if ("chat.fragment".equals(type)) {
+            requirePacketString(packet, "message_id", false);
+            requirePacketString(packet, "target_peer_id", false);
+            requirePacketString(packet, "fragment_data", false);
+            requirePacketString(packet, "sha256", false);
+            if (packet.getString("message_id").getBytes(StandardCharsets.UTF_8).length > 128) {
+                throw new IllegalArgumentException("Invalid message_id");
+            }
+            long index = requirePacketInteger(packet, "fragment_index", 0, 1023);
+            long count = requirePacketInteger(packet, "fragment_count", 1, 1024);
+            requirePacketInteger(packet, "total_bytes", 1, 262144);
+            if (index >= count || packet.getString("fragment_data").length() > 480) {
+                throw new IllegalArgumentException("Invalid fragment bounds");
+            }
+            String digest = packet.getString("sha256");
+            if (digest.length() != 64 || !digest.matches("[0-9a-f]{64}")) {
+                throw new IllegalArgumentException("Invalid fragment digest");
+            }
+            if (packet.has("created_at_ms")) requirePacketInteger(packet, "created_at_ms", 0, Long.MAX_VALUE);
+        } else if ("chat.fragment.ack".equals(type)) {
+            requirePacketString(packet, "message_id", false);
+            requirePacketString(packet, "target_peer_id", false);
+            requirePacketInteger(packet, "fragment_index", 0, 1023);
+            if (!packet.has("status") || !(packet.get("status") instanceof String)
+                    || !"received".equals(packet.getString("status"))) {
+                throw new IllegalArgumentException("Invalid fragment ACK status");
+            }
         } else {
             throw new IllegalArgumentException("Unsupported LAN P2P packet type");
         }
@@ -275,7 +303,8 @@ public final class LanP2pProtocol {
 
     private static boolean isSupportedType(String type) {
         return "peer.hello".equals(type) || "peer.ack".equals(type)
-                || "chat.message".equals(type) || "chat.ack".equals(type);
+                || "chat.message".equals(type) || "chat.ack".equals(type)
+                || "chat.fragment".equals(type) || "chat.fragment.ack".equals(type);
     }
 
     private static JSONObject copyWithoutAuth(JSONObject source) throws Exception {

@@ -5416,3 +5416,53 @@ assert retry == (0, 1061000), retry
 """
         self._run_python(verify)
 
+
+
+class LongChatFragmentProtocolTests(unittest.TestCase):
+    def test_long_message_fragments_reassemble_out_of_order_without_utf8_corruption(self):
+        from lan_p2p_core import fragment_chat_message, assemble_chat_fragments
+        body = ("诊断日志🙂" * 1500) + "\n" + ("0123456789" * 2000)
+        fragments = fragment_chat_message("long-message-1", "peer-b", body, 123456)
+        self.assertGreater(len(fragments), 1)
+        self.assertLessEqual(max(len(item["fragment_data"]) for item in fragments), 480)
+        self.assertEqual(body, assemble_chat_fragments(list(reversed(fragments))))
+
+    def test_fragment_reassembly_rejects_missing_duplicate_and_tampered_data(self):
+        from lan_p2p_core import fragment_chat_message, assemble_chat_fragments
+        fragments = fragment_chat_message("long-message-2", "peer-b", "长消息🙂" * 400)
+        with self.assertRaises(ValueError):
+            assemble_chat_fragments(fragments[:-1])
+        duplicate = list(fragments)
+        duplicate[-1] = dict(duplicate[0])
+        with self.assertRaises(ValueError):
+            assemble_chat_fragments(duplicate)
+        tampered = [dict(item) for item in fragments]
+        tampered[0]["fragment_data"] = "AAAA"
+        with self.assertRaises(ValueError):
+            assemble_chat_fragments(tampered)
+
+    def test_fragment_packet_codec_enforces_bounds_and_authentication(self):
+        from lan_p2p_core import encode_packet, decode_packet, fragment_chat_message
+        fields = fragment_chat_message("long-message-3", "peer-b", "测试🙂" * 300)[0]
+        fields.update({"sender_peer_id": "peer-a", "sender_peer_type": "python",
+                       "service_id": "rescue2"})
+        raw = encode_packet(fields, "shared-secret")
+        self.assertEqual("chat.fragment", decode_packet(raw, "shared-secret")["type"])
+        with self.assertRaises(ValueError):
+            encode_packet(dict(fields, fragment_index=1024), "shared-secret")
+        with self.assertRaises(ValueError):
+            decode_packet(raw, "wrong-secret")
+
+    def test_fragment_helper_limits_total_size_and_java_contract_matches_python(self):
+        from lan_p2p_core import fragment_chat_message, MAX_CHAT_MESSAGE_BYTES
+        with self.assertRaises(ValueError):
+            fragment_chat_message("too-big", "peer-b", "x" * (MAX_CHAT_MESSAGE_BYTES + 1))
+        repo_root = Path(__file__).resolve().parents[1]
+        protocol = (repo_root / "app/src/main/java/com/example/devicefinder/LanP2pProtocol.java").read_text(encoding="utf-8")
+        helper = (repo_root / "app/src/main/java/com/example/devicefinder/LanP2pFragments.java").read_text(encoding="utf-8")
+        self.assertIn('"chat.fragment".equals(type)', protocol)
+        self.assertIn('MAX_MESSAGE_BYTES = 256 * 1024', helper)
+        self.assertIn('RAW_FRAGMENT_BYTES = 360', helper)
+        self.assertIn('MessageDigest.isEqual', protocol)
+        self.assertIn('SecurityException("Chat fragment digest mismatch")', helper)
+

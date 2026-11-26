@@ -301,6 +301,30 @@ def _validate_packet_schema(packet):
         _require_packet_string(packet, "target_peer_id")
         if packet.get("status") != "stored":
             raise ValueError("invalid chat ACK status")
+    elif packet_type == "chat.fragment":
+        _require_packet_string(packet, "message_id")
+        _require_packet_string(packet, "target_peer_id")
+        _require_packet_string(packet, "fragment_data")
+        _require_packet_string(packet, "sha256")
+        if len(packet["message_id"].encode("utf-8")) > 128:
+            raise ValueError("message_id exceeds limit")
+        _require_packet_integer(packet, "fragment_index", 0, 1023)
+        _require_packet_integer(packet, "fragment_count", 1, 1024)
+        _require_packet_integer(packet, "total_bytes", 1, 262144)
+        if packet["fragment_index"] >= packet["fragment_count"]:
+            raise ValueError("fragment index exceeds count")
+        if len(packet["sha256"]) != 64 or any(c not in "0123456789abcdef" for c in packet["sha256"]):
+            raise ValueError("invalid fragment digest")
+        if len(packet["fragment_data"]) > 480:
+            raise ValueError("fragment data exceeds limit")
+        if "created_at_ms" in packet:
+            _require_packet_integer(packet, "created_at_ms")
+    elif packet_type == "chat.fragment.ack":
+        _require_packet_string(packet, "message_id")
+        _require_packet_string(packet, "target_peer_id")
+        _require_packet_integer(packet, "fragment_index", 0, 1023)
+        if packet.get("status") != "received":
+            raise ValueError("invalid fragment ACK status")
     else:
         raise ValueError("unsupported LAN P2P packet type")
 
@@ -356,7 +380,7 @@ def encode_packet(fields, secret, max_bytes=1200):
     _validate_canonical_numbers(packet)
     packet["v"] = 2
     packet_type = packet.get("type")
-    if packet_type not in ("peer.hello", "peer.ack", "chat.message", "chat.ack"):
+    if packet_type not in ("peer.hello", "peer.ack", "chat.message", "chat.ack", "chat.fragment", "chat.fragment.ack"):
         raise ValueError("unsupported LAN P2P packet type")
     _validate_peer_id_fields(packet)
     _validate_packet_schema(packet)
@@ -387,7 +411,7 @@ def decode_packet(data, secret, max_bytes=1200):
     _validate_canonical_numbers(packet)
     if type(packet.get("v")) is not int or packet.get("v") != 2:
         raise ValueError("unsupported LAN P2P protocol version")
-    if packet.get("type") not in ("peer.hello", "peer.ack", "chat.message", "chat.ack"):
+    if packet.get("type") not in ("peer.hello", "peer.ack", "chat.message", "chat.ack", "chat.fragment", "chat.fragment.ack"):
         raise ValueError("unsupported LAN P2P packet type")
     _validate_peer_id_fields(packet)
     _validate_packet_schema(packet)
@@ -1564,3 +1588,91 @@ def outgoing_ack_endpoint_matches(db_path, sender_scope, message_id, peer_id,
                 _safe_close(conn)
     except Exception:
         return False
+
+
+# Long chat messages remain one logical message. Fragment payloads are Base64 so
+# UTF-8 code points may safely cross fragment boundaries and be validated after reassembly.
+MAX_CHAT_MESSAGE_BYTES = 256 * 1024
+CHAT_FRAGMENT_RAW_BYTES = 360
+MAX_CHAT_MESSAGE_FRAGMENTS = 1024
+
+
+def fragment_chat_message(message_id, target_peer_id, body, created_at_ms=0):
+    """Build bounded authenticated-envelope fields for one logical long message."""
+    import base64
+    import hashlib
+    if not isinstance(message_id, str) or not message_id or len(message_id.encode("utf-8")) > 128:
+        raise ValueError("invalid message_id")
+    if not is_valid_peer_id(target_peer_id):
+        raise ValueError("invalid target_peer_id")
+    if not isinstance(body, str):
+        raise ValueError("message body must be text")
+    raw = body.encode("utf-8", errors="strict")
+    if not raw or len(raw) > MAX_CHAT_MESSAGE_BYTES:
+        raise ValueError("long chat message size is outside supported range")
+    digest = hashlib.sha256(raw).hexdigest()
+    count = (len(raw) + CHAT_FRAGMENT_RAW_BYTES - 1) // CHAT_FRAGMENT_RAW_BYTES
+    if count > MAX_CHAT_MESSAGE_FRAGMENTS:
+        raise ValueError("too many chat fragments")
+    result = []
+    for index in range(count):
+        chunk = raw[index * CHAT_FRAGMENT_RAW_BYTES:(index + 1) * CHAT_FRAGMENT_RAW_BYTES]
+        result.append({
+            "type": "chat.fragment",
+            "message_id": message_id,
+            "target_peer_id": target_peer_id,
+            "created_at_ms": int(created_at_ms),
+            "fragment_index": index,
+            "fragment_count": count,
+            "total_bytes": len(raw),
+            "sha256": digest,
+            "fragment_data": base64.b64encode(chunk).decode("ascii"),
+        })
+    return result
+
+
+def assemble_chat_fragments(fragments):
+    """Validate and reassemble fragments; return one UTF-8 body or raise ValueError."""
+    import base64
+    import hashlib
+    if not isinstance(fragments, (list, tuple)) or not fragments:
+        raise ValueError("no chat fragments")
+    first = fragments[0]
+    required = ("message_id", "target_peer_id", "fragment_count", "total_bytes", "sha256")
+    if not isinstance(first, dict) or any(key not in first for key in required):
+        raise ValueError("invalid fragment metadata")
+    count = first["fragment_count"]
+    total = first["total_bytes"]
+    digest = first["sha256"]
+    if type(count) is not int or not 1 <= count <= MAX_CHAT_MESSAGE_FRAGMENTS:
+        raise ValueError("invalid fragment count")
+    if type(total) is not int or not 1 <= total <= MAX_CHAT_MESSAGE_BYTES:
+        raise ValueError("invalid total message size")
+    if len(fragments) != count:
+        raise ValueError("incomplete chat message")
+    chunks = {}
+    for packet in fragments:
+        if not isinstance(packet, dict):
+            raise ValueError("invalid fragment")
+        if any(packet.get(key) != first[key] for key in required):
+            raise ValueError("inconsistent fragment metadata")
+        index = packet.get("fragment_index")
+        if type(index) is not int or not 0 <= index < count or index in chunks:
+            raise ValueError("duplicate or invalid fragment index")
+        encoded = packet.get("fragment_data")
+        if not isinstance(encoded, str) or len(encoded) > 480:
+            raise ValueError("invalid fragment data")
+        try:
+            chunk = base64.b64decode(encoded.encode("ascii"), validate=True)
+        except Exception as exc:
+            raise ValueError("invalid fragment base64") from exc
+        if not chunk or len(chunk) > CHAT_FRAGMENT_RAW_BYTES:
+            raise ValueError("invalid fragment byte length")
+        chunks[index] = chunk
+    raw = b"".join(chunks[index] for index in range(count))
+    if len(raw) != total or hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError("chat message digest or length mismatch")
+    try:
+        return raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError("reassembled chat message is not valid UTF-8") from exc
