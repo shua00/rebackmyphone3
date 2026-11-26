@@ -380,3 +380,15 @@
 - [x] 新增回归测试：无路径时拒绝非 loopback 客户端/服务端端点；现有 loopback 协议集成测试继续通过。
 - [ ] **剩余限制**：目前 Python 文件 TCP 调用方需要把实际枚举的 IPv4InterfacePath 显式传入 network_path；接口绑定 API 尚未在 Windows/Linux/macOS 三个平台做真实网卡收发验收。当前 CI 只在 Ubuntu 上验证 Linux 代码路径参数和跨平台参数单测。
 - [ ] Python TransferTcpServer 的路径模式仍需由实际服务启动入口选择对应 LAN path；不可把测试 loopback 模式视为正式 LAN 节点已验收。
+
+
+## 本批推进记录（2026-11-27）：Python 文件传输监听器路径生命周期
+
+- [x] 新增 `lan_p2p_transfer_runtime.py`：将接口枚举、唯一路径选择、TransferTcpServer 创建和路径变化重绑收敛为独立运行时适配器。
+- [x] 多网卡下不再默认取第一张网卡；调用方必须指定 interface_name/address，只有恰好一个候选时才允许自动选择。
+- [x] 启动时将选中的 IPv4InterfacePath 同时作为监听地址和 network_path 传入 TransferTcpServer；实际绑定仍由既有跨平台 socket adapter 执行，失败不回退。
+- [x] refresh() 在路径完全相同的情况下保留 listener；路径变化时先关闭旧 listener 再绑定新路径；无候选时关闭 listener；新路径绑定失败时保持停止状态。
+- [x] close() 幂等，关闭后禁止重新启动；新增运行时测试覆盖唯一选择、多网卡歧义、同路径保留、切网重绑、路径消失、绑定失败和关闭后重启拒绝。
+- [ ] **集成边界**：运行时适配器已经提供给宿主程序的正式启动/刷新入口，但仓库当前尚无调用 TransferTcpServer 的 Python 生产服务启动点；本批不伪造“已接入 chat.py/server2.py”。后续需明确哪个 Python 节点部署文件接收服务，并由其生命周期调用 start()/refresh()/close()。
+- [ ] **平台验收边界**：Linux CI 的参数测试不能证明 SO_BINDTODEVICE 权限、Windows IP_UNICAST_IF 和 macOS IP_BOUND_IF 在真实主机的出口行为；仍需三平台实机验证。
+- [ ] 不修改聊天消息/长消息 ACK 状态机、对讲数据面、Android 文件协议、Rescue2 旧日志 `pull_logs_multi()`。
