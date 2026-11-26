@@ -3,6 +3,7 @@ package com.example.devicefinder.diagnostics;
 import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.os.Build;
+import com.example.devicefinder.Rescue2AdminTrustStore;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -15,14 +16,17 @@ public final class DiagnosticTaskRunAdapter {
     private DiagnosticTaskRunAdapter() {}
 
     public static DiagnosticRun execute(Context context, DiagnosticTaskVerifier.Result verification,
-            DiagnosticTaskConsentStore consentStore, DiagnosticRunHistoryStore history,
+            Rescue2AdminTrustStore trustStore, DiagnosticTaskConsentStore consentStore,
+            DiagnosticRunHistoryStore history,
             long nowEpochMs, DiagnosticExecutor.Cancellation cancellation,
             DiagnosticExecutor.Listener progress) throws Exception {
         if (context == null || verification == null || !verification.accepted
                 || !verification.replayProtected || verification.envelope == null
-                || consentStore == null || history == null)
+                || trustStore == null || consentStore == null || history == null)
             throw new SecurityException("A verified task, device consent and history store are required");
         DiagnosticTaskEnvelope envelope = verification.envelope;
+        if (!trustStore.isTrusted(envelope.adminKeyFingerprint))
+            throw new SecurityException("Rescue2 administrator trust was revoked");
         if (!consentStore.isApproved(envelope.adminKeyFingerprint, envelope.taskId, nowEpochMs))
             throw new SecurityException("Diagnostic task has not been explicitly approved on this device");
 

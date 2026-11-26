@@ -65,7 +65,7 @@ public class DiagnosticTaskRunAdapterTest {
         assertTrue(consent.registerPending(verified, 1800000000100L));
         DiagnosticRunHistoryStore history = new DiagnosticRunHistoryStore(context);
         try {
-            DiagnosticTaskRunAdapter.execute(context, verified, consent, history,
+            DiagnosticTaskRunAdapter.execute(context, verified, trust, consent, history,
                     1800000000200L, null, null);
             fail("task executed without explicit consent");
         } catch (SecurityException expected) { }
