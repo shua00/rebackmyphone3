@@ -35,6 +35,9 @@ public final class LanTransferDiscovery implements AutoCloseable {
     private final AtomicBoolean closed = new AtomicBoolean(false);
     private final java.util.concurrent.atomic.AtomicLong lastBeaconAtMs =
             new java.util.concurrent.atomic.AtomicLong(Long.MIN_VALUE);
+    // Explicit refresh is independent from periodic beacon timing, but still bounded.
+    private final java.util.concurrent.atomic.AtomicLong lastManualBeaconAtMs =
+            new java.util.concurrent.atomic.AtomicLong(Long.MIN_VALUE);
     private volatile DatagramSocket receiver;
     private volatile Thread thread;
 
@@ -83,7 +86,7 @@ public final class LanTransferDiscovery implements AutoCloseable {
 
     /** Request an immediate bounded beacon after an explicit user refresh. */
     public void announceNow() {
-        if (!closed.get() && isRunning()) announce();
+        if (!closed.get() && isRunning()) announce(true);
     }
 
     private void runLoop() {
@@ -94,7 +97,7 @@ public final class LanTransferDiscovery implements AutoCloseable {
             while (!closed.get()) {
                 long now = android.os.SystemClock.elapsedRealtime();
                 if (now >= nextBeaconAt) {
-                    announce();
+                    announce(false);
                     nextBeaconAt = now + BEACON_INTERVAL_MS;
                 }
                 try {
@@ -126,7 +129,38 @@ public final class LanTransferDiscovery implements AutoCloseable {
         }
     }
 
-    private void announce() {
+    static final class Beacon {
+        final String peerId;
+        final int filePort;
+        final int pairingPort;
+        Beacon(String peerId, int filePort, int pairingPort) {
+            this.peerId = peerId; this.filePort = filePort; this.pairingPort = pairingPort;
+        }
+    }
+
+    /** Strict parser shared by the socket receiver and protocol unit tests. */
+    static Beacon parseBeacon(String message, String localPeerId) {
+        if (message == null || message.length() < 8 || message.length() > 200
+                || localPeerId == null) return null;
+        String[] fields = message.split("\\\\|", -1);
+        if ((fields.length != 3 && fields.length != 4) || !MAGIC.equals(fields[0])
+                || !fields[1].matches("[A-Za-z0-9._:-]{1,128}")
+                || localPeerId.equals(fields[1])) return null;
+        try {
+            int filePort = Integer.parseInt(fields[2]);
+            int pairingPort = fields.length == 4 ? Integer.parseInt(fields[3])
+                    : LanTransferPairingControlProtocol.DEFAULT_PORT;
+            if (filePort < 0 || filePort > 65535 || pairingPort < 1 || pairingPort > 65535) return null;
+            return new Beacon(fields[1], filePort, pairingPort);
+        } catch (NumberFormatException invalid) { return null; }
+    }
+
+    private void announce(boolean userRequested) {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (userRequested) {
+            if (!claimBeaconSlot(lastManualBeaconAtMs, now)) return;
+        } else if (!claimBeaconSlot(lastBeaconAtMs, now)) return;
+
         long now = android.os.SystemClock.elapsedRealtime();
         if (!claimBeaconSlot(lastBeaconAtMs, now)) return;
         int port;
@@ -158,25 +192,12 @@ public final class LanTransferDiscovery implements AutoCloseable {
                 || packet.getLength() < 8 || packet.getLength() > 200) return;
         String message = new String(packet.getData(), packet.getOffset(),
                 packet.getLength(), StandardCharsets.US_ASCII);
-        String[] fields = message.split("\\|", -1);
-        if ((fields.length != 3 && fields.length != 4) || !MAGIC.equals(fields[0])
-                || !fields[1].matches("[A-Za-z0-9._:-]{1,128}")) return;
-        if (localPeerId.equals(fields[1])) return;
-        final int port;
-        try { port = Integer.parseInt(fields[2]); }
-        catch (NumberFormatException invalid) { return; }
-        if (port < 0 || port > 65535) return;
-        final int pairingPort;
+        Beacon beacon = parseBeacon(message, localPeerId);
+        if (beacon == null) return;
         try {
-            pairingPort = fields.length == 4
-                    ? Integer.parseInt(fields[3])
-                    : LanTransferPairingControlProtocol.DEFAULT_PORT;
-        } catch (NumberFormatException invalid) { return; }
-        if (pairingPort < 1 || pairingPort > 65535) return;
-        try {
-            LanTransferPeerDirectory.recordFileDiscoveryCandidate(context, fields[1],
-                    packet.getAddress().getHostAddress(), port, pairingPort, networkFingerprint,
-                    System.currentTimeMillis());
+            LanTransferPeerDirectory.recordFileDiscoveryCandidate(context, beacon.peerId,
+                    packet.getAddress().getHostAddress(), beacon.filePort, beacon.pairingPort,
+                    networkFingerprint, System.currentTimeMillis());
             context.sendBroadcast(new Intent("ACTION_LAN_TRANSFER_PEERS_UPDATED")
                     .setPackage(context.getPackageName()));
         } catch (RuntimeException invalid) {
