@@ -10,12 +10,15 @@ import android.content.Intent;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.net.LinkProperties;
+import android.net.LinkAddress;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.Handler;
 import android.os.Looper;
 import org.json.JSONObject;
 import java.io.File;
+import java.net.Inet4Address;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -172,7 +175,16 @@ public final class LanTransferSenderService extends Service {
             if(!source.getPath().startsWith(new File(getFilesDir(),"lan-transfer-outbox").getCanonicalPath()+File.separator))
                 throw new SecurityException("Snapshot path is outside private outbox");
             store=new LanTransferStore(this);
-            LanTransferSenderWorker worker=new LanTransferSenderWorker(store,credentials,()->selectWifiNetwork(),
+            LanTransferSenderWorker.NetworkProvider pathProvider = new LanTransferSenderWorker.NetworkProvider() {
+                @Override public Network currentWifiNetwork() throws java.io.IOException {
+                    LanNetworkPath path = selectLanNetworkPath();
+                    return path == null ? null : path.network;
+                }
+                @Override public LanNetworkPath currentLanNetworkPath() throws java.io.IOException {
+                    return selectLanNetworkPath();
+                }
+            };
+            LanTransferSenderWorker worker=new LanTransferSenderWorker(store,credentials,pathProvider,
                 source,offer,local,()->{
                     LanTransferPeerDirectory.Candidate candidate = LanTransferPeerDirectory.findCurrent(
                             getApplicationContext(), offer.targetPeerId, System.currentTimeMillis());
@@ -245,6 +257,29 @@ public final class LanTransferSenderService extends Service {
             jobActive.set(false);
             stopSelf(startId);
         }
+    }
+
+
+    private LanNetworkPath selectLanNetworkPath() throws java.io.IOException {
+        Network network = selectWifiNetwork();
+        if (network == null) return null;
+        ConnectivityManager cm=(ConnectivityManager)getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (cm == null) throw new java.io.IOException("ConnectivityManager unavailable");
+        LinkProperties properties = cm.getLinkProperties(network);
+        if (properties == null || properties.getInterfaceName() == null
+                || properties.getInterfaceName().isEmpty())
+            throw new java.io.IOException("Selected Wi-Fi LinkProperties are incomplete");
+        for (LinkAddress linkAddress : properties.getLinkAddresses()) {
+            if (!(linkAddress.getAddress() instanceof Inet4Address)) continue;
+            Inet4Address local = (Inet4Address) linkAddress.getAddress();
+            if (!LanNetworkPath.isUsableLanIpv4(local)) continue;
+            int prefix = linkAddress.getPrefixLength();
+            if (prefix < 1 || prefix > 32) continue;
+            Inet4Address broadcast = LanTransferIpv4Subnet.directedBroadcast(local, prefix);
+            return LanNetworkPath.fromAndroidNetwork(network, properties.getInterfaceName(),
+                    local, prefix, broadcast);
+        }
+        throw new java.io.IOException("Selected Wi-Fi network has no usable IPv4 LAN address");
     }
 
     private Network selectWifiNetwork() throws java.io.IOException {
