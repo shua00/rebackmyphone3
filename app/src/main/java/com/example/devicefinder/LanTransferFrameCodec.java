@@ -237,15 +237,15 @@ public final class LanTransferFrameCodec {
             char ch=value.charAt(i);
             switch(ch) {
                 case '"': out.append("\\\""); break;
-                case '\\\\': out.append("\\\\\\\\"); break;
-                case '\\b': out.append("\\\\b"); break;
-                case '\\f': out.append("\\\\f"); break;
-                case '\\n': out.append("\\\\n"); break;
-                case '\\r': out.append("\\\\r"); break;
-                case '\\t': out.append("\\\\t"); break;
+                case '\\': out.append("\\\\"); break;
+                case '\b': out.append("\\b"); break;
+                case '\f': out.append("\\f"); break;
+                case '\n': out.append("\\n"); break;
+                case '\r': out.append("\\r"); break;
+                case '\t': out.append("\\t"); break;
                 default:
                     if(ch<0x20) {
-                        out.append("\\\\u");
+                        out.append("\\u");
                         String hex=Integer.toHexString(ch);
                         for(int pad=hex.length();pad<4;pad++) out.append('0');
                         out.append(hex);
