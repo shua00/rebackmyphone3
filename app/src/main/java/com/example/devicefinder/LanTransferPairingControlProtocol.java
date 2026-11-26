@@ -22,7 +22,7 @@ public final class LanTransferPairingControlProtocol {
     private static final int MAGIC = 0x4c545031; // LTP1
 
     public enum Type {
-        REQUEST(1), RESPONSE(2), CONFIRM(3), REJECT(4), CANCEL(5), ACK(6);
+        REQUEST(1), RESPONSE(2), CONFIRM(3), REJECT(4), CANCEL(5), ACK(6), COMMIT(7), COMMIT_ACK(8);
         final int wire;
         Type(int wire) { this.wire = wire; }
         static Type fromWire(int value) throws IOException {
@@ -128,6 +128,8 @@ public final class LanTransferPairingControlProtocol {
                 || (payload[0] == 3 && payload.length != 1)
                 || payload[0] < 0 || payload[0] > 3))
             throw new IllegalArgumentException("Pairing acknowledgement status and proof are inconsistent");
+        if ((type == Type.COMMIT || type == Type.COMMIT_ACK) && payload.length != 32)
+            throw new IllegalArgumentException("Pairing commit proof must be 32 bytes");
         if (type == Type.CANCEL && payload.length != 0)
             throw new IllegalArgumentException("Pairing cancel message must be empty");
     }

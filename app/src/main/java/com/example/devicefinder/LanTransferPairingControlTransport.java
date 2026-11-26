@@ -50,7 +50,9 @@ public final class LanTransferPairingControlTransport {
             LanTransferPairingControlProtocol.Type expectedType =
                     request.type == LanTransferPairingControlProtocol.Type.REQUEST
                             ? LanTransferPairingControlProtocol.Type.RESPONSE
-                            : LanTransferPairingControlProtocol.Type.ACK;
+                            : request.type == LanTransferPairingControlProtocol.Type.COMMIT
+                                    ? LanTransferPairingControlProtocol.Type.COMMIT_ACK
+                                    : LanTransferPairingControlProtocol.Type.ACK;
             if (decoded.type != expectedType)
                 throw new IOException("Pairing control request received an unexpected response type");
             if (!decoded.sessionId.equals(request.sessionId)
@@ -155,7 +157,9 @@ public final class LanTransferPairingControlTransport {
                 LanTransferPairingControlProtocol.Type expectedType =
                         request.type == LanTransferPairingControlProtocol.Type.REQUEST
                                 ? LanTransferPairingControlProtocol.Type.RESPONSE
-                                : LanTransferPairingControlProtocol.Type.ACK;
+                                : request.type == LanTransferPairingControlProtocol.Type.COMMIT
+                                        ? LanTransferPairingControlProtocol.Type.COMMIT_ACK
+                                        : LanTransferPairingControlProtocol.Type.ACK;
                 if (response.type != expectedType
                         || !response.sessionId.equals(request.sessionId)
                         || !response.senderPeerId.equals(localPeerId)

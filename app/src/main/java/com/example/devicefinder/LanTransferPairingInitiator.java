@@ -109,6 +109,24 @@ public final class LanTransferPairingInitiator implements AutoCloseable {
         }
     }
 
+    /** Copies the provisional secret only after both SAS decisions have been authenticated. */
+    public synchronized byte[] copySecretForCommit() {
+        ensureOpen();
+        if (session.state(nowElapsedMs()) != LanTransferPairingSession.State.READY_TO_COMMIT)
+            throw new IllegalStateException("Both pairing confirmations are required before commit");
+        return session.peerSecretForCommit(nowElapsedMs());
+    }
+
+    /** Send an authenticated durable commit; caller owns encrypted journaling and finalization. */
+    public synchronized void sendCommit(byte[] peerSecret, int connectTimeoutMs, int readTimeoutMs)
+            throws GeneralSecurityException, IOException {
+        ensureOpen();
+        if (session.state(nowElapsedMs()) != LanTransferPairingSession.State.READY_TO_COMMIT)
+            throw new IllegalStateException("Pairing session is not ready for durable commit");
+        LanTransferPairingCommitProof.sendCommit(address, port, localPeerId, remotePeerId,
+                sessionId, peerSecret, nextSequence++, connectTimeoutMs, readTimeoutMs);
+    }
+
     public synchronized void rejectLocal(int connectTimeoutMs, int readTimeoutMs)
             throws GeneralSecurityException, IOException {
         ensureOpen();

@@ -18,6 +18,13 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
                 long expiresAtElapsedMs);
         default void onPairingStateChanged(String sessionId, String remotePeerId,
                 LanTransferPairingSession.State state) { }
+        default boolean onPairingReady(String sessionId, String remotePeerId,
+                byte[] peerSecret, byte[] localProof, byte[] remoteProof,
+                long expiresAtElapsedMs) { return true; }
+        default boolean onPairingCommitRequested(String sessionId, String remotePeerId,
+                byte[] peerSecret) throws Exception { return false; }
+        default LanTransferPairingControlProtocol.Message onPairingRecoveryMessage(
+                LanTransferPairingControlProtocol.Message request) throws Exception { return null; }
     }
 
     public static final long SESSION_TIMEOUT_MS = 120_000L;
@@ -47,6 +54,7 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
         final long expiresAtElapsedMs;
         final LanTransferPairingSession session;
         volatile byte[] terminalAckPayload;
+        volatile byte[] remoteConfirmationProof;
 
         Entry(String key, String sessionId, String remotePeerId, String sas,
                 long expiresAtElapsedMs, LanTransferPairingSession session) {
@@ -131,7 +139,10 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
 
     public void cancelPending(String sessionId, String remotePeerId) {
         Entry entry = pending.remove(key(sessionId, remotePeerId));
-        if (entry != null) entry.session.cancel(nowElapsedMs());
+        if (entry != null) {
+            entry.session.cancel(nowElapsedMs());
+            if (entry.remoteConfirmationProof != null) java.util.Arrays.fill(entry.remoteConfirmationProof, (byte) 0);
+        }
     }
 
     /** Retain a short-lived cancellation tombstone so the initiator learns the decision on retry. */
@@ -139,6 +150,7 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
         Entry entry = pending.get(key(sessionId, remotePeerId));
         if (entry == null || entry.terminalAckPayload != null) return;
         entry.session.cancel(nowElapsedMs());
+        if (entry.remoteConfirmationProof != null) java.util.Arrays.fill(entry.remoteConfirmationProof, (byte) 0);
         entry.terminalAckPayload = new byte[]{3};
     }
 
@@ -155,6 +167,7 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
         System.arraycopy(proof, 0, terminal, 1, proof.length);
         java.util.Arrays.fill(proof, (byte) 0);
         entry.terminalAckPayload = terminal;
+        if (entry.remoteConfirmationProof != null) java.util.Arrays.fill(entry.remoteConfirmationProof, (byte) 0);
     }
 
     /**
@@ -172,7 +185,29 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
             java.util.Arrays.fill(proof, (byte) 0);
             throw new IllegalStateException("Pairing session changed before rejection handoff");
         }
+        if (entry.remoteConfirmationProof != null) java.util.Arrays.fill(entry.remoteConfirmationProof, (byte) 0);
         return proof;
+    }
+
+    /** Non-destructive copies used by the durable commit coordinator while the session is READY. */
+    public byte[] copySecretForCommit(String sessionId, String remotePeerId) {
+        Entry entry = pending.get(key(sessionId, remotePeerId));
+        if (entry == null) throw new IllegalArgumentException("Unknown or expired pairing session");
+        return entry.session.peerSecretForCommit(nowElapsedMs());
+    }
+
+    public byte[] copyLocalConfirmationProof(String sessionId, String remotePeerId)
+            throws java.security.GeneralSecurityException {
+        Entry entry = pending.get(key(sessionId, remotePeerId));
+        if (entry == null) throw new IllegalArgumentException("Unknown or expired pairing session");
+        return entry.session.createLocalConfirmationProof(nowElapsedMs());
+    }
+
+    public byte[] copyRemoteConfirmationProof(String sessionId, String remotePeerId) {
+        Entry entry = pending.get(key(sessionId, remotePeerId));
+        if (entry == null || entry.remoteConfirmationProof == null)
+            throw new IllegalStateException("Remote confirmation proof is not available");
+        return entry.remoteConfirmationProof.clone();
     }
 
     /** Records the local SAS decision and returns its transcript-bound proof for the peer. */
@@ -195,6 +230,11 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
         if (entry == null) throw new IllegalArgumentException("Unknown or expired pairing session");
         long now = nowElapsedMs();
         entry.session.applyRemoteConfirmation(accepted, proof, now);
+        if (accepted && entry.session.state(now) != LanTransferPairingSession.State.REJECTED) {
+            byte[] oldProof = entry.remoteConfirmationProof;
+            if (oldProof != null) java.util.Arrays.fill(oldProof, (byte) 0);
+            entry.remoteConfirmationProof = proof.clone();
+        }
         LanTransferPairingSession.State state = entry.session.state(now);
         if (state == LanTransferPairingSession.State.REJECTED
                 || state == LanTransferPairingSession.State.EXPIRED
@@ -217,6 +257,7 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
             throw new IllegalStateException("Pairing session changed before credential handoff");
         }
         entry.session.cancel(now);
+        if (entry.remoteConfirmationProof != null) java.util.Arrays.fill(entry.remoteConfirmationProof, (byte) 0);
         return secret;
     }
 
@@ -228,17 +269,50 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
         if (request.type != LanTransferPairingControlProtocol.Type.REQUEST) {
             String controlKey = key(request.sessionId, request.senderPeerId);
             Entry active = pending.get(controlKey);
-            if (active == null) return null;
+            if (active == null) {
+                if (request.type == LanTransferPairingControlProtocol.Type.COMMIT
+                        || request.type == LanTransferPairingControlProtocol.Type.CONFIRM)
+                    return listener.onPairingRecoveryMessage(request);
+                return null;
+            }
             byte[] terminal = active.terminalAckPayload;
             if (terminal != null && request.type == LanTransferPairingControlProtocol.Type.CONFIRM) {
                 return new LanTransferPairingControlProtocol.Message(
                         LanTransferPairingControlProtocol.Type.ACK, request.sessionId,
                         localPeerId, request.senderPeerId, request.sequence, terminal.clone());
             }
+            if (request.type == LanTransferPairingControlProtocol.Type.COMMIT) {
+                byte[] secret = active.session.peerSecretForCommit(now);
+                try {
+                    if (!LanTransferPairingCommitProof.verify(secret, request.sessionId,
+                            request.senderPeerId, localPeerId, "COMMIT", request.payload))
+                        throw new java.security.SecurityException("Pairing commit proof is invalid");
+                    if (!listener.onPairingCommitRequested(active.sessionId,
+                            active.remotePeerId, secret)) return null;
+                    byte[] acknowledgement = LanTransferPairingCommitProof.create(secret,
+                            request.sessionId, localPeerId, request.senderPeerId, "COMMIT_ACK");
+                    pending.remove(active.key, active);
+                    active.session.cancel(now);
+                    byte[] remoteProof = active.remoteConfirmationProof;
+                    if (remoteProof != null) java.util.Arrays.fill(remoteProof, (byte) 0);
+                    LanTransferPairingControlProtocol.Message response =
+                            new LanTransferPairingControlProtocol.Message(
+                                    LanTransferPairingControlProtocol.Type.COMMIT_ACK,
+                                    request.sessionId, localPeerId, request.senderPeerId,
+                                    request.sequence, acknowledgement);
+                    java.util.Arrays.fill(acknowledgement, (byte) 0);
+                    return response;
+                } finally { java.util.Arrays.fill(secret, (byte) 0); }
+            }
             if (request.type == LanTransferPairingControlProtocol.Type.CONFIRM
                     || request.type == LanTransferPairingControlProtocol.Type.REJECT) {
                 boolean accepted = request.type == LanTransferPairingControlProtocol.Type.CONFIRM;
                 active.session.applyRemoteConfirmation(accepted, request.payload, now);
+                if (accepted && active.session.state(now) != LanTransferPairingSession.State.REJECTED) {
+                    byte[] oldProof = active.remoteConfirmationProof;
+                    if (oldProof != null) java.util.Arrays.fill(oldProof, (byte) 0);
+                    active.remoteConfirmationProof = request.payload.clone();
+                }
                 LanTransferPairingSession.State state = active.session.state(now);
                 if (state == LanTransferPairingSession.State.REJECTED
                         || state == LanTransferPairingSession.State.EXPIRED
@@ -257,11 +331,29 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
             boolean ready = updatedState == LanTransferPairingSession.State.READY_TO_COMMIT;
             byte[] acknowledgement;
             if (ready) {
+                byte[] secret = active.session.peerSecretForCommit(now);
                 byte[] proof = active.session.createLocalConfirmationProof(now);
-                acknowledgement = new byte[33];
-                acknowledgement[0] = 1;
-                System.arraycopy(proof, 0, acknowledgement, 1, proof.length);
-                java.util.Arrays.fill(proof, (byte) 0);
+                byte[] remoteProof = active.remoteConfirmationProof;
+                boolean staged = false;
+                try {
+                    staged = listener.onPairingReady(active.sessionId, active.remotePeerId,
+                            secret, proof, remoteProof,
+                            active.expiresAtElapsedMs);
+                } catch (Exception persistenceFailure) {
+                    staged = false;
+                } finally {
+                    java.util.Arrays.fill(secret, (byte) 0);
+                    java.util.Arrays.fill(proof, (byte) 0);
+                }
+                if (staged) {
+                    acknowledgement = new byte[33];
+                    acknowledgement[0] = 1;
+                    byte[] responseProof = active.session.createLocalConfirmationProof(now);
+                    System.arraycopy(responseProof, 0, acknowledgement, 1, responseProof.length);
+                    java.util.Arrays.fill(responseProof, (byte) 0);
+                } else {
+                    acknowledgement = new byte[]{0};
+                }
             } else {
                 acknowledgement = new byte[]{0};
             }
@@ -300,6 +392,8 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
                 pending.remove(entry.key, entry);
                 byte[] terminal = entry.terminalAckPayload;
                 if (terminal != null) java.util.Arrays.fill(terminal, (byte) 0);
+                byte[] remoteProof = entry.remoteConfirmationProof;
+                if (remoteProof != null) java.util.Arrays.fill(remoteProof, (byte) 0);
             }
         }
     }
@@ -324,6 +418,8 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
             entry.session.cancel(now);
             byte[] terminal = entry.terminalAckPayload;
             if (terminal != null) java.util.Arrays.fill(terminal, (byte) 0);
+            byte[] remoteProof = entry.remoteConfirmationProof;
+            if (remoteProof != null) java.util.Arrays.fill(remoteProof, (byte) 0);
         }
         pending.clear();
     }
