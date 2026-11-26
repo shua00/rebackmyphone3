@@ -72,7 +72,7 @@ public class DiagnosticTaskConsentStoreTest {
     private DiagnosticTaskVerifier.Result verifyWith(DiagnosticTaskEnvelope envelope,
             java.security.KeyPair pair, com.example.devicefinder.Rescue2AdminTrustStore trust,
             Context context, long now) throws Exception {
-        byte[] domain = "rebackmyphone3/rescue2-admin-task/v1\\0".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] domain = "rebackmyphone3/rescue2-admin-task/v1\0".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         java.security.Signature signer = java.security.Signature.getInstance("SHA256withECDSA");
         signer.initSign(pair.getPrivate());
         signer.update(domain);
@@ -94,7 +94,7 @@ public class DiagnosticTaskConsentStoreTest {
             DiagnosticTaskEnvelope signed = new DiagnosticTaskEnvelope(envelope.taskId, fingerprint,
                     envelope.targetParticipantIds, envelope.probeIds, envelope.createdAtEpochMs,
                     envelope.expiresAtEpochMs, envelope.nonce);
-            byte[] domain = "rebackmyphone3/rescue2-admin-task/v1\\0".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            byte[] domain = "rebackmyphone3/rescue2-admin-task/v1\0".getBytes(java.nio.charset.StandardCharsets.UTF_8);
             java.security.Signature signer = java.security.Signature.getInstance("SHA256withECDSA");
             signer.initSign(pair.getPrivate());
             signer.update(domain);
