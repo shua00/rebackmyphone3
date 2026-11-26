@@ -122,6 +122,50 @@ public final class LanTransferPairingControlHost implements AutoCloseable {
         if (entry != null) entry.session.cancel(nowElapsedMs());
     }
 
+    /** Records the local SAS decision and returns its transcript-bound proof for the peer. */
+    public byte[] confirmLocalProof(String sessionId, String remotePeerId, String sas)
+            throws java.security.GeneralSecurityException {
+        Entry entry = pending.get(key(sessionId, remotePeerId));
+        if (entry == null) throw new IllegalArgumentException("Unknown or expired pairing session");
+        LanTransferPairingSession.State state = confirmLocal(sessionId, remotePeerId, sas);
+        if (state != LanTransferPairingSession.State.WAITING_REMOTE_CONFIRMATION)
+            throw new IllegalStateException("Local confirmation was rejected or session is not awaiting peer confirmation");
+        return entry.session.createLocalConfirmationProof(nowElapsedMs());
+    }
+
+    /** Applies the peer's authenticated decision; a rejection permanently removes the provisional session. */
+    public LanTransferPairingSession.State applyRemoteConfirmation(String sessionId,
+            String remotePeerId, boolean accepted, byte[] proof)
+            throws java.security.GeneralSecurityException {
+        Entry entry = pending.get(key(sessionId, remotePeerId));
+        if (entry == null) throw new IllegalArgumentException("Unknown or expired pairing session");
+        long now = nowElapsedMs();
+        entry.session.applyRemoteConfirmation(accepted, proof, now);
+        LanTransferPairingSession.State state = entry.session.state(now);
+        if (state == LanTransferPairingSession.State.REJECTED
+                || state == LanTransferPairingSession.State.EXPIRED
+                || state == LanTransferPairingSession.State.CANCELLED)
+            pending.remove(entry.key, entry);
+        return state;
+    }
+
+    /**
+     * One-shot secret handoff for the credential coordinator. It is impossible before both
+     * authenticated user confirmations; the provisional session is destroyed after handoff.
+     */
+    public byte[] takeSecretForCommit(String sessionId, String remotePeerId) {
+        Entry entry = pending.get(key(sessionId, remotePeerId));
+        if (entry == null) throw new IllegalArgumentException("Unknown or expired pairing session");
+        long now = nowElapsedMs();
+        byte[] secret = entry.session.peerSecretForCommit(now);
+        if (!pending.remove(entry.key, entry)) {
+            java.util.Arrays.fill(secret, (byte) 0);
+            throw new IllegalStateException("Pairing session changed before credential handoff");
+        }
+        entry.session.cancel(now);
+        return secret;
+    }
+
     private LanTransferPairingControlProtocol.Message handle(
             LanTransferPairingControlProtocol.Message request) throws Exception {
         if (closed || request.type != LanTransferPairingControlProtocol.Type.REQUEST) return null;

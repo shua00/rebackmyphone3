@@ -47,6 +47,57 @@ public class LanTransferPairingControlHostTest {
         assertTrue(host.pendingSessions().isEmpty());
     }
 
+    @Test public void secretHandoffRequiresBothConfirmedSidesAndIsOneShot() throws Exception {
+        final CountDownLatch requested = new CountDownLatch(1);
+        final String[] values = new String[3];
+        LanTransferPairingControlHost host = new LanTransferPairingControlHost("receiver",
+                (sessionId, peerId, sas, expiresAt) -> {
+                    values[0] = sessionId; values[1] = peerId; values[2] = sas;
+                    requested.countDown();
+                });
+        try {
+            host.start(InetAddress.getLoopbackAddress(), 0);
+            LanTransferPairingHandshake.InitiatorStart start =
+                    LanTransferPairingHandshake.begin("sender", "receiver", UUID.randomUUID().toString(), 1L);
+            LanTransferPairingControlProtocol.Message response =
+                    LanTransferPairingControlTransport.exchange(InetAddress.getLoopbackAddress(),
+                            host.getBoundPort(), start.request, 2000, 3000);
+            LanTransferPairingCrypto.Result initiator =
+                    LanTransferPairingHandshake.completeInitiator(start, response);
+            assertTrue(requested.await(1, TimeUnit.SECONDS));
+            try {
+                host.takeSecretForCommit(values[0], values[1]);
+                fail("one-sided session must not expose a commit secret");
+            } catch (IllegalStateException expected) { }
+
+            byte[] responderProof = host.confirmLocalProof(values[0], values[1], values[2]);
+            LanTransferPairingSession.State state = host.applyRemoteConfirmation(
+                    values[0], values[1], true, initiatorConfirmationProofForTest(start, response));
+            assertEquals(LanTransferPairingSession.State.READY_TO_COMMIT, state);
+            byte[] secret = host.takeSecretForCommit(values[0], values[1]);
+            assertEquals(32, secret.length);
+            assertArrayEquals(initiator.peerSecret, secret);
+            java.util.Arrays.fill(secret, (byte) 0);
+            try {
+                host.takeSecretForCommit(values[0], values[1]);
+                fail("commit handoff must be one-shot");
+            } catch (IllegalArgumentException expected) { }
+        } finally {
+            host.close();
+        }
+    }
+
+    private static byte[] initiatorConfirmationProofForTest(
+            LanTransferPairingHandshake.InitiatorStart start,
+            LanTransferPairingControlProtocol.Message response) throws Exception {
+        LanTransferPairingCrypto.Result material =
+                LanTransferPairingHandshake.completeInitiator(start, response);
+        LanTransferPairingSession session = new LanTransferPairingSession("sender", "receiver",
+                LanTransferPairingSession.Role.INITIATOR, material, 1L, 120_000L);
+        session.confirmLocal(material.shortAuthenticationCode, 2L);
+        return session.createLocalConfirmationProof(2L);
+    }
+
     @Test public void localSasMismatchRejectsAndRemovesPendingSession() throws Exception {
         final CountDownLatch requested = new CountDownLatch(1);
         final String[] sessionAndPeer = new String[3];
