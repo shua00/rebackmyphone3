@@ -1,12 +1,66 @@
 package com.example.devicefinder;
 
 import static org.junit.Assert.*;
+import android.content.Context;
+import org.junit.runner.RunWith;
+import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
+import org.robolectric.annotation.Config;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.nio.charset.StandardCharsets;
 import org.junit.Test;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
+@RunWith(RobolectricTestRunner.class)
+@Config(sdk = 28)
 public class LanTransferDiscoveryTest {
+    @Test public void loopbackUdpDatagramFlowsThroughPacketParserIntoPeerDirectory() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        LanTransferPeerDirectory.clear(context);
+        LanTransferPeerDirectory.deactivateNetwork(context);
+        String fingerprint = "wifi:udp-integration";
+        try {
+            LanTransferPeerDirectory.activateNetwork(context, fingerprint);
+            byte[] payload = "LTFD1|peer-remote|38471|38473".getBytes(StandardCharsets.US_ASCII);
+            InetAddress loopback = InetAddress.getByName("127.0.0.1");
+            try (DatagramSocket receiver = new DatagramSocket(0, loopback);
+                 DatagramSocket sender = new DatagramSocket()) {
+                sender.send(new DatagramPacket(payload, payload.length, loopback, receiver.getLocalPort()));
+                byte[] buffer = new byte[256];
+                DatagramPacket received = new DatagramPacket(buffer, buffer.length);
+                receiver.setSoTimeout(1500);
+                receiver.receive(received);
+                assertTrue(LanTransferDiscovery.recordBeaconCandidate(context, received,
+                        "peer-local", fingerprint, System.currentTimeMillis()));
+            }
+            LanTransferPeerDirectory.Candidate candidate =
+                    LanTransferPeerDirectory.findCurrent(context, "peer-remote", System.currentTimeMillis());
+            assertNotNull(candidate);
+            assertEquals("127.0.0.1", candidate.host);
+            assertEquals(38471, candidate.port);
+            assertEquals(38473, candidate.pairingPort);
+            assertEquals(LanTransferPeerDirectory.SOURCE_FILE_DISCOVERY, candidate.source);
+        } finally {
+            LanTransferPeerDirectory.clear(context);
+            LanTransferPeerDirectory.deactivateNetwork(context);
+        }
+    }
+
+    @Test public void packetDirectoryBoundaryRejectsInvalidBeaconAndEmptyNetwork() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        byte[] malformed = "LTFD1|bad peer|38471|38473".getBytes(StandardCharsets.US_ASCII);
+        DatagramPacket packet = new DatagramPacket(malformed, malformed.length,
+                InetAddress.getByName("127.0.0.1"), 38472);
+        assertFalse(LanTransferDiscovery.recordBeaconCandidate(context, packet,
+                "peer-local", "wifi:test", System.currentTimeMillis()));
+        assertFalse(LanTransferDiscovery.recordBeaconCandidate(context, packet,
+                "peer-local", "", System.currentTimeMillis()));
+    }
+
     @Test public void firstBeaconIsAllowedAndRapidRefreshIsThrottled() {
         AtomicLong last=new AtomicLong(Long.MIN_VALUE);
         assertTrue(LanTransferDiscovery.claimBeaconSlot(last,10_000L));

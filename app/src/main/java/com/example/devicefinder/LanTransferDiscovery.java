@@ -194,21 +194,34 @@ public final class LanTransferDiscovery implements AutoCloseable {
                 || packet.getAddress().isLoopbackAddress()
                 || packet.getAddress().equals(localAddress)
                 || packet.getLength() < 8 || packet.getLength() > 200) return;
+        recordBeaconCandidate(context, packet, localPeerId, networkFingerprint,
+                System.currentTimeMillis());
+    }
+
+    /** Packet-to-directory boundary shared with the real UDP socket integration test. */
+    static boolean recordBeaconCandidate(Context context, DatagramPacket packet,
+            String localPeerId, String networkFingerprint, long nowWallTimeMs) {
+        if (context == null || packet == null || !(packet.getAddress() instanceof Inet4Address)
+                || packet.getLength() < 8 || packet.getLength() > 200
+                || networkFingerprint == null || networkFingerprint.isEmpty() || nowWallTimeMs <= 0L)
+            return false;
         String message = new String(packet.getData(), packet.getOffset(),
                 packet.getLength(), StandardCharsets.US_ASCII);
         Beacon beacon = parseBeacon(message, localPeerId);
-        if (beacon == null) return;
+        if (beacon == null) return false;
         try {
+            String host = packet.getAddress().getHostAddress();
             LanTransferPeerDirectory.recordFileDiscoveryCandidate(context, beacon.peerId,
-                    packet.getAddress().getHostAddress(), beacon.filePort, beacon.pairingPort,
-                    networkFingerprint, System.currentTimeMillis());
+                    host, beacon.filePort, beacon.pairingPort, networkFingerprint, nowWallTimeMs);
             android.util.Log.d("LanTransferDiscovery", "Candidate received peer=" + beacon.peerId
-                    + " endpoint=" + packet.getAddress().getHostAddress() + ":" + beacon.filePort
+                    + " endpoint=" + host + ":" + beacon.filePort
                     + " pairingPort=" + beacon.pairingPort);
             context.sendBroadcast(new Intent("ACTION_LAN_TRANSFER_PEERS_UPDATED")
                     .setPackage(context.getPackageName()));
+            return true;
         } catch (RuntimeException invalid) {
             // A malformed discovery hint is disposable and never changes authentication state.
+            return false;
         }
     }
 
