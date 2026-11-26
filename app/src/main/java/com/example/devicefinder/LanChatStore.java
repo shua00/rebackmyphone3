@@ -199,6 +199,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 "last_error TEXT NOT NULL DEFAULT ''," +
                 "last_recovery_at_ms INTEGER NOT NULL DEFAULT 0," +
                 "fragment_count INTEGER NOT NULL DEFAULT 0," +
+                // Per-recipient selective ACK state survives process death; empty count means legacy/short message.
                 "fragment_ack_bitmap TEXT NOT NULL DEFAULT ''," +
                 "PRIMARY KEY(message_id, peer_id)," +
                 "FOREIGN KEY(message_id) REFERENCES lan_outbox(message_id) ON DELETE CASCADE)");
