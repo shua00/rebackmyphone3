@@ -79,6 +79,21 @@ class ChatInputContinuityTests(unittest.TestCase):
         self.assertIn('android:focusable="false"', button)
         self.assertIn('android:focusableInTouchMode="false"', button)
 
+    def test_composer_supports_multiline_text_and_keeps_enter_for_newlines(self):
+        layout = LAYOUT.read_text(encoding="utf-8")
+        composer = layout.split('android:id="@+id/inputMsg"', 1)[1].split("/>", 1)[0]
+        self.assertIn('android:inputType="textMultiLine|textCapSentences"', composer)
+        self.assertIn('android:minLines="1"', composer)
+        self.assertIn('android:maxLines="5"', composer)
+        self.assertIn('android:imeOptions="actionSend"', composer)
+
+        source = JAVA.read_text(encoding="utf-8")
+        listener = source.split("inputMsg.setOnEditorActionListener", 1)[1].split("});", 1)[0]
+        self.assertIn("EditorInfo.IME_ACTION_SEND", listener)
+        self.assertIn("event.isCtrlPressed()", listener)
+        self.assertIn("event.getAction() == KeyEvent.ACTION_DOWN", listener)
+        self.assertNotIn("event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER))", listener)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -116,7 +116,11 @@
             android:hint="输入消息发到局域网..."
             android:background="#F0F0F0"
             android:padding="10dp"
-            android:singleLine="true"
+            android:inputType="textMultiLine|textCapSentences"
+            android:minLines="1"
+            android:maxLines="5"
+            android:gravity="top|start"
+            android:scrollbars="vertical"
             android:imeOptions="actionSend" />
 
         <Button

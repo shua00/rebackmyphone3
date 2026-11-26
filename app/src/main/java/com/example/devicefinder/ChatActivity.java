@@ -153,8 +153,12 @@ public class ChatActivity extends Activity {
         btnSend.setOnClickListener(v -> sendMessage());
 
         inputMsg.setOnEditorActionListener((v, actionId, event) -> {
-            if (actionId == EditorInfo.IME_ACTION_SEND ||
-               (event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER)) {
+            // IME action sends; a physical Enter inserts a newline in the multiline
+            // composer. Ctrl+Enter remains an explicit send shortcut for hardware keyboards.
+            if (actionId == EditorInfo.IME_ACTION_SEND
+                    || (event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER
+                        && event.isCtrlPressed()
+                        && event.getAction() == KeyEvent.ACTION_DOWN)) {
                 sendMessage();
                 return true;
             }
