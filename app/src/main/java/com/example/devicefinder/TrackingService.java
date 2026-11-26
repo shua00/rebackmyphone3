@@ -3198,8 +3198,14 @@ public class TrackingService extends Service implements LocationListener {
                     (byte) (broadcastValue >>> 8), (byte) broadcastValue };
             java.net.Inet4Address broadcast =
                     (java.net.Inet4Address) java.net.InetAddress.getByAddress(broadcastBytes);
-            String fingerprint = selected.toString() + "|" + links.getInterfaceName()
-                    + "|" + local.getHostAddress() + "/" + prefix;
+            List<String> addressEntries = new ArrayList<>();
+            for (LinkAddress item : links.getLinkAddresses()) addressEntries.add(item.toString());
+            List<String> routeEntries = new ArrayList<>();
+            if (links.getRoutes() != null) {
+                for (RouteInfo route : links.getRoutes()) routeEntries.add(route.toString());
+            }
+            String fingerprint = LanTransferNetworkFingerprint.create(selected.toString(),
+                    links.getInterfaceName(), addressEntries, routeEntries);
             synchronized (lanTransferListenerLock) {
                 if (serviceDestroyed) return;
                 if (fingerprint.equals(lanTransferDiscoveryFingerprint)
