@@ -33,6 +33,9 @@ on:
       - "lan_p2p_network_paths.py"
       - "lan_p2p_socket_binding.py"
       - "lan_p2p_transfer_runtime.py"
+      - "lan_p2p_transfer_service.py"
+      - "lan_p2p_transfer_provision.py"
+      - "lan_p2p_transfer_host.py"
       - "requirements-lan-p2p.txt"
       - "rescue2.py"
       - "rescue2_admin_identity.py"
@@ -86,7 +89,7 @@ jobs:
       - name: Validate Python communication services
         run: |
           python3 -m pip install -r requirements-rescue2-admin.txt -r requirements-lan-p2p.txt
-          python3 -m py_compile server2.py rescue2.py rescue2_admin_identity.py chat.py lan_p2p_core.py lan_p2p_transfer.py lan_p2p_transfer_store.py lan_p2p_transfer_files.py lan_p2p_transfer_tcp.py lan_p2p_transfer_session.py lan_p2p_transfer_sender.py lan_p2p_transfer_network.py lan_p2p_transfer_auth.py lan_p2p_network_paths.py lan_p2p_socket_binding.py lan_p2p_transfer_runtime.py
+          python3 -m py_compile server2.py rescue2.py rescue2_admin_identity.py chat.py lan_p2p_core.py lan_p2p_transfer.py lan_p2p_transfer_store.py lan_p2p_transfer_files.py lan_p2p_transfer_tcp.py lan_p2p_transfer_session.py lan_p2p_transfer_sender.py lan_p2p_transfer_network.py lan_p2p_transfer_auth.py lan_p2p_network_paths.py lan_p2p_socket_binding.py lan_p2p_transfer_runtime.py lan_p2p_transfer_service.py lan_p2p_transfer_provision.py lan_p2p_transfer_host.py
           python3 -m unittest discover -s tests -v
 
   build:
