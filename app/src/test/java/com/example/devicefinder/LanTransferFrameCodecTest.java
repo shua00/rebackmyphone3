@@ -141,8 +141,12 @@ public class LanTransferFrameCodecTest {
                     kind,vector.getString("transfer_id"),vector.getString("sender_peer_id"),
                     vector.getString("target_peer_id"),index,payload,metadata);
             byte[] expected=fromHex(vector.getString("wire_hex"));
-            assertArrayEquals("Android encoder vector: "+kind,expected,
-                    LanTransferFrameCodec.encodeFrame(frame,key,maxPayload));
+            byte[] actual=LanTransferFrameCodec.encodeFrame(frame,key,maxPayload);
+            if(!java.util.Arrays.equals(expected,actual)) {
+                System.err.println("LNP2 golden mismatch kind="+kind+" expectedLength="+expected.length
+                        +" actualLength="+actual.length+" expected="+toHex(expected)+" actual="+toHex(actual));
+            }
+            assertArrayEquals("Android encoder vector: "+kind,expected,actual);
             LanTransferFrameCodec.Frame decoded=decode(expected,key,maxPayload,
                     vector.getString("sender_peer_id"),vector.getString("target_peer_id"));
             assertEquals(kind,decoded.kind);
@@ -157,6 +161,12 @@ public class LanTransferFrameCodecTest {
                 }
             }
         }
+    }
+
+    private static String toHex(byte[] value) {
+        StringBuilder out=new StringBuilder();
+        for(byte item:value) out.append(String.format(java.util.Locale.ROOT,"%02x",item & 0xff));
+        return out.toString();
     }
 
 }
