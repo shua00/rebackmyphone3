@@ -15,8 +15,8 @@ public final class LanTransferPairingExchangePayload {
     private static final int MAX_PAYLOAD_BYTES = 1024;
 
     public static final class Material {
-        public final byte[] publicKey;
-        public final byte[] nonce;
+        private final byte[] publicKey;
+        private final byte[] nonce;
 
         public Material(byte[] publicKey, byte[] nonce) {
             validate(publicKey, nonce);
@@ -24,9 +24,12 @@ public final class LanTransferPairingExchangePayload {
             this.nonce = nonce.clone();
         }
 
-        @Override public byte[] toString() {
-            return "PairingExchangeMaterial{publicKeyBytes=" + publicKey.length + ", nonceBytes="
-                    + nonce.length + "}";
+        public byte[] publicKey() { return publicKey.clone(); }
+        public byte[] nonce() { return nonce.clone(); }
+
+        @Override public String toString() {
+            return "PairingExchangeMaterial{publicKeyBytes=" + publicKey.length
+                    + ", nonceBytes=" + nonce.length + "}";
         }
     }
 
@@ -34,13 +37,15 @@ public final class LanTransferPairingExchangePayload {
 
     public static byte[] encode(Material material) throws IOException {
         if (material == null) throw new IllegalArgumentException("Pairing exchange material is required");
-        validate(material.publicKey, material.nonce);
+        byte[] publicKey = material.publicKey();
+        byte[] nonce = material.nonce();
+        validate(publicKey, nonce);
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         DataOutputStream out = new DataOutputStream(bytes);
         out.writeByte(VERSION);
-        out.writeShort(material.publicKey.length);
-        out.write(material.publicKey);
-        out.write(material.nonce);
+        out.writeShort(publicKey.length);
+        out.write(publicKey);
+        out.write(nonce);
         out.flush();
         byte[] encoded = bytes.toByteArray();
         if (encoded.length > MAX_PAYLOAD_BYTES) throw new IOException("Pairing exchange payload exceeds limit");

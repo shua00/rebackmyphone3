@@ -6,18 +6,28 @@ import java.util.Arrays;
 import static org.junit.Assert.*;
 
 public class LanTransferPairingExchangePayloadTest {
-    @Test public void roundTripPreservesPublicKeyAndNonce() throws Exception {
+    @Test public void roundTripPreservesPublicKeyAndNonceAndDefensivelyCopies() throws Exception {
         byte[] key = new byte[91], nonce = new byte[LanTransferPairingCrypto.NONCE_BYTES];
         for (int i = 0; i < key.length; i++) key[i] = (byte) (i + 1);
         for (int i = 0; i < nonce.length; i++) nonce[i] = (byte) (100 + i);
         LanTransferPairingExchangePayload.Material source =
                 new LanTransferPairingExchangePayload.Material(key, nonce);
+        key[0] ^= 1;
+        nonce[0] ^= 1;
+        assertEquals(1, source.publicKey()[0]);
+        assertEquals(100, source.nonce()[0]);
+
         LanTransferPairingExchangePayload.Material decoded =
                 LanTransferPairingExchangePayload.decode(LanTransferPairingExchangePayload.encode(source));
-        assertArrayEquals(key, decoded.publicKey);
-        assertArrayEquals(nonce, decoded.nonce);
-        source.publicKey[0] ^= 1;
-        assertNotEquals(source.publicKey[0], decoded.publicKey[0]);
+        assertArrayEquals(source.publicKey(), decoded.publicKey());
+        assertArrayEquals(source.nonce(), decoded.nonce());
+        byte[] exposedKey = decoded.publicKey();
+        byte[] exposedNonce = decoded.nonce();
+        exposedKey[0] ^= 1;
+        exposedNonce[0] ^= 1;
+        assertArrayEquals(source.publicKey(), decoded.publicKey());
+        assertArrayEquals(source.nonce(), decoded.nonce());
+        assertTrue(source.toString().contains("publicKeyBytes=91"));
     }
 
     @Test public void rejectsTruncatedAndTrailingPayloads() throws Exception {
