@@ -4,6 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import socket
 import threading
+import ipaddress
+from lan_p2p_socket_binding import bind_socket_to_path
 from typing import Callable
 from lan_p2p_transfer import TransferValidationError
 from lan_p2p_transfer_files import TransferFilesystem
@@ -37,7 +39,7 @@ class AuthenticatedTransferConnection:
 
 def connect_transfer_peer(host: str, port: int,
         authenticate_peer: Callable[[socket.socket], tuple[str, bytes]], *,
-        timeout_seconds: float = 10.0) -> AuthenticatedTransferConnection:
+        timeout_seconds: float = 10.0, network_path=None) -> AuthenticatedTransferConnection:
     """Connect and run caller-supplied trusted peer challenge; never trust IP as identity."""
     if not isinstance(host, str) or not host:
         raise TransferValidationError("remote host is required")
@@ -48,7 +50,27 @@ def connect_transfer_peer(host: str, port: int,
         raise TransferValidationError("connection timeout must be positive")
     if not callable(authenticate_peer):
         raise TransferValidationError("peer authentication callback is required")
-    sock = socket.create_connection((host, port), timeout=float(timeout_seconds))
+    if network_path is None:
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError as exc:
+            raise TransferValidationError("an explicit LAN path is required for non-loopback destinations") from exc
+        if not address.is_loopback:
+            raise TransferValidationError("an explicit LAN path is required for non-loopback destinations")
+        sock = socket.create_connection((host, port), timeout=float(timeout_seconds))
+    else:
+        try:
+            address = ipaddress.IPv4Address(host)
+        except ipaddress.AddressValueError as exc:
+            raise TransferValidationError("LAN path connections require an IPv4 literal endpoint") from exc
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            bind_socket_to_path(sock, network_path, remote_address=str(address))
+            sock.settimeout(float(timeout_seconds))
+            sock.connect((str(address), port))
+        except Exception:
+            sock.close()
+            raise
     try:
         sock.settimeout(float(timeout_seconds))
         peer_id, secret = _validated_peer(authenticate_peer(sock))
@@ -65,7 +87,8 @@ class TransferTcpServer:
             backlog: int = 16, max_connections: int = 2,
             socket_timeout_seconds: float = 15.0, max_frames: int = 64,
             max_payload_bytes: int = 1024 * 1024,
-            on_error: Callable[[Exception], None] | None = None):
+            on_error: Callable[[Exception], None] | None = None,
+            network_path=None):
         if not isinstance(store, TransferStore) or not isinstance(filesystem, TransferFilesystem):
             raise TransferValidationError("transfer store and filesystem are required")
         if not isinstance(local_peer_id, str) or not local_peer_id:
@@ -89,6 +112,11 @@ class TransferTcpServer:
             raise TransferValidationError("on_error must be callable")
         self.store, self.filesystem = store, filesystem
         self.local_peer_id, self.authenticate_peer, self.now_ms = local_peer_id, authenticate_peer, now_ms
+        self.network_path = network_path
+        if network_path is not None:
+            if not getattr(network_path, "interface_name", None) or not getattr(network_path, "address", None):
+                raise TransferValidationError("invalid listener LAN path")
+            host = str(ipaddress.IPv4Address(network_path.address))
         self.host, self.port, self.backlog = host, port, backlog
         self.max_connections, self.socket_timeout_seconds = max_connections, float(socket_timeout_seconds)
         self.max_frames, self.max_payload_bytes, self.on_error = max_frames, max_payload_bytes, on_error
@@ -116,6 +144,8 @@ class TransferTcpServer:
             listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
+                if self.network_path is not None:
+                    bind_socket_to_path(listener, self.network_path, bind_source_address=False)
                 listener.bind((self.host, self.port))
                 listener.listen(self.backlog)
                 listener.settimeout(0.25)
