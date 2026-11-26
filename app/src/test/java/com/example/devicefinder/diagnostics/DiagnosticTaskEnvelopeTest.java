@@ -51,6 +51,20 @@ public class DiagnosticTaskEnvelopeTest {
         } catch (IllegalArgumentException expected) { }
     }
 
+
+    @Test public void rejectsUnknownAndMissingJsonFields() throws Exception {
+        String encoded = task().toJson();
+        try {
+            DiagnosticTaskEnvelope.fromJson(encoded.replace("\\\"nonce\\\":", "\\\"extra\\\":true,\\\"nonce\\\":"));
+            fail("unknown field accepted");
+        } catch (IllegalArgumentException expected) { }
+        try {
+            DiagnosticTaskEnvelope.fromJson(encoded.replace(",\\\"nonce\\\":\\\""
+                    + repeat('A', 22) + "\\\"", ""));
+            fail("missing field accepted");
+        } catch (IllegalArgumentException expected) { }
+    }
+
     @Test public void expiryIsHalfOpen() {
         DiagnosticTaskEnvelope task = task();
         assertFalse(task.isValidAt(task.createdAtEpochMs - 1));
