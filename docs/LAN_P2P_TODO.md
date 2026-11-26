@@ -304,7 +304,7 @@
 - [x] Python 聊天广播和启动发现改为逐个使用枚举出的接口广播地址，并保留有限的 `255.255.255.255` 备用广播。
 - [x] 增加多网卡/多子网、loopback/link-local/非法地址过滤、接口 down、无广播地址和接口枚举不可用等单元测试。
 - [x] 本批相关 Python 验证工作流通过：`45896435014`（路径枚举测试）、`45896463008`（移除公网探测）、`45896491893`（多接口广播接入）；均为 `validate-python: success`。纯 Python 改动未触发 Android APK build，不能据此宣称 Android 构建已验证。
-- [ ] **明确未完成**：本批 Python 接口枚举只提供路径候选和广播地址，不等于 Socket 已绑定到指定接口；尚未实现 Windows/Linux/macOS 各自可靠的接口绑定与出口验证。
+- [ ] **明确未完成**：本批 Python 接口枚举只提供路径候选和广播地址，不等于 Socket 已绑定到指定接口；尚未实现 Linux/Windows 各自可靠的接口绑定与出口验证；macOS 暂不纳入范围。
 - [ ] **明确限制**：Python 侧 `psutil` 为可选能力；缺失时接口枚举 fail-closed，当前只保留有限全局广播，不猜测子网。后续需确定并纳入正式安装依赖/各平台适配实现。
 - [ ] **Android 热点主机仍未打通**：`LanTransferDiscovery` 当前仍要求非空 Android `Network` 和非空广播地址，并调用 `Network.bindSocket()`；本地 AP 接口候选尚未进入 UDP/TCP 数据面。不能将本批 Python 改动描述为热点兼容完成。
 - [ ] 下一步：补齐 Python 各 OS 路径绑定能力及真实多网卡出口验证；Android 侧先建立显式的路径绑定能力/失败状态，再验证 AP 本地接口候选的实际收发，保持普通 Wi-Fi Network 绑定回归。
@@ -369,7 +369,7 @@
 - [x] 新增 IPv4 子网成员判断单测，覆盖 /24、/16、非八位边界及非法前缀。
 - [ ] 路径快照在每次重连时重新选择；当前活跃 TCP 会话不会因网络回调主动中断，而是在旧 Network 断开/连接失败后按既有任务状态机暂停并恢复。后续可评估是否需要路径代数监听来更快关闭旧会话，但不得破坏已完成分块和任务恢复。
 - [ ] Android 本次代码层路径绑定仍需普通 Wi-Fi 双机真机验证；不代表 Android 热点主机无 Network 接口已经支持。
-- [ ] Python 跨平台适配仍需 Windows/Linux/macOS 实机验证实际 socket 出口和权限差异；单测仅验证 API 参数和 fail-closed 行为。
+- [ ] Python 跨平台适配仍需 Linux/Windows 实机验证实际 socket 出口和权限差异；单测仅验证 API 参数和 fail-closed 行为。macOS 暂不纳入范围。
 
 ## 本批推进记录补充（2026-11-27）：Python 文件 TCP 路径绑定接入
 
@@ -378,7 +378,7 @@
 - [x] TransferTcpServer 增加路径参数；指定路径时先绑定接口，再绑定快照本机地址/端口；未提供路径时仅允许 loopback 监听，不再接受通配/非 loopback 监听。
 - [x] Python 绑定适配器支持 listener 模式：只做网卡绑定，由 listener 随后绑定明确端口；client 模式额外绑定源地址和临时端口。
 - [x] 新增回归测试：无路径时拒绝非 loopback 客户端/服务端端点；现有 loopback 协议集成测试继续通过。
-- [ ] **剩余限制**：目前 Python 文件 TCP 调用方需要把实际枚举的 IPv4InterfacePath 显式传入 network_path；接口绑定 API 尚未在 Windows/Linux/macOS 三个平台做真实网卡收发验收。当前 CI 只在 Ubuntu 上验证 Linux 代码路径参数和跨平台参数单测。
+- [ ] **剩余限制**：目前 Python 文件 TCP 调用方需要把实际枚举的 IPv4InterfacePath 显式传入 network_path；接口绑定 API 尚未在 Linux/Windows 两个平台做真实网卡收发验收。当前 CI 只在 Ubuntu 上验证 Linux 代码路径参数和跨平台参数单测；macOS 暂不纳入范围。
 - [ ] Python TransferTcpServer 的路径模式仍需由实际服务启动入口选择对应 LAN path；不可把测试 loopback 模式视为正式 LAN 节点已验收。
 
 
@@ -401,3 +401,15 @@
 - [x] 移除 macOS 专属模拟测试；保留 Linux `SO_BINDTODEVICE`、Windows `IP_UNICAST_IF` 参数与失败边界测试。
 - [x] 后续 CI、安装说明、跨平台集成矩阵均以 Linux/Windows 为准；macOS 不作为交付、测试、兼容性或真机验收门槛。
 - [ ] 若未来重新纳入 macOS，必须单独评估接口绑定实现、权限和真实出口行为，再增加适配及测试；不得仅恢复一个平台分支就宣称支持。
+
+
+## Python 文件传输生产宿主审计（2026-11-27）
+
+- [x] 审计当前 Python 入口：`chat.py` 是独立/代理模式的 UDP 聊天与 Web 前端进程；`server2.py` 是设备管理、HTTP/UDP 服务进程。两者当前均未导入或调用 `lan_p2p_transfer_*` 文件传输模块。
+- [x] 确认 `TransferTcpServer`、`TransferListenerRuntime`、`TransferStore`、`TransferFilesystem` 和 TCP PSK challenge 目前属于可测试的传输组件，尚未构成一个可直接启动的 Python P2P 文件接收节点。
+- [x] 确认当前没有已接入生产的 Python 文件接收生命周期：没有宿主启动/网络变化刷新/退出关闭的实际调用链；因此不能把 `TransferListenerRuntime` 的单测通过描述成 Python 节点已监听或 Android↔Python 文件传输已打通。
+- [ ] **生产接入前置条件 A：节点身份与信任来源**。明确 Python 节点稳定 Peer ID 的来源，以及可信 Peer 授权回调如何读取独立可信配对记录；不得把静态聊天广播口令、来源 IP 或发现缓存直接视为可信配对。
+- [ ] **生产接入前置条件 B：文件接收服务宿主**。新增独立、可显式启停的 Python LAN Transfer Service（或明确指定现有进程为宿主），由其统一持有 TransferStore、TransferFilesystem、TransferListenerRuntime；必须提供 start/refresh/close 生命周期、端口发布、错误回调和资源清理。不得未经架构确认把文件 TCP 监听塞进聊天 UDP 状态机。
+- [ ] **生产接入前置条件 C：跨端认证兼容**。核对 Android 与 Python 的认证 transcript、密钥派生、Peer ID 编码和配对密钥来源完全一致；未完成逐字段兼容测试前，不启用真实文件接收。
+- [ ] **验收**：独立 Python 进程可启动并报告实际绑定接口/地址/端口；接口变化后旧 listener 关闭并重新绑定；无可信配对、绑定失败、接口歧义均 fail-closed；Android↔Python 与 Python↔Python 分别完成 offer/chunk/ACK/整文件 SHA-256/断点续传的真实 socket 测试。
+- [ ] 以上完成前，Python 文件 TCP 仅视为传输组件与模拟/单测能力，不视为已交付生产节点。不得修改现有聊天/长消息 ACK、对讲数据面或 Rescue2 旧日志 `pull_logs_multi()`。
