@@ -71,17 +71,17 @@ class CrossLanguageTransferVectors(unittest.TestCase):
                     right.close()
 
     def test_android_python_authentication_derivation_golden_vector(self):
-        secret = "base64-encoded-peer-secret-for-sender"
+        secret = "eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg="
         client_id, server_id = b"android-A", b"python-B"
         client_nonce, server_nonce = bytes(range(32)), bytes(range(32, 64))
         key = _key(secret)
         transcript = _transcript(client_id, server_id, client_nonce, server_nonce)
-        self.assertEqual("a69a4ac48fa3fa1d8454c4732275bedc71b973d349b767515d05ac46c62ff330", key.hex())
-        self.assertEqual("bed8741fd9deae227eeae2cf44eae2cb12399ec6ca3c7e1920a65a76fc7dac57",
+        self.assertEqual("80d0e9e112555fb1910dc6a60c103f1a0b1e3639ac1060517fcaf215263c5af7", key.hex())
+        self.assertEqual("51d864d2fc5cef2474309c7b0188f743789a05227f33258213ac197e716cd23e",
                          hmac.new(key, _DOMAIN_SERVER + transcript, hashlib.sha256).hexdigest())
-        self.assertEqual("29230d3e9d9fda979422daf6f64214b520aa17cceee2cad7a1ea74c62ad39a48",
+        self.assertEqual("585ca4ddbad267eab82efd459a0893b3b3cb95d8ae013683d19a4a1ecc999f0d",
                          hmac.new(key, _DOMAIN_CLIENT + transcript, hashlib.sha256).hexdigest())
-        self.assertEqual("955200ba44ad7dd482ef90b9541247a0d27d59970cfdf1c9f17126be67d72be1",
+        self.assertEqual("6c962607aa55ed1c48952647b0c759a7efc179c6921b30fad4e204cce704ef8a",
                          hmac.new(key, _DOMAIN_SESSION + transcript, hashlib.sha256).hexdigest())
 
 
