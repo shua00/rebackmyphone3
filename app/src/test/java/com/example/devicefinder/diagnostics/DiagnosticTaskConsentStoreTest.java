@@ -19,25 +19,27 @@ public class DiagnosticTaskConsentStoreTest {
     @Test public void requiresExplicitApprovalAndEnforcesTerminalTransitions() {
         Context context = org.robolectric.RuntimeEnvironment.getApplication();
         DiagnosticTaskConsentStore store = new DiagnosticTaskConsentStore(context);
-        String fingerprint = repeat('a', 64);
         DiagnosticTaskVerifier.Result verified01 = verified(task("task-01", repeat('A', 22)), 1800000000100L);
+        String fingerprint01 = verified01.envelope.adminKeyFingerprint;
+        assertTrue(verified01.replayProtected);
         assertTrue(store.registerPending(verified01, 1800000000100L));
         assertEquals(DiagnosticTaskConsentStore.State.PENDING,
-                store.getState(fingerprint, "task-01", 1800000000200L));
-        assertEquals(Arrays.asList("task-01"), store.pendingTaskIds(fingerprint, 1800000000200L));
-        assertTrue(store.reject(fingerprint, "task-01", 1800000000200L));
-        assertFalse(store.approve(fingerprint, "task-01", 1800000000300L));
+                store.getState(fingerprint01, "task-01", 1800000000200L));
+        assertEquals(Arrays.asList("task-01"), store.pendingTaskIds(fingerprint01, 1800000000200L));
+        assertTrue(store.reject(fingerprint01, "task-01", 1800000000200L));
+        assertFalse(store.approve(fingerprint01, "task-01", 1800000000300L));
         assertEquals(DiagnosticTaskConsentStore.State.REJECTED,
-                store.getState(fingerprint, "task-01", 1800000000300L));
+                store.getState(fingerprint01, "task-01", 1800000000300L));
 
         DiagnosticTaskVerifier.Result verified02 = verified(task("task-02", repeat('B', 22)), 1800000000100L);
+        String fingerprint02 = verified02.envelope.adminKeyFingerprint;
         assertTrue(store.registerPending(verified02, 1800000000100L));
-        assertTrue(store.approve(fingerprint, "task-02", 1800000000200L));
-        assertTrue(store.isApproved(fingerprint, "task-02", 1800000000300L));
-        assertTrue(store.cancel(fingerprint, "task-02", 1800000000300L));
-        assertFalse(store.markCompleted(fingerprint, "task-02", 1800000000400L));
+        assertTrue(store.approve(fingerprint02, "task-02", 1800000000200L));
+        assertTrue(store.isApproved(fingerprint02, "task-02", 1800000000300L));
+        assertTrue(store.cancel(fingerprint02, "task-02", 1800000000300L));
+        assertFalse(store.markCompleted(fingerprint02, "task-02", 1800000000400L));
         assertEquals(DiagnosticTaskConsentStore.State.CANCELLED,
-                store.getState(fingerprint, "task-02", 1800000000400L));
+                store.getState(fingerprint02, "task-02", 1800000000400L));
     }
 
     @Test public void expiresAndPrunesOldPendingTasks() {
