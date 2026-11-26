@@ -348,3 +348,14 @@
 - [ ] 本批只完成配对控制出站路径；文件 TCP 出站仍使用既有 `Network.getSocketFactory()` 方式，后续需将其纳入同一 `LanNetworkPath` 校验/诊断契约并覆盖路径代数。
 - [ ] 当前路径一致性使用 IPv4 前缀约束；尚未覆盖多路由/非直连路由、IPv6 和热点 AP 无 Network 的绑定方案。热点主机仍明确不可宣称支持。
 - [ ] CI 成功后仍需双 Android 真机验证：配对初始握手、确认/拒绝/取消、COMMIT ACK、蜂窝并存时的真实出口路径，以及切 Wi-Fi/热点后旧会话失效和持久化 COMMIT 恢复。
+
+
+## 本批推进记录（2026-11-27）：Python 跨平台接口绑定适配第一步
+
+- [x] 新增 `lan_p2p_socket_binding.py`：Linux 使用 `SO_BINDTODEVICE`，Windows 使用 `IP_UNICAST_IF`（接口索引按网络字节序传递），macOS 使用 `IP_BOUND_IF`；三者均额外绑定所选接口源 IPv4 地址。
+- [x] 绑定前校验接口名、IPv4 地址、前缀和接口索引；可选校验远端地址必须属于所选路径子网。接口不存在、平台不支持、系统拒绝绑定或参数不合法时抛错，不允许回退默认路由。
+- [x] 新增跨平台适配单元测试：覆盖 Linux/Windows/macOS 参数编码、源地址绑定、跨子网端点拒绝、无效前缀、非 IPv4 socket、接口索引缺失及未知平台 fail-closed。
+- [x] 新增 `requirements-lan-p2p.txt`，将 `psutil` 作为 LAN Python 接口枚举的明确依赖；CI 安装并编译新适配模块，执行新增测试。
+- [ ] **重要限制**：本批适配器及测试只证明平台 API 调用参数和失败边界正确，不证明当前运行主机具有所需权限，也不证明真实出口接口/路由正确；必须在 Linux、Windows、macOS 实机上检查 socket 绑定结果和实际收发路径。
+- [ ] **Android 文件 TCP 尚未完成统一**：当前 `LanTransferSenderWorker` 仍通过 `NetworkProvider.currentWifiNetwork()` 提供 Network，`LanTransferTcpClient` 使用 `Network.getSocketFactory()` 创建出站 socket；尚未将不可变 `LanNetworkPath` 快照、远端 IPv4 子网校验和路径代数贯穿 Offer 与分片会话。下一步必须接入生产调用链并补充网络变化时旧路径失效测试。
+- [ ] 本批未修改聊天消息协议、持久化、ACK/重试、聊天 UI、文件协议、对讲数据面及 Rescue2 旧日志功能。
