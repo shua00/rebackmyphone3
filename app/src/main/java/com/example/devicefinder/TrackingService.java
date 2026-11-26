@@ -3206,6 +3206,7 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private void stopLanTransferPairingControlHost() {
+        closeLanTransferPairingInitiators();
         synchronized (lanTransferListenerLock) { closeLanTransferPairingControlHostLocked(); }
     }
 
