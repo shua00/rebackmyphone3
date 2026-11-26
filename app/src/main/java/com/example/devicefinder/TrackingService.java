@@ -2891,6 +2891,30 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     /**
+     * Observe active local IPv4 interfaces independently of ConnectivityManager's TRANSPORT_WIFI
+     * list. This is diagnostic/candidate discovery only: it does not bind sockets or claim that
+     * a hotspot AP interface is reachable. OEM interface names are intentionally not hard-coded.
+     */
+    private void logLocalLanInterfaceCandidates(String reason) {
+        try {
+            List<LanNetworkPath> candidates = LanNetworkPath.enumerateLocalInterfaceCandidates();
+            StringBuilder summary = new StringBuilder("Local IPv4 LAN interface candidates count=")
+                    .append(candidates.size()).append(" reason=").append(reason);
+            for (LanNetworkPath candidate : candidates) {
+                summary.append(" [").append(candidate.interfaceName).append(" ")
+                        .append(candidate.localAddress.getHostAddress()).append("/")
+                        .append(candidate.prefixLength).append(" bcast=")
+                        .append(candidate.broadcastAddress == null ? "none"
+                                : candidate.broadcastAddress.getHostAddress()).append("]");
+            }
+            FileLogger.log(this, "LAN_TRANSFER", summary.toString());
+        } catch (Exception unavailable) {
+            FileLogger.logD("LAN_TRANSFER", "Local IPv4 interface enumeration unavailable: "
+                    + unavailable.getClass().getSimpleName());
+        }
+    }
+
+    /**
      * Reconcile the dedicated TCP file-transfer listener against the selected Wi-Fi LAN.
      * No fallback to the default cellular route is permitted. The listener binds to the
      * selected Wi-Fi IPv4 address and is recreated whenever Network/interface/address changes.
@@ -2898,6 +2922,7 @@ public class TrackingService extends Service implements LocationListener {
      * absent credentials means the file-transfer listener remains closed.
      */
     private void refreshLanTransferTcpListener(String reason) {
+        logLocalLanInterfaceCandidates(reason);
         // Pairing must be available before the first peer credential exists. Its listener is
         // deliberately independent of the credential-gated file-data listener.
         refreshLanTransferPairingControlHost(reason);
