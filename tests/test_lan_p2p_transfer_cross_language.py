@@ -1,6 +1,9 @@
 """Golden vectors shared with Android LanTransferFrameCodecTest and authenticator tests."""
 import hashlib
 import hmac
+import json
+from pathlib import Path
+import socket
 import unittest
 
 from lan_p2p_transfer_auth import (
@@ -37,6 +40,35 @@ class CrossLanguageTransferVectors(unittest.TestCase):
         finally:
             left.close()
             right.close()
+
+    def test_all_control_and_chunk_frames_match_shared_android_fixture(self):
+        fixture_path = (Path(__file__).resolve().parents[1]
+                        / "app" / "src" / "test" / "resources"
+                        / "lan_p2p_frame_vectors.json")
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        key = bytes.fromhex(fixture["session_key_hex"])
+        for vector in fixture["frames"]:
+            with self.subTest(kind=vector["kind"]):
+                payload = bytes.fromhex(vector["payload_hex"])
+                frame = TransferFrame(
+                    vector["kind"], vector["transfer_id"],
+                    vector["sender_peer_id"], vector["target_peer_id"],
+                    index=vector["index"], payload=payload,
+                    metadata=vector["metadata"],
+                )
+                expected = bytes.fromhex(vector["wire_hex"])
+                self.assertEqual(expected, encode_frame(frame, key, fixture["max_payload_bytes"]))
+                left, right = socket.socketpair()
+                try:
+                    left.sendall(expected)
+                    decoded = recv_frame(right, key, fixture["max_payload_bytes"],
+                                          vector["sender_peer_id"], vector["target_peer_id"])
+                    self.assertEqual(vector["kind"], decoded.kind)
+                    self.assertEqual(payload, decoded.payload)
+                    self.assertEqual(vector["metadata"], decoded.metadata)
+                finally:
+                    left.close()
+                    right.close()
 
     def test_android_python_authentication_derivation_golden_vector(self):
         secret = "base64-encoded-peer-secret-for-sender"
