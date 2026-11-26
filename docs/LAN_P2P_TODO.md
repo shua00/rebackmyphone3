@@ -408,8 +408,21 @@
 - [x] 审计当前 Python 入口：`chat.py` 是独立/代理模式的 UDP 聊天与 Web 前端进程；`server2.py` 是设备管理、HTTP/UDP 服务进程。两者当前均未导入或调用 `lan_p2p_transfer_*` 文件传输模块。
 - [x] 确认 `TransferTcpServer`、`TransferListenerRuntime`、`TransferStore`、`TransferFilesystem` 和 TCP PSK challenge 目前属于可测试的传输组件，尚未构成一个可直接启动的 Python P2P 文件接收节点。
 - [x] 确认当前没有已接入生产的 Python 文件接收生命周期：没有宿主启动/网络变化刷新/退出关闭的实际调用链；因此不能把 `TransferListenerRuntime` 的单测通过描述成 Python 节点已监听或 Android↔Python 文件传输已打通。
-- [ ] **生产接入前置条件 A：节点身份与信任来源**。明确 Python 节点稳定 Peer ID 的来源，以及可信 Peer 授权回调如何读取独立可信配对记录；不得把静态聊天广播口令、来源 IP 或发现缓存直接视为可信配对。
-- [ ] **生产接入前置条件 B：文件接收服务宿主**。新增独立、可显式启停的 Python LAN Transfer Service（或明确指定现有进程为宿主），由其统一持有 TransferStore、TransferFilesystem、TransferListenerRuntime；必须提供 start/refresh/close 生命周期、端口发布、错误回调和资源清理。不得未经架构确认把文件 TCP 监听塞进聊天 UDP 状态机。
+- [x] **生产接入前置条件 A（服务 API 层）**。Python 接收服务要求调用方显式提供稳定 Peer ID；新增只读逐设备凭据存储，授权判断与密钥读取均按 Peer ID 查询，发现缓存/IP/聊天口令不参与授权。当前凭据必须由独立可信配对流程安全 provision，不能从 AndroidKeyStore 加密 SharedPreferences 直接读取。
+- [x] **生产接入前置条件 B（独立服务骨架）**。新增 `lan_p2p_transfer_service.py`，不自动挂入 `chat.py`/`server2.py`；显式构造后才可 start，统一持有 TransferStore、TransferFilesystem、TransferListenerRuntime，提供 start/refresh/close、实际 address/port、错误回调和退出清理。
 - [ ] **生产接入前置条件 C：跨端认证兼容**。核对 Android 与 Python 的认证 transcript、密钥派生、Peer ID 编码和配对密钥来源完全一致；未完成逐字段兼容测试前，不启用真实文件接收。
 - [ ] **验收**：独立 Python 进程可启动并报告实际绑定接口/地址/端口；接口变化后旧 listener 关闭并重新绑定；无可信配对、绑定失败、接口歧义均 fail-closed；Android↔Python 与 Python↔Python 分别完成 offer/chunk/ACK/整文件 SHA-256/断点续传的真实 socket 测试。
 - [ ] 以上完成前，Python 文件 TCP 仅视为传输组件与模拟/单测能力，不视为已交付生产节点。不得修改现有聊天/长消息 ACK、对讲数据面或 Rescue2 旧日志 `pull_logs_multi()`。
+
+
+## 第一批推进记录（2026-11-27）：Python 文件接收服务骨架与逐设备信任接入
+
+- [x] 新增 `PeerCredentialStore`：只读加载显式 provision 的 JSON 凭据映射，限制 1–256 个 Peer；校验 Peer ID、Base64 格式及解码后恰好 32 字节；POSIX 凭据文件要求 0600 或更严格；不接受空信任表、未知版本、错误密钥和不安全文件权限。
+- [x] 新增 `LanTransferService`：独立于聊天进程；显式 start/refresh/close；统一管理 SQLite TransferStore、TransferFilesystem、TransferListenerRuntime；只绑定已枚举且唯一/显式选择的 IPv4 路径；报告真实监听地址/端口；网络路径消失时关闭监听；错误回调异常不会破坏服务清理。
+- [x] TCP 认证接入逐设备授权与 secret provider；认证前先检查 Peer ID 是否在显式可信表，随后只取该 Peer 的 PSK；缺失凭据不会回退共享密钥。
+- [x] Android 兼容性审计：Android 配对凭据存储在 AndroidKeyStore 封装的 SharedPreferences 中；每个 Peer 的 32 字节配对密钥以 Base64 字符串保存；Android TCP authenticator 对 Base64 字符串 UTF-8 字节执行 `SHA-256("lan-p2p-v2\\0" + secret)`。Python 侧凭据格式及既有认证派生与此保持一致。
+- [ ] **安全集成限制**：本批未增加从 AndroidKeyStore 解封装并导出密钥的 UI/接口，也没有从聊天口令推导文件凭据。Python JSON 凭据文件需要由受信任的独立配对/管理员 provision 流程生成；在该安全导出流程完成前，不能声称 Android 与 Python 已完成真实配对。
+- [ ] **Windows 文件权限**：当前 POSIX 0600 校验在 Linux 生效；Windows ACL 权限需在 Windows 实机/安装器方案中单独验证，不能将 POSIX mode 位校验当作 Windows 安全边界。
+- [x] 新增服务/凭据测试：可信 Peer 精确匹配、未知 Peer 拒绝、空表/错误版本/非法 Peer ID/非法 Base64/错误密钥长度拒绝、POSIX 宽权限拒绝、唯一接口启动、路径变化重绑、无路径关闭、关闭幂等、多网卡歧义 fail-closed。
+- [ ] **本批仍未完成端到端文件传输验收**：本服务骨架和认证凭据入口不等于 Android↔Python 文件协议闭环；offer/chunk/ACK/最终 ACK/SHA-256/断点续传的真实跨端 socket 测试继续列入后续批次。
+- [ ] Linux/Windows 真实网卡绑定权限与实际出口验证仍需实机完成；CI 单测不替代平台实测。
