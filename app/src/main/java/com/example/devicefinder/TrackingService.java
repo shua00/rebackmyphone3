@@ -6093,10 +6093,12 @@ public class TrackingService extends Service implements LocationListener {
                             // A missing prebuilt frame is a local preparation failure, not a UDP attempt.
                             byte[] peerData = preparedPeerPackets.get(peerId);
                             java.util.List<byte[]> peerFragments = preparedPeerFragmentPackets.get(peerId);
-                            if (peerData == null && (peerFragments == null || peerFragments.isEmpty())) {
-                                FileLogger.log(this, "CHAT", "⚠️ P2P 缺少预编码目标数据包，保留发送预算 peer="
-                                        + peerId + " message=" + messageId);
-                                continue;
+                            if (peerData == null) {
+                                if (peerFragments == null || peerFragments.isEmpty()) {
+                                    FileLogger.log(this, "CHAT", "⚠️ P2P 缺少预编码目标数据包，保留发送预算 peer="
+                                            + peerId + " message=" + messageId);
+                                    continue;
+                                }
                             }
                             String attemptedEndpoint = peer.getAddress().getHostAddress() + ":" + peer.getPort();
                             if (peerFragments != null) {
@@ -6106,6 +6108,10 @@ public class TrackingService extends Service implements LocationListener {
                                     continue;
                                 }
                             }
+                            // markAttempt() durably records only the attempted endpoint; the
+                            // last_attempt_endpoint reservation is not ACK evidence. Only
+                            // last_sent_endpoint after a successful UDP send (or a verified route)
+                            // may authorize a delayed chat.ack / chat.fragment.ack.
                             // Persist the exact endpoint before UDP dispatch and revalidate the
                             // immutable recipient snapshot immediately before any datagram.
                             long targetAttemptDbStartedAt = android.os.SystemClock.elapsedRealtime();
@@ -6596,6 +6602,28 @@ public class TrackingService extends Service implements LocationListener {
                 }
                 return true;
             }
+            if ("chat.ack".equals(type)) {
+                String messageId = envelope.optString("message_id", "");
+                String targetId = envelope.optString("target_peer_id", "");
+                int sourcePort = packet.getPort();
+                if (messageId.isEmpty() || !getUniqueDeviceId().equals(targetId)
+                        || !"stored".equals(envelope.optString("status", ""))
+                        || !(sourcePort == 8888 || sourcePort == 8887
+                             || sourcePort == 8889 || sourcePort == 8890)) {
+                    return true;
+                }
+                final java.net.InetAddress sourceAddress = packet.getAddress();
+                final LanChatStore store = lanChatStore;
+                try {
+                    lanChatAckExecutor.execute(() -> processAuthenticatedLanChatAck(
+                            messageId, senderId, sourceAddress, sourcePort, store,
+                            packetReceivedAtElapsedMs, true));
+                } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                    FileLogger.log(this, "CHAT", "⚠️ LAN ACK IO 队列已满，保留发送端待确认状态 message="
+                            + messageId + " peer=" + senderId);
+                }
+                return true;
+            }
             if ("chat.fragment.ack".equals(type)) {
                 String messageId = envelope.optString("message_id", "");
                 String targetId = envelope.optString("target_peer_id", "");
@@ -6617,28 +6645,6 @@ public class TrackingService extends Service implements LocationListener {
                 } catch (java.util.concurrent.RejectedExecutionException rejected) {
                     FileLogger.log(this, "CHAT", "⚠️ fragment ACK IO 队列已满，保留位图待重传 message="
                             + messageId + " peer=" + senderId + " index=" + fragmentIndex);
-                }
-                return true;
-            }
-            if ("chat.ack".equals(type)) {
-                String messageId = envelope.optString("message_id", "");
-                String targetId = envelope.optString("target_peer_id", "");
-                int sourcePort = packet.getPort();
-                if (messageId.isEmpty() || !getUniqueDeviceId().equals(targetId)
-                        || !"stored".equals(envelope.optString("status", ""))
-                        || !(sourcePort == 8888 || sourcePort == 8887
-                             || sourcePort == 8889 || sourcePort == 8890)) {
-                    return true;
-                }
-                final java.net.InetAddress sourceAddress = packet.getAddress();
-                final LanChatStore store = lanChatStore;
-                try {
-                    lanChatAckExecutor.execute(() -> processAuthenticatedLanChatAck(
-                            messageId, senderId, sourceAddress, sourcePort, store,
-                            packetReceivedAtElapsedMs, true));
-                } catch (java.util.concurrent.RejectedExecutionException rejected) {
-                    FileLogger.log(this, "CHAT", "⚠️ LAN ACK IO 队列已满，保留发送端待确认状态 message="
-                            + messageId + " peer=" + senderId);
                 }
                 return true;
             }
