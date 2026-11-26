@@ -3006,7 +3006,10 @@ public class TrackingService extends Service implements LocationListener {
      * peer credentials, because its purpose is to establish the first credential.
      */
     private void refreshLanTransferPairingControlHost(String reason) {
-        if (!LanTransferFeature.isEnabled(this) || serviceDestroyed) {
+        // Network selection and Network-bound socket routing are API 23+ capabilities.
+        // Keep API 21-22 fail-closed instead of invoking unavailable framework methods.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M
+                || !LanTransferFeature.isEnabled(this) || serviceDestroyed) {
             stopLanTransferPairingControlHost();
             closeLanTransferPairingInitiators();
             return;
@@ -3156,8 +3159,10 @@ public class TrackingService extends Service implements LocationListener {
 
     /** Start/refresh file-transfer discovery independently of credentials and chat UDP state. */
     private void refreshLanTransferDiscovery(String reason) {
+        // DatagramSocket Network.bindSocket is API 23+. API 21-22 must not enter
+        // this path even if a secondary Wi-Fi Network is visible.
         if (!LanTransferFeature.isEnabled(this) || serviceDestroyed
-                || Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+                || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             stopLanTransferDiscovery();
             return;
         }
