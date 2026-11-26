@@ -142,7 +142,7 @@ public final class LanTransferDiscovery implements AutoCloseable {
     static Beacon parseBeacon(String message, String localPeerId) {
         if (message == null || message.length() < 8 || message.length() > 200
                 || localPeerId == null) return null;
-        String[] fields = message.split("\\\\|", -1);
+        String[] fields = message.split("\\|", -1);
         if ((fields.length != 3 && fields.length != 4) || !MAGIC.equals(fields[0])
                 || !fields[1].matches("[A-Za-z0-9._:-]{1,128}")
                 || localPeerId.equals(fields[1])) return null;
