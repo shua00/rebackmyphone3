@@ -43,6 +43,14 @@ public final class LanTransferPeerDirectory {
                     .edit().putString(KEY_CURRENT_NETWORK, fingerprint).commit();
         }
     }
+    /** Hide every cached endpoint when no Wi-Fi LAN is currently selected. */
+    public static void deactivateNetwork(Context context) {
+        if (context == null) return;
+        synchronized (LOCK) {
+            context.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .edit().remove(KEY_CURRENT_NETWORK).commit();
+        }
+    }
     public static String getCurrentNetwork(Context context) {
         if (context == null) return null;
         return context.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE)

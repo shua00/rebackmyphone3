@@ -77,6 +77,18 @@ public class LanTransferPeerDirectoryTest {
         assertNotNull(LanTransferPeerDirectory.findCurrent(context, "peer-a", NOW + 1));
     }
 
+    @Test public void deactivatedNetworkHidesCachedCandidatesUntilANewNetworkIsActivated() {
+        LanTransferPeerDirectory.recordFileDiscoveryCandidate(context, "peer-a",
+                "192.168.1.10", 38471, "wifi:test", NOW);
+        assertEquals(1, LanTransferPeerDirectory.loadCurrent(context, NOW + 1).size());
+        LanTransferPeerDirectory.deactivateNetwork(context);
+        assertNull(LanTransferPeerDirectory.getCurrentNetwork(context));
+        assertTrue(LanTransferPeerDirectory.loadCurrent(context, NOW + 1).isEmpty());
+        assertNull(LanTransferPeerDirectory.findCurrent(context, "peer-a", NOW + 1));
+        LanTransferPeerDirectory.activateNetwork(context, "wifi:test");
+        assertNotNull(LanTransferPeerDirectory.findCurrent(context, "peer-a", NOW + 1));
+    }
+
     @Test public void endpointLeaseExpiresAtTtlAndRejectsFutureTimestamp() {
         LanTransferPeerDirectory.recordFileDiscoveryCandidate(context, "peer-a",
                 "192.168.1.10", 38471, "wifi:test", NOW);

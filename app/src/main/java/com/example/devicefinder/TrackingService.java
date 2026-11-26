@@ -3288,6 +3288,8 @@ public class TrackingService extends Service implements LocationListener {
             lanTransferStore = null;
             lanTransferFilesystem = null;
         }
+        // Service teardown must not leave the previous Wi-Fi endpoint set active for UI lookups.
+        LanTransferPeerDirectory.deactivateNetwork(this);
         if (storeToClose == null) return;
         Runnable closeStore = () -> {
             try {
