@@ -281,7 +281,7 @@
 - [ ] P0 三种节点组合都必须真实运行对应平台程序；Python 单元测试、协议模型对照或模拟 socket 不能代替 Android-Python 真机/实机互通。
 - [ ] Android↔Python 必须双向验证发现、身份认证/配对、短消息、长消息分片、逐设备最终 ACK、文件 offer/chunk/ACK、整文件 SHA-256、断线续传和进程重启恢复。
 - [ ] Python↔Python 必须验证多进程/多主机真实 socket 互通、独立身份与配对、消息可靠性、文件完整性和版本协商；不得因两端同语言而省略协议兼容测试。
-- [ ] Python 节点至少规划并覆盖 Windows、Linux；macOS 作为兼容扩展验证。平台接口绑定能力不同，必须记录各 OS 的实现和限制，不得假设 Python socket 在所有系统行为完全一致。
+- [ ] Python 节点当前阶段只规划并覆盖 Windows、Linux。macOS 暂不纳入范围，不作为实现、测试或验收门槛。平台接口绑定能力不同，必须记录各 OS 的实现和限制，不得假设 Python socket 在所有系统行为完全一致。
 - [ ] Android 端覆盖不同 Android API 级别和至少两种厂商/ROM；热点主机角色、热点客户端角色分别记录。
 - [ ] 每种组合分别记录发现、可达、认证、消息最终送达、文件摘要校验、恢复六类结果；任一环节失败不得被其他环节成功掩盖。
 - [ ] 统一协议兼容测试覆盖当前/前一受支持 schema 版本、未知字段、缺失字段、超长帧、非法 UTF-8、错误字节序/长度、重复/乱序/迟到 ACK、重放和不兼容版本拒绝。
@@ -352,11 +352,11 @@
 
 ## 本批推进记录（2026-11-27）：Python 跨平台接口绑定适配第一步
 
-- [x] 新增 `lan_p2p_socket_binding.py`：Linux 使用 `SO_BINDTODEVICE`，Windows 使用 `IP_UNICAST_IF`（接口索引按网络字节序传递），macOS 使用 `IP_BOUND_IF`；三者均额外绑定所选接口源 IPv4 地址。
+- [x] 新增 `lan_p2p_socket_binding.py`：Linux 使用 `SO_BINDTODEVICE`，Windows 使用 `IP_UNICAST_IF`（接口索引按网络字节序传递）；两者均额外绑定所选接口源 IPv4 地址。macOS 暂不支持、不测试，也不纳入当前验收范围。
 - [x] 绑定前校验接口名、IPv4 地址、前缀和接口索引；可选校验远端地址必须属于所选路径子网。接口不存在、平台不支持、系统拒绝绑定或参数不合法时抛错，不允许回退默认路由。
-- [x] 新增跨平台适配单元测试：覆盖 Linux/Windows/macOS 参数编码、源地址绑定、跨子网端点拒绝、无效前缀、非 IPv4 socket、接口索引缺失及未知平台 fail-closed。
+- [x] 新增跨平台适配单元测试：覆盖 Linux/Windows 参数编码、源地址绑定、跨子网端点拒绝、无效前缀、非 IPv4 socket、接口索引缺失及未知平台 fail-closed。
 - [x] 新增 `requirements-lan-p2p.txt`，将 `psutil` 作为 LAN Python 接口枚举的明确依赖；CI 安装并编译新适配模块，执行新增测试。
-- [ ] **重要限制**：本批适配器及测试只证明平台 API 调用参数和失败边界正确，不证明当前运行主机具有所需权限，也不证明真实出口接口/路由正确；必须在 Linux、Windows、macOS 实机上检查 socket 绑定结果和实际收发路径。
+- [ ] **重要限制**：本批适配器及测试只证明平台 API 调用参数和失败边界正确，不证明当前运行主机具有所需权限，也不证明真实出口接口/路由正确；当前阶段必须在 Linux、Windows 实机上检查 socket 绑定结果和实际收发路径；macOS 不纳入本阶段。
 - [x] **Android 文件 TCP 出站路径快照接入**：生产 `LanTransferSenderService` 每次 Offer/分片重连均重新读取所选 Wi-Fi `Network` 的 `LinkProperties`，构造不可变 `LanNetworkPath`；`LanTransferSenderWorker` 将快照传入 `LanTransferTcpClient`，后者在 `connect()` 前调用 `LanSocketBinding.bindStreamSocket()`，并拒绝非 IPv4 字面端点、跨所选前缀端点及无 Network 路径。Offer 与每个分片会话使用同一条路径契约；旧 Network 失效时连接失败并保留可恢复任务，不回退默认路由。旧 `NetworkProvider` 入口仅保留兼容测试用途。
 - [ ] 本批未修改聊天消息协议、持久化、ACK/重试、聊天 UI、文件协议、对讲数据面及 Rescue2 旧日志功能。
 
@@ -390,5 +390,14 @@
 - [x] refresh() 在路径完全相同的情况下保留 listener；路径变化时先关闭旧 listener 再绑定新路径；无候选时关闭 listener；新路径绑定失败时保持停止状态。
 - [x] close() 幂等，关闭后禁止重新启动；新增运行时测试覆盖唯一选择、多网卡歧义、同路径保留、切网重绑、路径消失、绑定失败和关闭后重启拒绝。
 - [ ] **集成边界**：运行时适配器已经提供给宿主程序的正式启动/刷新入口，但仓库当前尚无调用 TransferTcpServer 的 Python 生产服务启动点；本批不伪造“已接入 chat.py/server2.py”。后续需明确哪个 Python 节点部署文件接收服务，并由其生命周期调用 start()/refresh()/close()。
-- [ ] **平台验收边界**：Linux CI 的参数测试不能证明 SO_BINDTODEVICE 权限、Windows IP_UNICAST_IF 和 macOS IP_BOUND_IF 在真实主机的出口行为；仍需三平台实机验证。
+- [ ] **平台验收边界**：Linux CI 的参数测试不能证明 SO_BINDTODEVICE 权限和 Windows IP_UNICAST_IF 在真实主机的出口行为；仍需 Linux、Windows 实机验证。macOS 暂不考虑。
 - [ ] 不修改聊天消息/长消息 ACK 状态机、对讲数据面、Android 文件协议、Rescue2 旧日志 `pull_logs_multi()`。
+
+
+## 范围修正（2026-11-27）：暂不支持 macOS
+
+- [x] 当前 LAN P2P V2 Python 跨平台目标收敛为 **Linux + Windows**；Android 继续独立作为核心平台。
+- [x] 从 Python socket 绑定适配器移除 macOS `IP_BOUND_IF` 分支，macOS 当前会按不支持平台 fail-closed，不会误报绑定成功。
+- [x] 移除 macOS 专属模拟测试；保留 Linux `SO_BINDTODEVICE`、Windows `IP_UNICAST_IF` 参数与失败边界测试。
+- [x] 后续 CI、安装说明、跨平台集成矩阵均以 Linux/Windows 为准；macOS 不作为交付、测试、兼容性或真机验收门槛。
+- [ ] 若未来重新纳入 macOS，必须单独评估接口绑定实现、权限和真实出口行为，再增加适配及测试；不得仅恢复一个平台分支就宣称支持。

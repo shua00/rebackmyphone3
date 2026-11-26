@@ -25,7 +25,6 @@ class FakeSocketModule:
     SO_BINDTODEVICE = getattr(socket, "SO_BINDTODEVICE", 25)
     IPPROTO_IP = socket.IPPROTO_IP
     IP_UNICAST_IF = 31
-    IP_BOUND_IF = 25
 
     @staticmethod
     def if_nametoindex(name):
@@ -64,13 +63,6 @@ class LanSocketBindingTests(unittest.TestCase):
                             socket_module=FakeSocketModule)
         self.assertEqual(FakeSocketModule.IP_UNICAST_IF, sock.options[0][1])
         self.assertEqual(socket.htonl(7), __import__("struct").unpack("@I", sock.options[0][2])[0])
-        self.assertEqual(("192.168.40.2", 0), sock.bound)
-
-    def test_macos_uses_ip_bound_if(self):
-        sock = FakeSocket()
-        bind_socket_to_path(sock, self.path, platform="darwin",
-                            socket_module=FakeSocketModule)
-        self.assertEqual((socket.IPPROTO_IP, FakeSocketModule.IP_BOUND_IF, 7), sock.options[0])
         self.assertEqual(("192.168.40.2", 0), sock.bound)
 
     def test_rejects_endpoint_outside_selected_subnet_before_binding(self):

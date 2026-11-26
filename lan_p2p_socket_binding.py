@@ -42,8 +42,8 @@ def bind_socket_to_path(sock: socket.socket, path: Any, *,
                         bind_source_address: bool = True) -> SocketBinding:
     """Bind an unconnected IPv4 socket to a named interface and its source address.
 
-    Linux uses SO_BINDTODEVICE, Windows uses IP_UNICAST_IF, and macOS uses
-    IP_BOUND_IF. Source-address binding is additionally applied on all platforms.
+    Linux uses SO_BINDTODEVICE and Windows uses IP_UNICAST_IF.
+    Source-address binding is additionally applied on both supported platforms.
     This function must be called before connect()/sendto(); it never reports success
     when only a source address could be selected.
     """
@@ -82,9 +82,6 @@ def bind_socket_to_path(sock: socket.socket, path: Any, *,
         # Windows expects the interface index in network byte order.
         sock.setsockopt(socket_module.IPPROTO_IP, option,
                         struct.pack("@I", socket_module.htonl(index)))
-    elif os_name == "darwin":
-        option = getattr(socket_module, "IP_BOUND_IF", 25)
-        sock.setsockopt(socket_module.IPPROTO_IP, option, index)
     else:
         raise OSError("interface-bound IPv4 sockets are unsupported on this platform")
 
