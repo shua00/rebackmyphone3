@@ -1,6 +1,9 @@
 package com.example.devicefinder;
 
 import org.json.JSONObject;
+import org.json.JSONArray;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
@@ -114,4 +117,39 @@ public class LanTransferFrameCodecTest {
             fail("trailing bytes must be rejected");
         } catch (java.io.IOException expected) { }
     }
+    @Test public void allFramesMatchSharedPythonGoldenVectors() throws Exception {
+        InputStream input = getClass().getResourceAsStream("/lan_p2p_frame_vectors.json");
+        assertNotNull("shared cross-language frame vectors must be packaged",input);
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        byte[] buffer = new byte[4096];
+        int count;
+        while ((count=input.read(buffer))!=-1) bytes.write(buffer,0,count);
+        input.close();
+        JSONObject fixture = new JSONObject(new String(bytes.toByteArray(),
+                java.nio.charset.StandardCharsets.UTF_8));
+        byte[] key = fromHex(fixture.getString("session_key_hex"));
+        int maxPayload = fixture.getInt("max_payload_bytes");
+        JSONArray vectors = fixture.getJSONArray("frames");
+        assertEquals(7,vectors.length());
+        for(int i=0;i<vectors.length();i++) {
+            JSONObject vector = vectors.getJSONObject(i);
+            String kind=vector.getString("kind");
+            JSONObject metadata=vector.isNull("metadata")?null:vector.getJSONObject("metadata");
+            Integer index=vector.isNull("index")?null:vector.getInt("index");
+            byte[] payload=fromHex(vector.getString("payload_hex"));
+            LanTransferFrameCodec.Frame frame = new LanTransferFrameCodec.Frame(
+                    kind,vector.getString("transfer_id"),vector.getString("sender_peer_id"),
+                    vector.getString("target_peer_id"),index,payload,metadata);
+            byte[] expected=fromHex(vector.getString("wire_hex"));
+            assertArrayEquals("Android encoder vector: "+kind,expected,
+                    LanTransferFrameCodec.encodeFrame(frame,key,maxPayload));
+            LanTransferFrameCodec.Frame decoded=decode(expected,key,maxPayload,
+                    vector.getString("sender_peer_id"),vector.getString("target_peer_id"));
+            assertEquals(kind,decoded.kind);
+            assertArrayEquals(payload,decoded.payload);
+            assertEquals(metadata==null?null:metadata.toString(),
+                    decoded.metadata==null?null:decoded.metadata.toString());
+        }
+    }
+
 }
