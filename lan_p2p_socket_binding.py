@@ -38,7 +38,7 @@ def validate_endpoint_on_path(path: Any, remote_address: str) -> None:
 def bind_socket_to_path(sock: socket.socket, path: Any, *,
                         remote_address: str | None = None,
                         platform: str | None = None,
-                        socket_module: Any = socket) -> SocketBinding:
+                        socket_module: Any = socket,\n                        bind_source_address: bool = True) -> SocketBinding:
     """Bind an unconnected IPv4 socket to a named interface and its source address.
 
     Linux uses SO_BINDTODEVICE, Windows uses IP_UNICAST_IF, and macOS uses
