@@ -45,6 +45,8 @@ class PeerCredentialStore:
 
     def reload(self) -> None:
         with self._lock:
+            # Never retain stale trust if the on-disk policy becomes unreadable or invalid.
+            self._secrets = {}
             try:
                 info = self.path.stat()
                 if not self.path.is_file() or self.path.is_symlink():
