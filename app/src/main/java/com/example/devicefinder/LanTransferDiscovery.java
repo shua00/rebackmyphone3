@@ -116,13 +116,18 @@ public final class LanTransferDiscovery implements AutoCloseable {
         }
     }
 
-    private void announce() {
-        long now = android.os.SystemClock.elapsedRealtime();
+    static boolean claimBeaconSlot(java.util.concurrent.atomic.AtomicLong lastBeaconAtMs,
+            long nowElapsedMs) {
         while (true) {
             long previous = lastBeaconAtMs.get();
-            if (previous != Long.MIN_VALUE && now - previous < 1000L) return;
-            if (lastBeaconAtMs.compareAndSet(previous, now)) break;
+            if (previous != Long.MIN_VALUE && nowElapsedMs - previous < 1000L) return false;
+            if (lastBeaconAtMs.compareAndSet(previous, nowElapsedMs)) return true;
         }
+    }
+
+    private void announce() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (!claimBeaconSlot(lastBeaconAtMs, now)) return;
         int port;
         try { port = portProvider.getListeningPort(); }
         catch (RuntimeException unavailable) { port = 0; }
