@@ -357,5 +357,16 @@
 - [x] 新增跨平台适配单元测试：覆盖 Linux/Windows/macOS 参数编码、源地址绑定、跨子网端点拒绝、无效前缀、非 IPv4 socket、接口索引缺失及未知平台 fail-closed。
 - [x] 新增 `requirements-lan-p2p.txt`，将 `psutil` 作为 LAN Python 接口枚举的明确依赖；CI 安装并编译新适配模块，执行新增测试。
 - [ ] **重要限制**：本批适配器及测试只证明平台 API 调用参数和失败边界正确，不证明当前运行主机具有所需权限，也不证明真实出口接口/路由正确；必须在 Linux、Windows、macOS 实机上检查 socket 绑定结果和实际收发路径。
-- [ ] **Android 文件 TCP 尚未完成统一**：当前 `LanTransferSenderWorker` 仍通过 `NetworkProvider.currentWifiNetwork()` 提供 Network，`LanTransferTcpClient` 使用 `Network.getSocketFactory()` 创建出站 socket；尚未将不可变 `LanNetworkPath` 快照、远端 IPv4 子网校验和路径代数贯穿 Offer 与分片会话。下一步必须接入生产调用链并补充网络变化时旧路径失效测试。
+- [x] **Android 文件 TCP 出站路径快照接入**：生产 `LanTransferSenderService` 每次 Offer/分片重连均重新读取所选 Wi-Fi `Network` 的 `LinkProperties`，构造不可变 `LanNetworkPath`；`LanTransferSenderWorker` 将快照传入 `LanTransferTcpClient`，后者在 `connect()` 前调用 `LanSocketBinding.bindStreamSocket()`，并拒绝非 IPv4 字面端点、跨所选前缀端点及无 Network 路径。Offer 与每个分片会话使用同一条路径契约；旧 Network 失效时连接失败并保留可恢复任务，不回退默认路由。旧 `NetworkProvider` 入口仅保留兼容测试用途。
 - [ ] 本批未修改聊天消息协议、持久化、ACK/重试、聊天 UI、文件协议、对讲数据面及 Rescue2 旧日志功能。
+
+
+## 本批推进记录（2026-11-27）：Android 文件 TCP 出站路径快照统一
+
+- [x] 文件发送生产服务不再只传递裸 `Network`；每次尝试均从同一 Network 的 `LinkProperties` 构造 `LanNetworkPath`，要求存在接口名和可用 IPv4 地址/前缀。
+- [x] Offer 和每次断点续传 TCP 会话均使用路径快照；新建未连接 Socket 后先 `LanSocketBinding.bindStreamSocket()`，再 connect。
+- [x] 文件端点只接受规范 IPv4 字面地址，且必须属于快照本机 IPv4 前缀；DNS 主机名、跨子网地址、无 Network 路径均 fail-closed。
+- [x] 新增 IPv4 子网成员判断单测，覆盖 /24、/16、非八位边界及非法前缀。
+- [ ] 路径快照在每次重连时重新选择；当前活跃 TCP 会话不会因网络回调主动中断，而是在旧 Network 断开/连接失败后按既有任务状态机暂停并恢复。后续可评估是否需要路径代数监听来更快关闭旧会话，但不得破坏已完成分块和任务恢复。
+- [ ] Android 本次代码层路径绑定仍需普通 Wi-Fi 双机真机验证；不代表 Android 热点主机无 Network 接口已经支持。
+- [ ] Python 跨平台适配仍需 Windows/Linux/macOS 实机验证实际 socket 出口和权限差异；单测仅验证 API 参数和 fail-closed 行为。
