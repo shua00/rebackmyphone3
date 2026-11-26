@@ -596,6 +596,26 @@ public class TrackingService extends Service implements LocationListener {
                     new ThreadPoolExecutor.AbortPolicy()
             );
 
+    // ACK-driven fragment window advancement is isolated from the FIFO sender and ACK lane.
+    // Workers never wait for ACKs; accepted ACKs enqueue bounded continuation work.
+    private final java.util.concurrent.ExecutorService lanChatFragmentSendExecutor =
+            new ThreadPoolExecutor(
+                    2, 2, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(64),
+                    runnable -> {
+                        Thread thread = new Thread(runnable, "LanChat-Fragment-Send");
+                        thread.setPriority(Thread.NORM_PRIORITY);
+                        return thread;
+                    },
+                    new ThreadPoolExecutor.AbortPolicy()
+            );
+    private final java.util.Set<String> activeLanChatFragmentAdvances =
+            java.util.Collections.newSetFromMap(
+                    new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+    private final java.util.Set<String> pendingLanChatFragmentAdvances =
+            java.util.Collections.newSetFromMap(
+                    new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+
     // Peer presence announcements may perform SQLite work and directed challenges.
     // Bounded FIFO isolation keeps peer presence bursts from delaying authenticated ACK commits.
     private final java.util.concurrent.ExecutorService lanChatPeerExecutor =
@@ -6732,6 +6752,119 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     /**
+     * Queue the next selective-repeat fragment window after an authenticated fragment ACK.
+     * Duplicate ACKs coalesce while a worker is active; one follow-up pass is retained so an
+     * ACK racing the worker's final bitmap read cannot strand the next window.
+     */
+    private void scheduleLanChatFragmentWindowAdvance(final String messageId, final String peerId,
+            final java.net.InetAddress sourceAddress, final int sourcePort) {
+        if (serviceDestroyed || messageId == null || peerId == null || sourceAddress == null) return;
+        final String key = messageId + ":" + peerId;
+        if (!activeLanChatFragmentAdvances.add(key)) {
+            pendingLanChatFragmentAdvances.add(key);
+            return;
+        }
+        try {
+            lanChatFragmentSendExecutor.execute(() -> {
+                try {
+                    advanceLanChatFragmentWindow(messageId, peerId, sourceAddress, sourcePort);
+                } finally {
+                    activeLanChatFragmentAdvances.remove(key);
+                    if (pendingLanChatFragmentAdvances.remove(key) && !serviceDestroyed) {
+                        scheduleLanChatFragmentWindowAdvance(
+                                messageId, peerId, sourceAddress, sourcePort);
+                    }
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException rejected) {
+            activeLanChatFragmentAdvances.remove(key);
+            pendingLanChatFragmentAdvances.remove(key);
+            FileLogger.log(this, "CHAT", "fragment window continuation queue full message="
+                    + messageId + " peer=" + peerId + "; durable ACK bitmap retained");
+        }
+    }
+
+    /**
+     * Advance only at an 8-fragment boundary. Missing pieces inside the current window remain
+     * the normal bounded retry planner's responsibility; a completed window moves forward
+     * without consuming another whole-message retry attempt or taking the FIFO transmit lock.
+     */
+    private void advanceLanChatFragmentWindow(String messageId, String peerId,
+            java.net.InetAddress sourceAddress, int sourcePort) {
+        LanChatStore store = lanChatStore;
+        DatagramSocket socket = rescueSocketRef;
+        if (serviceDestroyed || store == null || socket == null || socket.isClosed()
+                || !hasUsableWifiLanPath()
+                || !(sourcePort == 8888 || sourcePort == 8887
+                     || sourcePort == 8889 || sourcePort == 8890)
+                || !(sourceAddress instanceof java.net.Inet4Address)
+                || !sourceAddress.isSiteLocalAddress()
+                || sourceAddress.isLoopbackAddress() || sourceAddress.isAnyLocalAddress()) return;
+        try {
+            java.net.InetSocketAddress liveRoute = verifiedChatPeers.get(peerId);
+            boolean routeMatches = liveRoute != null
+                    && liveRoute.getAddress().equals(sourceAddress)
+                    && liveRoute.getPort() == sourcePort;
+            boolean persistedMatch = store.matchesExpectedAckEndpoint(
+                    messageId, peerId, sourceAddress.getHostAddress(), sourcePort);
+            boolean attemptedMatch = store.matchesAttemptedAckEndpoint(
+                    messageId, peerId, sourceAddress.getHostAddress(), sourcePort);
+            if (!routeMatches && !persistedMatch && !attemptedMatch) return;
+
+            LanChatStore.PendingMessage pending = null;
+            for (LanChatStore.PendingMessage item : store.loadPending(50)) {
+                if (messageId.equals(item.messageId)) {
+                    pending = item;
+                    break;
+                }
+            }
+            if (pending == null) return;
+            LanChatStore.Target target = null;
+            for (LanChatStore.Target item : store.loadTargets(messageId)) {
+                if (peerId.equals(item.peerId)) {
+                    target = item;
+                    break;
+                }
+            }
+            if (target == null || "acked".equals(target.status)) return;
+
+            java.util.List<byte[]> packets = buildAuthenticatedLanChatFragmentPackets(
+                    pending.senderPeerId, peerId, messageId, pending.body, pending.createdAtMs);
+            if (!store.initializeTargetFragmentProgress(messageId, peerId, packets.size())) return;
+            String bitmap = store.loadTargetFragmentAckBitmap(messageId, peerId);
+            if (bitmap == null || bitmap.length() != packets.size()) return;
+
+            int firstMissing = bitmap.indexOf('0');
+            // Fragment ACKs never imply delivery. The existing retry path handles a missing
+            // final chat.ack after all fragments have been persisted by the receiver.
+            if (firstMissing < 0 || firstMissing % 8 != 0) return;
+            int windowEnd = Math.min(packets.size(), firstMissing + 8);
+            java.net.InetSocketAddress endpoint = routeMatches
+                    ? liveRoute : new java.net.InetSocketAddress(sourceAddress, sourcePort);
+            int sent = 0;
+            for (int i = firstMissing; i < windowEnd; i++) {
+                if (!isCurrentLanChatSocket(socket, lanSocketGeneration.get())) return;
+                if (bitmap.charAt(i) == '1') continue;
+                byte[] frame = packets.get(i);
+                DatagramPacket packet = new DatagramPacket(
+                        frame, frame.length, endpoint.getAddress(), endpoint.getPort());
+                sendLanUdpPacket(socket, packet, "CHAT_FRAGMENT_ACK_WINDOW");
+                sent++;
+            }
+            if (sent > 0) {
+                FileLogger.logD("CHAT", "P2P fragment ACK advanced window message=" + messageId
+                        + " peer=" + peerId + " start=" + firstMissing
+                        + " end=" + windowEnd + " sent=" + sent
+                        + " retryBudgetCharged=false");
+            }
+        } catch (Exception e) {
+            FileLogger.log(this, "CHAT", "fragment window continuation deferred message="
+                    + messageId + " peer=" + peerId + " reason="
+                    + e.getClass().getSimpleName());
+        }
+    }
+
+    /**
      * Persist a chat ACK only after its sender endpoint is verified. During an open
      * first-discovery window, allow one short asynchronous recheck so a fast chat.ack
      * cannot lose a race against the peer.ack route-persistence task on the IO pool.
@@ -6789,6 +6922,7 @@ public class TrackingService extends Service implements LocationListener {
                 + " peer=" + senderId + " index=" + fragmentIndex
                 + " acked=" + acked + "/" + (bitmap == null ? 0 : bitmap.length())
                 + " finalDelivery=false");
+        scheduleLanChatFragmentWindowAdvance(messageId, senderId, sourceAddress, sourcePort);
     }
 
     private void processAuthenticatedLanChatAck(String messageId, String senderId,
@@ -8289,6 +8423,7 @@ public class TrackingService extends Service implements LocationListener {
             awaitLanExecutorTermination(lanChatSendExecutor);
             awaitLanExecutorTermination(lanChatControlExecutor);
             awaitLanExecutorTermination(lanChatAckExecutor);
+            awaitLanExecutorTermination(lanChatFragmentSendExecutor);
             awaitLanExecutorTermination(lanChatPeerExecutor);
             awaitLanExecutorTermination(lanChatProbeExecutor);
             awaitLanExecutorTermination(lanChatIoExecutor);
@@ -8368,6 +8503,7 @@ public class TrackingService extends Service implements LocationListener {
         if (lanChatSendExecutor != null) lanChatSendExecutor.shutdown();
         if (lanChatControlExecutor != null) lanChatControlExecutor.shutdown();
         if (lanChatAckExecutor != null) lanChatAckExecutor.shutdown();
+        if (lanChatFragmentSendExecutor != null) lanChatFragmentSendExecutor.shutdown();
         if (lanChatPeerExecutor != null) lanChatPeerExecutor.shutdown();
         if (lanChatProbeExecutor != null) lanChatProbeExecutor.shutdown();
         if (lanChatIoExecutor != null) lanChatIoExecutor.shutdown();

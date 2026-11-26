@@ -5603,3 +5603,33 @@ class LongChatReceiveAndRescueDiagnosticsTests(unittest.TestCase):
         self.assertIn("udp_tx_failed", source)
         self.assertIn("http_log_receiver_failed", source)
         self.assertIn("payload", source[source.index("def _diag_event("):source.index("def _diag_exception(")])
+
+
+
+class AndroidLanChatFragmentWindowAdvanceTests(unittest.TestCase):
+    def test_fragment_ack_advances_next_window_without_retry_budget_or_fifo_lock(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        worker = extract_java_method(source, "private void advanceLanChatFragmentWindow(")
+        scheduler = extract_java_method(source, "private void scheduleLanChatFragmentWindowAdvance(")
+        ack_handler = extract_java_method(source, "private void processAuthenticatedLanChatFragmentAck(")
+        self.assertIn("firstMissing % 8 != 0", worker)
+        self.assertIn("firstMissing + 8", worker)
+        self.assertIn("retryBudgetCharged=false", worker)
+        self.assertNotIn("markAttempt(", worker)
+        self.assertNotIn("lanChatTransmitLock", worker)
+        self.assertIn("lanChatFragmentSendExecutor.execute(", scheduler)
+        self.assertIn("pendingLanChatFragmentAdvances", scheduler)
+        self.assertIn("scheduleLanChatFragmentWindowAdvance(messageId, senderId", ack_handler)
+
+    def test_fragment_window_executor_is_drained_during_service_shutdown(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        destroy = extract_java_method(source, "public void onDestroy()")
+        closer = extract_java_method(source, "private void closeLanChatStoreAfterExecutors(")
+        self.assertIn("lanChatFragmentSendExecutor.shutdown()", destroy)
+        self.assertIn("awaitLanExecutorTermination(lanChatFragmentSendExecutor)", closer)
