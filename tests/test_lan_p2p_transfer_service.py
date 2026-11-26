@@ -67,6 +67,16 @@ class TransferServiceTests(unittest.TestCase):
                 with self.assertRaises(TransferValidationError):
                     PeerCredentialStore(str(path))
 
+    def test_failed_credential_reload_revokes_cached_trust(self):
+        store = PeerCredentialStore(self.credentials_path)
+        self.assertTrue(store.is_trusted("android-peer-1"))
+        Path(self.credentials_path).write_text('{"version":1,"peer_secrets":{}}', encoding="utf-8")
+        os.chmod(self.credentials_path, 0o600)
+        with self.assertRaises(TransferValidationError):
+            store.reload()
+        self.assertFalse(store.is_trusted("android-peer-1"))
+        self.assertIsNone(store.secret_for("android-peer-1"))
+
     @unittest.skipUnless(os.name == "posix", "POSIX credential-file mode policy")
     def test_credential_store_rejects_group_or_world_readable_file(self):
         os.chmod(self.credentials_path, 0o644)
