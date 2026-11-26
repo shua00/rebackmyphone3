@@ -19,6 +19,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class LanTransferSenderWorker implements Runnable {
     public interface NetworkProvider {
         Network currentWifiNetwork() throws IOException;
+        /** Complete immutable production path; null is retained only for legacy protocol tests. */
+        default LanNetworkPath currentLanNetworkPath() throws IOException { return null; }
     }
     public interface Listener {
         void onState(String state);
