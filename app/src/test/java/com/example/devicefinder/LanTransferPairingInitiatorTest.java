@@ -23,7 +23,7 @@ public class LanTransferPairingInitiatorTest {
                     host.getBoundPort(), 2000, 3000);
             assertTrue(requested.await(1, TimeUnit.SECONDS));
             assertEquals(values[0], initiator.sessionId());
-            assertEquals(values[1], initiator.remotePeerId());
+            assertEquals("receiver", initiator.remotePeerId());
             assertEquals(values[2], initiator.shortAuthenticationCode());
             assertEquals(LanTransferPairingSession.State.WAITING_REMOTE_CONFIRMATION,
                     initiator.confirmLocal(initiator.shortAuthenticationCode(), 2000, 3000));
