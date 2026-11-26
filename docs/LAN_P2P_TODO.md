@@ -334,3 +334,17 @@
 - [ ] **尚未统一出站 TCP**：配对控制客户端 `exchange()` 及文件 TCP 发起连接仍需显式传入所选路径，并在 `Socket.connect()` 前通过 `Network.bindSocket()` 绑定；本批未改调用者/会话语义，下一批优先补齐，避免多网卡/蜂窝并存时出站连接走错默认路由。
 - [ ] **路径生命周期尚需加强**：当前 TrackingService 依靠网络回调触发 refresh 和路径指纹变化重建监听器；还需审计网络回调遗漏、短暂 LinkProperties 不完整、旧候选租约失效和活跃连接关闭策略，并补充自动化测试。
 - [ ] 本批未触碰聊天协议、消息 ACK/重试/持久化、UI、文件协议、对讲音频通道，也未触碰 Rescue2 旧日志功能。
+
+
+## 本批推进记录（2026-11-27）：配对控制出站 TCP 路径绑定
+
+- [x] 配对控制 transport 增加生产路径入口：创建未连接 Socket 后，先经 `LanSocketBinding.bindStreamSocket(LanNetworkPath, socket)` 绑定，再执行 `connect()`；绑定失败不会进入 connect，也不回退进程默认网络。
+- [x] 对端点做路径一致性校验：只接受 Network-backed IPv4 路径，远端配对地址必须属于所选本机 IPv4 前缀；拒绝无 Network 热点接口候选和跨网段端点。
+- [x] 配对发起器保存不可变 `LanNetworkPath` 快照；初始握手、双方确认、确认重试、拒绝、取消及当前会话 COMMIT 均复用该路径。
+- [x] TrackingService 在发起配对前从当前选定 Wi-Fi Network/LinkProperties 构造路径快照；持久化 COMMIT 恢复重试重新选取当前路径并绑定。
+- [x] 配对控制 listener 的路径指纹变化或路径不可用时，关闭旧 provisional initiator 会话，避免旧 Network/旧端点继续用于新配对；持久化 COMMIT journal 保留并允许在新路径恢复。
+- [x] 无路径兼容入口限制为 loopback 测试用途，避免生产代码误用普通 Socket 走蜂窝/VPN 默认路由。
+- [x] 新增 fail-closed 测试：无 Network 接口候选、端点超出所选子网时，在连接前拒绝。
+- [ ] 本批只完成配对控制出站路径；文件 TCP 出站仍使用既有 `Network.getSocketFactory()` 方式，后续需将其纳入同一 `LanNetworkPath` 校验/诊断契约并覆盖路径代数。
+- [ ] 当前路径一致性使用 IPv4 前缀约束；尚未覆盖多路由/非直连路由、IPv6 和热点 AP 无 Network 的绑定方案。热点主机仍明确不可宣称支持。
+- [ ] CI 成功后仍需双 Android 真机验证：配对初始握手、确认/拒绝/取消、COMMIT ACK、蜂窝并存时的真实出口路径，以及切 Wi-Fi/热点后旧会话失效和持久化 COMMIT 恢复。
