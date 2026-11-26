@@ -44,7 +44,11 @@ public final class LanTransferPairingSession {
         localConfirmed=true;
     }
     public synchronized byte[] createLocalConfirmationProof(long now)throws GeneralSecurityException {
-        requireActive(now);if(!localConfirmed)throw new IllegalStateException("Local user has not confirmed SAS");
+        // The proof must remain available after the peer's proof arrives: the responder
+        // sends its ACK only after both confirmations have been recorded.
+        expireIfNeeded(now);
+        if(terminalState!=null)throw new IllegalStateException("Pairing session is terminal");
+        if(!localConfirmed)throw new IllegalStateException("Local user has not confirmed SAS");
         return confirmationProof(localRole,true);
     }
     /** Explicit user rejection returns an authenticated negative decision, then destroys local session secrets. */
