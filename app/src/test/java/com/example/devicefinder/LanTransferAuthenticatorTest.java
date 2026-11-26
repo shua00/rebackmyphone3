@@ -139,9 +139,11 @@ public class LanTransferAuthenticatorTest {
     }
     @Test
     public void androidMatchesSharedPythonAuthenticationDerivationVector() throws Exception {
-        String secret = "base64-encoded-peer-secret-for-sender";
+        byte[] secretBytes = new byte[32];
+        java.util.Arrays.fill(secretBytes,(byte)'x');
+        String secret = android.util.Base64.encodeToString(secretBytes,android.util.Base64.NO_WRAP);
         byte[] key = invokePrivate("deriveKey", new Class<?>[]{String.class}, secret);
-        assertEquals("a69a4ac48fa3fa1d8454c4732275bedc71b973d349b767515d05ac46c62ff330",
+        assertEquals("80d0e9e112555fb1910dc6a60c103f1a0b1e3639ac1060517fcaf215263c5af7",
                 hex(key));
         byte[] clientId = "android-A".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         byte[] serverId = "python-B".getBytes(java.nio.charset.StandardCharsets.UTF_8);
@@ -153,11 +155,11 @@ public class LanTransferAuthenticatorTest {
         byte[] serverDomain = "lan-transfer-v1/server\0".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         byte[] clientDomain = "lan-transfer-v1/client\0".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         byte[] sessionDomain = "lan-transfer-v1/session\0".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        assertEquals("bed8741fd9deae227eeae2cf44eae2cb12399ec6ca3c7e1920a65a76fc7dac57",
+        assertEquals("51d864d2fc5cef2474309c7b0188f743789a05227f33258213ac197e716cd23e",
                 hex(invokePrivate("hmac",new Class<?>[]{byte[].class,byte[].class},key,concat(serverDomain,transcript))));
-        assertEquals("29230d3e9d9fda979422daf6f64214b520aa17cceee2cad7a1ea74c62ad39a48",
+        assertEquals("585ca4ddbad267eab82efd459a0893b3b3cb95d8ae013683d19a4a1ecc999f0d",
                 hex(invokePrivate("hmac",new Class<?>[]{byte[].class,byte[].class},key,concat(clientDomain,transcript))));
-        assertEquals("955200ba44ad7dd482ef90b9541247a0d27d59970cfdf1c9f17126be67d72be1",
+        assertEquals("6c962607aa55ed1c48952647b0c759a7efc179c6921b30fad4e204cce704ef8a",
                 hex(invokePrivate("hmac",new Class<?>[]{byte[].class,byte[].class},key,concat(sessionDomain,transcript))));
     }
 
