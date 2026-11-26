@@ -198,32 +198,29 @@ def is_server2_running():
         return False
 
 
-# [F1] 计算本机子网定向广播地址（与 server2.py 对齐）
-def get_subnet_broadcast():
+# [F1] 仅从本机活动接口枚举子网；不探测公网、不猜测 /24。
+from lan_p2p_network_paths import enumerate_ipv4_paths, directed_broadcast_addresses
+
+
+def get_subnet_broadcasts():
+    """Return explicit directed broadcasts from active local interfaces."""
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(1)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        if ip.startswith("127.") or ip == "0.0.0.0":
-            return "255.255.255.255"
-        parts = ip.split(".")
-        if len(parts) == 4:
-            return ".".join(parts[:3]) + ".255"
+        return directed_broadcast_addresses(enumerate_ipv4_paths())
     except Exception:
-        pass
-    return "255.255.255.255"
+        return ()
 
 
-# [F1] 独立模式聊天广播：子网 + 全局双发，每目标 3 次
+def get_subnet_broadcast():
+    """Compatibility wrapper for legacy callers; prefer get_subnet_broadcasts()."""
+    targets = get_subnet_broadcasts()
+    return targets[0] if targets else "255.255.255.255"
+
+
+# [F1] 独立模式聊天广播：逐活动接口定向广播 + 全局广播，每目标有限重试
 def broadcast_chat_message(payload_str):
     data = payload_str.encode('utf-8')
-    subnet = get_subnet_broadcast()
-    if subnet != "255.255.255.255":
-        targets = [subnet, "255.255.255.255"]
-    else:
-        targets = ["255.255.255.255"]
+    targets = list(get_subnet_broadcasts())
+    targets.append("255.255.255.255")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
