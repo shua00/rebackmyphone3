@@ -1,6 +1,9 @@
 package com.example.devicefinder;
 
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.robolectric.RobolectricTestRunner;
+import org.robolectric.annotation.Config;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.util.UUID;
@@ -8,6 +11,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import static org.junit.Assert.*;
 
+@RunWith(RobolectricTestRunner.class)
+@Config(sdk = 34)
 public class LanTransferPairingControlTransportTest {
     private static LanTransferPairingControlProtocol.Message message(
             LanTransferPairingControlProtocol.Type type, String session,
@@ -108,6 +113,39 @@ public class LanTransferPairingControlTransportTest {
             }
         } finally {
             server.close();
+        }
+    }
+
+    @Test public void productionExchangeRejectsUnboundInterfaceCandidateBeforeConnecting()
+            throws Exception {
+        LanNetworkPath candidate = LanNetworkPath.localInterfaceCandidate("ap0",
+                (java.net.Inet4Address) InetAddress.getByName("192.168.43.1"), 24, null);
+        try {
+            LanTransferPairingControlTransport.exchange(candidate,
+                    InetAddress.getByName("192.168.43.2"), 9,
+                    message(LanTransferPairingControlProtocol.Type.REQUEST,
+                            UUID.randomUUID().toString(), "sender", "receiver", 1L, new byte[64]),
+                    100, 100);
+            fail("unbound local-interface candidates must fail closed");
+        } catch (IOException expected) {
+            assertTrue(expected.getMessage().contains("Network-backed"));
+        }
+    }
+
+    @Test public void productionExchangeRejectsEndpointOutsideSelectedSubnetBeforeConnecting()
+            throws Exception {
+        LanNetworkPath path = LanNetworkPath.fromAndroidNetwork(
+                org.robolectric.shadows.ShadowNetwork.newInstance(42), "wlan0",
+                (java.net.Inet4Address) InetAddress.getByName("192.168.1.2"), 24, null);
+        try {
+            LanTransferPairingControlTransport.exchange(path,
+                    InetAddress.getByName("192.168.2.3"), 9,
+                    message(LanTransferPairingControlProtocol.Type.REQUEST,
+                            UUID.randomUUID().toString(), "sender", "receiver", 1L, new byte[64]),
+                    100, 100);
+            fail("endpoint outside the selected LAN subnet must be rejected");
+        } catch (IOException expected) {
+            assertTrue(expected.getMessage().contains("outside"));
         }
     }
 
