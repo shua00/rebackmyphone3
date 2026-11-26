@@ -75,9 +75,11 @@
 
 ## 后续架构 TODO：rescue2 超级管理权限
 - [ ] **Rescue2 超级管理员权限（不可削弱的既有能力约束）**：Rescue2 是独立 L2 超级管理端，不设置应用层权限等级、业务功能白名单或 Shell/ADB 命令白名单；保留并持续扩展既有完整救援、设备管理、任意合法 Shell/ADB 操作及临时扩展能力。管理员身份/签名只用于让设备识别并认证 Rescue2 管理端，不得反向变成限制 Rescue2 可执行功能的权限系统。
-- [ ] **Android 系统能力边界**：Rescue2 超级管理员身份不等于自动获得 Android Root；实际操作仍受设备 UID、SELinux、沙箱、ADB 可用性和系统授权约束。普通设备已有 Root 时，Rescue2 应可按设备现有授权流程申请并使用 Root；不得伪造或绕过 Root 授权。
-- [x] Android 核心包新增 `Rescue2AdminTrustStore`（不随 diagnostics=false 精简构建剥离）：独立保存 Rescue2 P-256 公钥、SHA-256 指纹、显式信任与持久化撤销；支持公钥身份 JSON 导入及域分离 ECDSA/SHA-256 detached signature 验签。该类仅认证管理端身份，不定义或收窄 Rescue2 操作权限。
-- [ ] **诊断参与端隔离**：只读 Probe 白名单仅约束普通 Android 诊断参与端的自动诊断任务，不约束 Rescue2 管理端自身，也不限制 Rescue2 通过合法 Shell/ADB 执行其他管理任务。
+- [x] **Android 系统能力边界约定**：Rescue2 超级管理员身份不等于自动获得 Android Root；实际操作仍受设备 UID、SELinux、沙箱、ADB 可用性和系统授权约束。普通设备已有 Root 时，Rescue2 应可按设备现有授权流程申请并使用 Root；不得伪造或绕过 Root 授权。实际 Root/ADB 远程执行通道仍待实现与真机验收。
+- [x] Android 核心包新增 `Rescue2AdminTrustStore`（不随 diagnostics=false 精简构建剥离）：独立保存 Rescue2 P-256 公钥、SHA-256 指纹、显式信任与持久化撤销；严格校验 secp256r1、支持公钥身份 JSON 预览/导入及域分离 ECDSA/SHA-256 detached signature 验签。该类仅认证管理端身份，不定义或收窄 Rescue2 操作权限。
+- [x] Android 新增 `Rescue2AdminTrustActivity`：从文件选择器导入 Rescue2 公钥文件，导入前展示完整 SHA-256 指纹并要求用户明确确认；列出当前可信管理员并支持逐个二次确认撤销。通过 Chat 设置入口访问，属于核心构建，不依赖 diagnostics。
+- [x] Rescue2 新增 G 菜单：首次创建/读取独立 P-256 管理员密钥，Windows 当前用户 DPAPI 保护私钥，导出只含公钥、指纹和 schemaVersion 的 JSON；密钥路径 `%LOCALAPPDATA%\\RebackMyPhone3\\rescue2_admin.key.dpapi`。需要安装 `requirements-rescue2-admin.txt`；不读取/复用 `RESCUE_SECRET`。
+- [x] **诊断参与端隔离约定**：只读 Probe 白名单仅约束普通 Android 诊断参与端的自动诊断任务，不约束 Rescue2 管理端自身，也不限制 Rescue2 通过合法 Shell/ADB 执行其他管理任务。`DiagnosticTaskEnvelope/Verifier` 是诊断专用协议，不得用作通用 Rescue2 命令白名单。
 - [ ] 独立 CommunicationPolicyManager：策略版本化、签名验证、作用域、有效期、撤销、审计。
 - [ ] rescue2 可管理对讲和文件传输策略，但不绕过 Android OS sandbox 或接收端授权。
 - [ ] 临时免长期配对发送使用短期 capability，绑定管理员、任务、目标、文件摘要/大小、操作范围、过期时间和一次性 nonce。
@@ -143,10 +145,12 @@
 
 - [x] 增加 Python/Android 共用的有界诊断任务 envelope：taskId、管理员公钥指纹、固定目标 participant 快照、诊断参与端只读 Probe ID 白名单、创建/过期时间及随机 nonce。
 - [x] Python 与 Android 字段名、schemaVersion、目标/Probe 上限、唯一性、TTL 和拒绝非法 Probe 的跨语言模型测试。
-- [ ] Rescue2 管理员 P-256 签名密钥生成/安全存储、公钥指纹计算、显式设备端公钥信任与撤销；不得复用 peer secret 或旧救援口令。
-- [ ] 任务签名与设备端验签、持久化 nonce 防重放、设备端逐任务同意/拒绝/取消状态机；未完成前禁止网络分发和执行。
+- [x] Rescue2 管理员 P-256 签名密钥生成/Windows DPAPI 安全存储、公钥指纹计算、显式 Android 端公钥信任与撤销；不得复用 peer secret 或旧救援口令。
+- [x] 诊断任务签名与 Android 端验签：签名绑定规范 JSON、管理员指纹、任务时效和固定目标 participant；拒绝非规范 JSON、错误目标、过期任务、未知管理员及无效签名。
+- [x] Android 持久化 taskId/nonce 防重放；覆盖重复 taskId、重复 nonce、进程重建和过期后清理/重用测试。
+- [ ] 设备端逐任务同意/拒绝/取消状态机仍待实现；当前验证器/防重放组件未接入网络分发，未授权前不得执行。
 - [ ] 接入 DiagnosticExecutor 的 Probe 白名单执行适配器、任务超时/并发限流和逐设备结果状态。
 - [ ] 独立诊断控制通道及报告回传的端到端认证、加密、断点续传和限流。
-- [ ] Rescue2 单设备/批量任务界面、报告查看/保存/导出及关闭诊断后的旧版日志拉取隔离验收。
+- [ ] Rescue2 单设备/批量诊断任务界面、报告查看/保存/导出及真实控制通道仍待实现；当前 G 菜单仅管理身份和导出公钥。
 
 > 当前批次新增的 task envelope 仅是序列化与输入校验，不提供身份认证、签名、授权或传输安全。管理员公钥信任、签名验签和设备端授权均未完成；不得把 schema 测试通过视为远程诊断已可用。
