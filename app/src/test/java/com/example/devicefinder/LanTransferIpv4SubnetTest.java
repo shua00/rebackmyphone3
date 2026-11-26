@@ -29,4 +29,15 @@ public class LanTransferIpv4SubnetTest {
         assertNull(LanTransferIpv4Subnet.directedBroadcast(ipv4("192.0.2.10"), 33));
         assertNull(LanTransferIpv4Subnet.directedBroadcast(null, 24));
     }
+    @Test public void validatesRemoteEndpointAgainstSelectedIpv4Prefix() throws Exception {
+        assertTrue(LanTransferIpv4Subnet.contains(ipv4("192.168.40.2"), 24,
+                ipv4("192.168.40.99")));
+        assertFalse(LanTransferIpv4Subnet.contains(ipv4("192.168.40.2"), 24,
+                ipv4("192.168.41.99")));
+        assertTrue(LanTransferIpv4Subnet.contains(ipv4("10.42.0.1"), 16,
+                ipv4("10.42.255.254")));
+        assertFalse(LanTransferIpv4Subnet.contains(ipv4("192.0.2.1"), 0,
+                ipv4("192.0.2.2")));
+    }
+
 }
