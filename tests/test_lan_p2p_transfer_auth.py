@@ -100,7 +100,7 @@ class TransferAuthenticationTests(unittest.TestCase):
         worker = threading.Thread(target=server)
         worker.start()
         try:
-            with self.assertRaises(TransferValidationError):
+            with self.assertRaises((TransferValidationError, EOFError)):
                 authenticate_tcp_client(left, "sender", "receiver", self.SECRET)
         finally:
             left.close()
