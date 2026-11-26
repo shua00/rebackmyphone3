@@ -31,6 +31,8 @@ on:
       - "lan_p2p_transfer_network.py"
       - "lan_p2p_transfer_auth.py"
       - "rescue2.py"
+      - "rescue2_admin_identity.py"
+      - "requirements-rescue2-admin.txt"
       - "chat.py"
       - "server2.py"
       - "tests/**"
