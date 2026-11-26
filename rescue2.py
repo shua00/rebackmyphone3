@@ -1822,7 +1822,7 @@ def menu_f_todo():
 
 def menu_g_admin_identity():
     """Manage the independent Rescue2 administrator identity; never touches RESCUE_SECRET."""
-    print("\\n" + "=" * 50 + "\\n  G. Rescue2 超级管理员身份\\n" + "=" * 50)
+    print("\n" + "=" * 50 + "\n  G. Rescue2 超级管理员身份\n" + "=" * 50)
     try:
         from rescue2_admin_identity import Rescue2AdminIdentity
         identity = Rescue2AdminIdentity(Rescue2AdminIdentity.default_key_path()).load_or_create()
@@ -1892,7 +1892,7 @@ def print_main_menu(local_ip):
     print("  [7] 注入 ADB 保活   [8] 紧急寻找")
     
     print("\n【 设备管理与规划 】")
-    print("  [E] ADB 控制台      [G] Rescue2 管理员身份\\n  [T] 未来规划 (TODO)")
+    print("  [E] ADB 控制台      [G] Rescue2 管理员身份\n  [T] 未来规划 (TODO)")
     
     print("\n【 更多分类 】")
     if is_termux():
