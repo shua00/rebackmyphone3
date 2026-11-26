@@ -44,6 +44,8 @@ public final class LanTransferPairingControlTransport {
             InetAddress address, int port, LanTransferPairingControlProtocol.Message request,
             int connectTimeoutMs, int readTimeoutMs) throws IOException {
         validateEndpoint(address, port, connectTimeoutMs, readTimeoutMs);
+        if (!address.isLoopbackAddress())
+            throw new IOException("Unbound pairing transport is restricted to loopback tests");
         byte[] frame = LanTransferPairingControlProtocol.encode(request);
         try (Socket socket = new Socket()) {
             socket.setTcpNoDelay(true);
