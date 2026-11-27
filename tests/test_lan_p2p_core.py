@@ -5809,7 +5809,7 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
         self.assertEqual(1, send_outgoing_fragment_window(
             sock, db_path, "rescue2", "tx-window", "peer-b", body, created,
             endpoint, "peer-a", "rescue2", "peer-a", "shared-secret",
-            mark_attempt=False))
+            mark_attempt=True, allow_fast_retry=True))
         self.assertEqual(before_probe + 1, len(sock.sent))
         self.assertEqual(len(bitmap) - 1,
                          decode_packet(sock.sent[-1][0], "shared-secret")["fragment_index"])
