@@ -902,6 +902,16 @@ def _build_version_aware_commands(target_devs, action_name, payload, message_id=
             try:
                 encoded = encode_packet(packet, RESCUE_SECRET)
                 long_message = False
+                # Preserve worst-case recipient preflight on the short-message fast path.
+                if target_devs:
+                    for peer_id in target_devs:
+                        targeted_packet = dict(packet)
+                        targeted_packet["target_peer_id"] = str(peer_id)
+                        encode_packet(targeted_packet, RESCUE_SECRET)
+                else:
+                    budget_packet = dict(packet)
+                    budget_packet["target_peer_id"] = max_peer_id_budget_probe()
+                    encode_packet(budget_packet, RESCUE_SECRET)
             except ValueError:
                 # Validate all actual recipient IDs (or the maximum discovery ID budget)
                 # against every fragment before committing the immutable Outbox row.
