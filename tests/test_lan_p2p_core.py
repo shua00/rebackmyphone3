@@ -5886,7 +5886,7 @@ class LongChatReceiveAndRescueDiagnosticsTests(unittest.TestCase):
             with self.subTest(service=filename):
                 source = (repo_root / filename).read_text(encoding="utf-8")
                 start = source.index("def _handle_authenticated_v2_packet(")
-                end = source.find("\\ndef ", start + 5)
+                end = source.find("\ndef ", start + 5)
                 handler = source[start:end if end >= 0 else len(source)]
                 receive = handler[handler.index('if packet_type == "chat.fragment":'):]
                 self.assertLess(receive.index("store_incoming_chat_fragment("),
