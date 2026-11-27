@@ -174,6 +174,9 @@ public class TrackingService extends Service implements LocationListener {
     private ConnectivityManager.NetworkCallback networkCallback;
     // Observe Wi-Fi LAN separately: the default route may remain on cellular.
     private ConnectivityManager.NetworkCallback wifiLanNetworkCallback;
+    // OEM hotspot/AP transitions may not surface as ConnectivityManager Wi-Fi Networks.
+    // This receiver is event-only: it refreshes candidate metadata, never starts workers itself.
+    private BroadcastReceiver lanHotspotStateReceiver;
     private volatile String wifiLanFingerprint;
     // Runtime ownership registry; currently mirrors the selected Wi-Fi listener only.
     // It is deliberately dormant when no usable LAN fingerprint/listener exists.
@@ -827,6 +830,8 @@ public class TrackingService extends Service implements LocationListener {
                 requestSingleLocationAndReport();
                 if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 registerNetworkCallback();
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
+                registerLanHotspotStateReceiver();
                 if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 startLocationUpdates();
                 if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
@@ -3617,6 +3622,49 @@ public class TrackingService extends Service implements LocationListener {
             closer.setDaemon(true);
             closer.start();
         } else closeStore.run();
+    }
+
+    /**
+     * Observe platform hotspot/tethering state transitions without polling.
+     * The broadcasts are best-effort because OEM builds differ; ConnectivityManager remains
+     * the authoritative source for represented Wi-Fi Networks. A broadcast only triggers a
+     * fresh, bounded path snapshot so an unrepresented AP interface can enter/leave the plan.
+     */
+    private void registerLanHotspotStateReceiver() {
+        if (serviceDestroyed || lanHotspotStateReceiver != null) return;
+        final IntentFilter filter = new IntentFilter();
+        // WIFI_AP_STATE_CHANGED_ACTION is hidden on some SDK surfaces; use the platform
+        // action string and never depend on OEM interface names or undocumented extras.
+        filter.addAction("android.net.wifi.WIFI_AP_STATE_CHANGED");
+        filter.addAction("android.net.conn.TETHER_STATE_CHANGED");
+        BroadcastReceiver receiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context context, Intent intent) {
+                if (serviceDestroyed || intent == null) return;
+                final String action = intent.getAction();
+                executeMaintenance("hotspot-path-refresh", () -> {
+                    if (serviceDestroyed) return;
+                    ConnectivityManager cm = (ConnectivityManager)
+                            getSystemService(Context.CONNECTIVITY_SERVICE);
+                    if (cm != null) refreshLanChatListenerPathPlan(cm,
+                            "hotspot/tethering event: " + action);
+                });
+            }
+        };
+        try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(receiver, filter);
+            }
+            lanHotspotStateReceiver = receiver;
+            FileLogger.logD("CHAT", "Hotspot/tethering event observer registered (best-effort)");
+        } catch (Exception registrationFailure) {
+            // Not all OEMs expose these broadcasts to ordinary applications. Do not
+            // fail service startup or introduce a polling fallback when registration fails.
+            FileLogger.logD("CHAT", "Hotspot event observer unavailable: "
+                    + registrationFailure.getClass().getSimpleName());
+            try { unregisterReceiver(receiver); } catch (Exception ignored) { }
+        }
     }
 
     private void registerNetworkCallback() {
@@ -9080,6 +9128,10 @@ public class TrackingService extends Service implements LocationListener {
         activeBubbles.clear();
 
         if (batteryMonitor != null) { try { unregisterReceiver(batteryMonitor); } catch (Exception ignored) {} }
+        if (lanHotspotStateReceiver != null) {
+            try { unregisterReceiver(lanHotspotStateReceiver); } catch (Exception ignored) { }
+            lanHotspotStateReceiver = null;
+        }
         if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
         releaseLanMulticastLock();
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
