@@ -6767,8 +6767,8 @@ public class TrackingService extends Service implements LocationListener {
                     + " otherLockMs=" + Math.max(0L, preparationMs - routeProbeMs));
         }
         FileLogger.log(this, "CHAT", "⏱️ P2P UDP 开始发送，固定目标 " + totalPeerCount
-                + "，已验证路由 " + verifiedRouteCount + "，历史端点直投 " + cachedEndpointCount
-                + "，消息 " + messageId);
+                + "，已验证路径路由 " + verifiedRouteCount + "，待路径验证目标 "
+                + Math.max(0, totalPeerCount - reachablePeerCount) + "，消息 " + messageId);
         long ackLoopStartedAt = android.os.SystemClock.elapsedRealtime();
         java.util.concurrent.atomic.AtomicBoolean hadUdpDispatchAttempt =
                 new java.util.concurrent.atomic.AtomicBoolean(false);
