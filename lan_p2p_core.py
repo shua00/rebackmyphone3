@@ -1699,7 +1699,7 @@ def assemble_chat_fragments(fragments):
 
 CHAT_FRAGMENT_SESSION_TTL_MS = 30 * 60 * 1000
 MAX_CHAT_FRAGMENT_SESSIONS = 32
-MAX_CHAT_FRAGMENT_CACHE_BYTES = 2 * 1024 * 1024
+MAX_CHAT_FRAGMENT_CACHE_CHARS = 2 * 1024 * 1024
 
 
 def _ensure_chat_fragment_schema(conn):
@@ -1815,7 +1815,7 @@ def store_incoming_chat_fragment(db_path, receiver_scope, sender_peer_id,
             return "complete" if int(received) == count else "duplicate"
         cached_chars = conn.execute(
             "SELECT COALESCE(SUM(LENGTH(fragment_data)),0) FROM lan_chat_fragments").fetchone()[0]
-        if int(cached_chars or 0) + len(encoded) > MAX_CHAT_FRAGMENT_CACHE_BYTES:
+        if int(cached_chars or 0) + len(encoded) > MAX_CHAT_FRAGMENT_CACHE_CHARS:
             _safe_rollback(conn)
             return "rejected"
         conn.execute("""INSERT INTO lan_chat_fragments
