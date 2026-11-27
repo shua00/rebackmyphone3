@@ -625,7 +625,12 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
                            "display_name": "PC_Terminal", "body": pending["body"]}
             try:
                 target_port = int(pending.get("endpoint_port") or addr[1])
-                raw = encode_packet(chat_packet, RESCUE_SECRET)
+                try:
+                    raw = encode_packet(chat_packet, RESCUE_SECRET)
+                    long_message = False
+                except ValueError:
+                    raw = None
+                    long_message = True
             except Exception as e:
                 with print_lock:
                     print(f"⚠️ rescue2 pending chat retry payload preparation failed peer={peer_id}: {type(e).__name__}")
@@ -652,13 +657,23 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
                 _diag_event("chat_recovery_send_started", peer_id=peer_id,
                             message_id=pending["message_id"], endpoint_ip=pending["endpoint_ip"],
                             endpoint_port=target_port)
-                send_outgoing_packet(
-                    sock, raw, (pending["endpoint_ip"], target_port),
-                    _CHAT_DEDUP_DB, "rescue2", pending["message_id"], peer_id,
-                    send_lock=UDP_CHAT_SEND_LOCK)
+                if long_message:
+                    sent = send_outgoing_fragment_window(
+                        sock, _CHAT_DEDUP_DB, "rescue2", pending["message_id"], peer_id,
+                        pending["body"], pending["created_at_ms"],
+                        (pending["endpoint_ip"], target_port), PEER_NODE_ID, "rescue2",
+                        PEER_NODE_ID, RESCUE_SECRET, send_lock=UDP_CHAT_SEND_LOCK,
+                        display_name="PC_Terminal", mark_attempt=False)
+                else:
+                    send_outgoing_packet(
+                        sock, raw, (pending["endpoint_ip"], target_port),
+                        _CHAT_DEDUP_DB, "rescue2", pending["message_id"], peer_id,
+                        send_lock=UDP_CHAT_SEND_LOCK)
+                    sent = 1
                 _diag_event("chat_recovery_send_submitted", peer_id=peer_id,
                             message_id=pending["message_id"], endpoint_ip=pending["endpoint_ip"],
-                            endpoint_port=target_port)
+                            endpoint_port=target_port, long_message=long_message,
+                            fragments_sent=sent if long_message else 0)
             except LanP2PStorageError as e:
                 _diag_exception("chat_recovery_send_storage_failed", peer_id=peer_id,
                                 message_id=pending["message_id"], error_type=type(e).__name__)
