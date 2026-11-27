@@ -244,14 +244,13 @@ public class TrackingService extends Service implements LocationListener {
     //   TrackingService 启动后由 batteryMonitor 持续刷新，-1 表示尚未采集。
     public static volatile int GLOBAL_BATTERY_LEVEL = -1;
 
+    private volatile boolean serviceDestroyed = false;
     // Hidden/OEM hotspot AP interfaces may not produce ConnectivityManager Network callbacks.
     // Reconcile the selected LAN path periodically while the independent transfer feature is on.
     private final Runnable lanTransferPathRefreshRunnable = () -> {
         if (!serviceDestroyed && LanTransferFeature.isEnabled(this))
             refreshLanTransferTcpListener("periodic LAN path reconciliation");
     };
-
-    private volatile boolean serviceDestroyed = false;
     // 每个进程只生成一次；进程被系统杀死后重启会得到新的 Session。
     private static final String PROCESS_SESSION_ID = java.util.UUID.randomUUID().toString();
     private static final long PROCESS_START_WALL_TIME_MS = System.currentTimeMillis();
