@@ -334,3 +334,15 @@ PR #1 仍 Open，未合并 main；本轮完成的是代码和 CI 层面的批次
 - [x] `peer.hello` 异步任务在持久化前和发送 `peer.ack` 前分别复核 ingress；统一 helper 使 teardown guard 同样覆盖 ACK 的异步账本更新。
 - [x] 最新代码 head `3ba7da00aa6b8114a0d4e5c49dd60b8e32e38bfc) / PR run [46031571050](https://github.com/shua00/rebackmyphone3/actions/runs/46031571050)：Python 467 tests（skipped=1）、Windows Socket Binding、Android unit/debug/slim release 全部成功；artifact `15215120518`。
 - [ ] 仍需真机验证网络切换、Service 快速销毁/重建和热点双路径下的实际收发；CI 不能替代这些设备级验证。
+
+
+## 2026-11-27 批次 C：secondary worker 启动失败与旧 Android 网络代际清理
+
+- [x] 修复 `Thread.start()` 抛出 `RuntimeException` 时的恢复遗漏：由于 Runnable 从未启动，其内部 `finally` 不会运行；现在启动失败分支先撤销 stop 状态与 path owner，再调用统一的 `scheduleSecondaryLanChatListenerRetry(...)`。
+- [x] secondary bind/receive 运行期异常与 `Thread.start()` 启动异常共用同一条 path-scoped 指数退避策略；重试任务仍校验 Service 未销毁、generation 未变化、path 仍在当前 secondary plan、owner 为空，退避 5 秒起步、上限 5 分钟。
+- [x] API 21–22 明确不启动 secondary Listener：该版本无法按当前设计将 DatagramSocket 绑定到 secondary Android Network，避免表面多 Listener、实际仍走默认路由。
+- [x] API 21–22 默认网络 generation 变化时，先关闭并撤销所有旧 secondary Socket/Lease/Instance，再按旧版本单路径策略 reconciliation；避免旧 secondary 阻塞在 `receive()` 且永远无法通过 generation 校验退出。
+- [x] 新增 `tests/test_lan_secondary_listener_contract.py` 回归契约，覆盖 Thread.start 失败后仍排期重试、retry 的 path/generation/owner guard，以及 API 21–22 secondary 禁用与代际清理。
+- [x] 源码提交 `afc4249f224c4861b5fc16e7d2ab6d73ae9cfc90`；测试提交/当前 head `b60303b3aa2ec867de7f81c4dc2117047af2b1c0`。
+- [x] PR Actions run [46034311338](https://github.com/shua00/rebackmyphone3/actions/runs/46034311338)：Python 471 tests（skipped=1）、Windows Socket Binding、Android `testDebugUnitTest`、Debug APK、Slim Release 全部成功；artifact `15216630552`（`app-diagnostic-and-slim-apks`，711489 bytes）。
+- [ ] CI 只证明代码契约与构建通过；API 21–22 实机兼容、OEM AP bind、STA/AP 双向广播/单播、热点 NAT/客户端隔离及三设备任意两台通信仍需真机验收。
