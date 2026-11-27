@@ -6327,8 +6327,9 @@ public class TrackingService extends Service implements LocationListener {
         final long routeLookupNow = android.os.SystemClock.elapsedRealtime();
         for (LanChatStore.Target target : savedTargets) {
             if (target == null || target.peerId == null || "acked".equals(target.status)) continue;
-            // The common single-path case uses a direct O(1) peer+path lookup: no route-list
-            // allocation, cross-interface scan, or peer-wide endpoint authorization.
+            // The selector preserves the O(1) single-listener fast path. It only enumerates
+            // peer routes when multiple listeners are actually registered; path authentication
+            // and the captured socket/generation remain attached to the selected binding.
             LanChatPathRegistry.RouteBinding liveBinding =
                     LanAdaptiveRouteSelector.selectPrimaryBinding(
                             lanChatPathRegistry, target.peerId, preferredChatPath, routeLookupNow);
