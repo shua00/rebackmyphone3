@@ -411,7 +411,7 @@ public class TrackingService extends Service implements LocationListener {
                         lanSocketGeneration.incrementAndGet();
                         LanChatListenerInstance oldInstance = activeLanChatListenerInstance;
                         if (oldInstance != null) oldInstance.requestStop();
-                        oldSocket = rescueSocketRef;
+                        oldSocket = oldInstance != null ? oldInstance.socket() : rescueSocketRef;
                     }
                     invalidateVerifiedChatPeers("Pre-M default LAN route changed: " + reason);
                     lastPeerDiscoveryAt = 0L;
