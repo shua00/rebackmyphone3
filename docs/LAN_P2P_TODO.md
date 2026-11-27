@@ -586,3 +586,11 @@
 - [x] 新增 Python 静态架构回归，约束聊天 Listener 必须使用精确地址绑定、并验证 wildcard 仅位于未绑定 fallback 分支。
 - [ ] AP local-interface candidate 尚未接入 TrackingService 聊天 Listener；不能据此宣称 STA/AP 双 Listener 已实现。
 - [ ] 仍需 Android Robolectric/单元测试、Python 全量测试、Windows 检查及 Debug/Slim Release APK 构建验证；真机多网卡和热点验收另计。
+
+
+### 批次 A（2026-11-27）：单 Listener 生命周期实例化
+- [x] 为当前唯一 LAN chat listener 增加 path/generation 级实例身份，绑定其 socket 与 worker identity。
+- [x] 网络替换时标记旧实例停止；socket 关闭仍在 lifecycle lock 外执行。
+- [x] 覆盖旧实例迟到清理、停止后资源附着、socket/thread identity 的单测。
+- [ ] 将 bind/receive/close/multicast lock 的完整生命周期进一步收敛到 owner；逐项覆盖 onDestroy、bind failure、thread start failure 和网络切换竞态。
+- [ ] 保持单路径只有一个 listener；完成后再进入 STA/AP 第二 Listener。
