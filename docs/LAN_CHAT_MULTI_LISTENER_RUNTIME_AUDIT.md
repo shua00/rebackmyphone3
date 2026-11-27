@@ -167,3 +167,12 @@
 - Slim Release：`assembleRelease -PincludeDiagnostics=false` 成功，17s。
 - APK artifact：`app-diagnostic-and-slim-apks`，artifact ID `15189696370`。
 - 以上是代码/构建验证，不是 Android 真机验收；本批仍未启动第二 Listener。
+
+
+### 批次 A 补充：实例成为 Socket/Worker 生命周期资源来源
+
+- `TrackingService` 的网络替换与服务销毁优先从当前 `LanChatListenerInstance` 取回 Socket/Thread，再执行 stop/close/interrupt；旧字段保留为兼容引用，不再作为唯一资源所有权来源。
+- close/interrupt 仍在 `rescueLock` 外执行；实例 attach 只接受未关闭 Socket、NEW 状态 Thread，拒绝重复或迟到资源。
+- 最新验证 commit：`96fb9c03eacd67f51079272b54923b0ceef32760`；Actions run [45981692678](https://github.com/shua00/rebackmyphone3/actions/runs/45981692678) 全部成功。
+- Python：440 tests，OK（skipped=1）；Windows socket binding success；Android `testDebugUnitTest` + `assembleDebug` success；Slim Release `assembleRelease -PincludeDiagnostics=false` success。
+- APK artifact：`app-diagnostic-and-slim-apks`，ID `15189847113`。
