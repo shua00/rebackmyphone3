@@ -810,7 +810,7 @@ public class LanTransferTcpSessionTest {
                 "android", SECRET, "python"::equals, () -> 1003L, 64, 1024 * 1024, 10000);
         ServerSocket listener = new ServerSocket(0);
         ExecutorService executor = Executors.newSingleThreadExecutor();
-        String script = String.join("\\n",
+        String script = String.join("\n",
                 "import socket,sys",
                 "from pathlib import Path",
                 "from lan_p2p_transfer import TransferOffer",
