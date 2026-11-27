@@ -2681,11 +2681,201 @@ public class TrackingService extends Service implements LocationListener {
             FileLogger.logD("CHAT", "LAN chat path plan refreshed reason=" + reason
                     + " listenerPaths=" + plan.listenerCount()
                     + " secondaryCandidates=" + plan.secondary().size());
+            reconcileLanChatSecondaryListeners(plan);
         } catch (Exception unavailable) {
             // Do not retain stale AP/local-interface candidates after a topology change.
             lanChatListenerPathPlan = null;
+            reconcileLanChatSecondaryListeners(null);
             FileLogger.logD("CHAT", "LAN chat path plan unavailable reason=" + reason
                     + " error=" + unavailable.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Reconcile only explicit unrepresented local-interface candidates. A normal single
+     * represented Wi-Fi path leaves this loop empty and creates no additional worker/socket.
+     * The primary listener remains owned by startRescueListener(); this method owns only
+     * secondary AP/local-interface receive loops.
+     */
+    private void reconcileLanChatSecondaryListeners(LanChatListenerPathPlan plan) {
+        final java.util.Map<String, LanNetworkPath> desired = new java.util.HashMap<>();
+        if (!serviceDestroyed && plan != null) {
+            for (LanNetworkPath path : plan.secondary()) {
+                if (path != null
+                        && path.kind == LanNetworkPath.Kind.LOCAL_INTERFACE_CANDIDATE) {
+                    desired.put(path.diagnosticFingerprint(), path);
+                }
+            }
+        }
+        final long generation = lanSocketGeneration.get();
+        for (LanChatListenerInstance instance : lanChatListenerRuntime.instanceSnapshot()) {
+            if (instance == null || instance == activeLanChatListenerInstance) continue;
+            if (instance.generation != generation
+                    || !desired.containsKey(instance.pathFingerprint)) {
+                stopSecondaryLanChatListener(instance);
+            }
+        }
+        if (serviceDestroyed) return;
+        for (LanNetworkPath path : desired.values()) {
+            startSecondaryLanChatListener(path, generation);
+        }
+    }
+
+    /** Mark stale first, then retire its lease/socket/thread outside the runtime monitor. */
+    private void stopSecondaryLanChatListener(LanChatListenerInstance instance) {
+        if (instance == null || instance == activeLanChatListenerInstance) return;
+        instance.requestStop();
+        lanChatListenerRuntime.removeInstance(instance);
+        LanChatListenerRuntime.Lease lease =
+                lanChatListenerRuntime.get(instance.pathFingerprint);
+        if (lease != null && lease.socket == instance.socket()
+                && lease.generation == instance.generation) {
+            lanChatListenerRuntime.remove(lease);
+        }
+        DatagramSocket socket = instance.socket();
+        if (socket != null && !socket.isClosed()) {
+            try { socket.close(); } catch (Exception ignored) { }
+        }
+        Thread worker = instance.thread();
+        if (worker != null && worker != Thread.currentThread()) worker.interrupt();
+    }
+
+    private boolean isCurrentSecondaryLanChatListener(LanChatListenerInstance instance,
+            DatagramSocket socket, LanChatListenerRuntime.Lease lease) {
+        return !serviceDestroyed && instance != null && socket != null
+                && !instance.isStopRequested() && !socket.isClosed()
+                && instance.generation == lanSocketGeneration.get()
+                && lanChatListenerRuntime.getInstance(instance.pathFingerprint) == instance
+                && lease != null && lease.socket == socket
+                && lease.generation == instance.generation
+                && lanChatListenerRuntime.get(instance.pathFingerprint) == lease;
+    }
+
+    /**
+     * Start a path-scoped authenticated-frame ingress loop for one AP/local-interface
+     * candidate. Legacy management UDP commands remain on the primary listener only.
+     */
+    private void startSecondaryLanChatListener(final LanNetworkPath path, final long generation) {
+        if (path == null || path.kind != LanNetworkPath.Kind.LOCAL_INTERFACE_CANDIDATE
+                || serviceDestroyed || generation != lanSocketGeneration.get()) return;
+        final String fingerprint = path.diagnosticFingerprint();
+        if (fingerprint == null || fingerprint.isEmpty()
+                || lanChatListenerRuntime.getInstance(fingerprint) != null) return;
+        final LanChatListenerInstance instance =
+                new LanChatListenerInstance(fingerprint, generation);
+        if (!lanChatListenerRuntime.installInstance(instance)) return;
+
+        Thread worker = new Thread(() -> {
+            DatagramSocket socket = null;
+            LanChatListenerRuntime.Lease lease = null;
+            try {
+                if (serviceDestroyed || instance.isStopRequested()
+                        || Thread.currentThread().isInterrupted()) return;
+                socket = new DatagramSocket(null);
+                if (!instance.attachSocket(socket)) {
+                    throw new java.net.SocketException("Secondary listener no longer accepts socket");
+                }
+                // Exact local-address bind is mandatory. Never fall back to wildcard if an
+                // OEM candidate cannot be bound; primary STA listener remains unaffected.
+                LanSocketBinding.bindDatagramListenerSocket(path, socket, 8888);
+                socket.setSoTimeout(3000);
+                synchronized (rescueLock) {
+                    if (serviceDestroyed || instance.isStopRequested()
+                            || generation != lanSocketGeneration.get()
+                            || lanChatListenerRuntime.getInstance(fingerprint) != instance
+                            || !isSecondaryPathStillPlanned(fingerprint)) {
+                        throw new java.net.SocketException("Secondary LAN path became stale during bind");
+                    }
+                    lease = lanChatListenerRuntime.register(fingerprint, socket, generation);
+                }
+                FileLogger.log(this, "CHAT", "Secondary LAN listener bound exact path="
+                        + path.diagnosticFingerprint() + " port=8888");
+                sendSecondaryPathPeerHello(instance, socket, lease, path);
+
+                byte[] buffer = new byte[4096];
+                DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+                while (isCurrentSecondaryLanChatListener(instance, socket, lease)) {
+                    try {
+                        packet.setLength(buffer.length);
+                        socket.receive(packet);
+                    } catch (java.net.SocketTimeoutException timeout) {
+                        continue;
+                    }
+                    if (!isCurrentSecondaryLanChatListener(instance, socket, lease)) break;
+                    long receivedAt = android.os.SystemClock.elapsedRealtime();
+                    // Secondary ingress is intentionally authenticated P2P only. Do not run
+                    // legacy FIND_ME_* commands twice when the same LAN broadcast reaches STA/AP.
+                    handleLanRealtimePacket(socket, packet, receivedAt, fingerprint, generation);
+                }
+            } catch (Exception failure) {
+                if (!instance.isStopRequested() && !serviceDestroyed) {
+                    FileLogger.log(this, "CHAT", "Secondary LAN listener unavailable path="
+                            + fingerprint + " error=" + failure.getClass().getSimpleName());
+                }
+            } finally {
+                if (lease != null) lanChatListenerRuntime.remove(lease);
+                lanChatListenerRuntime.removeInstance(instance);
+                if (socket != null && !socket.isClosed()) {
+                    try { socket.close(); } catch (Exception ignored) { }
+                }
+            }
+        }, "LAN-UDP-Secondary-" + serviceInstanceId);
+        if (!instance.attachThread(worker)) {
+            lanChatListenerRuntime.removeInstance(instance);
+            return;
+        }
+        if (serviceDestroyed || generation != lanSocketGeneration.get()
+                || lanChatListenerRuntime.getInstance(fingerprint) != instance) {
+            instance.requestStop();
+            lanChatListenerRuntime.removeInstance(instance);
+            return;
+        }
+        try {
+            worker.start();
+        } catch (RuntimeException startFailure) {
+            instance.requestStop();
+            lanChatListenerRuntime.removeInstance(instance);
+            throw startFailure;
+        }
+    }
+
+    private boolean isSecondaryPathStillPlanned(String fingerprint) {
+        LanChatListenerPathPlan plan = lanChatListenerPathPlan;
+        if (plan == null || fingerprint == null) return false;
+        for (LanNetworkPath path : plan.secondary()) {
+            if (path != null && path.kind == LanNetworkPath.Kind.LOCAL_INTERFACE_CANDIDATE
+                    && fingerprint.equals(path.diagnosticFingerprint())) return true;
+        }
+        return false;
+    }
+
+    /** One bounded authenticated discovery beacon on the newly activated secondary path. */
+    private void sendSecondaryPathPeerHello(LanChatListenerInstance instance,
+            DatagramSocket socket, LanChatListenerRuntime.Lease lease, LanNetworkPath path) {
+        if (path.broadcastAddress == null
+                || !isCurrentSecondaryLanChatListener(instance, socket, lease)) return;
+        final String nonce = java.util.UUID.randomUUID().toString();
+        final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+        pendingPeerChallenges.put(nonce, latch);
+        scheduleLanChatTask("secondary-peer-discovery-timeout",
+                () -> clearPendingPeerChallenge(nonce), LAN_PEER_CHALLENGE_TIMEOUT_MS);
+        try {
+            JSONObject hello = LanP2pProtocol.create("peer.hello",
+                    getUniqueDeviceId(), "android", "android-main");
+            hello.put("nonce", nonce);
+            hello.put("network_scope", buildLanProtocolNetworkScope(path.diagnosticFingerprint()));
+            hello.put("capabilities", new JSONArray().put("chat.text").put("chat.ack"));
+            byte[] bytes = LanP2pProtocol.encode(hello, RESCUE_SECRET);
+            for (int port : new int[]{8888, 8887, 8889, 8890}) {
+                if (!isCurrentSecondaryLanChatListener(instance, socket, lease)) break;
+                DatagramPacket beacon = new DatagramPacket(bytes, bytes.length,
+                        path.broadcastAddress, port);
+                sendLanUdpPacket(socket, beacon, "SECONDARY_PEER_HELLO_" + port);
+            }
+        } catch (Exception failure) {
+            clearPendingPeerChallenge(nonce);
+            FileLogger.logD("CHAT", "Secondary path peer discovery deferred: "
+                    + failure.getClass().getSimpleName());
         }
     }
 
