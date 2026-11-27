@@ -2792,20 +2792,23 @@ public class TrackingService extends Service implements LocationListener {
     /** Mark stale first, then retire its lease/socket/thread outside the runtime monitor. */
     private void stopSecondaryLanChatListener(LanChatListenerInstance instance) {
         if (instance == null || instance == activeLanChatListenerInstance) return;
+        // Keep the path instance claimed until its bound port is actually released.
+        // Otherwise a concurrent reconciliation can install a replacement while the old
+        // socket is still bound and lose the restart to an avoidable bind conflict.
         instance.requestStop();
-        lanChatListenerRuntime.removeInstance(instance);
-        LanChatListenerRuntime.Lease lease =
-                lanChatListenerRuntime.get(instance.pathFingerprint);
-        if (lease != null && lease.socket == instance.socket()
-                && lease.generation == instance.generation) {
-            lanChatListenerRuntime.remove(lease);
-        }
         DatagramSocket socket = instance.socket();
         if (socket != null && !socket.isClosed()) {
             try { socket.close(); } catch (Exception ignored) { }
         }
         Thread worker = instance.thread();
         if (worker != null && worker != Thread.currentThread()) worker.interrupt();
+        LanChatListenerRuntime.Lease lease =
+                lanChatListenerRuntime.get(instance.pathFingerprint);
+        if (lease != null && lease.socket == socket
+                && lease.generation == instance.generation) {
+            lanChatListenerRuntime.remove(lease);
+        }
+        lanChatListenerRuntime.removeInstance(instance);
     }
 
     private boolean isCurrentSecondaryLanChatListener(LanChatListenerInstance instance,
@@ -2879,11 +2882,12 @@ public class TrackingService extends Service implements LocationListener {
                             + fingerprint + " error=" + failure.getClass().getSimpleName());
                 }
             } finally {
-                if (lease != null) lanChatListenerRuntime.remove(lease);
-                lanChatListenerRuntime.removeInstance(instance);
+                // Release the bound UDP port before making this path eligible for replacement.
                 if (socket != null && !socket.isClosed()) {
                     try { socket.close(); } catch (Exception ignored) { }
                 }
+                if (lease != null) lanChatListenerRuntime.remove(lease);
+                lanChatListenerRuntime.removeInstance(instance);
             }
         }, "LAN-UDP-Secondary-" + serviceInstanceId);
         if (!instance.attachThread(worker)) {
