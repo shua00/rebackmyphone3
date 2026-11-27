@@ -177,6 +177,81 @@ class TransferSenderIntegrationTests(unittest.TestCase):
             published = next((root / "received").iterdir())
             self.assertEqual(payload, published.read_bytes())
 
+    def test_reconnect_after_unobserved_chunk_ack_requeries_durable_receipts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = b"a" * 4096 + b"remaining-after-ack-loss"
+            source = root / "ack-loss.bin"
+            source.write_bytes(payload)
+            offer = TransferOffer("sender-lost-ack", "sender", "receiver", "ack-loss.bin",
+                len(payload), hashlib.sha256(payload).hexdigest(), 1)
+            store = TransferStore(str(root / "ledger.db"), TransferLimits(chunk_size_bytes=4096))
+            files = TransferFilesystem(store, str(root / "stage"), str(root / "received"))
+            store.create_offer(offer, 1)
+            store.transition(offer.transfer_id, TransferState.ACCEPTED, 2)
+            store.transition(offer.transfer_id, TransferState.TRANSFERRING, 3)
+
+            # First connection: receiver durably stores chunk 0 and sends its ACK,
+            # but the sender closes without consuming that ACK.
+            server1, client1 = socket.socketpair()
+            first_errors = []
+            def serve_first():
+                try:
+                    serve_transfer_session(server1, store, files, local_peer_id="receiver",
+                        authenticated_peer_id="sender", session_secret=self.SECRET,
+                        now_ms=lambda: 10, max_frames=2)
+                except OSError:
+                    # Closing without reading the ACK may race with server send.
+                    pass
+                except Exception as exc:
+                    first_errors.append(exc)
+                finally:
+                    server1.close()
+            first_worker = threading.Thread(target=serve_first)
+            first_worker.start()
+            send_frame(client1, TransferFrame("missing", offer.transfer_id,
+                "sender", "receiver", metadata={"limit": 62}), self.SECRET)
+            initial = recv_frame(client1, self.SECRET,
+                expected_sender_peer_id="receiver", expected_target_peer_id="sender")
+            self.assertEqual([0, 1], initial.metadata["indexes"])
+            first_chunk = payload[:4096]
+            send_frame(client1, TransferFrame("chunk", offer.transfer_id,
+                "sender", "receiver", index=0, payload=first_chunk), self.SECRET)
+            client1.close()
+            first_worker.join(timeout=3)
+            self.assertFalse(first_worker.is_alive())
+            self.assertEqual([], first_errors)
+            self.assertIsNotNone(store.get_chunk_receipt(offer.transfer_id, 0))
+
+            # New authenticated transport session asks the durable ledger again;
+            # chunk 0 must not be retransmitted, and the remaining chunk completes.
+            server2, client2 = socket.socketpair()
+            second_errors = []
+            def serve_second():
+                try:
+                    serve_transfer_session(server2, store, files, local_peer_id="receiver",
+                        authenticated_peer_id="sender", session_secret=self.SECRET,
+                        now_ms=lambda: 11, max_frames=3)
+                except Exception as exc:
+                    second_errors.append(exc)
+                finally:
+                    server2.close()
+            second_worker = threading.Thread(target=serve_second)
+            second_worker.start()
+            try:
+                remaining = send_file_over_session(client2, str(source), offer,
+                    local_peer_id="sender", remote_peer_id="receiver",
+                    session_secret=self.SECRET, chunk_size_bytes=4096)
+            finally:
+                client2.close()
+                second_worker.join(timeout=3)
+            self.assertFalse(second_worker.is_alive())
+            self.assertEqual([], second_errors)
+            self.assertEqual((), remaining)
+            self.assertEqual(TransferState.COMPLETED, store.get_transfer(offer.transfer_id).state)
+            published = next((root / "received").iterdir())
+            self.assertEqual(payload, published.read_bytes())
+
     def test_cancel_ack_is_sent_after_staging_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
