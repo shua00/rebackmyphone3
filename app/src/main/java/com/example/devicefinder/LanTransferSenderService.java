@@ -292,8 +292,9 @@ public final class LanTransferSenderService extends Service {
                 LinkProperties links=cm.getLinkProperties(network);
                 if(caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
                         || caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
-                    if(links!=null && links.getInterfaceName()!=null)
-                        excludedInterfaces.add(links.getInterfaceName());
+                    if(links==null || links.getInterfaceName()==null || links.getInterfaceName().isEmpty())
+                        incomplete=true;
+                    else excludedInterfaces.add(links.getInterfaceName());
                     continue;
                 }
                 if(!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue;
