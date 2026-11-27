@@ -833,6 +833,13 @@ public class TrackingService extends Service implements LocationListener {
                 if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 registerLanHotspotStateReceiver();
                 if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
+                // Seed the initial plan once; the Wi-Fi fingerprint is initialized by
+                // registerNetworkCallback, so waiting for a later fingerprint change would
+                // otherwise leave the plan empty for the entire first stable network epoch.
+                ConnectivityManager lanCm = (ConnectivityManager)
+                        getSystemService(Context.CONNECTIVITY_SERVICE);
+                if (lanCm != null) refreshLanChatListenerPathPlan(lanCm, "service startup");
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 startLocationUpdates();
                 if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 registerBatteryMonitor();
