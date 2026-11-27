@@ -41,6 +41,9 @@ When multiple fresh paths are genuinely available for a peer:
 - Authentication on one path must not automatically authenticate an endpoint on another path.
 - A path fingerprint is a routing/diagnostic discriminator, not a credential.
 - Failed, ambiguous or incomplete path binding must fail closed for that candidate; it must not silently fall back to an unrelated network.
+- The durable `lan_peers` row is peer-wide and has no local ingress-path identity. Its endpoint is a membership/discovery hint and may seed a directed challenge, but it must never authorize chat or fragment payload transmission by itself.
+- Payload transmission requires a fresh path-scoped in-memory route binding that still matches the exact active listener socket and generation at dispatch time. A cached endpoint learned before process restart or on a removed path must be challenged again before it becomes a send route.
+- Message-specific `last_attempt_endpoint` and `last_sent_endpoint` fields remain delivery/ACK evidence only; they do not grant a reusable peer route or cross-path trust.
 
 ## Adapter boundary (P1/P2 compatibility)
 
