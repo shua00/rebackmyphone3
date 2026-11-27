@@ -271,6 +271,28 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
         self.assertLess(primary_ingress, primary_legacy)
         self.assertLess(primary_legacy, primary_dedup)
 
+    def test_stale_primary_finally_cannot_clear_or_retire_replacement_socket_owner(self):
+        primary = self._method(
+            "private void startRescueListener()",
+            "private void releaseLanMulticastLock()",
+        )
+        finally_block = primary[primary.index("} finally {"):]
+        socket_ref_guard = finally_block.index("if (rescueSocketRef == rescueSocket")
+        socket_ref_clear = finally_block.index("rescueSocketRef = null", socket_ref_guard)
+        close_old_socket = finally_block.index("rescueSocket.close()")
+        remove_old_owner = finally_block.index(
+            "lanChatListenerRuntime.removeInstance(listenerInstance)"
+        )
+        active_owner_check = finally_block.index(
+            "activeLanChatListenerInstance == listenerInstance"
+        )
+        self.assertLess(socket_ref_guard, socket_ref_clear)
+        self.assertLess(close_old_socket, remove_old_owner)
+        self.assertLess(remove_old_owner, active_owner_check)
+        self.assertIn("rescueListenerThread == Thread.currentThread()", finally_block)
+        self.assertNotIn("rescueSocketRef.close()", finally_block)
+        self.assertIn("listenerGeneration != lanSocketGeneration.get()", finally_block)
+
     def test_inbound_chat_ack_is_sent_on_the_socket_that_received_the_message(self):
         method = self._method(
             "private boolean handleAuthenticatedLanPacket(",
