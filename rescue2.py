@@ -580,6 +580,9 @@ def start_log_receiver():
 
 def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
     """Replay due durable rows; verified peer recovery is throttled and finite."""
+    _diag_event("chat_recovery_peer_started", peer_id=peer_id,
+                endpoint_ip=addr[0], endpoint_port=addr[1],
+                recovery_event=recovery_event)
     with _V2_RECOVERY_RETRY_LOCK:
         # Consume a queued event only when this invocation can own the work.
         # If another invocation is active, put it back for the next worker pass.
@@ -597,12 +600,16 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
                 prepare_outgoing_peer_recovery(_CHAT_DEDUP_DB, "rescue2", peer_id)
             pending_rows = load_pending_outgoing_for_peer(
                 _CHAT_DEDUP_DB, "rescue2", peer_id, limit=10)
+            _diag_event("chat_recovery_pending_loaded", peer_id=peer_id,
+                        pending_count=len(pending_rows), recovery_event=recovery_event)
             if recovery_event:
                 next_eligible_at = next_peer_recovery_eligible_at_ms(_CHAT_DEDUP_DB, "rescue2", peer_id)
                 if next_eligible_at is not None:
                     with _V2_RECOVERY_RETRY_LOCK:
                         _V2_RECOVERY_RETRY_PEERS.add(peer_id)
         except Exception as e:
+            _diag_exception("chat_recovery_ledger_read_failed", peer_id=peer_id,
+                            error_type=type(e).__name__, recovery_event=recovery_event)
             with print_lock:
                 print(f"⚠️ rescue2 LAN outbox recovery deferred; durable ledger read failed: {type(e).__name__}")
             if recovery_event:
@@ -635,12 +642,20 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
                     print(f"⚠️ rescue2 pending chat attempt admission failed; recovery retained: {type(e).__name__}")
                 return
             if not attempt_admitted:
+                _diag_event("chat_recovery_attempt_not_admitted", peer_id=peer_id,
+                            message_id=pending["message_id"])
                 continue
             try:
+                _diag_event("chat_recovery_send_started", peer_id=peer_id,
+                            message_id=pending["message_id"], endpoint_ip=pending["endpoint_ip"],
+                            endpoint_port=target_port)
                 send_outgoing_packet(
                     sock, raw, (pending["endpoint_ip"], target_port),
                     _CHAT_DEDUP_DB, "rescue2", pending["message_id"], peer_id,
                     send_lock=UDP_CHAT_SEND_LOCK)
+                _diag_event("chat_recovery_send_submitted", peer_id=peer_id,
+                            message_id=pending["message_id"], endpoint_ip=pending["endpoint_ip"],
+                            endpoint_port=target_port)
             except LanP2PStorageError as e:
                 # The durable attempt is already consumed; let normal persisted backoff
                 # take over instead of force-reopening the same retry epoch.
@@ -652,6 +667,7 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
                     print(f"⚠️ rescue2 pending chat retry failed peer={peer_id}: {type(e).__name__}")
                 return
     finally:
+        _diag_event("chat_recovery_peer_finished", peer_id=peer_id)
         with _V2_RECOVERY_RETRY_LOCK:
             # A new event may have arrived during this batch; never erase it here.
             _V2_RECOVERY_INFLIGHT.discard(peer_id)
@@ -668,6 +684,8 @@ def _retry_deferred_v2_peer_recoveries():
                 ensure_outbox_retry_schema(_CHAT_DEDUP_DB)
                 _V2_RECOVERY_SCHEMA_READY = True
             except Exception as exc:
+                _diag_exception("chat_recovery_schema_retry_failed",
+                                error_type=type(exc).__name__)
                 with print_lock:
                     print(f"⚠️ rescue2 LAN retry schema initialization still deferred: {type(exc).__name__}")
                 time.sleep(4)
@@ -691,6 +709,9 @@ def _retry_deferred_v2_peer_recoveries():
                 continue
             known_peers = {row["peer_id"]: row for row in list_known_peer_snapshot(_CHAT_DEDUP_DB, "rescue2", limit=500)}
         except Exception as exc:
+            _diag_exception("chat_recovery_retry_scan_failed",
+                            recovery_peer_count=len(recovery_event_peers),
+                            error_type=type(exc).__name__)
             with _V2_RECOVERY_RETRY_LOCK:
                 _V2_RECOVERY_RETRY_PEERS.update(recovery_event_peers)
             with print_lock:
@@ -737,6 +758,7 @@ def _start_v2_recovery_retry_worker():
         _V2_RECOVERY_WORKER_STARTED = True
     threading.Thread(target=_retry_deferred_v2_peer_recoveries, daemon=True,
                      name="lan-v2-recovery-retry").start()
+    _diag_event("chat_recovery_worker_started", schema_ready=_V2_RECOVERY_SCHEMA_READY)
 
 
 def _handle_authenticated_v2_packet(envelope, sock, addr):
@@ -749,12 +771,20 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
         nonce = str(envelope.get("nonce") or "")
         if (not sender or not nonce
                 or int(addr[1]) not in (8887, 8888, 8889, 8890)):
+            _diag_event("peer_hello_rejected", logging.WARNING,
+                        source_ip=addr[0], source_port=addr[1],
+                        has_sender=bool(sender), has_nonce=bool(nonce))
             return
+        _diag_event("peer_hello_received", peer_id=sender,
+                    source_ip=addr[0], source_port=addr[1],
+                    challenge_only=bool(envelope.get("challenge_only", False)))
         # Receipt proves inbound reachability only. Keep the route suspect until
         # our own nonce-bound challenge receives a matching peer.ack.
         if not record_peer(_CHAT_DEDUP_DB, "rescue2", sender,
                            envelope.get("sender_peer_type", "unknown"),
                            envelope.get("service_id", ""), addr[0], addr[1], "suspect"):
+            _diag_event("peer_hello_persist_failed", logging.ERROR, peer_id=sender,
+                        source_ip=addr[0], source_port=addr[1])
             print(f"⚠️ rescue2 peer HELLO persistence failed; withholding peer.ack")
             return
         reply = {"type": "peer.ack", "sender_peer_id": PEER_NODE_ID,
@@ -762,8 +792,13 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
                  "reply_nonce": nonce, "listen_port": UDP_PORT}
         try:
             sock.sendto(encode_packet(reply, RESCUE_SECRET), addr)
-        except OSError:
+        except OSError as exc:
+            _diag_exception("peer_hello_ack_send_failed", peer_id=sender,
+                            source_ip=addr[0], source_port=addr[1],
+                            error_type=type(exc).__name__)
             return
+        _diag_event("peer_hello_ack_sent", peer_id=sender,
+                    source_ip=addr[0], source_port=addr[1])
         # Normal HELLO triggers a reverse challenge. challenge_only receives only
         # the response; it must not activate the source endpoint on this side.
         if not envelope.get("challenge_only", False):
@@ -774,10 +809,14 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
         return
     if packet_type == "peer.ack":
         reply_nonce = str(envelope.get("reply_nonce") or "")
-        if reply_nonce and complete_peer_challenge(
-                _CHAT_DEDUP_DB, "rescue2", reply_nonce, sender, addr[0], addr[1],
-                envelope.get("sender_peer_type", "unknown"),
-                envelope.get("service_id", "")):
+        challenge_ok = bool(reply_nonce) and complete_peer_challenge(
+            _CHAT_DEDUP_DB, "rescue2", reply_nonce, sender, addr[0], addr[1],
+            envelope.get("sender_peer_type", "unknown"),
+            envelope.get("service_id", ""))
+        _diag_event("peer_challenge_result", peer_id=sender,
+                    source_ip=addr[0], source_port=addr[1],
+                    nonce_present=bool(reply_nonce), verified=bool(challenge_ok))
+        if challenge_ok:
             # Keep the UDP receive loop free for incoming messages and ACKs.
             with _V2_RECOVERY_RETRY_LOCK:
                 _V2_RECOVERY_RETRY_PEERS.add(sender)
@@ -789,14 +828,24 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
         active_route = peer_endpoint_matches(_CHAT_DEDUP_DB, "rescue2", sender, addr[0], addr[1])
         sent_endpoint_route = outgoing_ack_endpoint_matches(
             _CHAT_DEDUP_DB, "rescue2", message_id, sender, addr[0], addr[1])
-        if (target == PEER_NODE_ID and envelope.get("status") == "stored"
-                and sender and (active_route or sent_endpoint_route)):
-            acknowledge_outgoing_message(_CHAT_DEDUP_DB, "rescue2", message_id, sender)
+        ack_accepted = (target == PEER_NODE_ID and envelope.get("status") == "stored"
+                        and bool(sender) and (active_route or sent_endpoint_route))
+        _diag_event("chat_ack_received", peer_id=sender, message_id=message_id,
+                    status=envelope.get("status", "unknown"),
+                    active_route=bool(active_route), sent_endpoint_route=bool(sent_endpoint_route),
+                    accepted=bool(ack_accepted), source_ip=addr[0], source_port=addr[1])
+        if ack_accepted:
+            acknowledged = acknowledge_outgoing_message(
+                _CHAT_DEDUP_DB, "rescue2", message_id, sender)
+            _diag_event("chat_ack_persisted", peer_id=sender, message_id=message_id,
+                        acknowledged=bool(acknowledged))
         return
     if packet_type != "chat.message":
         return
     target = envelope.get("target_peer_id", "*")
     if target not in ("*", PEER_NODE_ID):
+        _diag_event("chat_message_not_for_this_peer", peer_id=sender,
+                    target_peer_id=target, message_id=envelope.get("message_id", ""))
         return
     message_id = str(envelope.get("message_id") or "")
     body = str(envelope.get("body") or "")
@@ -806,15 +855,29 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
     # Display names are presentation metadata, never sender identity or a persistence bypass.
     claim_result = _claim_chat_message(sender, message_id, body)
     if claim_result is None:
+        _diag_event("chat_message_persist_rejected", logging.WARNING,
+                    peer_id=sender, message_id=message_id,
+                    source_ip=addr[0], source_port=addr[1])
         return
+    _diag_event("chat_message_persisted", peer_id=sender, message_id=message_id,
+                is_new=bool(claim_result), source_ip=addr[0], source_port=addr[1])
     record_peer(_CHAT_DEDUP_DB, "rescue2", sender, envelope.get("sender_peer_type", "unknown"),
                 envelope.get("service_id", ""), addr[0], addr[1], "suspect")
     ack_packet = {"type": "chat.ack", "sender_peer_id": PEER_NODE_ID,
                   "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
                   "target_peer_id": sender, "message_id": message_id, "status": "stored"}
-    try: sock.sendto(encode_packet(ack_packet, RESCUE_SECRET), addr)
-    except OSError: pass
+    try:
+        ack_bytes = encode_packet(ack_packet, RESCUE_SECRET)
+        ack_sent = sock.sendto(ack_bytes, addr)
+        _diag_event("chat_ack_sent", peer_id=sender, message_id=message_id,
+                    bytes=ack_sent, source_ip=addr[0], source_port=addr[1])
+    except OSError as exc:
+        _diag_exception("chat_ack_send_failed", peer_id=sender, message_id=message_id,
+                        source_ip=addr[0], source_port=addr[1],
+                        error_type=type(exc).__name__)
     if not claim_result:
+        _diag_event("chat_duplicate_message_suppressed", peer_id=sender,
+                    message_id=message_id)
         return
     print(f"\\n{I.chat} [{display_sender}] {body}  (来自 {addr[0]})")
     with _state_lock:
@@ -826,6 +889,9 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
 def send_chat_v2(body, target_ips):
     """Persist PC-originated chat and send from bound UDP 8889 so ACKs return here."""
     message_id = uuid.uuid4().hex
+    _diag_event("chat_send_requested", message_id=message_id,
+                body_bytes=len(str(body).encode("utf-8")),
+                target_count=len(target_ips or []))
     peer_snapshot = list_known_peer_snapshot(_CHAT_DEDUP_DB, "rescue2")
     selected_ips = set(target_ips or [])
     broadcast_all = not selected_ips or "255.255.255.255" in selected_ips
@@ -842,15 +908,23 @@ def send_chat_v2(body, target_ips):
              "created_at_ms": created, "display_name": "PC_Terminal", "body": body}
     try:
         broadcast_bytes = encode_packet(probe, RESCUE_SECRET)
-    except ValueError:
+    except ValueError as exc:
+        _diag_event("chat_send_packet_encode_failed", logging.WARNING,
+                    message_id=message_id, error_type=type(exc).__name__)
         print("⚠️ 对讲消息过长，超过局域网 UDP 单包限制，未发送。")
         return False
     if not persist_outgoing_message(_CHAT_DEDUP_DB, "rescue2", PEER_NODE_ID,
                                     message_id, body, target_ids, created):
+        _diag_event("chat_send_persist_failed", logging.ERROR, message_id=message_id,
+                    target_peer_count=len(target_ids))
         print("⚠️ 对讲消息无法写入持久化队列，已阻止发送。")
         return False
+    _diag_event("chat_send_persisted", message_id=message_id,
+                target_peer_count=len(target_ids))
     sock = UDP_LISTENER_SOCKET
     if sock is None or sock.fileno() < 0:
+        _diag_event("chat_send_waiting_for_listener", logging.WARNING,
+                    message_id=message_id, listener_available=False)
         print("⚠️ rescue2 UDP 监听尚未就绪，消息已保存，等待设备重新发现后补发。")
         return False
     try:
@@ -873,9 +947,13 @@ def send_chat_v2(body, target_ips):
             send_discovery_broadcast_with_retries(
                 sock, _CHAT_DEDUP_DB, "rescue2", message_id, broadcast_bytes, destinations,
                 send_lock=UDP_CHAT_SEND_LOCK, attempts=3, retry_delay_seconds=0.25)
+        _diag_event("chat_send_submitted", message_id=message_id,
+                    target_peer_count=len(target_ids), broadcast=broadcast_all)
         print(f"{I.ok} 对讲消息已提交发送队列: {message_id}")
         return True
     except Exception as e:
+        _diag_exception("chat_send_failed", message_id=message_id,
+                        target_peer_count=len(target_ids), error_type=type(e).__name__)
         print(f"{I.warn} 对讲发送失败，消息保留待补发: {type(e).__name__}")
         return False
 
@@ -897,6 +975,8 @@ def udp_listener():
             UDP_LISTENER_SOCKET = sock
             _start_v2_recovery_retry_worker()
             UDP_OK = True
+            _diag_event("udp_listener_bound", bind="0.0.0.0", port=UDP_PORT,
+                        socket_fd=sock.fileno())
             try:
                 subnet_broadcast = get_subnet_broadcast()
             except Exception as broadcast_error:
@@ -940,7 +1020,9 @@ def udp_listener():
         finally:
             if UDP_LISTENER_SOCKET is sock:
                 UDP_LISTENER_SOCKET = None
-            try: sock.close()
+            try:
+                sock.close()
+                _diag_event("udp_listener_socket_closed", port=UDP_PORT)
             except Exception as close_error:
                 _diag_exception("udp_listener_socket_close_failed",
                                 error_type=type(close_error).__name__)
@@ -1005,6 +1087,9 @@ def scan_lan_devices():
         if p not in seen_prefix:
             seen_prefix.add(p)
             targets.append((p, ip))
+    scan_id = uuid.uuid4().hex[:12]
+    _diag_event("lan_scan_started", scan_id=scan_id, local_ip_count=len(real_local_ips),
+                local_ips=",".join(real_local_ips), network_count=len(targets))
     print(f"\n{I.ping} 正在扫描局域网 ...")
     print(f"   本机 IP: {', '.join(real_local_ips)}")
     print(f"   网段: {', '.join(p + '.x' for p, _ in targets)}")
@@ -1030,11 +1115,17 @@ def scan_lan_devices():
     with _state_lock:
         new_devices = {dev_id: info for dev_id, info in DISCOVERED_DEVICES.items() if info.get("last_seen", 0) >= scan_start}
     if not new_devices:
+        _diag_event("lan_scan_completed", logging.WARNING, scan_id=scan_id,
+                    discovered_count=0, duration_ms=int((time.time()-scan_start)*1000))
         print(f"\n{I.err} 未发现任何运行中的手机")
         # v2.0.2 补丁：跨网段提示
         print(f"{I.ping} 提示：如果手机连接的是 4G 或其他网段，局域网扫描无法发现它。")
         print(f"      可以尝试在菜单直接输入手机的公网/局域网 IP 进行定向控制。")
         return
+    _diag_event("lan_scan_completed", scan_id=scan_id,
+                discovered_count=len(new_devices),
+                duration_ms=int((time.time()-scan_start)*1000),
+                device_ids=",".join(list(new_devices.keys())[:20]))
     print(f"\n{I.ok} 发现 {len(new_devices)} 台手机：")
     for dev_id, info in new_devices.items():
         ip = info.get("source_ip_lan") or info.get("source_ip") or info.get("ip", "?")
