@@ -6825,6 +6825,13 @@ public class TrackingService extends Service implements LocationListener {
             String senderId = envelope.optString("sender_peer_id", "");
             String serviceId = envelope.optString("service_id", "");
             long now = System.currentTimeMillis();
+            // Snapshot the exact ingress listener epoch before dispatching asynchronous ACK work.
+            String ingressPathFingerprint = rescueSocketPathFingerprint;
+            LanChatPathRegistry.Listener ingressListener = ingressPathFingerprint == null
+                    ? null : lanChatPathRegistry.getListener(ingressPathFingerprint);
+            final String ackIngressPath = ingressListener != null && ingressListener.socket == socket
+                    && ingressListener.isUsable() ? ingressPathFingerprint : null;
+            final long ackIngressGeneration = ackIngressPath == null ? -1L : ingressListener.generation;
             if ("peer.hello".equals(type)) {
                 int sourcePort = packet.getPort();
                 if (senderId.isEmpty() || senderId.equals(getUniqueDeviceId())
@@ -6980,6 +6987,7 @@ public class TrackingService extends Service implements LocationListener {
                 try {
                     lanChatAckExecutor.execute(() -> processAuthenticatedLanChatAck(
                             messageId, senderId, sourceAddress, sourcePort, store,
+                            ackIngressPath, socket, ackIngressGeneration,
                             packetReceivedAtElapsedMs, true));
                 } catch (java.util.concurrent.RejectedExecutionException rejected) {
                     FileLogger.log(this, "CHAT", "⚠️ LAN ACK IO 队列已满，保留发送端待确认状态 message="
@@ -7004,7 +7012,8 @@ public class TrackingService extends Service implements LocationListener {
                 try {
                     lanChatAckExecutor.execute(() -> processAuthenticatedLanChatFragmentAck(
                             messageId, senderId, sourceAddress, sourcePort, fragmentIndex,
-                            store, packetReceivedAtElapsedMs, true));
+                            store, ackIngressPath, socket, ackIngressGeneration,
+                            packetReceivedAtElapsedMs, true));
                 } catch (java.util.concurrent.RejectedExecutionException rejected) {
                     FileLogger.log(this, "CHAT", "⚠️ fragment ACK IO 队列已满，保留位图待重传 message="
                             + messageId + " peer=" + senderId + " index=" + fragmentIndex);
@@ -7095,6 +7104,14 @@ public class TrackingService extends Service implements LocationListener {
             FileLogger.logD("UDP", "authenticated LAN packet rejected: " + e.getClass().getSimpleName());
         }
         return true;
+    }
+
+    private boolean isCurrentLanChatIngress(String path, DatagramSocket socket, long generation) {
+        if (path == null || path.isEmpty() || socket == null || generation < 0L
+                || socket.isClosed()) return false;
+        LanChatPathRegistry.Listener listener = lanChatPathRegistry.getListener(path);
+        return listener != null && listener.socket == socket
+                && listener.generation == generation && listener.isUsable();
     }
 
     /**
@@ -7226,11 +7243,16 @@ public class TrackingService extends Service implements LocationListener {
     /** Persist selective fragment ACKs only from the verified/successfully-used peer endpoint. */
     private void processAuthenticatedLanChatFragmentAck(String messageId, String senderId,
             java.net.InetAddress sourceAddress, int sourcePort, int fragmentIndex,
-            LanChatStore store, long packetReceivedAtElapsedMs, boolean allowEndpointGrace) {
-        if (store == null || sourceAddress == null) return;
-        java.net.InetSocketAddress verified = verifiedChatPeers.get(senderId);
-        boolean routeMatches = verified != null && verified.getAddress().equals(sourceAddress)
-                && verified.getPort() == sourcePort;
+            LanChatStore store, String ingressPath, DatagramSocket ingressSocket,
+            long ingressGeneration, long packetReceivedAtElapsedMs, boolean allowEndpointGrace) {
+        if (store == null || sourceAddress == null
+                || !isCurrentLanChatIngress(ingressPath, ingressSocket, ingressGeneration)) return;
+        LanChatPathRegistry.RouteBinding routeBinding =
+                lanChatPathRegistry.findCurrentPeerRouteBinding(senderId, ingressPath,
+                        ingressSocket, ingressGeneration,
+                        new java.net.InetSocketAddress(sourceAddress, sourcePort),
+                        android.os.SystemClock.elapsedRealtime());
+        boolean routeMatches = routeBinding != null;
         boolean persistedEndpointMatch = !routeMatches && store.matchesExpectedAckEndpoint(
                 messageId, senderId, sourceAddress.getHostAddress(), sourcePort);
         boolean attemptedEndpointPending = !routeMatches && !persistedEndpointMatch
@@ -7251,7 +7273,8 @@ public class TrackingService extends Service implements LocationListener {
                         try {
                             lanChatAckExecutor.execute(() -> processAuthenticatedLanChatFragmentAck(
                                     messageId, senderId, sourceAddress, sourcePort, fragmentIndex,
-                                    store, packetReceivedAtElapsedMs, false));
+                                    store, ingressPath, ingressSocket, ingressGeneration,
+                                    packetReceivedAtElapsedMs, false));
                         } catch (java.util.concurrent.RejectedExecutionException ignored) {
                             FileLogger.log(this, "CHAT", "fragment ACK endpoint recheck queue full message="
                                     + messageId + " peer=" + senderId);
@@ -7281,19 +7304,24 @@ public class TrackingService extends Service implements LocationListener {
                 + " peer=" + senderId + " index=" + fragmentIndex
                 + " acked=" + acked + "/" + (bitmap == null ? 0 : bitmap.length())
                 + " finalDelivery=false");
-        scheduleLanChatFragmentWindowAdvance(messageId, senderId, sourceAddress, sourcePort);
+        scheduleLanChatFragmentWindowAdvance(messageId, senderId, sourceAddress, sourcePort,
+                ingressPath, ingressSocket, ingressGeneration);
     }
 
     private void processAuthenticatedLanChatAck(String messageId, String senderId,
             java.net.InetAddress sourceAddress, int sourcePort, LanChatStore store,
+            String ingressPath, DatagramSocket ingressSocket, long ingressGeneration,
             long packetReceivedAtElapsedMs, boolean allowDiscoveryGrace) {
-        if (store == null || sourceAddress == null) return;
+        if (store == null || sourceAddress == null
+                || !isCurrentLanChatIngress(ingressPath, ingressSocket, ingressGeneration)) return;
         long ackQueueMs = android.os.SystemClock.elapsedRealtime() - packetReceivedAtElapsedMs;
         long ackPersistStarted = android.os.SystemClock.elapsedRealtime();
-        java.net.InetSocketAddress verified = verifiedChatPeers.get(senderId);
-        boolean routeMatches = verified != null
-                && verified.getAddress().equals(sourceAddress)
-                && verified.getPort() == sourcePort;
+        LanChatPathRegistry.RouteBinding routeBinding =
+                lanChatPathRegistry.findCurrentPeerRouteBinding(senderId, ingressPath,
+                        ingressSocket, ingressGeneration,
+                        new java.net.InetSocketAddress(sourceAddress, sourcePort),
+                        android.os.SystemClock.elapsedRealtime());
+        boolean routeMatches = routeBinding != null;
         // A live authenticated route already proves this exact sender endpoint. Avoid a
         // redundant SQLite endpoint lookup on the common ACK fast path; do not label the
         // skipped persisted check as a match in diagnostics.
@@ -7327,6 +7355,7 @@ public class TrackingService extends Service implements LocationListener {
                     try {
                         lanChatAckExecutor.execute(() -> processAuthenticatedLanChatAck(
                                 messageId, senderId, sourceAddress, sourcePort, store,
+                                ingressPath, ingressSocket, ingressGeneration,
                                 packetReceivedAtElapsedMs, false));
                     } catch (java.util.concurrent.RejectedExecutionException rejected) {
                         FileLogger.log(this, "CHAT", "⚠️ LAN ACK 路由复核队列已满，继续保留待确认 message="
@@ -7359,15 +7388,7 @@ public class TrackingService extends Service implements LocationListener {
         boolean persistedAck = store.acknowledge(messageId, senderId);
         if (persistedAck) {
             boolean wasExpected = expected != null && expected.remove(senderId);
-            if (routeMatches) {
-                synchronized (verifiedChatPeerRouteVersions) {
-                    if (verifiedChatPeers.get(senderId) == verified) {
-                        verifiedChatPeerRouteVersions.put(senderId,
-                                verifiedChatPeerRouteVersionCounter.incrementAndGet());
-                        verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
-                    }
-                }
-            }
+            // ACK acceptance is path-scoped; do not refresh the peer-wide compatibility cache.
             boolean discoveryBroadcastAck = !wasExpected && expected != null && expected.isEmpty()
                     && latch != null && latch.getCount() > 0;
             if (discoveryBroadcastAck && !discoveryAck) {
