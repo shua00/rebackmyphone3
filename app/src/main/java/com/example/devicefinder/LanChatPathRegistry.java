@@ -55,6 +55,12 @@ public final class LanChatPathRegistry {
         requireKey(path, "path fingerprint");
         if (socket == null || socket.isClosed() || !socket.isBound())
             throw new IllegalArgumentException("Listener must be open and bound");
+        Listener previous = listeners.get(path);
+        if (previous != null && previous.socket != socket) {
+            // A re-created listener has a new receive/send ownership epoch. Do not
+            // carry peer routes verified against the previous socket into that epoch.
+            removeRoutesForPath(path);
+        }
         Listener value = new Listener(path, socket, generation);
         listeners.put(path, value);
         return value;
