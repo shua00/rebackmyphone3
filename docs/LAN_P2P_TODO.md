@@ -2,6 +2,18 @@
 
 更新：2026-11-27
 
+## 新增 P0 架构目标：统一网络感知与自适应路由
+
+> 架构定义见 [UNIFIED_NETWORK_AWARENESS_AND_ADAPTIVE_ROUTING.md](UNIFIED_NETWORK_AWARENESS_AND_ADAPTIVE_ROUTING.md)。这是项目级 P0 架构原则，当前先确立契约和边界，不打断 LAN P2P v2 IPv4 STA/AP 主线。
+
+- [x] 确立统一 Network Awareness + Adaptive Routing 架构：网络/接口感知、候选路径与可信路径分离、路径级认证与租约、双向可达验证、路径质量事实、单路径快路径、多路径有界回退及失效恢复。
+- [ ] **当前 P0-A**：LAN 聊天发送端改用 path-scoped RouteBinding；发送任务捕获具体 path/socket/listener generation，发送前复核 binding 仍有效；不得从 peer-wide endpoint 或其他路径认证借用路由。
+- [ ] **当前 P0-A**：STA/AP 多 Listener 生命周期、socket ownership、generation 和按路径清理；三设备任意两台双向互通。
+- [ ] **当前 P0-A**：普通路由器两台或多台 Android/Python 设备快路径回归；不增加无关周期扫描、高频探测、每包全路径枚举或默认多路径重复发送。
+- [ ] **P0-B**：沉淀 Android/Python 对齐的 path state、route lease、failure reason、route decision 语义及可复用接口。
+- [ ] **P0-C（LAN P2P v2 真机验收后排期）**：Rescue2/Server2 复用感知结果，LAN 内优先 UDP 即时指令，LAN 外或 LAN route 不可用时走 HTTP；以 commandId 幂等、TTL、接收/执行状态和结果回传防止重复执行。
+- [ ] P0-C 不提前实现，不改变当前 Rescue2 新诊断封存状态；旧版 `pull_logs_multi()`、Shell/ADB/Root 能力及聊天/文件传输隔离必须保持。
+
 ## 当前阶段总纲：四级优先级（2026-11-27 调整）
 
 > **当前唯一主线：LAN P2P V2 基础可靠性与真机验收。** Rescue2 新诊断暂停开发并封存；不得继续扩建其管理员认证、任务调度、设备端授权或诊断回传体系。封存不等于删除，成果索引见 [RESCUE2_DIAGNOSTICS_ARCHIVE.md](RESCUE2_DIAGNOSTICS_ARCHIVE.md)。
