@@ -119,9 +119,9 @@ public final class LanTransferPairingControlTransport {
 
     private static void validatePathEndpoint(LanNetworkPath path, InetAddress address)
             throws IOException {
-        if (path == null || path.kind != LanNetworkPath.Kind.ANDROID_NETWORK
-                || path.network == null)
-            throw new IOException("Pairing requires an Android Network-backed LAN path");
+        if (path == null || path.localAddress == null
+                || (path.kind == LanNetworkPath.Kind.ANDROID_NETWORK && path.network == null))
+            throw new IOException("Pairing requires a selected local LAN interface path");
         byte[] local = path.localAddress.getAddress();
         byte[] remote = address.getAddress();
         if (remote.length != 4 || local.length != 4)
