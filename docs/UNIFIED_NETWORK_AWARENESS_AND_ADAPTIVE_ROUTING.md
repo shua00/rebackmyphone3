@@ -45,6 +45,8 @@
 
 ### 2.3 Adaptive Route Selector（自适应路径选择）
 
+当前代码已引入 `LanAdaptiveRouteSelector`：单 Listener 使用 peer+preferredPath 的 O(1) 查询；多 Listener 才创建候选列表；显式首选路径优先，否则按最近认证时间选择。备用候选 API 仅在调用方主动请求时构造，最多返回 2 条。**这只是路由选择第一阶段，不代表质量评分或发送失败后的自动回退闭环已经完成。**
+
 输入：目标 peer、通信类型/时效性、当前 fresh authenticated route bindings、路径健康事实及发送预算。
 
 输出：一个首选 route binding 和有界备用候选（仅在需要时构造）。
