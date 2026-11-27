@@ -402,6 +402,9 @@ public class TrackingService extends Service implements LocationListener {
     // One timer services every durable first-discovery deadline; never one timer per message.
     private final java.util.concurrent.atomic.AtomicBoolean lanChatDiscoveryFinalizerScheduled =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+    // One coalesced timer services all durable Outbox TTL deadlines independently of discovery windows.
+    private final java.util.concurrent.atomic.AtomicBoolean lanChatOutboxExpiryScheduled =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
     private final java.util.Set<String> activeLanChatTransmissions =
             java.util.Collections.newSetFromMap(
                     new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
@@ -5788,6 +5791,8 @@ public class TrackingService extends Service implements LocationListener {
                     content, createdAt, verifiedChatPeers);
             if (!persisted) {
                 FileLogger.log(this, "CHAT", "⚠️ LAN SQLite 原子写入消息及固定收件人快照失败");
+            } else {
+                scheduleLanChatOutboxExpiry(store);
             }
             return persisted;
         } catch (Exception e) {
@@ -6016,11 +6021,7 @@ public class TrackingService extends Service implements LocationListener {
                             }
                         }
                     }
-                    long nextOutboxExpiry = store.getNextOutboxExpiryMs();
-                    if (nextOutboxExpiry > 0L) {
-                        scheduleLanChatDiscoveryFinalizer(store,
-                                Math.max(0L, nextOutboxExpiry - System.currentTimeMillis() + 100L));
-                    }
+                    scheduleLanChatOutboxExpiry(store);
                     // Consume the recovery event only after legacy migration succeeds. If any
                     // later Outbox operation fails, the outer catch restores this captured event.
                     recoveryEventCaptured = lanChatRecoveryEventPending.getAndSet(false);
@@ -6472,10 +6473,6 @@ public class TrackingService extends Service implements LocationListener {
                     try {
                         long now = System.currentTimeMillis();
                         List<String> finalizedIds = store.finalizeExpiredDiscoveryWindowIds(now);
-                        int expiredOutbox = store.expireOutboxMessages(now);
-                        if (expiredOutbox > 0) {
-                            FileLogger.log(this, "CHAT", "LAN Outbox TTL expired messages=" + expiredOutbox);
-                        }
                         if (!finalizedIds.isEmpty()) {
                             FileLogger.log(this, "CHAT", "LAN discovery finalization settled messages="
                                     + finalizedIds.size());
@@ -6499,13 +6496,9 @@ public class TrackingService extends Service implements LocationListener {
                             } else {
                                 try {
                                     long nextDiscoveryDeadline = store.getNextDiscoveryDeadlineMs();
-                                    long nextExpiryDeadline = store.getNextOutboxExpiryMs();
-                                    long nextDeadline = nextDiscoveryDeadline > 0L && nextExpiryDeadline > 0L
-                                            ? Math.min(nextDiscoveryDeadline, nextExpiryDeadline)
-                                            : Math.max(nextDiscoveryDeadline, nextExpiryDeadline);
-                                    if (nextDeadline > 0L) {
+                                    if (nextDiscoveryDeadline > 0L) {
                                         scheduleLanChatDiscoveryFinalizer(store,
-                                                Math.max(0L, nextDeadline - System.currentTimeMillis() + 100L));
+                                                Math.max(0L, nextDiscoveryDeadline - System.currentTimeMillis() + 100L));
                                     }
                                 } catch (Exception storageFailure) {
                                     scheduleLanChatDiscoveryFinalizer(store, 500L);
@@ -6520,6 +6513,61 @@ public class TrackingService extends Service implements LocationListener {
             }
         }, delayMs);
         if (!scheduled) lanChatDiscoveryFinalizerScheduled.set(false);
+    }
+
+    /** Schedule the earliest pending-message TTL without interfering with discovery-window deadlines. */
+    private void scheduleLanChatOutboxExpiry(final LanChatStore store) {
+        if (serviceDestroyed || store == null
+                || !lanChatOutboxExpiryScheduled.compareAndSet(false, true)) return;
+        final long deadline;
+        try {
+            deadline = store.getNextOutboxExpiryMs();
+        } catch (Exception e) {
+            lanChatOutboxExpiryScheduled.set(false);
+            FileLogger.log(this, "CHAT", "LAN Outbox expiry deadline lookup deferred: "
+                    + e.getClass().getSimpleName());
+            if (!serviceDestroyed) scheduleLanChatOutboxExpiryRetry(store);
+            return;
+        }
+        if (deadline <= 0L) {
+            lanChatOutboxExpiryScheduled.set(false);
+            return;
+        }
+        long delay = Math.max(0L, deadline - System.currentTimeMillis() + 100L);
+        Runnable expireAndRearm = () -> {
+            if (serviceDestroyed) {
+                lanChatOutboxExpiryScheduled.set(false);
+                return;
+            }
+            try {
+                LanChatStore current = lanChatStore;
+                if (current != null) {
+                    int expired = current.expireOutboxMessages(System.currentTimeMillis());
+                    if (expired > 0) {
+                        FileLogger.log(this, "CHAT", "LAN Outbox TTL expired messages=" + expired);
+                    }
+                }
+            } catch (Exception e) {
+                FileLogger.log(this, "CHAT", "LAN Outbox TTL expiry deferred: "
+                        + e.getClass().getSimpleName());
+            } finally {
+                lanChatOutboxExpiryScheduled.set(false);
+                if (!serviceDestroyed) scheduleLanChatOutboxExpiry(lanChatStore);
+            }
+        };
+        if (!scheduleLanChatTask("outbox-ttl-expiry", expireAndRearm, delay)) {
+            lanChatOutboxExpiryScheduled.set(false);
+            if (!serviceDestroyed && !handler.postDelayed(
+                    () -> scheduleLanChatOutboxExpiry(store), 500L)) {
+                FileLogger.log(this, "CHAT", "LAN Outbox TTL scheduler unavailable");
+            }
+        }
+    }
+
+    private void scheduleLanChatOutboxExpiryRetry(final LanChatStore store) {
+        if (serviceDestroyed || store == null) return;
+        scheduleLanChatTask("outbox-ttl-expiry-retry",
+                () -> scheduleLanChatOutboxExpiry(store), 500L);
     }
 
     private void transmitLocalUdpMessageInternal(final String message, final String messageId,
