@@ -76,17 +76,15 @@ public class LanChatPathRegistryTest {
         } finally { listener.close(); }
     }
 
-    @Test public void staleGenerationRoutesArePrunedWhenQueried() throws Exception {
+    @Test public void closedListenerRoutesArePrunedWhenQueried() throws Exception {
         LanChatPathRegistry registry = new LanChatPathRegistry();
         DatagramSocket listener = socket();
-        try {
-            String path = "sta|wlan0|192.168.1.20/24";
-            registry.registerListener(path, listener, 20);
-            registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.31"), NOW, NOW + 100);
-            registry.registerListener(path, listener, 21);
-            assertTrue(registry.getFreshPeerRoutes("peer", NOW + 1).isEmpty());
-            assertTrue(registry.getFreshPeerRoutes("peer", NOW + 2).isEmpty());
-        } finally { listener.close(); }
+        String path = "sta|wlan0|192.168.1.20/24";
+        registry.registerListener(path, listener, 20);
+        registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.31"), NOW, NOW + 100);
+        listener.close();
+        assertTrue(registry.getFreshPeerRoutes("peer", NOW + 1).isEmpty());
+        assertTrue(registry.getFreshPeerRoutes("peer", NOW + 2).isEmpty());
     }
 
     @Test public void replacingListenerInvalidatesRoutesFromPreviousSocketEpoch() throws Exception {
