@@ -102,6 +102,37 @@ def extract_python_function(source, name):
 
 class LanP2PCoreTests(unittest.TestCase):
 
+    def test_chat_listener_runtime_owns_path_scoped_leases_without_background_work(self):
+        root = Path(__file__).resolve().parents[1]
+        runtime = (root / "app/src/main/java/com/example/devicefinder/LanChatListenerRuntime.java").read_text(encoding="utf-8")
+        service = (root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        listener = extract_java_method(service, "private void startRescueListener()")
+        self.assertIn("new LanChatListenerRuntime(lanChatPathRegistry)", service)
+        self.assertIn("lanChatListenerRuntime.register(", listener)
+        self.assertIn("lanChatListenerRuntime.remove(listenerLease)", listener)
+        self.assertIn("listenerLease.pathFingerprint", listener)
+        self.assertIn("registry.registerListener(pathFingerprint, socket, generation)", runtime)
+        self.assertIn("registry.removeListener(expected.pathFingerprint", runtime)
+        self.assertIn("leases.get(expected.pathFingerprint) != expected", runtime)
+        self.assertIn("public synchronized boolean isCurrent(Lease lease)", runtime)
+        # The owner is an in-memory lifecycle boundary only: no per-path workers,
+        # timers, polling or socket close while its monitor is held.
+        self.assertNotIn("new Thread(", runtime)
+        self.assertNotIn("postDelayed(", runtime)
+        self.assertNotIn("scheduleAtFixedRate(", runtime)
+        self.assertNotIn("socket.close()", runtime)
+
+    def test_chat_listener_runtime_keeps_single_path_fast_path_and_multi_path_isolation(self):
+        root = Path(__file__).resolve().parents[1]
+        runtime = (root / "app/src/main/java/com/example/devicefinder/LanChatListenerRuntime.java").read_text(encoding="utf-8")
+        selector = (root / "app/src/main/java/com/example/devicefinder/LanAdaptiveRouteSelector.java").read_text(encoding="utf-8")
+        self.assertIn("public synchronized int listenerCount()", runtime)
+        self.assertIn("if (registry.listenerCount() <= 1)", selector)
+        self.assertIn("registry.getFreshPeerRouteBinding(peerId, preferredPath, nowElapsedMs)", selector)
+        self.assertIn("registry.getFreshPeerRouteBindings(peerId, nowElapsedMs)", selector)
+        self.assertIn("if (registry == null || peerId == null", selector)
+
+
     def test_udp_listener_stops_packet_dispatch_when_service_teardown_wins_receive_race(self):
         repo_root = Path(__file__).resolve().parents[1]
         service = (
