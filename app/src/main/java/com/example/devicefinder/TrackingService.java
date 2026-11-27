@@ -6912,6 +6912,7 @@ public class TrackingService extends Service implements LocationListener {
                     if (store == null) return true;
                     final String peerType = envelope.optString("sender_peer_type", "unknown");
                     final String peerNetwork = envelope.optString("network_scope", "");
+                    final String verifiedPathFingerprint = rescueSocketPathFingerprint;
                     try {
                         lanChatControlExecutor.execute(() -> {
                             long controlQueueMs = android.os.SystemClock.elapsedRealtime()
@@ -6925,6 +6926,26 @@ public class TrackingService extends Service implements LocationListener {
                             if (!persisted) {
                                 FileLogger.log(this, "CHAT", "⚠️ peer.ack 路由持久化失败，暂不启用单播");
                                 return;
+                            }
+                            // Mirror the durable authenticated route into the path-scoped
+                            // runtime registry only if this exact listener still owns the
+                            // receive socket that accepted the challenge response.
+                            if (verifiedPathFingerprint != null) {
+                                LanChatPathRegistry.Listener activeListener =
+                                        lanChatPathRegistry.getListener(verifiedPathFingerprint);
+                                if (activeListener != null && activeListener.socket == socket
+                                        && activeListener.generation == lanSocketGeneration.get()) {
+                                    try {
+                                        long verifiedAt = System.currentTimeMillis();
+                                        lanChatPathRegistry.recordVerifiedPeer(senderId,
+                                                verifiedPathFingerprint,
+                                                new java.net.InetSocketAddress(peerAddress, port),
+                                                verifiedAt, verifiedAt + 120_000L);
+                                    } catch (RuntimeException registryFailure) {
+                                        FileLogger.logD("CHAT", "verified route registry mirror deferred: "
+                                                + registryFailure.getClass().getSimpleName());
+                                    }
+                                }
                             }
                             // upsertPeer() atomically commits this verified route and joins all
                             // still-open first-discovery target snapshots in the same transaction.
@@ -8115,11 +8136,16 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.log(this, "UDP", "❌ 监听异常: " + e.getMessage());
             } finally {
                 if (rescueSocket != null) {
-                    String ownedPath = rescueSocketPathFingerprint;
-                    if (ownedPath != null) {
+                    // Use this receive loop's immutable path snapshot. A delayed old
+                    // thread must never read/clear the replacement listener's path field.
+                    String ownedPath = listenerPathFingerprint;
+                    if (ownedPath != null && !ownedPath.isEmpty()) {
                         lanChatPathRegistry.removeListener(ownedPath, rescueSocket);
-                        if (ownedPath.equals(rescueSocketPathFingerprint)) {
-                            rescueSocketPathFingerprint = null;
+                        synchronized (rescueLock) {
+                            if (rescueSocketRef == rescueSocket
+                                    && ownedPath.equals(rescueSocketPathFingerprint)) {
+                                rescueSocketPathFingerprint = null;
+                            }
                         }
                     }
                     if (!rescueSocket.isClosed()) rescueSocket.close();
