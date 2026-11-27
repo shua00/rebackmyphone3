@@ -169,6 +169,71 @@ public class LanChatListenerRuntimeTest {
         } catch (UnsupportedOperationException expected) { }
     }
 
+    @Test public void simultaneousPathFailureAllowsOnlyRecoveredPathToRejoin() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        LanChatListenerRuntime runtime = new LanChatListenerRuntime(registry);
+        String staPath = "sta|192.168.1.2/24";
+        String apPath = "ap|192.168.43.1/24";
+        DatagramSocket oldSta = socket(), oldAp = socket();
+        try {
+            LanChatListenerRuntime.Lease oldStaLease = runtime.register(staPath, oldSta, 90L);
+            LanChatListenerRuntime.Lease oldApLease = runtime.register(apPath, oldAp, 90L);
+
+            // Both listeners fail and release independently.
+            oldSta.close();
+            oldAp.close();
+            assertTrue(runtime.remove(oldStaLease));
+            assertTrue(runtime.remove(oldApLease));
+            assertEquals(0, runtime.listenerCount());
+            assertEquals(0, registry.listenerCount());
+
+            // Only STA recovers. AP remains unavailable and must not be fabricated.
+            DatagramSocket recoveredSta = socket();
+            try {
+                LanChatListenerRuntime.Lease recoveredStaLease =
+                        runtime.register(staPath, recoveredSta, 91L);
+                assertTrue(runtime.isCurrent(recoveredStaLease));
+                assertNull(runtime.get(apPath));
+                assertEquals(1, runtime.listenerCount());
+                assertEquals(1, registry.listenerCount());
+
+                // A delayed finally from the old STA generation cannot retire the new lease.
+                assertFalse(runtime.remove(oldStaLease));
+                assertTrue(runtime.isCurrent(recoveredStaLease));
+                assertSame(recoveredSta, runtime.get(staPath).socket);
+            } finally {
+                recoveredSta.close();
+            }
+        } finally {
+            oldSta.close();
+            oldAp.close();
+        }
+    }
+
+    @Test public void generationHandoffOnOnePathDoesNotDisturbHealthyOtherPath() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        LanChatListenerRuntime runtime = new LanChatListenerRuntime(registry);
+        String staPath = "sta|192.168.1.2/24";
+        String apPath = "ap|192.168.43.1/24";
+        DatagramSocket oldSta = socket(), ap = socket(), newSta = socket();
+        try {
+            LanChatListenerRuntime.Lease oldStaLease = runtime.register(staPath, oldSta, 100L);
+            LanChatListenerRuntime.Lease apLease = runtime.register(apPath, ap, 100L);
+            assertTrue(runtime.remove(oldStaLease));
+            LanChatListenerRuntime.Lease newStaLease = runtime.register(staPath, newSta, 101L);
+
+            assertFalse(runtime.remove(oldStaLease));
+            assertTrue(runtime.isCurrent(newStaLease));
+            assertTrue(runtime.isCurrent(apLease));
+            assertEquals(2, runtime.listenerCount());
+            assertEquals(2, registry.listenerCount());
+        } finally {
+            oldSta.close();
+            ap.close();
+            newSta.close();
+        }
+    }
+
     @Test public void snapshotIsImmutableAndEmptySnapshotIsShared() throws Exception {
         LanChatPathRegistry registry = new LanChatPathRegistry();
         LanChatListenerRuntime runtime = new LanChatListenerRuntime(registry);
