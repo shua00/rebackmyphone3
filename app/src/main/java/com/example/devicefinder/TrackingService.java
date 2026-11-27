@@ -299,6 +299,9 @@ public class TrackingService extends Service implements LocationListener {
             lanTransferPairingControlHosts = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, LanTransferPairingInitiator>
             lanTransferPairingInitiators = new java.util.concurrent.ConcurrentHashMap<>();
+    // Initiator ceremonies are pinned to the exact path used for their first authenticated exchange.
+    private final java.util.concurrent.ConcurrentHashMap<String, String>
+            lanTransferPairingInitiatorFingerprints = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.Set<String> lanTransferPairingCommitRetries =
             java.util.Collections.newSetFromMap(
                     new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
@@ -2717,7 +2720,7 @@ public class TrackingService extends Service implements LocationListener {
                             "initiator", displayState, 0L);
                 }
             } catch (IllegalStateException expired) {
-                lanTransferPairingInitiators.remove(initiator.sessionId(), initiator);
+                removeLanTransferPairingInitiator(initiator.sessionId(), initiator);
             }
         }
         // A process may restart after the in-memory ceremony is gone but before COMMIT_ACK.
@@ -2738,26 +2741,73 @@ public class TrackingService extends Service implements LocationListener {
 
     private void handleLanTransferPairingStart(String peerId, String requestedHost) {
         if (serviceDestroyed || !LanTransferFeature.isEnabled(this)) return;
+        LanTransferPairingInitiator initiator = null;
+        String selectedFingerprint = null;
         try {
-            LanTransferPeerDirectory.Candidate candidate = LanTransferPeerDirectory.findCurrent(
-                    this, peerId, System.currentTimeMillis());
-            if (candidate == null || !candidate.isPairingConnectable()
-                    || requestedHost == null || !candidate.host.equals(requestedHost))
-                throw new SecurityException("Pairing endpoint is not a fresh discovered candidate");
-            LanNetworkPath selectedPath = currentLanNetworkPath();
-            LanTransferPairingInitiator initiator = LanTransferPairingInitiator.connect(
-                    getUniqueDeviceId(), peerId, selectedPath,
-                    java.net.InetAddress.getByName(candidate.host),
-                    candidate.pairingPort, 5000, 10000);
+            if (requestedHost == null || requestedHost.isEmpty())
+                throw new SecurityException("A selected discovered endpoint is required");
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            LanTransferPathSet paths = currentLanTransferPathSet(cm);
+            java.util.Map<String, LanNetworkPath> pathsByFingerprint = new java.util.HashMap<>();
+            for (LanNetworkPath path : paths.paths())
+                pathsByFingerprint.put(path.diagnosticFingerprint(), path);
+            java.util.List<LanTransferPeerDirectory.Candidate> candidates =
+                    new java.util.ArrayList<>(LanTransferPeerDirectory.findCurrentAll(
+                            this, peerId, System.currentTimeMillis()));
+            // The UI-selected endpoint is validated first, then other fresh endpoints for the same identity
+            // are tried over their own immutable path. The peer identity, not an IP, remains the trust key.
+            LanTransferPeerDirectory.Candidate selected = null;
+            for (LanTransferPeerDirectory.Candidate candidate : candidates) {
+                if (candidate.isPairingConnectable() && candidate.host.equals(requestedHost)
+                        && pathsByFingerprint.containsKey(candidate.networkFingerprint)) {
+                    selected = candidate;
+                    break;
+                }
+            }
+            if (selected == null)
+                throw new SecurityException("Selected pairing endpoint is not a fresh active-path candidate");
+            java.util.List<LanTransferPeerDirectory.Candidate> ordered = new java.util.ArrayList<>();
+            ordered.add(selected);
+            for (LanTransferPeerDirectory.Candidate candidate : candidates) {
+                if (candidate != selected && candidate.isPairingConnectable()
+                        && pathsByFingerprint.containsKey(candidate.networkFingerprint))
+                    ordered.add(candidate);
+            }
+            Exception lastFailure = null;
+            int attempts = 0;
+            for (LanTransferPeerDirectory.Candidate candidate : ordered) {
+                if (attempts++ >= 4) break;
+                LanNetworkPath path = pathsByFingerprint.get(candidate.networkFingerprint);
+                if (path == null) continue;
+                try {
+                    initiator = LanTransferPairingInitiator.connect(
+                            getUniqueDeviceId(), peerId, path,
+                            java.net.InetAddress.getByName(candidate.host),
+                            candidate.pairingPort, 2500, 5000);
+                    selectedFingerprint = candidate.networkFingerprint;
+                    break;
+                } catch (Exception endpointFailure) {
+                    lastFailure = endpointFailure;
+                    FileLogger.log(this, "LAN_TRANSFER", "Pairing endpoint attempt failed path="
+                            + candidate.networkFingerprint + " error="
+                            + endpointFailure.getClass().getSimpleName());
+                }
+            }
+            if (initiator == null) {
+                if (lastFailure != null) throw lastFailure;
+                throw new java.io.IOException("No active discovered pairing endpoint could be attempted");
+            }
             if (lanTransferPairingInitiators.putIfAbsent(initiator.sessionId(), initiator) != null) {
                 initiator.close();
                 throw new IllegalStateException("Pairing session identifier collision");
             }
+            lanTransferPairingInitiatorFingerprints.put(initiator.sessionId(), selectedFingerprint);
             broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_REQUESTED",
                     initiator.sessionId(), peerId, initiator.shortAuthenticationCode(),
                     "initiator", "WAITING_LOCAL_CONFIRMATION",
                     android.os.SystemClock.elapsedRealtime() + LanTransferPairingControlHost.SESSION_TIMEOUT_MS);
         } catch (Exception failure) {
+            if (initiator != null) initiator.close();
             FileLogger.log(this, "LAN_TRANSFER", "Pairing initiation failed: "
                     + failure.getClass().getSimpleName());
             broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED", "",
@@ -2794,7 +2844,7 @@ public class TrackingService extends Service implements LocationListener {
                     else if (state == LanTransferPairingSession.State.REJECTED
                             || state == LanTransferPairingSession.State.CANCELLED
                             || state == LanTransferPairingSession.State.EXPIRED) {
-                        lanTransferPairingInitiators.remove(sessionId, initiator);
+                        removeLanTransferPairingInitiator(sessionId, initiator);
                         initiator.close();
                     }
                 } else {
@@ -2849,7 +2899,7 @@ public class TrackingService extends Service implements LocationListener {
             initiator.sendCommit(secret, 5000, 10000);
             LanTransferCredentials.finishPendingCommit(this, commitId, peerId, secret);
             lanTransferPairingCommitPending.remove(commitId);
-            lanTransferPairingInitiators.remove(commitId, initiator);
+            removeLanTransferPairingInitiator(commitId, initiator);
             initiator.close();
             broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
                     commitId, peerId, "", "initiator", "PAIRED", 0L);
@@ -2986,13 +3036,35 @@ public class TrackingService extends Service implements LocationListener {
     private void closeLanTransferPairingInitiators() {
         for (java.util.Map.Entry<String, LanTransferPairingInitiator> entry
                 : lanTransferPairingInitiators.entrySet()) {
-            if (lanTransferPairingInitiators.remove(entry.getKey(), entry.getValue())) {
-                if (!serviceDestroyed) {
-                    broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
-                            entry.getKey(), entry.getValue().remotePeerId(), "",
-                            "initiator", "NETWORK_PATH_CHANGED", 0L);
-                }
+            removeLanTransferPairingInitiator(entry.getKey(), entry.getValue());
+            if (!serviceDestroyed) {
+                broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                        entry.getKey(), entry.getValue().remotePeerId(), "",
+                        "initiator", "NETWORK_PATH_CHANGED", 0L);
+            }
+            entry.getValue().close();
+        }
+        lanTransferPairingInitiatorFingerprints.clear();
+    }
+
+    private void removeLanTransferPairingInitiator(String sessionId,
+            LanTransferPairingInitiator initiator) {
+        if (initiator == null) return;
+        lanTransferPairingInitiators.remove(sessionId, initiator);
+        lanTransferPairingInitiatorFingerprints.remove(sessionId);
+    }
+
+    private void closeLanTransferPairingInitiatorsForMissingPaths(java.util.Set<String> activePaths) {
+        for (java.util.Map.Entry<String, LanTransferPairingInitiator> entry
+                : lanTransferPairingInitiators.entrySet()) {
+            String fingerprint = lanTransferPairingInitiatorFingerprints.get(entry.getKey());
+            if (fingerprint != null && !activePaths.contains(fingerprint)
+                    && lanTransferPairingInitiators.remove(entry.getKey(), entry.getValue())) {
+                lanTransferPairingInitiatorFingerprints.remove(entry.getKey(), fingerprint);
                 entry.getValue().close();
+                broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                        entry.getKey(), entry.getValue().remotePeerId(), "",
+                        "initiator", "NETWORK_PATH_CHANGED", 0L);
             }
         }
     }
@@ -3232,6 +3304,7 @@ public class TrackingService extends Service implements LocationListener {
                         if (old != null) old.close();
                     }
                 }
+                closeLanTransferPairingInitiatorsForMissingPaths(desired);
                 // Durable COMMIT journals survive path loss and can be retried over any live path.
                 if (!lanTransferPairingControlHosts.isEmpty()) resumePendingLanPairingCommits();
             }
