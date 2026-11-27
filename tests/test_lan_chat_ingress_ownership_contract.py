@@ -292,5 +292,33 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
         )
 
 
+    def test_async_ingress_is_invalid_immediately_when_service_teardown_begins(self):
+        current = self._method(
+            "private boolean isCurrentLanChatIngress(",
+            "private boolean hasFreshLanChatPeerRoute(",
+        )
+        self.assertIn("serviceDestroyed || path == null", current)
+        self.assertLess(
+            current.index("serviceDestroyed"),
+            current.index("lanChatPathRegistry.getListener(path)"),
+        )
+
+        hello = self._method(
+            'if ("peer.hello".equals(type))',
+            'if ("peer.ack".equals(type))',
+        )
+        first_guard = hello.index(
+            "!isCurrentLanChatIngress(helloIngressPath, socket,"
+        )
+        persist = hello.index("store.observePeer(")
+        second_guard = hello.index(
+            "!isCurrentLanChatIngress(helloIngressPath, socket,", first_guard + 1
+        )
+        reply = hello.index("sendLanUdpPacket(socket, response, \"PEER_ACK_V2\")")
+        self.assertLess(first_guard, persist)
+        self.assertLess(persist, second_guard)
+        self.assertLess(second_guard, reply)
+
+
 if __name__ == "__main__":
     unittest.main()
