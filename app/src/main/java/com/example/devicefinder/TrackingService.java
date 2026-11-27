@@ -2414,8 +2414,8 @@ public class TrackingService extends Service implements LocationListener {
             }
             // An incomplete Wi-Fi snapshot could conceal another active STA path. Do not
             // publish a partial path set that might revoke a still-live endpoint.
-            if (incomplete && wifiPaths.isEmpty())
-                throw new java.io.IOException("No complete Wi-Fi Network path snapshot");
+            if (incomplete)
+                throw new java.io.IOException("Incomplete Wi-Fi Network path snapshot; refusing partial path set");
             List<LanNetworkPath> localCandidates = enumerateUnrepresentedLanCandidates(cm);
             java.util.Set<String> excludedInterfaces = new java.util.HashSet<>();
             // The enumerator already excludes cellular/VPN interfaces. The path-set selector
