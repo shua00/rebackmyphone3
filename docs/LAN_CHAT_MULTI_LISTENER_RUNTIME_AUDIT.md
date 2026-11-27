@@ -353,7 +353,7 @@ PR #1 仍 Open，未合并 main；本轮完成的是代码和 CI 层面的批次
 Scope: diagnostics emitted by the Rescue2 Python process itself. This is separate from Android single-device diagnostic reports and the HTTP endpoint that receives uploaded device logs.
 
 - The bounded rotating local log remains `rescue2_runtime.log` beside `rescue2.py` (4 MiB per file, four backups); startup reports the resolved path.
-- Added scan lifecycle events: scan id, local interface/network counts, ARP/full-subnet fallback outcome, discovered count and elapsed time.
+- Added scan lifecycle events: scan id, local interface/network counts, ARP/full-subnet fallback outcome, per-probe batch candidate/sent/failed counts, discovered count and elapsed time.
 - Added v2 peer lifecycle events: HELLO receipt/rejection, HELLO persistence and ACK send outcomes, challenge verification result.
 - Added chat lifecycle events: send request/persistence/queue outcome, inbound persistence/dedup outcome, ACK send/receive/acceptance/persistence, and recovery replay stages correlated by message id.
 - ACK acceptance retains the existing target-peer and verified-endpoint guard; diagnostics observe its result without widening authorization.
