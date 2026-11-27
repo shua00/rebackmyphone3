@@ -478,4 +478,5 @@
 
 - [x] 发现 Python TCP `cancel` 过去只更新 SQLite 状态，没有像 Android 一样清理私有 staging 文件；修正为先持久化 `CANCELLED`，再清理 staging，最后发送 cancel ACK。重复取消仍按终态响应且清理可幂等重试。
 - [x] 新增 Python 回归测试，确认 ACK 返回后 staging 占用归零且任务状态为 `CANCELLED`（Run `45915548543` 全部通过）。
-- [x] 新增 Android 对应 loopback TCP 回归测试；当前最新 Android CI Run `45915577083` 正在验证。
+- [x] 新增 Android 对应 loopback TCP 回归测试；Android Gradle `testDebugUnitTest`、诊断 Debug APK 与 slim Release APK 全部通过（Run `45915577083`）。
+- [x] 同一 Run 的 Python `py_compile` 与全量 unittest 通过：`413 tests`。
