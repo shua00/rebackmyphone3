@@ -7646,8 +7646,8 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private boolean isCurrentLanChatIngress(String path, DatagramSocket socket, long generation) {
-        if (path == null || path.isEmpty() || socket == null || generation < 0L
-                || socket.isClosed()) return false;
+        if (serviceDestroyed || path == null || path.isEmpty()
+                || socket == null || generation < 0L || socket.isClosed()) return false;
         LanChatPathRegistry.Listener listener = lanChatPathRegistry.getListener(path);
         return listener != null && listener.socket == socket
                 && listener.generation == generation
