@@ -148,6 +148,26 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
         self.assertIn("target.generation)) return false;", ack)
         self.assertIn("sendAuthenticatedChatAck(target.socket, target.address, target.port,", ack)
 
+    def test_secondary_listener_releases_socket_before_owner_handoff(self):
+        stop = self._method(
+            "private void stopSecondaryLanChatListener(",
+            "private boolean isCurrentSecondaryLanChatListener(",
+        )
+        self.assertLess(
+            stop.index("socket.close()"),
+            stop.index("lanChatListenerRuntime.removeInstance(instance)"),
+        )
+        receive = self._method(
+            "private void startSecondaryLanChatListener(",
+            "private boolean isSecondaryPathStillPlanned(",
+        )
+        self.assertLess(
+            receive.index("socket.close()"),
+            receive.index("lanChatListenerRuntime.removeInstance(instance)", receive.index("} finally {")),
+        )
+        self.assertIn("Legacy FIND_ME_* commands remain on the primary listener only", self.source)
+        self.assertIn("lanUdpCommandDeduplicator.shouldAccept(", self.source)
+
     def test_inbound_chat_ack_is_sent_on_the_socket_that_received_the_message(self):
         method = self._method(
             "private boolean handleAuthenticatedLanPacket(",
