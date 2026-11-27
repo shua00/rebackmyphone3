@@ -5658,6 +5658,60 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
         self.assertIn('SecurityException("Chat fragment digest mismatch")', helper)
 
 
+    def test_python_outgoing_fragment_ack_bitmap_is_persistent_and_target_scoped(self):
+        from lan_p2p_core import (
+            persist_outgoing_message, initialize_outgoing_fragment_progress,
+            record_outgoing_fragment_ack, load_outgoing_fragment_ack_bitmap,
+            fragment_chat_message, ensure_outbox_retry_schema,
+        )
+        fd, db_path = tempfile.mkstemp(prefix="lan-fragment-outbox-")
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(db_path) and os.unlink(db_path))
+        ensure_outbox_retry_schema(db_path)
+        body = "长消息🙂" * 300
+        self.assertTrue(persist_outgoing_message(
+            db_path, "rescue2", "peer-a", "tx-long-1", body, ["peer-b"], 123456))
+        fragments = fragment_chat_message("tx-long-1", "peer-b", body, 123456)
+        self.assertTrue(initialize_outgoing_fragment_progress(
+            db_path, "tx-long-1", "peer-b", len(fragments)))
+        self.assertIsNone(load_outgoing_fragment_ack_bitmap(db_path, "tx-long-1", "peer-c"))
+        bitmap = record_outgoing_fragment_ack(
+            db_path, "rescue2", "tx-long-1", "peer-b", 1, "192.0.2.20", 8888, now_ms=2000)
+        self.assertEqual("0" + "1" + "0" * (len(fragments) - 2), bitmap)
+        self.assertEqual(bitmap, record_outgoing_fragment_ack(
+            db_path, "rescue2", "tx-long-1", "peer-b", 1,
+            "192.0.2.20", 8888, now_ms=2001))
+        self.assertIsNone(record_outgoing_fragment_ack(
+            db_path, "rescue2", "tx-long-1", "peer-b", len(fragments),
+            "192.0.2.20", 8888, now_ms=2002))
+        self.assertEqual(bitmap, load_outgoing_fragment_ack_bitmap(
+            db_path, "tx-long-1", "peer-b"))
+
+    def test_python_broadcast_fragment_ack_can_admit_only_first_window_target(self):
+        from lan_p2p_core import (
+            persist_outgoing_message, begin_outgoing_discovery_window,
+            record_outgoing_fragment_ack, load_outgoing_fragment_ack_bitmap,
+            fragment_chat_message,
+        )
+        fd, db_path = tempfile.mkstemp(prefix="lan-fragment-discovery-")
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(db_path) and os.unlink(db_path))
+        body = "广播长消息🙂" * 300
+        self.assertTrue(persist_outgoing_message(
+            db_path, "server2", "peer-server", "tx-broadcast-long", body, [], 123456))
+        self.assertTrue(begin_outgoing_discovery_window(
+            db_path, "server2", "tx-broadcast-long", window_ms=30000))
+        fragments = fragment_chat_message("tx-broadcast-long", "peer-android", body, 123456)
+        bitmap = record_outgoing_fragment_ack(
+            db_path, "server2", "tx-broadcast-long", "peer-android", 7,
+            "192.0.2.21", 8888, now_ms=2000)
+        self.assertEqual("0" * 7 + "1" + "0" * (len(fragments) - 8), bitmap)
+        self.assertIsNone(record_outgoing_fragment_ack(
+            db_path, "server2", "tx-broadcast-long", "peer-late", 8,
+            "192.0.2.22", 8888, now_ms=2001))
+        self.assertIsNone(load_outgoing_fragment_ack_bitmap(
+            db_path, "tx-broadcast-long", "peer-late"))
+
     def test_python_incoming_fragment_store_is_durable_bounded_and_out_of_order(self):
         from lan_p2p_core import (
             fragment_chat_message, store_incoming_chat_fragment,
