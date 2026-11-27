@@ -2228,7 +2228,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("attempts=1", server_sender)
         self.assertIn("send_discovery_broadcast_with_retries(", server_sender)
         self.assertNotIn("begin_outgoing_discovery_window(", server_sender)
-        self.assertIn("[(ip, 8888)", server_sender)
+        self.assertIn("build_chat_discovery_destinations(", server_sender)
+        self.assertIn("UDP_LISTEN_PORT", server_sender)
 
         action_start = server.index('elif action == "chat_msg":')
         action_end = server.index('elif action == "change_server":', action_start)
