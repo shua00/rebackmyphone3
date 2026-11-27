@@ -533,5 +533,28 @@ class TransferSenderIntegrationTests(unittest.TestCase):
             self.assertTrue(published.is_file())
             self.assertEqual(payload, published.read_bytes())
 
+    def test_corrupt_orphan_staging_file_without_receipt_is_replaced_on_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = b"orphan-repair"
+            offer = TransferOffer("sender-orphan-repair", "sender", "receiver",
+                "orphan.bin", len(payload), hashlib.sha256(payload).hexdigest(), 1)
+            store = TransferStore(str(root / "ledger.db"), TransferLimits(chunk_size_bytes=4096))
+            files = TransferFilesystem(store, str(root / "stage"), str(root / "received"))
+            store.create_offer(offer, 1)
+            store.transition(offer.transfer_id, TransferState.ACCEPTED, 2)
+            store.transition(offer.transfer_id, TransferState.TRANSFERRING, 3)
+            task_dir = files._task_dir(offer.transfer_id)
+            orphan = files._chunk_path(task_dir, 0)
+            orphan.write_bytes(b"partial-crash-data")
+            self.assertIsNone(store.get_chunk_receipt(offer.transfer_id, 0))
+
+            descriptor = ChunkDescriptor(offer.transfer_id, 0, payload,
+                hashlib.sha256(payload).hexdigest())
+            self.assertTrue(files.write_chunk(descriptor, 4))
+            self.assertEqual(payload, orphan.read_bytes())
+            self.assertIsNotNone(store.get_chunk_receipt(offer.transfer_id, 0))
+            self.assertEqual(((), False), files.reconcile_page(offer.transfer_id, 5, 8))
+
 if __name__ == "__main__":
     unittest.main()
