@@ -208,3 +208,12 @@ CI：前一组 path-plan commits 的 run `45982642484` 已全部成功（Python�
 - [x] Android 源码 commit `b58578e739125a85e90205978c618457d95e8bac`：Actions run [45984421449](https://github.com/shua00/rebackmyphone3/actions/runs/45984421449) 全部成功；Python、Windows socket binding、Android unit/debug/slim build 均通过，artifact `15190816457`。
 - [x] 热点事件静态契约测试 commit `1a6a42a24b21f51034437310257cb81f190116b7`：Actions run [45984525071](https://github.com/shua00/rebackmyphone3/actions/runs/45984525071) Python 与 Windows jobs 成功；Android build 按 path filter 正确跳过（仅 tests 变更）。
 - [ ] 上述 CI 不代表 OEM 实际广播覆盖率，也不代表 AP Listener 可绑定或 STA/AP 互通；真机确认仍待进行。
+
+
+### 批次 B：path-keyed receive-loop owner（本轮）
+
+- [x] `LanChatListenerRuntime` 新增按 path fingerprint 管理 `LanChatListenerInstance` 的 install/get/identity-remove/snapshot API。该 API 只管理 owner token，不在锁内创建线程、关闭 Socket 或 join。
+- [x] 现有 primary `startRescueListener()` 已将其 `LanChatListenerInstance` 纳入 owner map，并在 receive-loop finally、bind/start 失败和 teardown-before-start 分支按实例身份清理。
+- [x] 增加双路径 owner 独立性、同路径旧实例不能移除替换实例、snapshot 不可变等 Java 单元测试。
+- [ ] 该改动尚未创建 AP secondary worker；旧 primary 接收循环仍负责 legacy UDP commands，后续 secondary 必须只分发 authenticated LAN P2P frames，避免两条路径重复执行 legacy 命令。
+- [ ] 继续完成 secondary candidate 精确绑定、独立 receive loop、secondary HELLO discovery、generation/path-plan reconciliation、onDestroy 批量停止及竞态测试。
