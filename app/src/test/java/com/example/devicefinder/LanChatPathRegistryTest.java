@@ -304,4 +304,31 @@ public class LanChatPathRegistryTest {
         } finally { listener.close(); }
     }
 
+
+    @Test public void preferredPathLookupIsO1PathScopedAndExpiresStaleLease() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket sta = socket(), ap = socket();
+        try {
+            String s = "sta|wlan0|192.168.1.20/24", a = "ap|ap0|192.168.43.1/24";
+            registry.registerListener(s, sta, 91);
+            registry.registerListener(a, ap, 92);
+            InetSocketAddress staEndpoint = endpoint("192.168.1.31");
+            InetSocketAddress apEndpoint = endpoint("192.168.43.2");
+            registry.recordVerifiedPeer("peer", s, staEndpoint, NOW, NOW + 100);
+            registry.recordVerifiedPeer("peer", a, apEndpoint, NOW, NOW + 100);
+
+            LanChatPathRegistry.RouteBinding preferred =
+                    registry.getFreshPeerRouteBinding("peer", a, NOW + 1);
+            assertNotNull(preferred);
+            assertSame(ap, preferred.listener.socket);
+            assertEquals(a, preferred.route.pathFingerprint);
+            assertTrue(registry.isCurrentBinding(preferred));
+            assertNull(registry.getFreshPeerRouteBinding("peer", "unknown-path", NOW + 1));
+
+            assertNull(registry.getFreshPeerRouteBinding("peer", a, NOW + 100));
+            assertNotNull(registry.getFreshPeerRouteBinding("peer", s, NOW + 100));
+        } finally { sta.close(); ap.close(); }
+    }
+
+
 }
