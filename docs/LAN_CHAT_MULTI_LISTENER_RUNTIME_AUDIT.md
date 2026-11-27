@@ -124,3 +124,25 @@
 - [x] 保留原有 3 秒重复窗口、30 秒保留清理语义及最多 50 条记录上限；采用单调 elapsedRealtime 时间，避免系统墙钟回拨影响窗口判断。
 - [x] 新增组件测试：跨 ingress 共享实例抑制重复广播、窗口到期重新接纳、无效 key/时钟拒绝、记录数有界。
 - [ ] 多 Listener 旧命令处理归属仍需在真实多 Listener 接入时验证；此提交只建立共享去重基础，不代表第二条接收循环已经启动。
+
+
+## 9. 2026-11-27：跨 Listener 旧命令去重回归加固
+
+- [x] TrackingService 只持有一个 service-scoped `LanUdpCommandDeduplicator`；接收循环不再各自创建局部去重 HashMap。
+- [x] Python 静态架构测试锁定上述集成边界，防止后续复制接收循环时重新引入 per-loop 去重表。
+- [x] Java 并发测试使用 12 个并发 ingress 模拟同一广播同时到达，必须只有一个调用被接纳。
+- [x] GitHub Actions 验证结果：439 项 Python 测试通过（1 项既有 skip）；Windows Socket Binding、Android unit tests、Debug 与 Slim Release 构建成功；APK artifact 已上传。
+- [ ] 该去重仍只覆盖原有 alarm/low-battery 两类命令的既有语义；其他 legacy 命令仍须逐项审查是否具备原生幂等/全局去重需求，不能盲目扩大去重范围。
+- [ ] 第二条 Listener 尚未启动，真实双路径广播重复执行仍需在多 Listener 集成后做设备级验证。
+
+## 10. 到首次真机验收的剩余批次估算（计划，不是完成承诺）
+
+按当前代码缺口，预计还需 **4 个实施批次**进入第一轮受控 Android 真机验收；若 AP 接口识别、OEM 热点行为或端口绑定暴露新问题，预留第 5 个修复批次。这里的“进入真机验收”指可以开始执行测试矩阵，不代表三设备拓扑已通过。
+
+1. **批次 A：单 Listener 生命周期对象化**——把 socket/thread/path/generation/stop handoff 纳入同一 owner；先迁移现有 STA Listener，保持单路径资源数不变，并通过竞态测试。
+2. **批次 B：AP/local-interface 路径识别与第二 Listener**——明确区分 Android Network 与 AP local-interface，基于实际地址精确绑定；无已确认第二路径时不创建任何额外资源。
+3. **批次 C：多 Listener ingress/认证/业务分发闭环**——验证 ACK/fragment ACK/peer control 使用 ingress snapshot；共享 legacy 命令去重；每个 peer×path 独立认证，不因 bind 或发现直接变可信。
+4. **批次 D：受控回退与真机测试准备**——完成一次性备用路径尝试、真实 ACK RTT/失败采样的最小闭环、诊断/验收场景与 APK；普通单路径性能回归通过后开始双机/三机测试。
+5. **预留批次 E（条件触发）**——修复真机暴露的 ROM、热点客户端隔离、接口权限、网络切换或端口行为差异；不把它预先计入正常路径。
+
+真机验收按风险递进：普通路由器双 Android → 热点主机与一个客户端 → 热点主机、STA 客户端、路由器客户端三设备三组两两双向 → Android/Python 互通与网络切换。每一步独立记录，不以 CI 代替。
