@@ -2635,7 +2635,7 @@ public class TrackingService extends Service implements LocationListener {
             lanChatBoundWifiNetwork = null;
             LanChatListenerInstance oldInstance = activeLanChatListenerInstance;
             if (oldInstance != null) oldInstance.requestStop();
-            oldSocket = rescueSocketRef;
+            oldSocket = oldInstance != null ? oldInstance.socket() : rescueSocketRef;
         }
         FileLogger.log(this, "UDP", "主动重启 LAN UDP listener generation="
                 + generation + " reason=" + reason);
@@ -2679,7 +2679,7 @@ public class TrackingService extends Service implements LocationListener {
                 lanChatBoundWifiNetwork = null;
                 LanChatListenerInstance oldInstance = activeLanChatListenerInstance;
                 if (oldInstance != null) oldInstance.requestStop();
-                oldSocket = rescueSocketRef;
+                oldSocket = oldInstance != null ? oldInstance.socket() : rescueSocketRef;
             }
             FileLogger.log(this, "NETWORK", "Wi-Fi LAN socket generation advanced generation="
                     + socketGeneration + " reason=" + reason);
@@ -8911,8 +8911,8 @@ public class TrackingService extends Service implements LocationListener {
         synchronized (rescueLock) {
             LanChatListenerInstance activeInstance = activeLanChatListenerInstance;
             if (activeInstance != null) activeInstance.requestStop();
-            socketToClose = rescueSocketRef;
-            rescueSocketRef = null;
+            socketToClose = activeInstance != null ? activeInstance.socket() : rescueSocketRef;
+            if (rescueSocketRef == socketToClose) rescueSocketRef = null;
             lanChatBoundWifiNetwork = null;
         }
         if (socketToClose != null) {
@@ -8988,7 +8988,9 @@ public class TrackingService extends Service implements LocationListener {
         // handled may still be rejected during teardown; its sender will retry because
         // no ACK can be sent on the closed socket. Accepted IO tasks are drained below.
         closeLanChatIngressSocket();
-        Thread listenerToStop = rescueListenerThread;
+        LanChatListenerInstance activeListener = activeLanChatListenerInstance;
+        Thread listenerToStop = activeListener != null
+                ? activeListener.thread() : rescueListenerThread;
         if (listenerToStop != null) {
             listenerToStop.interrupt();
             if (listenerToStop != Thread.currentThread()) {
