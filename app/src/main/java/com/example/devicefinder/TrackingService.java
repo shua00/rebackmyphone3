@@ -2673,9 +2673,9 @@ public class TrackingService extends Service implements LocationListener {
 
     /**
      * Refresh the chat listener path plan only at an explicit LAN path-change boundary.
-     * Reuses the existing strict path-set rules: represented Wi-Fi Networks plus at most one
-     * unrepresented local-interface candidate; ambiguity/incomplete snapshots fail closed.
-     * This method only publishes metadata. It never starts a secondary listener.
+     * Reuses the existing strict path-set rules: represented Wi-Fi Networks plus validated
+     * unrepresented local-interface candidates; ambiguity/incomplete snapshots fail closed.
+     * Only explicit LOCAL_INTERFACE_CANDIDATE secondary paths may start a separate listener.
      */
     private void refreshLanChatListenerPathPlan(ConnectivityManager cm, String reason) {
         try {
@@ -2861,8 +2861,11 @@ public class TrackingService extends Service implements LocationListener {
         final String nonce = java.util.UUID.randomUUID().toString();
         final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
         pendingPeerChallenges.put(nonce, latch);
-        scheduleLanChatTask("secondary-peer-discovery-timeout",
-                () -> clearPendingPeerChallenge(nonce), LAN_PEER_CHALLENGE_TIMEOUT_MS);
+        if (!scheduleLanChatTask("secondary-peer-discovery-timeout",
+                () -> clearPendingPeerChallenge(nonce), LAN_PEER_CHALLENGE_TIMEOUT_MS)) {
+            clearPendingPeerChallenge(nonce);
+            return;
+        }
         try {
             JSONObject hello = LanP2pProtocol.create("peer.hello",
                     getUniqueDeviceId(), "android", "android-main");
