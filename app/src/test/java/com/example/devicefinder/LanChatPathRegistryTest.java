@@ -251,4 +251,57 @@ public class LanChatPathRegistryTest {
         } finally { old.close(); replacement.close(); }
     }
 
+    @Test public void exactIngressLookupNeverBorrowsAnotherPathAuthentication() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket sta = socket(), ap = socket(), wrong = socket();
+        try {
+            String s = "sta|wlan0|192.168.1.20/24";
+            String a = "ap|ap0|192.168.43.1/24";
+            InetSocketAddress staEndpoint = endpoint("192.168.1.31");
+            InetSocketAddress apEndpoint = endpoint("192.168.43.2");
+            registry.registerListener(s, sta, 61);
+            registry.registerListener(a, ap, 72);
+            registry.recordVerifiedPeer("peer", s, staEndpoint, NOW, NOW + 100);
+            registry.recordVerifiedPeer("peer", a, apEndpoint, NOW, NOW + 100);
+
+            LanChatPathRegistry.RouteBinding staBinding =
+                    registry.findCurrentPeerRouteBinding("peer", s, sta, 61, staEndpoint, NOW + 1);
+            assertNotNull(staBinding);
+            assertSame(sta, staBinding.listener.socket);
+            assertEquals(s, staBinding.route.pathFingerprint);
+
+            assertNull(registry.findCurrentPeerRouteBinding(
+                    "peer", s, ap, 72, apEndpoint, NOW + 1));
+            assertNull(registry.findCurrentPeerRouteBinding(
+                    "peer", s, wrong, 61, staEndpoint, NOW + 1));
+            assertNull(registry.findCurrentPeerRouteBinding(
+                    "peer", s, sta, 60, staEndpoint, NOW + 1));
+            assertNull(registry.findCurrentPeerRouteBinding(
+                    "peer", s, sta, 61, apEndpoint, NOW + 1));
+
+            LanChatPathRegistry.RouteBinding apBinding =
+                    registry.findCurrentPeerRouteBinding("peer", a, ap, 72, apEndpoint, NOW + 1);
+            assertNotNull(apBinding);
+            assertSame(ap, apBinding.listener.socket);
+            assertEquals(a, apBinding.route.pathFingerprint);
+        } finally { sta.close(); ap.close(); wrong.close(); }
+    }
+
+    @Test public void exactIngressLookupRejectsExpiredRouteAndClosedListener() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket listener = socket();
+        try {
+            String path = "sta|wlan0|192.168.1.20/24";
+            InetSocketAddress peer = endpoint("192.168.1.31");
+            registry.registerListener(path, listener, 81);
+            registry.recordVerifiedPeer("peer", path, peer, NOW, NOW + 10);
+            assertNull(registry.findCurrentPeerRouteBinding(
+                    "peer", path, listener, 81, peer, NOW + 10));
+            registry.recordVerifiedPeer("peer", path, peer, NOW + 11, NOW + 100);
+            listener.close();
+            assertNull(registry.findCurrentPeerRouteBinding(
+                    "peer", path, listener, 81, peer, NOW + 12));
+        } finally { listener.close(); }
+    }
+
 }
