@@ -6273,7 +6273,7 @@ class PythonLongChatRecoveryAdmissionTests(unittest.TestCase):
             with self.subTest(service=filename):
                 source = (repo_root / filename).read_text(encoding="utf-8")
                 start = source.index("def _resume_pending_v2_for_peer(")
-                end = source.index("\\ndef _advance_v2_fragment_windows(", start)
+                end = source.index("\ndef _advance_v2_fragment_windows(", start)
                 recovery = source[start:end]
                 # The outer retry admission is exclusively for the short-packet path.
                 short_guard = recovery.index("if not long_message:")
