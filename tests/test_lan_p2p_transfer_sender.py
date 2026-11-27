@@ -486,5 +486,51 @@ class TransferSenderIntegrationTests(unittest.TestCase):
             published = next((root / "received").iterdir())
             self.assertEqual(payload, published.read_bytes())
 
+    def test_completed_transfer_replays_complete_and_cancel_without_regression(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = b"terminal-replay"
+            offer = TransferOffer("sender-terminal-replay", "sender", "receiver",
+                "terminal.txt", len(payload), hashlib.sha256(payload).hexdigest(), 1)
+            store = TransferStore(str(root / "ledger.db"), TransferLimits(chunk_size_bytes=4096))
+            files = TransferFilesystem(store, str(root / "stage"), str(root / "received"))
+            store.create_offer(offer, 1)
+            store.transition(offer.transfer_id, TransferState.ACCEPTED, 2)
+            store.transition(offer.transfer_id, TransferState.TRANSFERRING, 3)
+            files.write_chunk(ChunkDescriptor(offer.transfer_id, 0, payload,
+                hashlib.sha256(payload).hexdigest()), 4)
+            published = files.assemble_and_verify(offer.transfer_id, 5)
+            self.assertTrue(published.is_file())
+
+            server, client = socket.socketpair()
+            errors = []
+            def serve():
+                try:
+                    serve_transfer_session(server, store, files, local_peer_id="receiver",
+                        authenticated_peer_id="sender", session_secret=self.SECRET,
+                        now_ms=lambda: 10, max_frames=2)
+                except Exception as exc:
+                    errors.append(exc)
+                finally:
+                    server.close()
+            worker = threading.Thread(target=serve)
+            worker.start()
+            try:
+                for kind in ("complete", "cancel"):
+                    send_frame(client, TransferFrame(kind, offer.transfer_id,
+                        "sender", "receiver"), self.SECRET)
+                    response = recv_frame(client, self.SECRET,
+                        expected_sender_peer_id="receiver", expected_target_peer_id="sender")
+                    self.assertEqual(kind, response.kind)
+                    self.assertEqual({"state": "completed"}, response.metadata)
+            finally:
+                client.close()
+                worker.join(timeout=3)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual([], errors)
+            self.assertEqual(TransferState.COMPLETED, store.get_transfer(offer.transfer_id).state)
+            self.assertTrue(published.is_file())
+            self.assertEqual(payload, published.read_bytes())
+
 if __name__ == "__main__":
     unittest.main()
