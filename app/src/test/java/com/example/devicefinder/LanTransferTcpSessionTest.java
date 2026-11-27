@@ -806,13 +806,9 @@ public class LanTransferTcpSessionTest {
         File root = Files.createTempDirectory("lan-p2p-python-android-").toFile();
         File source = new File(root, "python-source.bin");
         try (java.io.FileOutputStream out = new java.io.FileOutputStream(source)) { out.write(payload); }
+        File ready = new File(root, "receiver-accepted");
         String transferId = "python-android-real-tcp";
         LanTransferStore store = new LanTransferStore(context);
-        store.createOffer(new LanTransferStore.Offer(transferId, "python", "android",
-                source.getName(), payload.length, sha(payload), 1000L, "application/octet-stream"),
-                1000L, 4096);
-        store.transition(transferId, "accepted", 1001L);
-        store.transition(transferId, "transferring", 1002L);
         LanTransferFilesystem filesystem = new LanTransferFilesystem(context, store,
                 LanTransferFilesystem.DEFAULT_STAGING_QUOTA_BYTES, fileOps());
         LanTransferTcpSession session = new LanTransferTcpSession(context, store, filesystem,
@@ -820,29 +816,57 @@ public class LanTransferTcpSessionTest {
         ServerSocket listener = new ServerSocket(0);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         String script = String.join("\n",
-                "import socket,sys",
+                "import socket,sys,time",
                 "from pathlib import Path",
                 "from lan_p2p_transfer import TransferOffer",
                 "from lan_p2p_transfer_auth import authenticate_tcp_client",
-                "from lan_p2p_transfer_sender import send_file_over_session",
-                "source=Path(sys.argv[3]); payload=source.read_bytes()",
+                "from lan_p2p_transfer_sender import send_offer_over_session,send_file_over_session",
+                "source=Path(sys.argv[2]); payload=source.read_bytes(); ready=Path(sys.argv[3])",
                 "secret=" + JSONObject.quote(SECRET),
                 "offer=TransferOffer(" + JSONObject.quote(transferId) + ",'python','android',source.name,len(payload),__import__('hashlib').sha256(payload).hexdigest(),1000,'application/octet-stream')",
                 "sock=socket.create_connection(('127.0.0.1',int(sys.argv[1])),timeout=10)",
                 "peer,key=authenticate_tcp_client(sock,'python','android',secret)",
                 "assert peer=='android'",
+                "ack=send_offer_over_session(sock,str(source),offer,local_peer_id='python',remote_peer_id='android',session_secret=key,chunk_size_bytes=4096)",
+                "assert ack['state']=='offered', ack",
+                "sock.close()",
+                "deadline=time.time()+15",
+                "while not ready.exists() and time.time()<deadline: time.sleep(0.025)",
+                "assert ready.exists(), 'Android receiver did not explicitly accept Offer'",
+                "sock=socket.create_connection(('127.0.0.1',int(sys.argv[1])),timeout=10)",
+                "peer,key=authenticate_tcp_client(sock,'python','android',secret)",
                 "remaining=send_file_over_session(sock,str(source),offer,local_peer_id='python',remote_peer_id='android',session_secret=key,chunk_size_bytes=4096,max_chunks_per_session=62)",
                 "assert remaining==(), remaining",
                 "sock.close(); print('PYTHON_TO_ANDROID_TCP_OK')");
         Process python = null;
         try {
             Future<Integer> served = executor.submit(() -> {
-                try (Socket accepted = listener.accept()) { return session.serve(accepted); }
+                int total = 0;
+                for (int i = 0; i < 2; i++) {
+                    try (Socket accepted = listener.accept()) { total += session.serve(accepted); }
+                }
+                return total;
             });
             python = startPythonIntegration(script, repositoryRoot(),
-                    Integer.toString(listener.getLocalPort()), "", source.getAbsolutePath());
+                    Integer.toString(listener.getLocalPort()), source.getAbsolutePath(),
+                    ready.getAbsolutePath());
+            long deadline = System.currentTimeMillis() + 10000;
+            LanTransferStore.Transfer offered = null;
+            while (System.currentTimeMillis() < deadline) {
+                offered = store.getTransfer(transferId);
+                if (offered != null) break;
+                Thread.sleep(25);
+            }
+            assertNotNull("Python Offer did not reach Android over TCP", offered);
+            assertEquals("offered", offered.state);
+            store.transition(transferId, "accepted", 1004L);
+            store.transition(transferId, "transferring", 1005L);
+            try (java.io.FileOutputStream out = new java.io.FileOutputStream(ready)) {
+                out.write(1);
+                out.getFD().sync();
+            }
             assertTrue(finishPythonIntegration(python).contains("PYTHON_TO_ANDROID_TCP_OK"));
-            assertEquals(5, (int) served.get(10, TimeUnit.SECONDS));
+            assertEquals(6, (int) served.get(10, TimeUnit.SECONDS));
             assertEquals("completed", store.getTransfer(transferId).state);
             File[] published = new File(context.getFilesDir(), "lan-transfer-received").listFiles();
             assertNotNull(published);
