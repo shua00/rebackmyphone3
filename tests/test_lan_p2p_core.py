@@ -2577,11 +2577,10 @@ class LanP2PCoreTests(unittest.TestCase):
         # Check the meaning and counters, not one exact concatenation layout.
         self.assertIn("固定目标", method)
         self.assertIn("totalPeerCount", method)
-        self.assertIn("已验证路由", method)
-        self.assertIn("历史端点直投", method)
+        self.assertIn("已验证路径路由", method)
+        self.assertIn("待路径验证目标", method)
         self.assertIn("reachablePeerCount", method)
-        # Historical terminology in comments is harmless; the emitted log above
-        # is what defines the operator-facing distinction.
+        # Peer-wide persisted endpoints are no longer counted as reachable routes.
 
 
 
