@@ -175,6 +175,20 @@ class LanSecondaryListenerContractTests(unittest.TestCase):
         self.assertNotIn("postDelayed", finally_block[reconcile_index:reconcile_index + 300])
 
 
+    def test_secondary_failure_recovery_is_independent_per_path_and_generation(self):
+        secondary = self._method(
+            "private void startSecondaryLanChatListener(",
+            "private boolean isSecondaryPathStillPlanned(",
+        )
+        self.assertIn("ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>", self.source)
+        self.assertIn("secondaryListenerRetryAttempts.computeIfAbsent(", secondary)
+        self.assertIn("generation == lanSocketGeneration.get()", secondary)
+        self.assertIn("isSecondaryPathStillPlanned(fingerprint)", secondary)
+        self.assertIn("lanChatListenerRuntime.getInstance(fingerprint) == null", secondary)
+        self.assertIn("startSecondaryLanChatListener(path, generation)", secondary)
+        self.assertNotIn("peerDiscoveryInFlight", secondary)
+        self.assertNotIn("activeLanChatListenerInstance", secondary)
+
     def test_secondary_listener_unexpected_failure_uses_path_scoped_bounded_backoff(self):
         secondary = self._method(
             "private void startSecondaryLanChatListener(",
