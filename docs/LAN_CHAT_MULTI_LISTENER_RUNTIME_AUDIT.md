@@ -116,3 +116,11 @@
 - [x] helper 对 Android Network 执行 `Network.bindSocket`，然后将 UDP Listener bind 到该路径的精确 IPv4 地址；Socket bind、generation 校验、Registry lease 注册和 socket 发布顺序保持不变。
 - [x] 仅无可用 Wi-Fi Network 时，调用方才看到 socket 仍未绑定并进入旧 wildcard 兼容路径。选中 Network 后精确绑定失败会抛出 IOException，不会静默回退到蜂窝/default route。
 - [ ] 当前仍然只有一条 STA 聊天 Listener；AP candidate listener、每路径独立接收线程和多 Listener 旧命令分发归属仍待实现。
+
+
+## 8. 2026-11-27：旧 UDP 管理命令跨 Listener 去重前置
+
+- [x] 新增 `LanUdpCommandDeduplicator`，将旧 UDP 管理命令的重复抑制从 receive-loop 局部 HashMap 提升为 TrackingService 实例级共享对象；未来 STA/AP 所有 Listener 必须复用同一实例。
+- [x] 保留原有 3 秒重复窗口、30 秒保留清理语义及最多 50 条记录上限；采用单调 elapsedRealtime 时间，避免系统墙钟回拨影响窗口判断。
+- [x] 新增组件测试：跨 ingress 共享实例抑制重复广播、窗口到期重新接纳、无效 key/时钟拒绝、记录数有界。
+- [ ] 多 Listener 旧命令处理归属仍需在真实多 Listener 接入时验证；此提交只建立共享去重基础，不代表第二条接收循环已经启动。
