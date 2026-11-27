@@ -166,7 +166,7 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
             "private boolean sendLanChatReceiveAck(",
         )
         self.assertEqual(receive.count("persistIncomingLanChat(senderId, messageId, body"), 1)
-        self.assertIn("sendLanChatReceiveAck(ackTarget, senderId, messageId)", receive)
+        self.assertIn("sendLanChatReceiveAck(\n                            ackTarget, senderId, messageId)", receive)
         ack = self._method(
             "private boolean sendLanChatReceiveAck(",
             "private boolean isCurrentLanChatIngress(",
@@ -192,7 +192,8 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
             receive.index("socket.close()"),
             receive.index("lanChatListenerRuntime.removeInstance(instance)", receive.index("} finally {")),
         )
-        self.assertIn("Legacy FIND_ME_* commands remain on the primary listener only", self.source)
+        self.assertIn("Secondary ingress is intentionally authenticated P2P only", receive)
+        self.assertNotIn("handleLegacyUdpCommand(", receive)
         self.assertIn("lanUdpCommandDeduplicator.shouldAccept(", self.source)
 
     def test_inbound_chat_ack_is_sent_on_the_socket_that_received_the_message(self):
@@ -200,10 +201,14 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
             "private boolean handleAuthenticatedLanPacket(",
             "private boolean isCurrentLanChatIngress(",
         )
+        self.assertIn("new PendingLanChatAckTarget(", method)
+        self.assertIn("packet.getAddress(), packet.getPort(),", method)
+        ack_helper = self._method(
+            "private boolean sendLanChatReceiveAck(",
+            "private boolean isCurrentLanChatIngress(",
+        )
         self.assertIn(
-            "sendAuthenticatedChatAck(\n"
-            "                                        socket, ackAddress, ackPort, senderId, messageId)",
-            method,
+            "sendAuthenticatedChatAck(target.socket, target.address, target.port,", ack_helper
         )
         self.assertIn(
             "processAuthenticatedLanChatFragment(\n"
