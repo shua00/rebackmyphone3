@@ -42,6 +42,12 @@ public class TrackingServiceLifecycleTest {
 
         controller.destroy();
 
+        // Startup cancellation is asynchronous; give the worker a bounded opportunity
+        // to observe serviceDestroyed and unwind before asserting its terminal state.
+        if (startup != null && startup != Thread.currentThread()) {
+            startup.join(1000L);
+        }
+
         assertTrue("service must publish teardown before returning",
                 booleanField(service, "serviceDestroyed"));
         assertNull("UDP ingress reference must be revoked", field(service, "rescueSocketRef"));
