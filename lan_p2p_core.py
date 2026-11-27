@@ -1139,7 +1139,8 @@ def load_outgoing_fragment_targets_for_peer(db_path, sender_scope, peer_id, limi
         conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("PRAGMA busy_timeout=10000")
         rows = conn.execute("""SELECT o.message_id,o.body,o.created_at_ms,
-                    t.fragment_count,t.fragment_ack_bitmap,p.endpoint_ip,p.endpoint_port,t.last_endpoint
+                    t.fragment_count,t.fragment_ack_bitmap,p.endpoint_ip,p.endpoint_port,t.last_endpoint,
+                    p.status,p.lease_expires_at,p.last_verified_at
             FROM lan_outbox o JOIN lan_outbox_targets t ON t.message_id=o.message_id
             LEFT JOIN lan_peers p ON p.receiver_scope=? AND p.peer_id=t.peer_id
             WHERE o.sender_scope=? AND t.peer_id=? AND t.status!='acked'
@@ -1152,9 +1153,13 @@ def load_outgoing_fragment_targets_for_peer(db_path, sender_scope, peer_id, limi
         result = []
         for row in rows:
             saved_endpoint = row[7] or ""
-            # Prefer the endpoint pinned by this message's successful send/ACK evidence;
-            # the peer registry endpoint is only a fallback before message-scoped evidence exists.
-            if ":" in saved_endpoint:
+            peer_route_verified = (row[8] == "active" and float(row[9] or 0) > time.time()
+                                   and float(row[10] or 0) > 0)
+            # A newly verified lease supersedes stale message-scoped routing evidence.
+            # Otherwise keep the endpoint pinned by this message's successful send/ACK.
+            if peer_route_verified and row[5] and row[6]:
+                endpoint_ip, endpoint_port = row[5], int(row[6])
+            elif ":" in saved_endpoint:
                 endpoint_ip, port_text = saved_endpoint.rsplit(":", 1)
                 try:
                     endpoint_port = int(port_text)
