@@ -20,6 +20,8 @@
 
 - [x] 审计 TrackingService 当前聊天 Listener 生命周期：确认仍是单一 wildcard-bound UDP Listener，Registry/Selector 的多 Listener 逻辑尚无 runtime 多 Listener 接入。
 - [x] 审计现有精确路径绑定能力：`LanSocketBinding.bindDatagramListenerSocket()` 已存在，但尚未接入聊天 Listener。
+- [x] 新增 `LanChatListenerRuntime` path-keyed lease owner，并将现有单 Wi-Fi Listener 的 Registry 注册/注销接入该 owner；当前仍只有一个实际聊天 Listener，不代表 STA/AP 多 Listener 已完成。
+- [x] 增加 lease replacement、stale cleanup、独立 path、外部 path invalidation 和单路径无后台 worker/timer 的组件测试。
 - [x] 明确实施门槛与分阶段顺序，详见 [LAN_CHAT_MULTI_LISTENER_RUNTIME_AUDIT.md](LAN_CHAT_MULTI_LISTENER_RUNTIME_AUDIT.md)。
 - [ ] 下一步：先将现有单 Wi-Fi Listener 迁移到 path-keyed owner，保持单路径仍仅一个 Listener；通过生命周期/竞态测试后，再接入第二条 STA/AP path。
 
