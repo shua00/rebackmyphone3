@@ -93,4 +93,27 @@ public class LanTransferPathSetTest {
                 Collections.<String>emptySet());
         assertNotEquals(first.diagnosticFingerprint(), second.diagnosticFingerprint());
     }
+
+    @Test public void fingerprintIsIndependentOfNetworkEnumerationOrder() throws Exception {
+        LanNetworkPath staA = wifi("wlan_sta", "192.168.1.20", 1);
+        LanNetworkPath staB = wifi("wlan_aux", "192.168.2.20", 2);
+        LanNetworkPath ap = ap("vendor_ap", "192.168.43.1");
+        LanTransferPathSet first = LanTransferPathSet.select(
+                Arrays.asList(staA, staB), Collections.singletonList(ap),
+                Collections.<String>emptySet());
+        LanTransferPathSet second = LanTransferPathSet.select(
+                Arrays.asList(staB, staA), Collections.singletonList(ap),
+                Collections.<String>emptySet());
+        assertEquals(first.diagnosticFingerprint(), second.diagnosticFingerprint());
+    }
+
+    @Test public void returnedPathListIsImmutable() throws Exception {
+        LanTransferPathSet paths = LanTransferPathSet.select(
+                Collections.singletonList(wifi("wlan0", "192.168.1.20", 1)),
+                Collections.<LanNetworkPath>emptyList(), Collections.<String>emptySet());
+        try {
+            paths.paths().clear();
+            fail("path snapshot must be immutable");
+        } catch (UnsupportedOperationException expected) { }
+    }
 }
