@@ -430,6 +430,7 @@ class TransferSenderIntegrationTests(unittest.TestCase):
             missing, more = files.reconcile_page(offer.transfer_id, 5, 8)
             self.assertEqual((0,), missing)
             self.assertFalse(more)
+            self.assertFalse(staged.exists())
             self.assertIsNone(store.get_chunk_receipt(offer.transfer_id, 0))
             self.assertEqual(TransferState.TRANSFERRING,
                 store.get_transfer(offer.transfer_id).state)
