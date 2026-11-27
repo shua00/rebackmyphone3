@@ -2782,7 +2782,8 @@ public class TrackingService extends Service implements LocationListener {
                 // Exact local-address bind is mandatory. Never fall back to wildcard if an
                 // OEM candidate cannot be bound; primary STA listener remains unaffected.
                 LanSocketBinding.bindDatagramListenerSocket(path, socket, 8888);
-                socket.setSoTimeout(3000);
+                // Block on receive; socket.close() is the event-driven stop signal. Do not
+                // add a periodic timeout wakeup to this secondary path.
                 synchronized (rescueLock) {
                     if (serviceDestroyed || instance.isStopRequested()
                             || generation != lanSocketGeneration.get()
@@ -2799,12 +2800,8 @@ public class TrackingService extends Service implements LocationListener {
                 byte[] buffer = new byte[4096];
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
                 while (isCurrentSecondaryLanChatListener(instance, socket, lease)) {
-                    try {
-                        packet.setLength(buffer.length);
-                        socket.receive(packet);
-                    } catch (java.net.SocketTimeoutException timeout) {
-                        continue;
-                    }
+                    packet.setLength(buffer.length);
+                    socket.receive(packet);
                     if (!isCurrentSecondaryLanChatListener(instance, socket, lease)) break;
                     long receivedAt = android.os.SystemClock.elapsedRealtime();
                     // Secondary ingress is intentionally authenticated P2P only. Do not run
@@ -2839,7 +2836,8 @@ public class TrackingService extends Service implements LocationListener {
         } catch (RuntimeException startFailure) {
             instance.requestStop();
             lanChatListenerRuntime.removeInstance(instance);
-            throw startFailure;
+            FileLogger.log(this, "CHAT", "Secondary listener worker could not start path="
+                    + fingerprint + " error=" + startFailure.getClass().getSimpleName());
         }
     }
 
