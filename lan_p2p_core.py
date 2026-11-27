@@ -1146,14 +1146,16 @@ def load_outgoing_fragment_targets_for_peer(db_path, sender_scope, peer_id, limi
         result = []
         for row in rows:
             saved_endpoint = row[7] or ""
-            if row[5] and row[6]:
-                endpoint_ip, endpoint_port = row[5], int(row[6])
-            elif ":" in saved_endpoint:
+            # Prefer the endpoint pinned by this message's successful send/ACK evidence;
+            # the peer registry endpoint is only a fallback before message-scoped evidence exists.
+            if ":" in saved_endpoint:
                 endpoint_ip, port_text = saved_endpoint.rsplit(":", 1)
                 try:
                     endpoint_port = int(port_text)
                 except ValueError:
                     endpoint_ip, endpoint_port = "", 0
+            elif row[5] and row[6]:
+                endpoint_ip, endpoint_port = row[5], int(row[6])
             else:
                 endpoint_ip, endpoint_port = "", 0
             result.append({
