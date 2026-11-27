@@ -21,13 +21,14 @@ public final class LanChatStore extends SQLiteOpenHelper {
     public static final long FIRST_DISCOVERY_WINDOW_MS = LanChatRetryPolicy.FIRST_DISCOVERY_WINDOW_MS;
     private static final String DB_NAME = "lan_p2p_delivery.db";
     // v9 records attempted endpoints; v10 adds durable receive fragments; v11 adds sender ACK bitmaps.
-    private static final int DB_VERSION = 11;
+    private static final int DB_VERSION = 12;
     // Durable partial long-chat receive cache: strict per-message, session and global bounds.
     public static final long FRAGMENT_SESSION_TTL_MS = 30L * 60L * 1000L;
     public static final int MAX_FRAGMENT_SESSIONS = 32;
     public static final int MAX_FRAGMENT_CACHE_CHARS = 2 * 1024 * 1024;
     public static final int MAX_PENDING_MESSAGES = LanChatRetryPolicy.MAX_PENDING_MESSAGES;
     public static final long MAX_PENDING_BODY_BYTES = LanChatRetryPolicy.MAX_PENDING_BODY_BYTES;
+    public static final long OUTBOX_MESSAGE_TTL_MS = LanChatRetryPolicy.OUTBOX_MESSAGE_TTL_MS;
     /** Maximum automatic sends in one retry epoch, including the original send. */
     public static final int MAX_AUTOMATIC_RETRY_ATTEMPTS = LanChatRetryPolicy.MAX_AUTOMATIC_RETRY_ATTEMPTS;
     /** A real network/peer recovery event may reopen an exhausted retry epoch once per minute. */
@@ -182,6 +183,8 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 "protocol_version INTEGER NOT NULL DEFAULT 2," +
                 "state TEXT NOT NULL DEFAULT 'discovery_pending'," +
                 "delivery_deadline_ms INTEGER NOT NULL DEFAULT 0," +
+                "expires_at_ms INTEGER NOT NULL DEFAULT 0," +
+                "terminal_reason TEXT NOT NULL DEFAULT ''," +
                 "retry_attempt_count INTEGER NOT NULL DEFAULT 0," +
                 "last_retry_at_ms INTEGER NOT NULL DEFAULT 0," +
                 "last_event_retry_at_ms INTEGER NOT NULL DEFAULT 0)");
@@ -267,6 +270,12 @@ public final class LanChatStore extends SQLiteOpenHelper {
      * Delivered/expired rows are terminal history and do not consume pending capacity;
      * waiting_peers and retry_paused rows remain pending and therefore do consume it.
      */
+    private static long safeExpiry(long createdAtMs) {
+        long base = createdAtMs > 0L ? createdAtMs : System.currentTimeMillis();
+        return base > Long.MAX_VALUE - OUTBOX_MESSAGE_TTL_MS
+                ? Long.MAX_VALUE : base + OUTBOX_MESSAGE_TTL_MS;
+    }
+
     private boolean hasOutboxCapacity(SQLiteDatabase db, String body) {
         if (body == null) return false;
         long incomingBytes = body.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
@@ -364,6 +373,19 @@ public final class LanChatStore extends SQLiteOpenHelper {
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_lan_fragments_session " +
                     "ON lan_chat_fragments(receiver_scope,sender_peer_id,message_id)");
         }
+        if (oldVersion < 12) {
+            if (!hasColumn(db, "lan_outbox", "expires_at_ms")) {
+                db.execSQL("ALTER TABLE lan_outbox ADD COLUMN expires_at_ms INTEGER NOT NULL DEFAULT 0");
+            }
+            if (!hasColumn(db, "lan_outbox", "terminal_reason")) {
+                db.execSQL("ALTER TABLE lan_outbox ADD COLUMN terminal_reason TEXT NOT NULL DEFAULT ''");
+            }
+            db.execSQL("UPDATE lan_outbox SET expires_at_ms=created_at_ms+" + OUTBOX_MESSAGE_TTL_MS
+                    + " WHERE expires_at_ms=0");
+            db.execSQL("UPDATE lan_outbox SET state='expired',terminal_reason='ttl' "
+                    + "WHERE state NOT IN ('delivered','expired') AND expires_at_ms>0 AND expires_at_ms<="
+                    + System.currentTimeMillis());
+        }
         if (oldVersion < 6) {
             // Fixed-recipient rows now use target-local counters. Discard the old aggregate
             // retry counter so it cannot distort the new per-target scheduling delay.
@@ -417,6 +439,8 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 outbox.put("protocol_version", 2);
                 outbox.put("state", "discovery_pending");
                 outbox.put("delivery_deadline_ms", 0L);
+                outbox.put("expires_at_ms", safeExpiry(createdAtMs));
+                outbox.put("terminal_reason", "");
                 if (db.insertWithOnConflict("lan_outbox", null, outbox,
                         SQLiteDatabase.CONFLICT_IGNORE) < 0
                         && !rowExists(db, "lan_outbox", "message_id=?", new String[]{messageId})) {
@@ -531,6 +555,8 @@ public final class LanChatStore extends SQLiteOpenHelper {
             // A queued message may wait behind other sends before reaching the network.
             // Keep the deadline unset until the first actual discovery transmission begins.
             v.put("delivery_deadline_ms", 0L);
+            v.put("expires_at_ms", safeExpiry(createdAtMs));
+            v.put("terminal_reason", "");
             long rowId = db.insertWithOnConflict("lan_outbox", null, v, SQLiteDatabase.CONFLICT_IGNORE);
             if (rowId < 0 && !rowExists(db, "lan_outbox", "message_id=?", new String[]{messageId})) {
                 return false;
