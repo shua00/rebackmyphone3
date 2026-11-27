@@ -156,5 +156,23 @@ class LanSecondaryListenerContractTests(unittest.TestCase):
         )
 
 
+    def test_former_primary_path_is_reconciled_after_its_socket_and_owner_are_released(self):
+        primary = self._method(
+            "private void startRescueListener()",
+            "private void releaseLanMulticastLock()",
+        )
+        finally_block = primary[primary.index("} finally {"):]
+        close_index = finally_block.index("rescueSocket.close()")
+        owner_index = finally_block.index("lanChatListenerRuntime.removeInstance(listenerInstance)")
+        reconcile_index = finally_block.index(
+            "reconcileLanChatSecondaryListeners(lanChatListenerPathPlan)"
+        )
+        self.assertLess(close_index, owner_index)
+        self.assertLess(owner_index, reconcile_index)
+        self.assertIn("if (!serviceDestroyed)", finally_block)
+        self.assertIn("former primary path may now be a desired secondary path", finally_block)
+        self.assertNotIn("postDelayed", finally_block[reconcile_index:reconcile_index + 300])
+
+
 if __name__ == "__main__":
     unittest.main()
