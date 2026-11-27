@@ -151,6 +151,45 @@ class TransferListenerRuntimeTests(unittest.TestCase):
         self.assertTrue(made[-1].stopped)
         runtime.close()
 
+    def test_refresh_recovers_after_interface_enumeration_failure(self):
+        snapshots = [self.wifi]
+        made = []
+
+        class FakeServer:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.stopped = False
+                made.append(self)
+
+            def start(self):
+                return self
+
+            def shutdown(self):
+                self.stopped = True
+
+        def provider():
+            snapshot = snapshots.pop(0)
+            if isinstance(snapshot, Exception):
+                raise snapshot
+            return tuple(snapshot)
+
+        runtime = TransferListenerRuntime(
+            path_provider=provider, server_factory=FakeServer,
+            local_peer_id="local", authenticate_peer=lambda *_: ("peer", b"x" * 32),
+            now_ms=lambda: 1,
+        )
+        first = runtime.start()
+        snapshots.append(OSError("temporary interface query failure"))
+        self.assertIsNone(runtime.refresh())
+        self.assertTrue(first.stopped)
+        self.assertIsNone(runtime.server)
+        snapshots.append([self.usb])
+        recovered = runtime.refresh()
+        self.assertIsNotNone(recovered)
+        self.assertEqual("10.20.0.2", recovered.kwargs["host"])
+        self.assertIs(runtime.path, self.usb)
+        runtime.close()
+
     def test_runtime_cannot_restart_after_close(self):
         runtime = TransferListenerRuntime(path_provider=lambda: (self.wifi,),
             server_factory=Mock(), local_peer_id="local",
