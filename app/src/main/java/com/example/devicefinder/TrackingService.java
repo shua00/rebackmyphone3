@@ -6738,7 +6738,6 @@ public class TrackingService extends Service implements LocationListener {
         java.util.Map<String, LanChatPathRegistry.RouteBinding> dispatchBindings =
                 new java.util.HashMap<>();
         java.util.Set<String> verifiedRoutePeerIds = new java.util.HashSet<>();
-        final int activeChatListenerCount = lanChatPathRegistry.listenerCount();
         final String preferredChatPath = rescueSocketPathFingerprint;
         final long routeLookupNow = android.os.SystemClock.elapsedRealtime();
         for (LanChatStore.Target target : savedTargets) {
@@ -6755,13 +6754,11 @@ public class TrackingService extends Service implements LocationListener {
                 verifiedRoutePeerIds.add(target.peerId);
                 continue;
             }
-            // The legacy SQLite endpoint has no path identity. It remains a compatibility
-            // candidate only while exactly one chat listener exists; it is never allowed
-            // to authorize a send in a multi-listener topology.
-            if (activeChatListenerCount == 1) {
-                java.net.InetSocketAddress cachedRoute = preparedCachedEndpoints.get(target.peerId);
-                if (cachedRoute != null) dispatchEndpoints.put(target.peerId, cachedRoute);
-            }
+            // SQLite stores one peer-wide endpoint and cannot prove which local ingress
+            // path authenticated it. Keep it as a directed-challenge candidate only; every
+            // chat/fragment datagram requires a current path-scoped Registry binding.
+            // This also prevents a route learned on a removed AP path from being reused after
+            // the topology collapses back to one STA listener.
         }
         java.util.Set<String> awaitingPeerIds = java.util.Collections.newSetFromMap(
                 new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
@@ -6769,11 +6766,7 @@ public class TrackingService extends Service implements LocationListener {
         final int totalPeerCount = pendingTargetIds.size();
         final int reachablePeerCount = awaitingPeerIds.size();
         final int verifiedRouteCount = verifiedRoutePeerIds.size();
-        final int cachedEndpointCount = Math.max(0, reachablePeerCount - verifiedRouteCount);
-        if (cachedEndpointCount > 0) {
-            FileLogger.log(this, "CHAT", "P2P 即时投递走持久化 endpoint count="
-                    + cachedEndpointCount + " message=" + messageId);
-        }
+
         boolean firstDiscoveryWindowOpen = false;
         if (totalPeerCount == 0) {
             try {
@@ -7684,9 +7677,9 @@ public class TrackingService extends Service implements LocationListener {
         if (binding != null) {
             return binding.isCurrentAndUsable() && lanChatPathRegistry.isCurrentBinding(binding);
         }
-        // Path-less persisted endpoints are a temporary legacy bridge for exactly one listener.
-        return lanChatPathRegistry.listenerCount() == 1
-                && isCurrentLanChatSocket(fallbackSocket, fallbackGeneration);
+        // A peer-wide persisted endpoint has no authenticated local path identity.
+        // It may seed a directed challenge, but can never authorize chat payload dispatch.
+        return false;
     }
 
     /**
