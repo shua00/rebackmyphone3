@@ -3032,11 +3032,12 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     /**
-     * Reconcile the dedicated TCP file-transfer listener against the selected Wi-Fi LAN.
-     * No fallback to the default cellular route is permitted. The listener binds to the
-     * selected Wi-Fi IPv4 address and is recreated whenever Network/interface/address changes.
-     * Credentials are encrypted by AndroidKeyStore and include an explicit peer allow-list;
-     * absent credentials means the file-transfer listener remains closed.
+     * Reconcile the dedicated TCP file-transfer listener against the selected LAN path.
+     * A suitable Android Wi-Fi Network wins; otherwise only one complete, unrepresented
+     * private IPv4 interface candidate may be used for a hidden hotspot AP. Cellular/VPN
+     * interfaces and ambiguous candidates are rejected. Candidate sockets bind their exact
+     * source address and do not gain Network.bindSocket semantics or cellular fallback.
+     * Credentials remain encrypted by AndroidKeyStore with an explicit peer allow-list.
      */
     private void refreshLanTransferTcpListener(String reason) {
         handler.removeCallbacks(lanTransferPathRefreshRunnable);
