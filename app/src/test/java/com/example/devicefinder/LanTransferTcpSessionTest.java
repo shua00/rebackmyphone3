@@ -506,4 +506,100 @@ public class LanTransferTcpSessionTest {
             store.closeStore();
         }
     }
+
+    @Test
+    public void corruptedDurableReceiptIsInvalidatedAndChunkCanBeRepaired() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        context.deleteDatabase("lan_p2p_transfer.db");
+        deleteTree(new File(context.getFilesDir(), "lan-transfer-staging"));
+        deleteTree(new File(context.getFilesDir(), "lan-transfer-received"));
+        LanTransferStore store = new LanTransferStore(context);
+        String id = "corrupt-receipt-repair";
+        byte[] payload = "repair-me".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        store.createOffer(new LanTransferStore.Offer(id, "sender", "receiver",
+                "repair.txt", payload.length, sha(payload), 1L, "text/plain"),
+                1L, 4096);
+        store.transition(id, "accepted", 2L);
+        store.transition(id, "transferring", 3L);
+        LanTransferFilesystem filesystem = new LanTransferFilesystem(context, store,
+                LanTransferFilesystem.DEFAULT_STAGING_QUOTA_BYTES, fileOps());
+        assertTrue(filesystem.writeChunk(id, 0, payload, 4L));
+        File staged = new File(new File(new File(context.getFilesDir(),
+                "lan-transfer-staging"), id), "payload.part");
+        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(staged, "rw")) {
+            raf.seek(0);
+            raf.write('X');
+            raf.getFD().sync();
+        }
+
+        LanTransferStore.MissingPage missing = filesystem.reconcilePage(id, 5L);
+        assertEquals(java.util.Collections.singletonList(0), missing.indexes);
+        assertFalse(missing.more);
+        assertNull(store.getChunkReceipt(id, 0));
+        assertEquals("transferring", store.getTransfer(id).state);
+
+        assertTrue(filesystem.writeChunk(id, 0, payload, 6L));
+        LanTransferStore.MissingPage repaired = filesystem.reconcilePage(id, 7L);
+        assertTrue(repaired.indexes.isEmpty());
+        assertFalse(repaired.more);
+        assertNotNull(store.getChunkReceipt(id, 0));
+        store.closeStore();
+    }
+
+    @Test
+    public void missingPagesAdvanceAcrossThreeAuthenticatedReconnects() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        context.deleteDatabase("lan_p2p_transfer.db");
+        deleteTree(new File(context.getFilesDir(), "lan-transfer-staging"));
+        deleteTree(new File(context.getFilesDir(), "lan-transfer-received"));
+        byte[] payload = new byte[130 * 4096];
+        for (int i = 0; i < payload.length; i++) payload[i] = (byte) (i % 251);
+        File source = new File(context.getCacheDir(), "lan-transfer-multipage-source.bin");
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(source)) {
+            out.write(payload);
+        }
+        LanTransferStore store = new LanTransferStore(context);
+        String id = "android-multipage-resume";
+        LanTransferStore.Offer offer = new LanTransferStore.Offer(id, "sender", "receiver",
+                source.getName(), payload.length, sha(payload), 1L, "application/octet-stream");
+        store.createOffer(offer, 1L, 4096);
+        store.transition(id, "accepted", 2L);
+        store.transition(id, "transferring", 3L);
+        LanTransferFilesystem filesystem = new LanTransferFilesystem(context, store,
+                LanTransferFilesystem.DEFAULT_STAGING_QUOTA_BYTES, fileOps());
+        LanTransferTcpSession session = new LanTransferTcpSession(context, store, filesystem,
+                "receiver", SECRET, "sender"::equals, () -> 10L, 64, 1024 * 1024, 5000);
+        ServerSocket listener = new ServerSocket(0);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<Integer> served = executor.submit(() -> {
+                int total = 0;
+                for (int i = 0; i < 3; i++) {
+                    try (Socket accepted = listener.accept()) { total += session.serve(accepted); }
+                }
+                return total;
+            });
+            java.util.List<Integer> remaining = null;
+            for (int attempt = 0; attempt < 3; attempt++) {
+                try (Socket client = new Socket("127.0.0.1", listener.getLocalPort())) {
+                    remaining = LanTransferTcpClient.sendFile(client, source, offer,
+                            "sender", "receiver", SECRET, 4096, 62, 1024 * 1024, null);
+                }
+                if (attempt < 2) assertFalse(remaining.isEmpty());
+            }
+            assertNotNull(remaining);
+            assertTrue(remaining.isEmpty());
+            assertEquals(192, (int) served.get(15, TimeUnit.SECONDS));
+            assertEquals("completed", store.getTransfer(id).state);
+            File[] published = new File(context.getFilesDir(), "lan-transfer-received").listFiles();
+            assertNotNull(published);
+            assertEquals(1, published.length);
+            assertArrayEquals(payload, Files.readAllBytes(published[0].toPath()));
+        } finally {
+            listener.close();
+            executor.shutdownNow();
+            store.closeStore();
+        }
+    }
+
 }
