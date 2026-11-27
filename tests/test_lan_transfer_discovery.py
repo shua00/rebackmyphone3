@@ -39,6 +39,14 @@ class LanTransferDiscoveryIsolationTests(unittest.TestCase):
         self.assertIn("item.networkFingerprint.equals(network)", source)
         self.assertIn("now-item.lastSeenAtMs<=ENDPOINT_TTL_MS", source)
 
+    def test_chat_path_listener_binding_is_exact_and_separate_from_ephemeral_sender_binding(self):
+        source = self.read("LanSocketBinding.java")
+        self.assertIn("bindDatagramListenerSocket", source)
+        self.assertIn("new java.net.InetSocketAddress(path.localAddress, port)", source)
+        self.assertIn("requireAndroidNetwork(path)", source)
+        self.assertIn("Listener socket must be open and unbound", source)
+        self.assertIn("socket.getLocalPort() != port", source)
+
     def test_pairing_control_is_independent_per_path_and_uses_all_fresh_endpoints(self):
         service = self.read("TrackingService.java")
         directory = self.read("LanTransferPeerDirectory.java")

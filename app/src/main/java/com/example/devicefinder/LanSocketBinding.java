@@ -18,6 +18,39 @@ import java.net.InetAddress;
 public final class LanSocketBinding {
     private LanSocketBinding() { }
 
+    /**
+     * Bind a UDP listener to one exact LAN address and port.
+     *
+     * Unlike bindDatagramSocket (an outbound socket helper which reserves an ephemeral
+     * source port for local-interface candidates), this method owns the listener bind.
+     * Exact-address binding permits independent STA/AP listeners on the same UDP port
+     * without a wildcard socket silently capturing traffic for another path.
+     */
+    public static void bindDatagramListenerSocket(LanNetworkPath path,
+            DatagramSocket socket, int port) throws IOException {
+        if (socket == null) throw new IllegalArgumentException("Socket is required");
+        if (path == null) throw new IOException("LAN path is required");
+        if (port < 1 || port > 65535)
+            throw new IllegalArgumentException("Listener port is invalid");
+        if (socket.isClosed() || socket.isBound())
+            throw new IOException("Listener socket must be open and unbound");
+        if (path.kind == LanNetworkPath.Kind.ANDROID_NETWORK) {
+            Network network = requireAndroidNetwork(path);
+            network.bindSocket(socket);
+        } else if (path.kind != LanNetworkPath.Kind.LOCAL_INTERFACE_CANDIDATE
+                || path.network != null) {
+            throw new IOException("Unsupported LAN listener path");
+        }
+        socket.setReuseAddress(true);
+        socket.setBroadcast(true);
+        socket.bind(new java.net.InetSocketAddress(path.localAddress, port));
+        if (!path.localAddress.equals(socket.getLocalAddress())
+                || socket.getLocalPort() != port) {
+            try { socket.close(); } catch (Exception ignored) { }
+            throw new IOException("UDP listener did not bind to the requested LAN path");
+        }
+    }
+
     public static void bindDatagramSocket(LanNetworkPath path, DatagramSocket socket)
             throws IOException {
         if (socket == null) throw new IllegalArgumentException("Socket is required");
