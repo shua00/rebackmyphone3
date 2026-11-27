@@ -3095,9 +3095,12 @@ public class TrackingService extends Service implements LocationListener {
         logLocalLanInterfaceCandidates(reason);
         refreshLanTransferPairingControlHost(reason);
         refreshLanTransferDiscovery(reason);
-        if (!LanTransferFeature.isEnabled(this) || Build.VERSION.SDK_INT < Build.VERSION_CODES.M
-                || serviceDestroyed) {
-            stopLanTransferTcpListener("feature disabled, unsupported or service destroyed");
+        if (!LanTransferFeature.isEnabled(this)) {
+            stopLanTransferTcpListener("file-transfer feature disabled");
+            return;
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || serviceDestroyed) {
+            stopLanTransferTcpListener("unsupported or service destroyed");
             return;
         }
         final LanTransferCredentials.Value credentials;

@@ -45,7 +45,10 @@ class LanTransferDiscoveryIsolationTests(unittest.TestCase):
         self.assertIn("private void refreshLanTransferDiscovery(String reason)", service)
         self.assertIn("LanTransferDiscovery discovery = new LanTransferDiscovery", service)
         self.assertIn("closeLanTransferDiscoveryLocked();", service)
-        self.assertIn("LanTransferPeerDirectory.activateNetwork(this, fingerprint);", service)
+        self.assertIn("LanTransferPeerDirectory.activatePath(this, fingerprint);", service)
+        self.assertIn("currentLanTransferPathSet(cm)", service)
+        self.assertIn("lanTransferDiscoveries", service)
+        self.assertIn("lanTransferTcpListeners", service)
         self.assertIn("private void closeLanTransferResources()", service)
 
 
