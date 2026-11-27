@@ -291,3 +291,13 @@ CI 验证补充（secondary listener 代码阶段，2026-11-27）：
 - [x] 新增 Python 静态契约：锁定 peer.ack 使用精确 ingress epoch，且 route admission 失败必须先于全局 peer cache promotion。
 - [ ] 本轮新提交尚未取得 Android Gradle / Python / Windows CI 结果；必须以新 head 的完整 Actions 结果作为构建验收，不得引用前一轮成功 run。
 - [ ] 同一 peer 在多路径同时认证时，Registry 保留 peer × path 的独立路由；peer-wide SQLite/cache 仍只是兼容性提示，不得在多 Listener 下作为发送授权或 ACK 归属依据。后续继续审查其过期、发现抑制与路径降级语义。
+
+
+## 2026-11-27 批次 C：peer challenge nonce 的出站路径归属
+
+- [x] 为每个待确认 challenge nonce 记录实际发出它的 Listener path fingerprint、DatagramSocket 和 generation。
+- [x] secondary path HELLO、primary discovery HELLO 与定向 challenge 均通过当前 runtime lease 注册 nonce 的出站归属；无法匹配当前 lease 时不发送/不保留可接受的挑战。
+- [x] 收到 peer.ack 时，先校验 nonce 对应的出站 lease 与本次 ACK 的 ingress path/socket/generation 完全一致，再允许进入异步持久化。
+- [x] 定向 nonce 被消费、挑战超时或网络路径失效时，同时清理出站归属；广播发现 nonce 仍可在其短窗口内收集同一路径的多个 peer。
+- [x] 新增 Python 静态契约覆盖 nonce 出站绑定、ACK ingress 匹配与清理边界。
+- [ ] 尚未取得本轮新 head 的 CI 结果；仍需 Android unit tests、Debug/Slim build、Python 全量测试和 Windows binding 验证。
