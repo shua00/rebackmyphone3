@@ -7271,6 +7271,9 @@ public class TrackingService extends Service implements LocationListener {
                 return true;
             }
             if ("peer.ack".equals(type)) {
+                // A challenge response without a live ingress lease cannot establish a
+                // path-scoped route or promote a peer-wide endpoint.
+                if (ackIngressPath == null || ackIngressGeneration < 0L) return true;
                 String nonce = envelope.optString("reply_nonce", "");
                 java.util.concurrent.CountDownLatch latch = pendingPeerChallenges.get(nonce);
                 int port = packet.getPort();
@@ -7304,6 +7307,9 @@ public class TrackingService extends Service implements LocationListener {
                     final long verifiedListenerGeneration = ackIngressGeneration;
                     try {
                         lanChatControlExecutor.execute(() -> {
+                            // The ACK may wait in this queue while its ingress path is replaced.
+                            if (!isCurrentLanChatIngress(verifiedPathFingerprint, socket,
+                                    verifiedListenerGeneration)) return;
                             long controlQueueMs = android.os.SystemClock.elapsedRealtime()
                                     - packetReceivedAtElapsedMs;
                             if (controlQueueMs >= 150L) {
@@ -7316,11 +7322,12 @@ public class TrackingService extends Service implements LocationListener {
                                 FileLogger.log(this, "CHAT", "⚠️ peer.ack 路由持久化失败，暂不启用单播");
                                 return;
                             }
-                            // Mirror the durable authenticated route into the path-scoped
-                            // runtime registry only if this exact listener still owns the
-                            // receive socket that accepted the challenge response.
-                            if (isCurrentLanChatIngress(verifiedPathFingerprint, socket,
-                                    verifiedListenerGeneration)) {
+                            // The listener may be replaced while the durable peer write runs.
+                            // Do not promote global peer state or release waiters for a stale epoch.
+                            if (!isCurrentLanChatIngress(verifiedPathFingerprint, socket,
+                                    verifiedListenerGeneration)) return;
+                            // Mirror the durable authenticated route into the path-scoped registry.
+                            {
                                 try {
                                     // Registry leases and ACK freshness use elapsed realtime,
                                     // never wall-clock time (which can jump after clock sync).
