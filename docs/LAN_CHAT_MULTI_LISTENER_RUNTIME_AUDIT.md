@@ -237,3 +237,11 @@ CI 验证（2026-11-27）：
 - [ ] 新增的 `tests/test_lan_secondary_listener_contract.py` 与 Android build 正在 CI 验证；CI 通过后才确认代码阶段完成。
 - [x] 若设备仅有未被 ConnectivityManager 表示的 AP/local LAN path，primary 也按 path plan 精确绑定该本地地址；广播和 network_scope 使用同一 primary path identity。
 - [ ] 仍需设备验证：OEM AP 地址是否可绑定、AP/STA 广播和 ACK 是否双向到达、热点 NAT/客户端隔离对任意两台通信的影响，以及三设备三组双向验收。
+
+
+CI 验证补充（secondary listener 代码阶段，2026-11-27）：
+
+- [x] commit `82c8b012b118a539ffb1bbeb01cc0a964876647c` / run [45988859572](https://github.com/shua00/rebackmyphone3/actions/runs/45988859572)：Python 447 tests（skipped=1）、Windows socket binding、Android unit/debug/slim build 全通过；artifact `15193211135`。该构建包含 AP-only primary 精确绑定及所有已验证 secondary path 接入。
+- [x] commit `c1a28a0d21fb55bbb3fc3d8553fb9138388fe3b6` / run [45989057403](https://github.com/shua00/rebackmyphone3/actions/runs/45989057403)：Python 447 tests（skipped=1）、Windows socket binding、Android unit/debug/slim build 全通过；artifact `15192233835`。该构建包含 AP-only primary path 地址变化/消失时的 generation-safe rebind。
+- [x] commit `79c2d2c77b8f4546b281aa89df3cc932984b68ac` / run [45989092125](https://github.com/shua00/rebackmyphone3/actions/runs/45989092125)：Python 448 tests（skipped=1）、Windows socket binding 通过；仅测试文件变更，Android build 按路径过滤跳过。
+- [ ] CI 只验证代码/构建契约。尚未证明真实设备的热点广播覆盖、不同 OEM 的精确 bind、跨 STA/AP ACK 路由、热点 NAT/客户端隔离或三设备任意两台双向通信。
