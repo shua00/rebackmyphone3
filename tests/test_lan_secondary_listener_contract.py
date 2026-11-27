@@ -111,6 +111,7 @@ class LanSecondaryListenerContractTests(unittest.TestCase):
             stop.index("socket.close()"),
             stop.index("lanChatListenerRuntime.removeInstance(instance)"),
         )
+        self.assertIn("secondaryListenerRetryAttempts.remove(instance.pathFingerprint)", stop)
 
     def test_service_destroy_closes_ingress_and_retires_secondary_start_races(self):
         destroy = self._method(
