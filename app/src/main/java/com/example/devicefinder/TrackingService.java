@@ -8140,7 +8140,7 @@ public class TrackingService extends Service implements LocationListener {
                     // thread must never read/clear the replacement listener's path field.
                     String ownedPath = listenerPathFingerprint;
                     if (ownedPath != null && !ownedPath.isEmpty()) {
-                        lanChatPathRegistry.removeListener(ownedPath, rescueSocket);
+                        lanChatPathRegistry.removeListener(ownedPath, rescueSocket, listenerGeneration);
                         synchronized (rescueLock) {
                             if (rescueSocketRef == rescueSocket
                                     && ownedPath.equals(rescueSocketPathFingerprint)) {
