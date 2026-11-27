@@ -140,9 +140,9 @@ public final class LanTransferTcpClient {
 
     private static Socket connectOnPath(LanNetworkPath path, String host, int port,
             int connectTimeoutMs) throws IOException {
-        if (path == null || path.network == null || host == null || host.isEmpty()
+        if (path == null || host == null || host.isEmpty()
                 || port < 1 || port > 65535 || connectTimeoutMs < 1000 || connectTimeoutMs > 60000)
-            throw new IOException("A Network-backed LAN path and valid destination are required");
+            throw new IOException("A selected LAN interface path and valid destination are required");
         InetAddress resolved = InetAddress.getByName(host);
         if (!(resolved instanceof Inet4Address) || !resolved.getHostAddress().equals(host)
                 || !LanTransferIpv4Subnet.contains(path.localAddress, path.prefixLength,
