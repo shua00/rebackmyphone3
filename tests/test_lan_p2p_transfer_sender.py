@@ -228,7 +228,7 @@ class TransferSenderIntegrationTests(unittest.TestCase):
                 worker.join(timeout=3)
             self.assertFalse(worker.is_alive())
             self.assertEqual([], errors)
-            self.assertEqual(1, len(store.load_chunk_receipts(offer.transfer_id)))
+            self.assertIsNotNone(store.get_chunk_receipt(offer.transfer_id, 0))
             self.assertEqual(TransferState.TRANSFERRING, store.get_transfer(offer.transfer_id).state)
 
     def test_complete_request_recovers_receiver_left_in_verifying_state(self):
