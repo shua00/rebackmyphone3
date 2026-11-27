@@ -3664,6 +3664,13 @@ public class TrackingService extends Service implements LocationListener {
                 registerReceiver(receiver, filter);
             }
             lanHotspotStateReceiver = receiver;
+            if (serviceDestroyed) {
+                // Close the narrow startup-vs-onDestroy race: teardown may have observed
+                // a null field immediately before this registration was published.
+                try { unregisterReceiver(receiver); } catch (Exception ignored) { }
+                lanHotspotStateReceiver = null;
+                return;
+            }
             FileLogger.logD("CHAT", "Hotspot/tethering event observer registered (best-effort)");
         } catch (Exception registrationFailure) {
             // Not all OEMs expose these broadcasts to ordinary applications. Do not
