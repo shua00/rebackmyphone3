@@ -241,7 +241,8 @@ def broadcast_chat_message(payload_str):
 def send_chat_v2(body, display_name, message_id):
     """Durable standalone chat sender; ACKs return to the bound 8890 listener."""
     # Fixed recipient set includes previously known devices even when their lease expired.
-    target_ids = [peer["peer_id"] for peer in list_known_peer_snapshot(CHAT_DB, "chat.py")]
+    peer_snapshot = list_known_peer_snapshot(CHAT_DB, "chat.py")
+    target_ids = [peer["peer_id"] for peer in peer_snapshot]
     created = int(time.time() * 1000)
     probe = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
              "sender_peer_type": "chat.py", "service_id": PEER_NODE_ID,
@@ -249,8 +250,16 @@ def send_chat_v2(body, display_name, message_id):
              "created_at_ms": created, "display_name": display_name, "body": body}
     try:
         broadcast_bytes = encode_packet(probe, RESCUE_SECRET)
+        long_message = False
     except ValueError:
-        return False
+        try:
+            build_authenticated_chat_fragment_packets(
+                message_id, "*", body, created, PEER_NODE_ID, "chat.py",
+                PEER_NODE_ID, RESCUE_SECRET, display_name)
+            broadcast_bytes = None
+            long_message = True
+        except ValueError:
+            return False
     if not persist_outgoing_message(CHAT_DB, "chat.py", PEER_NODE_ID,
                                     message_id, body, target_ids, created):
         return False
@@ -260,18 +269,37 @@ def send_chat_v2(body, display_name, message_id):
         return True
     try:
         if target_ids:
-            # Fixed identities remain immutable; send to their persisted endpoint immediately.
-            send_outbox_to_active_peers(
-                sock, CHAT_DB, "chat.py", message_id, probe, RESCUE_SECRET,
-                send_lock=UDP_CHAT_SEND_LOCK, attempts=1, retry_delay_seconds=0.25)
+            if long_message:
+                for peer in peer_snapshot:
+                    endpoint_ip = peer.get("endpoint_ip") or ""
+                    endpoint_port = int(peer.get("endpoint_port") or UDP_DEVICE_PORT)
+                    if endpoint_ip and endpoint_port in (8887, 8888, 8889, 8890):
+                        send_outgoing_fragment_window(
+                            sock, CHAT_DB, "chat.py", message_id, peer["peer_id"],
+                            body, created, (endpoint_ip, endpoint_port), PEER_NODE_ID,
+                            "chat.py", PEER_NODE_ID, RESCUE_SECRET,
+                            send_lock=UDP_CHAT_SEND_LOCK, display_name=display_name,
+                            mark_attempt=True, allow_fast_retry=True)
+            else:
+                # Fixed identities remain immutable; short messages keep the single-packet path.
+                send_outbox_to_active_peers(
+                    sock, CHAT_DB, "chat.py", message_id, probe, RESCUE_SECRET,
+                    send_lock=UDP_CHAT_SEND_LOCK, attempts=1, retry_delay_seconds=0.25)
         else:
             targets = list(get_subnet_broadcasts())
             targets.append("255.255.255.255")
             destinations = [(target_ip, port) for target_ip in dict.fromkeys(targets)
                             for port in (UDP_DEVICE_PORT, 8887, 8889)]
-            send_discovery_broadcast_with_retries(
-                sock, CHAT_DB, "chat.py", message_id, broadcast_bytes, destinations,
-                send_lock=UDP_CHAT_SEND_LOCK, attempts=3, retry_delay_seconds=0.25)
+            if long_message:
+                send_discovery_fragment_window(
+                    sock, CHAT_DB, "chat.py", message_id, body, created,
+                    destinations, PEER_NODE_ID, "chat.py", PEER_NODE_ID,
+                    RESCUE_SECRET, send_lock=UDP_CHAT_SEND_LOCK,
+                    display_name=display_name)
+            else:
+                send_discovery_broadcast_with_retries(
+                    sock, CHAT_DB, "chat.py", message_id, broadcast_bytes, destinations,
+                    send_lock=UDP_CHAT_SEND_LOCK, attempts=3, retry_delay_seconds=0.25)
         return True
     except Exception as e:
         print(f"⚠️ chat.py LAN send failed; message remains pending: {type(e).__name__}")
