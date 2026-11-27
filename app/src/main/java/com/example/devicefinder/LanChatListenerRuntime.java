@@ -38,6 +38,9 @@ public final class LanChatListenerRuntime {
 
     private final LanChatPathRegistry registry;
     private final Map<String, Lease> leases = new HashMap<>();
+    // Receive-loop owners are keyed independently from socket leases. This lets lifecycle
+    // code coordinate worker identity without putting blocking close/join operations here.
+    private final Map<String, LanChatListenerInstance> instances = new HashMap<>();
 
     public LanChatListenerRuntime(LanChatPathRegistry registry) {
         if (registry == null) throw new IllegalArgumentException("Path registry is required");
@@ -87,6 +90,37 @@ public final class LanChatListenerRuntime {
     public synchronized List<Lease> snapshot() {
         if (leases.isEmpty()) return Collections.emptyList();
         return Collections.unmodifiableList(new ArrayList<>(leases.values()));
+    }
+
+    /** Claim one receive-loop owner for a path; caller creates/starts its worker outside this monitor. */
+    public synchronized boolean installInstance(LanChatListenerInstance instance) {
+        if (instance == null || instance.pathFingerprint == null
+                || instance.pathFingerprint.trim().isEmpty()) return false;
+        if (instances.containsKey(instance.pathFingerprint)) return false;
+        instances.put(instance.pathFingerprint, instance);
+        return true;
+    }
+
+    /** Compare-and-remove by object identity so an old worker cannot remove its replacement. */
+    public synchronized boolean removeInstance(LanChatListenerInstance expected) {
+        if (expected == null || expected.pathFingerprint == null
+                || instances.get(expected.pathFingerprint) != expected) return false;
+        instances.remove(expected.pathFingerprint);
+        return true;
+    }
+
+    public synchronized LanChatListenerInstance getInstance(String pathFingerprint) {
+        return instances.get(pathFingerprint);
+    }
+
+    /** Immutable lifecycle snapshot; never called from a packet-processing fast path. */
+    public synchronized List<LanChatListenerInstance> instanceSnapshot() {
+        if (instances.isEmpty()) return Collections.emptyList();
+        return Collections.unmodifiableList(new ArrayList<>(instances.values()));
+    }
+
+    public synchronized int instanceCount() {
+        return instances.size();
     }
 
     public synchronized int listenerCount() {
