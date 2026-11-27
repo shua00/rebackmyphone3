@@ -7373,12 +7373,18 @@ public class TrackingService extends Service implements LocationListener {
                                     lanChatPathRegistry.recordVerifiedPeer(senderId,
                                             verifiedPathFingerprint,
                                             new java.net.InetSocketAddress(peerAddress, port),
-                                            verifiedAt, verifiedAt + 120_000L);
+                                            verifiedAt, verifiedAt + 120_000L,
+                                            socket, verifiedListenerGeneration);
                                 } catch (RuntimeException registryFailure) {
-                                    FileLogger.logD("CHAT", "verified route registry mirror deferred: "
+                                    FileLogger.logD("CHAT", "verified route registry admission rejected: "
                                             + registryFailure.getClass().getSimpleName());
+                                    return;
                                 }
                             }
+                            // The exact socket/generation was checked atomically during registry
+                            // admission. Recheck before updating peer-wide compatibility hints.
+                            if (!isCurrentLanChatIngress(verifiedPathFingerprint, socket,
+                                    verifiedListenerGeneration)) return;
                             // upsertPeer() atomically commits this verified route and joins all
                             // still-open first-discovery target snapshots in the same transaction.
                             synchronized (verifiedChatPeerRouteVersions) {
