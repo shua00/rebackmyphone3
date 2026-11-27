@@ -42,7 +42,14 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
         self.assertIn("ingressListener.generation == listenerGeneration", method)
         self.assertIn("ingressListener.pathFingerprint.equals(listenerPathFingerprint)", method)
         self.assertIn("ingressListener.isUsable()", method)
-        executable = "\\n".join(\n            line for line in method.splitlines()\n            if not line.lstrip().startswith("//")\n        )\n        self.assertNotIn("rescueSocketPathFingerprint", executable)
+        executable = "\n".join(
+            line for line in method.splitlines()
+            if not line.lstrip().startswith("//")
+        )\n        self.assertNotIn("rescueSocketPathFingerprint", executable)
+
+        self.assertIn("if (ackIngressPath == null || ackIngressGeneration < 0L) return true;", method)
+        self.assertIn("isCurrentLanChatIngress(verifiedPathFingerprint, socket,", method)
+        self.assertIn("verifiedListenerGeneration)) return;", method)
 
     def test_async_chat_and_fragment_ack_keep_ingress_socket_and_epoch(self):
         method = self._method(
