@@ -2385,7 +2385,43 @@ public class TrackingService extends Service implements LocationListener {
         // interface exists. Source-address binding is not Network.bindSocket; the OS must route
         // that exact source/subnet or the connection fails. Ambiguity is always fail-closed.
         return LanTransferPathSelector.select(null,
-                LanNetworkPath.enumerateLocalInterfaceCandidates());
+                enumerateUnrepresentedLanCandidates(cm));
+    }
+
+    /**
+     * The interface enumerator also sees cellular/VPN addresses that are not Wi-Fi LAN paths.
+     * Exclude any interface explicitly represented by a cellular or VPN Network before
+     * considering an unrepresented AP candidate. If this snapshot cannot be inspected,
+     * fail closed rather than risking a cellular-bound fallback.
+     */
+    private List<LanNetworkPath> enumerateUnrepresentedLanCandidates(ConnectivityManager cm)
+            throws java.io.IOException {
+        if (cm == null) throw new java.io.IOException("ConnectivityManager unavailable");
+        java.util.Set<String> excludedInterfaces = new java.util.HashSet<>();
+        try {
+            for (Network network : cm.getAllNetworks()) {
+                NetworkCapabilities capabilities = cm.getNetworkCapabilities(network);
+                if (capabilities == null)
+                    throw new java.io.IOException("Incomplete Network capabilities snapshot");
+                if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+                        || capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                    LinkProperties links = cm.getLinkProperties(network);
+                    if (links == null || links.getInterfaceName() == null
+                            || links.getInterfaceName().isEmpty())
+                        throw new java.io.IOException("Incomplete cellular/VPN interface snapshot");
+                    excludedInterfaces.add(links.getInterfaceName());
+                }
+            }
+            List<LanNetworkPath> result = new ArrayList<>();
+            for (LanNetworkPath candidate : LanNetworkPath.enumerateLocalInterfaceCandidates()) {
+                if (!excludedInterfaces.contains(candidate.interfaceName)) result.add(candidate);
+            }
+            return result;
+        } catch (java.io.IOException failure) {
+            throw failure;
+        } catch (Exception failure) {
+            throw new java.io.IOException("Unable to safely enumerate unrepresented LAN interfaces", failure);
+        }
     }
 
     private String buildWifiLanFingerprint(ConnectivityManager cm) {
