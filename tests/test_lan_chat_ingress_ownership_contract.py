@@ -145,7 +145,8 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
             "private void transmitLocalUdpMessageInternal(",
             "private boolean hasFreshLanChatPeerRoute(",
         )
-        self.assertIn("preparedCachedEndpoints.get(target.peerId)", sender)
+        self.assertIn("target.endpointIp == null || target.endpointIp.isEmpty()", sender)
+        self.assertIn("sendDirectedPeerChallenge(socket, challengePeerId, savedAddress, challengePort)", sender)
         self.assertIn("directed-challenge candidate only", sender)
         self.assertNotIn("dispatchEndpoints.put(target.peerId, cachedRoute)", sender)
         binding_guard = self._method(
