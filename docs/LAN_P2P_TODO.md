@@ -457,3 +457,11 @@
 - [x] Python CI 已通过 410 项测试；共享七帧向量、认证向量和服务信任撤销测试均包含在内。
 - [ ] Android 单测/APK 构建正在对最新修正重新执行。此前 Android 失败分别定位为测试向量 NUL 转义写错、Android JSON 正斜杠转义不兼容；均已修正并提交，不能把先前失败运行计为通过。
 - [ ] 仍需补齐真实 Android↔Python TCP socket 双端运行测试，以及完整 offer/accept/chunk ACK/missing/complete 状态语义、SHA-256、断点续传重启测试。黄金向量只证明序列化/认证原语兼容，不替代端到端传输验收。
+
+## 第二批次推进补充（2026-11-27）：VERIFYING 状态崩溃恢复语义对齐
+
+- [x] 对照 Python `serve_transfer_session()` 与 Android `LanTransferTcpSession.serve()`，发现 Android `complete` 请求只接受 `transferring/completed`，而 Python 同时接受 `transferring/verifying/completed`。
+- [x] 确认 Android `LanTransferFilesystem.assembleAndPublish()` 已具备 `verifying` 状态恢复逻辑：可恢复 rename 前后的崩溃窗口、重新校验 staging receipts、完成 SHA-256 并原子发布；但 TCP session 的状态门禁此前阻止了远端重连触发该恢复。
+- [x] Android TCP session 现允许 `verifying` 状态收到 `complete` 后进入既有恢复/校验流程；未改变状态机迁移规则、文件落盘顺序或聊天数据面。
+- [x] 新增 Android loopback TCP 回归测试：预置完整 chunk receipt 并将任务置于 `verifying`，模拟进程重启后发送 `complete`，验证服务端完成发布、状态进入 `completed` 且文件 SHA-256/内容一致。
+- [ ] 最新修正仍需由 Android Gradle 单测和 APK CI 验证；此修正只解决一个已定位的跨端恢复状态门禁差异，不代表完整 Android↔Python 端到端互通验收完成。
