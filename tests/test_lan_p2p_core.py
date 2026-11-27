@@ -6400,3 +6400,65 @@ assert duplicate == 'complete_duplicate', duplicate
                 [sys.executable, "-c", second_process, db_path, message_id],
                 cwd=str(repo_root), env=env, capture_output=True, text=True, timeout=20)
             self.assertEqual(0, resumed.returncode, resumed.stderr)
+
+
+class PythonLongChatSenderProcessRestartTests(unittest.TestCase):
+    def test_sender_fragment_bitmap_resumes_missing_flight_after_process_restart(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "sender.sqlite3")
+            body = "sender-restart-selective-ACK🙂" * 500
+            message_id = "sender-restart-fragments"
+            first_process = """
+import sys
+from lan_p2p_core import (
+    persist_outgoing_message, initialize_outgoing_fragment_progress,
+    record_outgoing_fragment_ack, fragment_chat_message, mark_outgoing_attempt,
+)
+db, message_id = sys.argv[1], sys.argv[2]
+body = 'sender-restart-selective-ACK🙂' * 500
+fragments = fragment_chat_message(message_id, 'peer-target', body, 123456)
+assert persist_outgoing_message(
+    db, 'server2', 'peer-sender', message_id, body, ['peer-target'], 123456)
+assert initialize_outgoing_fragment_progress(db, message_id, 'peer-target', len(fragments))
+assert mark_outgoing_attempt(db, message_id, 'peer-target', '192.0.2.60', 8888,
+                              allow_fast_retry=True)
+for index in (0, 2):
+    assert record_outgoing_fragment_ack(
+        db, 'server2', message_id, 'peer-target', index,
+        '192.0.2.60', 8888, now_ms=200000)
+"""
+            repo_root = Path(__file__).resolve().parents[1]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+            created = subprocess.run(
+                [sys.executable, "-c", first_process, db_path, message_id],
+                cwd=str(repo_root), env=env, capture_output=True, text=True, timeout=20)
+            self.assertEqual(0, created.returncode, created.stderr)
+
+            second_process = """
+import sys
+from lan_p2p_core import (
+    send_outgoing_fragment_window, decode_packet,
+    load_outgoing_fragment_ack_bitmap,
+)
+db, message_id = sys.argv[1], sys.argv[2]
+body = 'sender-restart-selective-ACK🙂' * 500
+class FakeSocket:
+    def __init__(self):
+        self.sent = []
+    def sendto(self, raw, endpoint):
+        self.sent.append((raw, endpoint))
+sock = FakeSocket()
+assert load_outgoing_fragment_ack_bitmap(db, message_id, 'peer-target').startswith('101')
+sent = send_outgoing_fragment_window(
+    sock, db, 'server2', message_id, 'peer-target', body, 123456,
+    ('192.0.2.60', 8888), 'peer-sender', 'server2', 'peer-sender', 'secret',
+    mark_attempt=True, allow_fast_retry=True)
+indexes = [decode_packet(raw, 'secret')['fragment_index'] for raw, _ in sock.sent]
+assert sent == 6, (sent, indexes)
+assert indexes == [1, 3, 4, 5, 6, 7], indexes
+"""
+            resumed = subprocess.run(
+                [sys.executable, "-c", second_process, db_path, message_id],
+                cwd=str(repo_root), env=env, capture_output=True, text=True, timeout=20)
+            self.assertEqual(0, resumed.returncode, resumed.stderr)
