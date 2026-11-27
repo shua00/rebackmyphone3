@@ -1,6 +1,7 @@
 # ============================================================
 # Build and validation pipeline — LAN P2P v2
 # Android APK compilation is path-gated; docs/changelog-only commits
+# Path-scoped LAN chat route-binding changes are Android build inputs via app/**.
 # do not start this workflow.
 # ============================================================
 name: Build APK
