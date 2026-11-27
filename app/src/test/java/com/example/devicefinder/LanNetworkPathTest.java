@@ -44,43 +44,57 @@ public class LanNetworkPathTest {
         assertTrue(path.toString().contains("broadcast=none"));
     }
 
-    @Test public void hotspotCandidateCannotBeUsedForDatagramSocketBinding() throws Exception {
+    @Test public void hotspotCandidateDatagramSenderPinsItsSourceAddress() throws Exception {
         LanNetworkPath candidate = LanNetworkPath.localInterfaceCandidate(
                 "vendor_ap42", ipv4("192.168.43.1"), 24, ipv4("192.168.43.255"));
-        java.net.DatagramSocket socket = new java.net.DatagramSocket(null);
+        RecordingDatagramSocket socket = new RecordingDatagramSocket();
         try {
             LanSocketBinding.bindDatagramSocket(candidate, socket);
-            fail("candidate must not silently use the process default network");
-        } catch (java.io.IOException expected) {
-            assertTrue(expected.getMessage().contains("binding is unavailable"));
+            assertEquals(new java.net.InetSocketAddress("192.168.43.1", 0), socket.bound);
         } finally {
             socket.close();
         }
     }
 
-    @Test public void hotspotCandidateCannotBeUsedForStreamSocketBinding() throws Exception {
+    @Test public void hotspotCandidateStreamClientPinsItsSourceAddress() throws Exception {
         LanNetworkPath candidate = LanNetworkPath.localInterfaceCandidate(
                 "vendor_ap42", ipv4("192.168.43.1"), 24, ipv4("192.168.43.255"));
-        java.net.Socket socket = new java.net.Socket();
+        RecordingSocket socket = new RecordingSocket();
+        LanSocketBinding.bindStreamSocket(candidate, socket);
+        assertEquals(new java.net.InetSocketAddress("192.168.43.1", 0), socket.bound);
+    }
+
+    @Test public void serverListenerCanBindExactHotspotCandidateAddress() throws Exception {
+        LanNetworkPath candidate = LanNetworkPath.localInterfaceCandidate(
+                "vendor_ap42", ipv4("192.168.43.1"), 24, ipv4("192.168.43.255"));
+        LanSocketBinding.validateServerSocketAddress(candidate, ipv4("192.168.43.1"));
         try {
-            LanSocketBinding.bindStreamSocket(candidate, socket);
-            fail("candidate must not silently use the process default network");
+            LanSocketBinding.validateServerSocketAddress(candidate, ipv4("192.168.43.2"));
+            fail("listener must bind only to the selected AP address");
         } catch (java.io.IOException expected) {
-            assertTrue(expected.getMessage().contains("binding is unavailable"));
-        } finally {
-            socket.close();
+            assertTrue(expected.getMessage().contains("does not match"));
         }
     }
 
-    @Test public void serverListenerRejectsUnboundHotspotCandidate() throws Exception {
+    @Test public void hotspotCandidateCanConstructIndependentDiscovery() throws Exception {
         LanNetworkPath candidate = LanNetworkPath.localInterfaceCandidate(
                 "vendor_ap42", ipv4("192.168.43.1"), 24, ipv4("192.168.43.255"));
-        try {
-            LanSocketBinding.validateServerSocketAddress(candidate, ipv4("192.168.43.1"));
-            fail("listener must reject a candidate without a bindable Android Network");
-        } catch (java.io.IOException expected) {
-            assertTrue(expected.getMessage().contains("binding is unavailable"));
-        }
+        LanTransferDiscovery discovery = new LanTransferDiscovery(
+                org.robolectric.RuntimeEnvironment.getApplication(), candidate, "local-peer",
+                candidate.localAddress, candidate.broadcastAddress, "ap-fingerprint", () -> 38471);
+        assertNotNull(discovery);
+        discovery.close();
+    }
+
+    private static final class RecordingSocket extends java.net.Socket {
+        java.net.SocketAddress bound;
+        @Override public void bind(java.net.SocketAddress address) { bound = address; }
+    }
+
+    private static final class RecordingDatagramSocket extends java.net.DatagramSocket {
+        java.net.SocketAddress bound;
+        RecordingDatagramSocket() throws java.net.SocketException { super((java.net.SocketAddress) null); }
+        @Override public void bind(java.net.SocketAddress address) { bound = address; }
     }
 
     @Test public void serverListenerAddressMustMatchSelectedPath() throws Exception {
