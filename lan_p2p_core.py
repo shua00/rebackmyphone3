@@ -941,10 +941,11 @@ def record_outgoing_fragment_ack(db_path, sender_scope, message_id, peer_id,
                 _safe_rollback(conn)
                 return None
             conn.execute("""INSERT INTO lan_outbox_targets
-                (message_id,peer_id,status,last_ack_at,last_endpoint,last_attempt_endpoint,
-                 last_sent_endpoint,fragment_count,fragment_ack_bitmap)
-                VALUES(?,?,'sent',?,?,?,?,?,?)""",
-                (message_id, peer_id, now, endpoint, endpoint, endpoint, count, "0" * count))
+                (message_id,peer_id,status,attempt_count,last_attempt_at,last_ack_at,
+                 last_endpoint,last_attempt_endpoint,last_sent_endpoint,
+                 fragment_count,fragment_ack_bitmap)
+                VALUES(?,?,'sent',1,?,?,?,?,?,?,?)""",
+                (message_id, peer_id, now, now, endpoint, endpoint, endpoint, count, "0" * count))
             target = (count, "0" * count, "sent")
         existing_count, bitmap, status = int(target[0] or 0), target[1] or "", target[2]
         if status == "acked":
