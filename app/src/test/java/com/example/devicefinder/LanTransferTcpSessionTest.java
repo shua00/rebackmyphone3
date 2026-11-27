@@ -66,9 +66,8 @@ public class LanTransferTcpSessionTest {
 
     private static String finishPythonIntegration(Process process) throws Exception {
         assertTrue("Python integration process timed out", process.waitFor(30, TimeUnit.SECONDS));
-        byte[] output = new byte[process.getInputStream().available()];
-        int count = process.getInputStream().read(output);
-        String text = count > 0 ? new String(output, 0, count, java.nio.charset.StandardCharsets.UTF_8) : "";
+        byte[] output = process.getInputStream().readAllBytes();
+        String text = new String(output, java.nio.charset.StandardCharsets.UTF_8);
         assertEquals("Python integration process failed: " + text, 0, process.exitValue());
         return text;
     }
@@ -727,7 +726,7 @@ public class LanTransferTcpSessionTest {
         File portFile = new File(root, "port");
         String transferId = "android-python-real-tcp";
         String secret = SECRET;
-        String script = String.join("\\n",
+        String script = String.join("\n",
                 "import hashlib, socket, sys",
                 "from pathlib import Path",
                 "from lan_p2p_transfer import TransferState",
