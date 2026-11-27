@@ -495,10 +495,17 @@
 - [x] 新增 Python 与 Android 终态重放测试：已完成任务重复 `complete` 返回 completed；随后重放 `cancel` 仍返回 completed，不能回退状态或删除已发布文件。
 - [x] 新增回归测试 CI 已通过：Python 全量 417 tests（Run `45917117043`）；Android `testDebugUnitTest`、诊断 `assembleDebug`、slim `assembleRelease -PincludeDiagnostics=false` 均通过（同一 Run `45917117043`）。
 - [ ] 多页协议当前采用“每次连接从 Missing 起点重新查询、发送本连接首批缺片、Complete 再返回下一批缺片”的有界推进方式；`more` 是提示后面仍有缺片，不代表客户端必须在同一连接无限翻页。跨连接测试用于证明该约定无漏片/死循环。
-- [ ] Android↔Python 运行时真实跨语言 TCP 互通仍是独立验收项：当前 golden vectors、双方本地 loopback 和跨连接语义测试尚不能替代 JVM Android 客户端与 Python 服务端（及反向）的真实 socket 互通。
+- [x] 增加 JVM Android 客户端→Python 接收服务的真实 TCP 双端进程测试，以及 Python 发送端→Android Robolectric TCP 接收服务的反向测试；两条路径均执行真实 loopback TCP socket、双方互相认证、Missing/Chunk ACK/Complete 与最终文件 SHA-256/字节发布验证。CI Run `45919960578` 全部通过。
 
 - [x] 补测“staging 文件已写入但进程在 receipt 提交前崩溃”的 orphan chunk 窗口：Python 仅在无 receipt 且目标是可安全读取的普通文件时允许替换孤立损坏数据；有 receipt 的冲突数据仍拒绝覆盖；Android 覆盖单文件 staging 的同一恢复窗口。Python 418 tests 和 Android 单测/Debug APK/slim Release APK 均通过（Run `45917427009`）。
 - [ ] 下一项优先实现 JVM Android 客户端↔Python 服务端真实 TCP 双向互通测试，覆盖真实认证握手、Offer、显式 Accept、Chunk ACK、Missing、Complete 和 SHA-256 发布；不得仅以共享 golden vectors 或两端各自 loopback 测试替代。
 - [x] orphan chunk 修复的 Python 回归覆盖：模拟只写入部分/损坏 staging 文件、未提交 receipt 的崩溃窗口，重传后文件被正确替换并建立 durable receipt。
 - [x] orphan chunk 修复的 Android 回归覆盖：模拟 `payload.part` 已存在但 receipt 尚未提交，重传正确覆盖对应偏移、恢复 receipt 并通过 reconciliation。
 - [x] 最新验证：Python 全量 418 tests（Run `45917427009`）；Android `testDebugUnitTest`、`assembleDebug`、`assembleRelease -PincludeDiagnostics=false` 全部通过（Run `45917427009`）。
+## 第三批次推进（2026-11-27）：Android↔Python 双向真实 TCP 互通
+
+- [x] JVM Android `LanTransferTcpClient` → Python `authenticate_tcp_server` + `serve_transfer_session`：真实 TCP 两连接，先 Offer/Offer ACK，接收端显式 ACCEPTED→TRANSFERRING，再 Missing/Chunk ACK/Complete；Python 校验最终发布文件字节与内容。
+- [x] Python `authenticate_tcp_client` + `send_file_over_session` → Android Robolectric `LanTransferTcpSession`：真实 TCP socket，Android 预置接收端 Offer/ACCEPTED 状态，Python 执行 Missing/Chunk/Complete；验证 Android 最终 COMPLETED 状态及发布文件字节一致。
+- [x] 两条跨语言方向使用测试专用 PSK，不依赖聊天密钥或生产设备凭据；仅 Linux CI 执行子进程互通测试，避免将 Python 可执行文件要求强加给 Windows/macOS 开发环境。
+- [x] CI Run `45919960578`：Python 全量 418 tests；Android `testDebugUnitTest`、诊断 Debug APK、slim Release APK 均通过。
+- [ ] 该项验证的是 JVM/Robolectric Android 实现与 Python 运行时在同一主机上的真实 TCP 协议互通，不等同于实体 Android 手机经 Wi-Fi/AP 的真机网络验收；后者仍需双机/热点场景验收。
