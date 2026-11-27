@@ -2853,7 +2853,7 @@ class LanP2PCoreTests(unittest.TestCase):
         listener_start = source.index("private void startRescueListener()")
         listener_end = source.index("private void parseResponse(", listener_start)
         listener = source[listener_start:listener_end]
-        bind = listener.index("bindSocketToWifi(rescueSocket)")
+        bind = listener.index("bindSocketToWifi(rescueSocket, 8888)")
         socket_ready = listener.index("rescueSocketRef = rescueSocket")
         recovery = listener.index('scheduleLanChatTask("listener-outbox-recovery"')
         self.assertLess(bind, socket_ready)
@@ -3287,6 +3287,21 @@ class LanP2PCoreTests(unittest.TestCase):
                 mark_outgoing_attempt(self.db_path, "message-a", "peer-a",
                                       "192.168.1.20", 8888)
 
+    def test_chat_listener_uses_exact_address_binding_for_selected_wifi_network(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        binding = (root / "app/src/main/java/com/example/devicefinder/LanSocketBinding.java").read_text(encoding="utf-8")
+        method = extract_java_method(source, "private Network bindSocketToWifi(")
+        listener = extract_java_method(source, "private void startRescueListener()")
+        self.assertIn("LanSocketBinding.bindDatagramListenerSocket(selectedPath, socket, listenerPort)", method)
+        self.assertIn("socket, listenerPort", method)
+        self.assertIn("socket.bind(new java.net.InetSocketAddress(path.localAddress, port))", binding)
+        self.assertIn("if (!rescueSocket.isBound())", listener)
+        # The wildcard bind remains only as a compatibility fallback when no Wi-Fi
+        # Network/path was selected; it must not follow a successful exact bind.
+        self.assertLess(listener.index("if (!rescueSocket.isBound())"),
+                        listener.index("rescueSocket.bind(new InetSocketAddress(8888))"))
+
     def test_android_wifi_socket_binding_failure_does_not_fall_back_to_default_route(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
@@ -3295,7 +3310,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("throws java.io.IOException", method)
         self.assertIn("selectWifiLanNetwork(cm)", method)
         self.assertIn("LanNetworkPath.fromAndroidNetwork(selected", method)
-        self.assertIn("LanSocketBinding.bindDatagramSocket(selectedPath, socket)", method)
+        self.assertIn("LanSocketBinding.bindDatagramListenerSocket(selectedPath, socket, listenerPort)", method)
         self.assertLess(method.index("LanSocketBinding.bindDatagramSocket(selectedPath, socket)"),
                         method.index('FileLogger.logD("CHAT"'))
         self.assertLess(method.index('FileLogger.logD("CHAT"'),
@@ -3306,7 +3321,9 @@ class LanP2PCoreTests(unittest.TestCase):
         listener_start = source.index("private void startRescueListener()")
         listener_end = source.index("private void parseResponse(", listener_start)
         listener = source[listener_start:listener_end]
-        self.assertIn("Network boundWifiNetwork = bindSocketToWifi(rescueSocket);", listener)
+        self.assertIn("Network boundWifiNetwork = bindSocketToWifi(rescueSocket, 8888);", listener)
+        self.assertIn("if (!rescueSocket.isBound())", listener)
+        self.assertIn("rescueSocket.bind(new InetSocketAddress(8888))", listener)
         generation_guard = listener.index("listenerGeneration != lanSocketGeneration.get()")
         publish_network = listener.index("lanChatBoundWifiNetwork = boundWifiNetwork")
         publish_socket = listener.index("rescueSocketRef = rescueSocket")
