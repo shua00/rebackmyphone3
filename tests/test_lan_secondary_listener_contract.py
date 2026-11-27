@@ -46,6 +46,7 @@ class LanSecondaryListenerContractTests(unittest.TestCase):
         self.assertIn("instance.generation == lanSocketGeneration.get()", current)
         self.assertNotIn("new InetSocketAddress(8888)", start)
         self.assertNotIn("socket.bind(new InetSocketAddress(8888))", start)
+        self.assertNotIn("setSoTimeout", start)
         self.assertNotIn("new String(packet.getData()", start)
         self.assertNotIn('message.startsWith("FIND_ME_', start)
 
