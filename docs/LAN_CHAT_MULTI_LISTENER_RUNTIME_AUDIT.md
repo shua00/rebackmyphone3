@@ -101,9 +101,18 @@
 - [x] ACK ingress 从 receive loop 显式传递 path fingerprint 与 listener generation；异步 ACK/peer.ack 继续使用该捕获快照，避免未来多 Listener 时读取全局单 Listener path 字段而串线。
 - [x] 增加 runtime lease 和 ACK ingress 静态契约测试。
 - [ ] 尚未把每条 path 的 socket、receive loop、thread、Network snapshot、停止/替换生命周期全部迁入 owner；因此当前仍不是多 Listener runtime。
-- [ ] 尚未接入精确地址绑定到聊天 Listener；当前单 Listener仍使用原有 Wi-Fi bind 流程。
+- [x] 当前单 Wi-Fi 聊天 Listener 已接入 `bindDatagramListenerSocket()`，按选中 Android Network 的 LinkProperties 精确绑定本地 IPv4 地址和 8888 端口；无 Wi-Fi Network 时仅保留既有非聊天 UDP wildcard 兼容分支。
+- [ ] AP local-interface candidate 尚未接入 TrackingService 聊天 Listener，STA/AP 双 Listener 仍未完成。
 - [ ] 尚未实现 per-peer×path 真实 RTT/失败采样和发送失败后的备用路径回退。
 
 ## 6. 本批结论
 
 本批完成运行时阻塞点审计并形成可执行实施顺序。下一批应先把现有单 Listener 安全迁移到 path-keyed owner，再逐步引入第二条 Listener；不应一次性并行修改 TrackingService 的 socket 生命周期、ACK ingress 和发送重试，以免扩大竞态面。
+
+
+## 7. 2026-11-27：STA Listener 精确地址绑定补充
+
+- [x] `TrackingService.startRescueListener()` 在 socket 未绑定前调用 `bindSocketToWifi(socket, 8888)`；若选中 Wi-Fi Network，内部构造与该 Network 对应的 `LanNetworkPath` 并调用 `LanSocketBinding.bindDatagramListenerSocket()`，不再先做 Network-only bind 后再 wildcard bind。
+- [x] helper 对 Android Network 执行 `Network.bindSocket`，然后将 UDP Listener bind 到该路径的精确 IPv4 地址；Socket bind、generation 校验、Registry lease 注册和 socket 发布顺序保持不变。
+- [x] 仅无可用 Wi-Fi Network 时，调用方才看到 socket 仍未绑定并进入旧 wildcard 兼容路径。选中 Network 后精确绑定失败会抛出 IOException，不会静默回退到蜂窝/default route。
+- [ ] 当前仍然只有一条 STA 聊天 Listener；AP candidate listener、每路径独立接收线程和多 Listener 旧命令分发归属仍待实现。
