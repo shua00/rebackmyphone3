@@ -2697,6 +2697,9 @@ public class TrackingService extends Service implements LocationListener {
             Network preferredWifiNetwork = selectWifiLanNetwork(cm);
             LanChatListenerPathPlan plan = LanChatListenerPathPlan.from(paths, preferredWifiNetwork);
             lanChatListenerPathPlan = plan;
+            if (needsLocalPrimaryListenerRebind(plan)) {
+                requestRescueListenerRestart("local-primary-path-change: " + reason);
+            }
             FileLogger.logD("CHAT", "LAN chat path plan refreshed reason=" + reason
                     + " listenerPaths=" + plan.listenerCount()
                     + " secondaryCandidates=" + plan.secondary().size());
@@ -2704,10 +2707,30 @@ public class TrackingService extends Service implements LocationListener {
         } catch (Exception unavailable) {
             // Do not retain stale AP/local-interface candidates after a topology change.
             lanChatListenerPathPlan = null;
+            if (needsLocalPrimaryListenerRebind(null)) {
+                requestRescueListenerRestart("local-primary-path-unavailable: " + reason);
+            }
             reconcileLanChatSecondaryListeners(null);
             FileLogger.logD("CHAT", "LAN chat path plan unavailable reason=" + reason
                     + " error=" + unavailable.getClass().getSimpleName());
         }
+    }
+
+    /** Rebind an AP-only primary when its exact local address changes or disappears. */
+    private boolean needsLocalPrimaryListenerRebind(LanChatListenerPathPlan plan) {
+        if (!"NO_WIFI".equals(wifiLanFingerprint)) return false;
+        LanChatListenerInstance active = activeLanChatListenerInstance;
+        if (active == null || active.generation != lanSocketGeneration.get()) return false;
+        String desiredFingerprint = null;
+        if (plan != null
+                && plan.primary().kind == LanNetworkPath.Kind.LOCAL_INTERFACE_CANDIDATE) {
+            desiredFingerprint = plan.primary().diagnosticFingerprint();
+        }
+        if (desiredFingerprint != null) {
+            return !desiredFingerprint.equals(active.pathFingerprint);
+        }
+        return active.pathFingerprint != null
+                && active.pathFingerprint.startsWith("LOCAL_INTERFACE_CANDIDATE|");
     }
 
     /**
