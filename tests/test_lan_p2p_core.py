@@ -5700,6 +5700,7 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
             persist_outgoing_message, begin_outgoing_discovery_window,
             record_outgoing_fragment_ack, list_due_outgoing_peers,
             load_outgoing_fragment_targets_for_peer, fragment_chat_message,
+            ensure_peer_registry_schema,
         )
         fd, db_path = tempfile.mkstemp(prefix="lan-fragment-pinned-route-")
         os.close(fd)
@@ -5709,6 +5710,7 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
             db_path, "rescue2", "peer-a", "tx-pinned-route", body, [], 123456))
         self.assertTrue(begin_outgoing_discovery_window(
             db_path, "rescue2", "tx-pinned-route", window_ms=30000))
+        ensure_peer_registry_schema(db_path)
         fragments = fragment_chat_message("tx-pinned-route", "*", body, 123456)
         self.assertIsNotNone(record_outgoing_fragment_ack(
             db_path, "rescue2", "tx-pinned-route", "peer-unknown", 0,
