@@ -105,6 +105,17 @@ public class LanNetworkPathTest {
         assertFalse(LanTransferDiscovery.isOnSelectedSubnet(candidate, ipv4("127.0.0.1")));
     }
 
+    @Test public void hotspotAddressOrPrefixChangeProducesDifferentPathIdentity() throws Exception {
+        LanNetworkPath original = LanNetworkPath.localInterfaceCandidate(
+                "vendor_ap42", ipv4("192.168.43.1"), 24, ipv4("192.168.43.255"));
+        LanNetworkPath changedAddress = LanNetworkPath.localInterfaceCandidate(
+                "vendor_ap42", ipv4("192.168.44.1"), 24, ipv4("192.168.44.255"));
+        LanNetworkPath changedPrefix = LanNetworkPath.localInterfaceCandidate(
+                "vendor_ap42", ipv4("192.168.43.1"), 25, ipv4("192.168.43.127"));
+        assertNotEquals(original.diagnosticFingerprint(), changedAddress.diagnosticFingerprint());
+        assertNotEquals(original.diagnosticFingerprint(), changedPrefix.diagnosticFingerprint());
+    }
+
     @Test public void serverListenerAddressMustMatchSelectedPath() throws Exception {
         LanNetworkPath path = LanNetworkPath.fromAndroidNetwork(ShadowNetwork.newInstance(42),
                 "wlan0", ipv4("192.168.1.2"), 24, ipv4("192.168.1.255"));
