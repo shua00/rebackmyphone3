@@ -16,6 +16,13 @@
 - [ ] **P0-C（LAN P2P v2 真机验收后排期）**：Rescue2/Server2 复用感知结果，LAN 内优先 UDP 即时指令，LAN 外或 LAN route 不可用时走 HTTP；以 commandId 幂等、TTL、接收/执行状态和结果回传防止重复执行。
 - [ ] P0-C 不提前实现，不改变当前 Rescue2 新诊断封存状态；旧版 `pull_logs_multi()`、Shell/ADB/Root 能力及聊天/文件传输隔离必须保持。
 
+## 2026-11-27 多 Listener runtime 审计结论
+
+- [x] 审计 TrackingService 当前聊天 Listener 生命周期：确认仍是单一 wildcard-bound UDP Listener，Registry/Selector 的多 Listener 逻辑尚无 runtime 多 Listener 接入。
+- [x] 审计现有精确路径绑定能力：`LanSocketBinding.bindDatagramListenerSocket()` 已存在，但尚未接入聊天 Listener。
+- [x] 明确实施门槛与分阶段顺序，详见 [LAN_CHAT_MULTI_LISTENER_RUNTIME_AUDIT.md](LAN_CHAT_MULTI_LISTENER_RUNTIME_AUDIT.md)。
+- [ ] 下一步：先将现有单 Wi-Fi Listener 迁移到 path-keyed owner，保持单路径仍仅一个 Listener；通过生命周期/竞态测试后，再接入第二条 STA/AP path。
+
 ## 当前阶段总纲：四级优先级（2026-11-27 调整）
 
 > **当前唯一主线：LAN P2P V2 基础可靠性与真机验收。** Rescue2 新诊断暂停开发并封存；不得继续扩建其管理员认证、任务调度、设备端授权或诊断回传体系。封存不等于删除，成果索引见 [RESCUE2_DIAGNOSTICS_ARCHIVE.md](RESCUE2_DIAGNOSTICS_ARCHIVE.md)。
