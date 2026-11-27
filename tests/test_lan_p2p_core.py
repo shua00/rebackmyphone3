@@ -236,7 +236,11 @@ class LanP2PCoreTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("store.loadPending(LanChatRetryPolicy.MAX_PENDING_MESSAGES)", service)
         self.assertNotIn("store.loadPending(50)", service)
-        self.assertIn("MAX_PENDING_MESSAGES = 50", policy)
+        self.assertIn("MAX_PENDING_MESSAGES = 200", policy)
+        self.assertIn("MAX_PENDING_BODY_BYTES = 8L * 1024L * 1024L", policy)
+        store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
+        self.assertIn("hasOutboxCapacity(db, body)", store)
+        self.assertIn("state NOT IN ('delivered','expired')", store)
 
 
     def test_outbox_retry_wake_and_batch_policy_is_centralized(self):
