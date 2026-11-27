@@ -598,3 +598,7 @@
 
 - [x] 批次 A 单 Listener lifecycle instance 改造及组件测试；CI run 45980782340 全绿（Python 440 tests/1 skipped、Windows socket binding、Android testDebugUnitTest、Debug APK、diagnostics=false Slim Release APK）。
 - [ ] 真机验证当前单 Listener 在启动/停止/网络切换/服务销毁下的 socket/thread 生命周期；完成后再启动第二 Listener。
+
+
+- [x] Listener 实例成为 Socket/Worker 的生命周期资源来源；重启、网络切换和 onDestroy 均先标记停止，再在锁外关闭/中断；attach 拒绝 closed Socket 与已启动 Thread。
+- [x] 最新 CI run 45981692678 全绿：Python 440 tests（1 skipped）、Windows socket binding、Android 单测、Debug APK、diagnostics=false Slim Release APK；artifact 15189847113。
