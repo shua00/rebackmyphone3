@@ -393,11 +393,6 @@ public class ChatActivity extends Activity {
                 }
                 runOnUiThread(() -> {
                     if (isFinishing()) return;
-                    if (pending.isEmpty()) {
-                        Toast.makeText(this, "当前没有可取消的待处理消息", Toast.LENGTH_SHORT).show();
-                        refreshDeliveryStatusAsync();
-                        return;
-                    }
                     String[] labels = new String[pending.size()];
                     for (int i = 0; i < pending.size(); i++) {
                         LanChatStore.DeliverySummary item = pending.get(i);
@@ -406,7 +401,7 @@ public class ChatActivity extends Activity {
                         labels[i] = body + " (" + item.ackedTargets + "/" + item.totalTargets + ")";
                     }
                     new android.app.AlertDialog.Builder(this)
-                            .setTitle("选择要取消的待处理消息")
+                            .setTitle("待处理消息管理")
                             .setItems(labels, (dialog, which) -> {
                                 LanChatStore.DeliverySummary selected = pending.get(which);
                                 new android.app.AlertDialog.Builder(this)
@@ -426,6 +421,29 @@ public class ChatActivity extends Activity {
                                                 runOnUiThread(() -> {
                                                     Toast.makeText(this,
                                                             result ? "已取消后续发送" : "消息状态已变化，未执行取消",
+                                                            Toast.LENGTH_SHORT).show();
+                                                    refreshDeliveryStatusAsync();
+                                                });
+                                            });
+                                        }).show();
+                            })
+                            .setPositiveButton("清理已结束记录", (dialog, which) -> {
+                                new android.app.AlertDialog.Builder(this)
+                                        .setTitle("清理本机投递记录？")
+                                        .setMessage("只删除本机已送达、已取消和已过期的 Outbox 投递记录；不删除聊天历史，不操作对端设备。")
+                                        .setNegativeButton("返回", null)
+                                        .setPositiveButton("确认清理", (d, w) -> {
+                                            if (deliveryStatusExecutor == null) return;
+                                            deliveryStatusExecutor.execute(() -> {
+                                                int deleted = 0;
+                                                try {
+                                                    LanChatStore store = new LanChatStore(getApplicationContext());
+                                                    try { deleted = store.clearTerminalOutboxRecords(); }
+                                                    finally { store.closeStore(); }
+                                                } catch (Exception ignored) {}
+                                                final int count = deleted;
+                                                runOnUiThread(() -> {
+                                                    Toast.makeText(this, "已清理 " + count + " 条本机投递记录",
                                                             Toast.LENGTH_SHORT).show();
                                                     refreshDeliveryStatusAsync();
                                                 });
