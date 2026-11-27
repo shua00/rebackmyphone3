@@ -86,7 +86,8 @@ public final class LanTransferPathSet {
     }
 
     private static boolean samePath(LanNetworkPath left, LanNetworkPath right) {
-        return left.kind == right.kind && left.network == right.network
+        return left.kind == right.kind
+                && (left.network == null ? right.network == null : left.network.equals(right.network))
                 && left.interfaceName.equals(right.interfaceName)
                 && left.localAddress.equals(right.localAddress)
                 && left.prefixLength == right.prefixLength
