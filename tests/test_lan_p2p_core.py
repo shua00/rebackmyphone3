@@ -2886,7 +2886,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("oldInstance.socket()", source)
         self.assertIn("oldInstance.requestStop()", source)
         self.assertIn("activeInstance.requestStop()", source)
-        self.assertIn("Thread listenerToStop = activeListener.thread()", source)
+        self.assertIn("activeListener.thread() : rescueListenerThread;", source)
         self.assertIn("listenerToStop.interrupt();", source)
         self.assertIn("listenerToStop.join(1000L);", source)
         self.assertIn('"LAN-UDP-Listener-" + serviceInstanceId', source)
