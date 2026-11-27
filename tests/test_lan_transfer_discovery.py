@@ -48,7 +48,7 @@ class LanTransferDiscoveryIsolationTests(unittest.TestCase):
         self.assertIn("closeLanTransferPairingInitiatorsForMissingPaths(desired)", service)
         self.assertIn("LanTransferPeerDirectory.findCurrentAll", service)
         self.assertIn("pathsByFingerprint.get(candidate.networkFingerprint)", service)
-        self.assertIn("LanTransferPeerDirectory.findCurrentAll", directory)
+        self.assertIn("public static List<Candidate> findCurrentAll", directory)
         self.assertIn("private void closeLanTransferPairingControlHostLocked()", service)
         self.assertNotIn("lanTransferPairingControlFingerprint", service)
 
