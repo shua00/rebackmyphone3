@@ -6264,3 +6264,22 @@ class AndroidLanMultiListenerLegacyCommandDedupTests(unittest.TestCase):
         self.assertIn("public synchronized boolean shouldAccept(", helper)
         self.assertIn("MAX_ENTRIES = 50", helper)
         self.assertIn("DUPLICATE_WINDOW_MS = 3000L", helper)
+
+
+class PythonLongChatRecoveryAdmissionTests(unittest.TestCase):
+    def test_long_chat_recovery_admits_retry_only_inside_fragment_sender(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        for filename in ("rescue2.py", "chat.py", "server2.py"):
+            with self.subTest(service=filename):
+                source = (repo_root / filename).read_text(encoding="utf-8")
+                start = source.index("def _resume_pending_v2_for_peer(")
+                end = source.index("\\ndef _advance_v2_fragment_windows(", start)
+                recovery = source[start:end]
+                # The outer retry admission is exclusively for the short-packet path.
+                short_guard = recovery.index("if not long_message:")
+                admission = recovery.index("mark_outgoing_attempt(")
+                self.assertLess(short_guard, admission)
+                long_branch = recovery[recovery.index("if long_message:"):]
+                self.assertIn("send_outgoing_fragment_window(", long_branch)
+                self.assertIn("mark_attempt=True", long_branch)
+                self.assertIn("allow_fast_retry=False", long_branch)
