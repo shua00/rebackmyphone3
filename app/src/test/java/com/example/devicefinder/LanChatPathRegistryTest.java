@@ -76,6 +76,30 @@ public class LanChatPathRegistryTest {
         } finally { listener.close(); }
     }
 
+    @Test public void staleIngressCannotRegisterRouteUnderReplacementGeneration() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket old = socket(), replacement = socket();
+        String path = "sta|wlan0|192.168.1.20/24";
+        try {
+            registry.registerListener(path, old, 70);
+            registry.registerListener(path, replacement, 71);
+            try {
+                registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.31"),
+                        NOW, NOW + 100, old, 70);
+                fail("stale ingress must not be promoted into replacement generation");
+            } catch (IllegalStateException expected) { }
+            assertTrue(registry.getFreshPeerRoutes("peer", NOW + 1).isEmpty());
+            registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.32"),
+                    NOW + 2, NOW + 102, replacement, 71);
+            List<LanChatPathRegistry.PeerRoute> routes =
+                    registry.getFreshPeerRoutes("peer", NOW + 3);
+            assertEquals(1, routes.size());
+            assertEquals(71L, routes.get(0).listenerGeneration);
+            assertEquals("192.168.1.32",
+                    routes.get(0).endpoint.getAddress().getHostAddress());
+        } finally { old.close(); replacement.close(); }
+    }
+
     @Test public void closedListenerRoutesArePrunedWhenQueried() throws Exception {
         LanChatPathRegistry registry = new LanChatPathRegistry();
         DatagramSocket listener = socket();
