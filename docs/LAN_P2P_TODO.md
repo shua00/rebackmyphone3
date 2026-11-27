@@ -534,8 +534,9 @@
 - [x] 追加 Linux/Windows 绑定失败回归：模拟 `SO_BINDTODEVICE` 权限错误及 `IP_UNICAST_IF` 不可用，确认不会退化为仅绑定源 IP 的假成功。
 - [x] 上述追加测试已由 CI Run `45926534295` 验证：Python 全量 `423 tests` 通过；Android 变更检测通过，因仅 Python 文件变更而按条件跳过 Android build。
 - [x] 复核发现宿主首次启动时若 Wi-Fi/AP 尚未就绪，原实现会直接退出，无法等候网络恢复。宿主现对初始绑定失败按刷新周期重试；Service 对失败的初始 runtime 执行关闭和清理，后续重试不遗留半启动实例。
-- [ ] 新增启动竞态回归测试：第一次启动因接口未就绪失败，第二次启动恢复成功，之后正常刷新并在退出时关闭服务；不启用 wildcard 或其他网络回退。首次 CI Run `45927045464` 发现测试文件续行语法错误，已修正为括号式 with 语句；Run `45927106157` 进一步发现测试 Event mock 缺少 `is_set()` 状态接口，已补齐并等待重跑。
+- [x] 新增启动竞态回归测试：第一次启动因接口未就绪失败，第二次启动恢复成功，之后正常刷新并在退出时关闭服务；不启用 wildcard 或其他网络回退。Run `45927181959` Python 全量 `424 tests` 通过。
 - [x] Linux runner 专项真实 socket smoke test 通过（Run `45927460323`）：以 `lo` 接口执行 `SO_BINDTODEVICE`，并从 `127.0.0.1` 连接 `127.0.0.2`；内核接受设备绑定且 TCP connect/accept 成功。Python 全量 `426 tests` 通过（含该测试，另跳过 Windows 专属用例）。
 - [x] Windows runner 专项 `IP_UNICAST_IF` smoke 与 Linux runner `SO_BINDTODEVICE` smoke 均已在各自真实操作系统 CI runner 上通过（Run `45927460323`）；Windows 专项 11 tests、1 个 Linux 专属用例按平台跳过。物理多网卡 LAN 出口、Linux 不同权限配置、Windows ACL 仍需对应部署环境实机验收。
 - [x] Windows runner 专项校验通过（Run `45927389104`）：Windows 真实 loopback TCP socket 通过 `IP_UNICAST_IF` 绑定指定接口，并成功从 `127.0.0.1` 连接 `127.0.0.2`；Windows socket binding 专项 10 项通过。测试过程中发现并修正 `socket.if_nameindex()` 在 Windows 返回 `(index, name)` 的平台差异。该结果验证 Windows API 参数/字节序与本机 loopback 连接，不替代多网卡物理 LAN 出口验收。
+- [x] 新增服务进程重启集成测试：关闭并重新创建 `LanTransferService` 后，未完成任务仍为 TRANSFERRING，已 fsync/登记的 staging 分片与 receipt 可重新校验，缺失分片账本保持正确，可信 Peer 列表可加载，服务可重新启动。Run `45928099513`：Python 全量 `427 tests` 通过（1 项跨平台跳过），Windows socket binding 专项通过，Android 变更检测通过；仅 Python 变更，Android build 按条件跳过。
 - [x] 启动等待网络就绪修正代码提交 `9b2121649a8ad9803445382d66d5af0d8ffbf037`，测试夹具修正后 Run `45927181959` 全部通过：Python 全量 `424 tests`，Android 变更检测通过；Android build 按条件跳过。
