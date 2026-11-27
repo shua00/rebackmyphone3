@@ -409,6 +409,8 @@ public class TrackingService extends Service implements LocationListener {
                     final DatagramSocket oldSocket;
                     synchronized (rescueLock) {
                         lanSocketGeneration.incrementAndGet();
+                        LanChatListenerInstance oldInstance = activeLanChatListenerInstance;
+                        if (oldInstance != null) oldInstance.requestStop();
                         oldSocket = rescueSocketRef;
                     }
                     invalidateVerifiedChatPeers("Pre-M default LAN route changed: " + reason);
@@ -8903,6 +8905,8 @@ public class TrackingService extends Service implements LocationListener {
     private void closeLanChatIngressSocket() {
         DatagramSocket socketToClose;
         synchronized (rescueLock) {
+            LanChatListenerInstance activeInstance = activeLanChatListenerInstance;
+            if (activeInstance != null) activeInstance.requestStop();
             socketToClose = rescueSocketRef;
             rescueSocketRef = null;
             lanChatBoundWifiNetwork = null;
