@@ -6016,6 +6016,11 @@ public class TrackingService extends Service implements LocationListener {
                             }
                         }
                     }
+                    long nextOutboxExpiry = store.getNextOutboxExpiryMs();
+                    if (nextOutboxExpiry > 0L) {
+                        scheduleLanChatDiscoveryFinalizer(store,
+                                Math.max(0L, nextOutboxExpiry - System.currentTimeMillis() + 100L));
+                    }
                     // Consume the recovery event only after legacy migration succeeds. If any
                     // later Outbox operation fails, the outer catch restores this captured event.
                     recoveryEventCaptured = lanChatRecoveryEventPending.getAndSet(false);
@@ -6465,8 +6470,12 @@ public class TrackingService extends Service implements LocationListener {
                 lanChatSendExecutor.execute(() -> {
                     boolean finalizationFailed = false;
                     try {
-                        List<String> finalizedIds =
-                                store.finalizeExpiredDiscoveryWindowIds(System.currentTimeMillis());
+                        long now = System.currentTimeMillis();
+                        List<String> finalizedIds = store.finalizeExpiredDiscoveryWindowIds(now);
+                        int expiredOutbox = store.expireOutboxMessages(now);
+                        if (expiredOutbox > 0) {
+                            FileLogger.log(this, "CHAT", "LAN Outbox TTL expired messages=" + expiredOutbox);
+                        }
                         if (!finalizedIds.isEmpty()) {
                             FileLogger.log(this, "CHAT", "LAN discovery finalization settled messages="
                                     + finalizedIds.size());
@@ -6489,7 +6498,11 @@ public class TrackingService extends Service implements LocationListener {
                                 scheduleLanChatDiscoveryFinalizer(store, 500L);
                             } else {
                                 try {
-                                    long nextDeadline = store.getNextDiscoveryDeadlineMs();
+                                    long nextDiscoveryDeadline = store.getNextDiscoveryDeadlineMs();
+                                    long nextExpiryDeadline = store.getNextOutboxExpiryMs();
+                                    long nextDeadline = nextDiscoveryDeadline > 0L && nextExpiryDeadline > 0L
+                                            ? Math.min(nextDiscoveryDeadline, nextExpiryDeadline)
+                                            : Math.max(nextDiscoveryDeadline, nextExpiryDeadline);
                                     if (nextDeadline > 0L) {
                                         scheduleLanChatDiscoveryFinalizer(store,
                                                 Math.max(0L, nextDeadline - System.currentTimeMillis() + 100L));
