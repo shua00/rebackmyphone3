@@ -5188,7 +5188,6 @@ class LanP2PPacketSchemaTests(unittest.TestCase):
             self.assertIn('"' + field + '"', protocol)
         for bound in ("0, 1023", "1, 1024", "1, 262144"):
             self.assertIn(bound, protocol)
-        self.assertIn("fragment_data").__class__
         self.assertIn("fragment data exceeds limit", protocol)
         self.assertIn('!"received".equals(packet.getString("status"))', protocol)
 
