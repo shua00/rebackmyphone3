@@ -585,7 +585,9 @@ public class LanTransferTcpSessionTest {
                     remaining = LanTransferTcpClient.sendFile(client, source, offer,
                             "sender", "receiver", SECRET, 4096, 62, 1024 * 1024, null);
                 }
-                if (attempt < 2) assertFalse(remaining.isEmpty());
+                if (attempt == 0) assertEquals(62, remaining.size());
+                else if (attempt == 1) assertEquals(6, remaining.size());
+                else assertTrue(remaining.isEmpty());
             }
             assertNotNull(remaining);
             assertTrue(remaining.isEmpty());
