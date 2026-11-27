@@ -7120,7 +7120,9 @@ public class TrackingService extends Service implements LocationListener {
      * ACK racing the worker's final bitmap read cannot strand the next window.
      */
     private void scheduleLanChatFragmentWindowAdvance(final String messageId, final String peerId,
-            final java.net.InetAddress sourceAddress, final int sourcePort) {
+            final java.net.InetAddress sourceAddress, final int sourcePort,
+            final String ingressPath, final DatagramSocket ingressSocket,
+            final long ingressGeneration) {
         if (serviceDestroyed || messageId == null || peerId == null || sourceAddress == null) return;
         final String key = messageId + ":" + peerId;
         if (!activeLanChatFragmentAdvances.add(key)) {
@@ -7130,12 +7132,14 @@ public class TrackingService extends Service implements LocationListener {
         try {
             lanChatFragmentSendExecutor.execute(() -> {
                 try {
-                    advanceLanChatFragmentWindow(messageId, peerId, sourceAddress, sourcePort);
+                    advanceLanChatFragmentWindow(messageId, peerId, sourceAddress, sourcePort,
+                            ingressPath, ingressSocket, ingressGeneration);
                 } finally {
                     activeLanChatFragmentAdvances.remove(key);
                     if (pendingLanChatFragmentAdvances.remove(key) && !serviceDestroyed) {
                         scheduleLanChatFragmentWindowAdvance(
-                                messageId, peerId, sourceAddress, sourcePort);
+                                messageId, peerId, sourceAddress, sourcePort,
+                                ingressPath, ingressSocket, ingressGeneration);
                     }
                 }
             });
@@ -7153,21 +7157,23 @@ public class TrackingService extends Service implements LocationListener {
      * without consuming another whole-message retry attempt or taking the FIFO transmit lock.
      */
     private void advanceLanChatFragmentWindow(String messageId, String peerId,
-            java.net.InetAddress sourceAddress, int sourcePort) {
+            java.net.InetAddress sourceAddress, int sourcePort, String ingressPath,
+            DatagramSocket socket, long ingressGeneration) {
         LanChatStore store = lanChatStore;
-        DatagramSocket socket = rescueSocketRef;
-        if (serviceDestroyed || store == null || socket == null || socket.isClosed()
-                || !hasUsableWifiLanPath()
+        if (serviceDestroyed || store == null
+                || !isCurrentLanChatIngress(ingressPath, socket, ingressGeneration)
                 || !(sourcePort == 8888 || sourcePort == 8887
                      || sourcePort == 8889 || sourcePort == 8890)
                 || !(sourceAddress instanceof java.net.Inet4Address)
                 || !sourceAddress.isSiteLocalAddress()
                 || sourceAddress.isLoopbackAddress() || sourceAddress.isAnyLocalAddress()) return;
         try {
-            java.net.InetSocketAddress liveRoute = verifiedChatPeers.get(peerId);
-            boolean routeMatches = liveRoute != null
-                    && liveRoute.getAddress().equals(sourceAddress)
-                    && liveRoute.getPort() == sourcePort;
+            LanChatPathRegistry.RouteBinding routeBinding =
+                    lanChatPathRegistry.findCurrentPeerRouteBinding(peerId, ingressPath,
+                            socket, ingressGeneration,
+                            new java.net.InetSocketAddress(sourceAddress, sourcePort),
+                            android.os.SystemClock.elapsedRealtime());
+            boolean routeMatches = routeBinding != null;
             boolean persistedMatch = store.matchesExpectedAckEndpoint(
                     messageId, peerId, sourceAddress.getHostAddress(), sourcePort);
             boolean attemptedMatch = store.matchesAttemptedAckEndpoint(
@@ -7199,7 +7205,8 @@ public class TrackingService extends Service implements LocationListener {
 
             int firstMissing = bitmap.indexOf('0');
             java.net.InetSocketAddress endpoint = routeMatches
-                    ? liveRoute : new java.net.InetSocketAddress(sourceAddress, sourcePort);
+                    ? routeBinding.route.endpoint
+                    : new java.net.InetSocketAddress(sourceAddress, sourcePort);
             if (firstMissing < 0) {
                 // All fragment ACKs are still not final delivery. Probe the receiver's
                 // durable reassembly/inbox path so it can repeat chat.ack if that ACK was lost.
@@ -7213,7 +7220,7 @@ public class TrackingService extends Service implements LocationListener {
             int windowEnd = Math.min(packets.size(), firstMissing + 8);
             int sent = 0;
             for (int i = firstMissing; i < windowEnd; i++) {
-                if (!isCurrentLanChatSocket(socket, lanSocketGeneration.get())) return;
+                if (!isCurrentLanChatIngress(ingressPath, socket, ingressGeneration)) return;
                 if (bitmap.charAt(i) == '1') continue;
                 byte[] frame = packets.get(i);
                 DatagramPacket packet = new DatagramPacket(
