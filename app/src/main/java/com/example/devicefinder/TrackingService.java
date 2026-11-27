@@ -3050,7 +3050,7 @@ public class TrackingService extends Service implements LocationListener {
     private void removeLanTransferPairingInitiator(String sessionId,
             LanTransferPairingInitiator initiator) {
         if (initiator == null) return;
-        removeLanTransferPairingInitiator(sessionId, initiator);
+        lanTransferPairingInitiators.remove(sessionId, initiator);
         lanTransferPairingInitiatorFingerprints.remove(sessionId);
     }
 
