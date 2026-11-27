@@ -5658,6 +5658,48 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
         self.assertIn('SecurityException("Chat fragment digest mismatch")', helper)
 
 
+    def test_python_incoming_fragment_store_is_durable_bounded_and_out_of_order(self):
+        from lan_p2p_core import (
+            fragment_chat_message, store_incoming_chat_fragment,
+            load_incoming_chat_fragments, assemble_chat_fragments,
+        )
+        db_path = os.path.join(self.temp_dir.name, "fragment-inbox.db")
+        body = ("跨端长消息🙂" * 900)
+        fragments = fragment_chat_message("rx-long-1", "peer-a", body, 123456)
+        order = list(reversed(fragments))
+        for packet in order[:-1]:
+            self.assertIn(store_incoming_chat_fragment(
+                db_path, "rescue2", "peer-a", packet, now_ms=1000),
+                ("stored", "duplicate"))
+        self.assertEqual(len(fragments) - 1, len(load_incoming_chat_fragments(
+            db_path, "rescue2", "peer-a", "rx-long-1", now_ms=1001)))
+        self.assertEqual("complete", store_incoming_chat_fragment(
+            db_path, "rescue2", "peer-a", order[-1], now_ms=1002))
+        cached = load_incoming_chat_fragments(
+            db_path, "rescue2", "peer-a", "rx-long-1", now_ms=1003)
+        self.assertEqual(len(fragments), len(cached))
+        self.assertEqual(body, assemble_chat_fragments(cached))
+        # Completed rows are retained briefly so a duplicate tail can solicit a final ACK again.
+        self.assertEqual("complete", store_incoming_chat_fragment(
+            db_path, "rescue2", "peer-a", order[-1], now_ms=1004))
+
+    def test_python_incoming_fragment_store_rejects_metadata_drift_and_expires_sessions(self):
+        from lan_p2p_core import (
+            fragment_chat_message, store_incoming_chat_fragment,
+            load_incoming_chat_fragments, CHAT_FRAGMENT_SESSION_TTL_MS,
+        )
+        db_path = os.path.join(self.temp_dir.name, "fragment-expiry.db")
+        fragments = fragment_chat_message("rx-long-2", "peer-a", "x" * 900, 123456)
+        self.assertEqual("stored", store_incoming_chat_fragment(
+            db_path, "chat.py", "peer-a", fragments[0], now_ms=10))
+        changed = dict(fragments[1])
+        changed["sha256"] = "0" * 64
+        self.assertEqual("rejected", store_incoming_chat_fragment(
+            db_path, "chat.py", "peer-a", changed, now_ms=11))
+        self.assertEqual([], load_incoming_chat_fragments(
+            db_path, "chat.py", "peer-a", "rx-long-2",
+            now_ms=10 + CHAT_FRAGMENT_SESSION_TTL_MS + 1))
+
     def test_fragment_reassembly_rejects_metadata_drift_and_noncanonical_lengths(self):
         from lan_p2p_core import fragment_chat_message, assemble_chat_fragments
         fragments = fragment_chat_message("metadata-check", "peer-b", "z" * 900, 456)
