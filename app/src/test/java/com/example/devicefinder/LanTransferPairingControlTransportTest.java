@@ -116,19 +116,20 @@ public class LanTransferPairingControlTransportTest {
         }
     }
 
-    @Test public void productionExchangeRejectsUnboundInterfaceCandidateBeforeConnecting()
+    @Test public void productionExchangeAttemptsSourceBoundLocalInterfaceCandidate()
             throws Exception {
-        LanNetworkPath candidate = LanNetworkPath.localInterfaceCandidate("ap0",
-                (java.net.Inet4Address) InetAddress.getByName("192.168.43.1"), 24, null);
+        LanNetworkPath candidate = LanNetworkPath.localInterfaceCandidate("lo-candidate",
+                (java.net.Inet4Address) InetAddress.getByName("127.0.0.1"), 8, null);
         try {
             LanTransferPairingControlTransport.exchange(candidate,
-                    InetAddress.getByName("192.168.43.2"), 9,
+                    InetAddress.getByName("127.0.0.2"), 9,
                     message(LanTransferPairingControlProtocol.Type.REQUEST,
                             UUID.randomUUID().toString(), "sender", "receiver", 1L, new byte[64]),
-                    100, 100);
-            fail("unbound local-interface candidates must fail closed");
+                    1000, 100);
+            fail("no pairing server is listening on the test endpoint");
         } catch (IOException expected) {
-            assertTrue(expected.getMessage().contains("Network-backed"));
+            assertFalse("candidate path must pass path validation and attempt a source-bound connect",
+                    expected.getMessage().contains("Network-backed"));
         }
     }
 
