@@ -518,3 +518,14 @@
 - [x] 新增 Robolectric 回归覆盖：未知 OEM AP 接口名、候选源地址绑定、ServerSocket 精确地址校验、AP 候选可构造发现服务、发现来源必须处于所选子网；配对控制候选路径测试已同步更新。
 - [x] CI Run `45921608216`：Python 全量 418 tests、Android `testDebugUnitTest`、诊断 Debug APK、slim Release APK 全部通过。
 - [ ] 重要限制：Android 对无 `Network` 的 AP 候选使用源地址绑定，不等同于底层 `SO_BINDTODEVICE` 或 `Network.bindSocket`；同网段直连依赖内核对已连接子网的路由选择。仍须在真实 Android 热点主机/客户端设备上验证 OEM 接口、广播接收、配对回连及双向文件传输；若设备 VPN/厂商网络栈阻断源地址路由，应明确失败，不能回退蜂窝。
+
+
+## 第五批次并行推进（2026-11-27）：Python 宿主网络路径自动刷新
+
+- [x] 补齐独立 Python 前台宿主的生命周期缺口：宿主原先启动后只等待 SIGINT/SIGTERM，没有周期性调用已有的 `LanTransferService.refresh()`；网络切换、热点关闭/重启或本机地址变化时，监听器可能停留在旧路径。
+- [x] `lan_p2p_transfer_host.py` 现默认每 3 秒重新枚举 LAN IPv4 路径并刷新服务；新增 `--refresh-interval` 可配置项，必须为正数。
+- [x] 继续 fail-closed：无可用/唯一 LAN 路径时由既有 runtime 关闭监听，不回退 wildcard/蜂窝；后续周期发现有效路径时可重新绑定，稳定 Peer ID 不变。重绑定失败或凭据 reload 异常会记录日志并重试，不让瞬时故障直接杀死前台宿主。
+- [x] 新增宿主生命周期测试：验证周期刷新被调用、刷新间隔被传递、退出时关闭服务，以及非正刷新间隔被拒绝。
+- [ ] 本次新增代码与测试提交后，CI 尚未回报；必须等待 Python 全量测试/py_compile 结果，不能提前标记验证通过。
+- [ ] Android AP 候选路径仍需真机验证：源地址绑定不是底层设备绑定，也不是 Android `Network.bindSocket`；双机热点场景需核实接口路由、广播接收和回连，不得静默回退蜂窝。
+- [ ] Windows ACL 和 Windows 网卡绑定仍需 Windows runner/实机单独验证；POSIX 0600 检查不能作为 Windows 凭据文件安全证明。
