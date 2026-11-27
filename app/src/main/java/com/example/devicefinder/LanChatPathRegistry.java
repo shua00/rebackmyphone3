@@ -68,10 +68,18 @@ public final class LanChatPathRegistry {
         return value;
     }
 
-    /** Compare-and-remove: a delayed old thread cannot tear down a replacement listener. */
+    /** Compatibility overload; lifecycle owners should also supply their generation. */
     public synchronized boolean removeListener(String path, DatagramSocket expectedSocket) {
         Listener current = listeners.get(path);
-        if (current == null || current.socket != expectedSocket) return false;
+        return current != null && removeListener(path, expectedSocket, current.generation);
+    }
+
+    /** Compare-and-remove by socket AND epoch: stale receive loops cannot revoke a newer owner. */
+    public synchronized boolean removeListener(String path, DatagramSocket expectedSocket,
+            long expectedGeneration) {
+        Listener current = listeners.get(path);
+        if (current == null || current.socket != expectedSocket
+                || current.generation != expectedGeneration) return false;
         listeners.remove(path);
         removeRoutesForPath(path);
         return true;
@@ -113,8 +121,12 @@ public final class LanChatPathRegistry {
             if (now >= route.expiresAtMs) iterator.remove();
             else {
                 Listener listener = listeners.get(route.pathFingerprint);
-                if (listener != null && listener.isUsable()
-                        && listener.generation == route.listenerGeneration) result.add(route);
+                if (listener == null || !listener.isUsable()
+                        || listener.generation != route.listenerGeneration) {
+                    iterator.remove();
+                } else {
+                    result.add(route);
+                }
             }
         }
         if (peerRoutes.isEmpty()) routes.remove(peer);
