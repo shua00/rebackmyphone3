@@ -2754,6 +2754,9 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("isCurrentLanChatIngress(verifiedPathFingerprint, socket,", handler)
         self.assertIn("long verifiedAt = android.os.SystemClock.elapsedRealtime();", handler)
         self.assertNotIn("long verifiedAt = System.currentTimeMillis()", handler)
+        ingress_guard = extract_java_method(service, "private boolean isCurrentLanChatIngress(")
+        self.assertIn("path.equals(listener.pathFingerprint)", ingress_guard)
+        self.assertNotIn("lanSocketGeneration.get()", ingress_guard)
 
 
     def test_chat_send_restores_editor_focus_for_continuous_typing(self):
