@@ -7,7 +7,9 @@
 > 架构定义见 [UNIFIED_NETWORK_AWARENESS_AND_ADAPTIVE_ROUTING.md](UNIFIED_NETWORK_AWARENESS_AND_ADAPTIVE_ROUTING.md)。这是项目级 P0 架构原则，当前先确立契约和边界，不打断 LAN P2P v2 IPv4 STA/AP 主线。
 
 - [x] 确立统一 Network Awareness + Adaptive Routing 架构：网络/接口感知、候选路径与可信路径分离、路径级认证与租约、双向可达验证、路径质量事实、单路径快路径、多路径有界回退及失效恢复。
-- [ ] **当前 P0-A**：LAN 聊天发送端改用 path-scoped RouteBinding；发送任务捕获具体 path/socket/listener generation，发送前复核 binding 仍有效；不得从 peer-wide endpoint 或其他路径认证借用路由。
+- [x] **当前 P0-A（第一阶段）**：LAN 聊天发送端使用 path-scoped RouteBinding；发送任务捕获具体 path/socket/listener generation，发送前复核 binding 仍有效；不再从 peer-wide endpoint 或其他路径认证借用路由。
+- [x] **当前 P0-A（第一阶段）**：引入 `LanAdaptiveRouteSelector`；单 Listener 走 O(1) 首选路径查询，多 Listener 才枚举 fresh authenticated bindings；首选路径优先，缺省按最近认证时间排序；备用候选仅在调用方请求时构造，最多 2 条。
+- [ ] **当前 P0-A（下一阶段）**：将显式发送失败/ACK 超时与备用 RouteBinding 回退闭环；每次切换必须重新校验 binding、记录具体 path failure，避免对同一消息重复执行或无限重试。
 - [ ] **当前 P0-A**：STA/AP 多 Listener 生命周期、socket ownership、generation 和按路径清理；三设备任意两台双向互通。
 - [ ] **当前 P0-A**：普通路由器两台或多台 Android/Python 设备快路径回归；不增加无关周期扫描、高频探测、每包全路径枚举或默认多路径重复发送。
 - [ ] **P0-B**：沉淀 Android/Python 对齐的 path state、route lease、failure reason、route decision 语义及可复用接口。
