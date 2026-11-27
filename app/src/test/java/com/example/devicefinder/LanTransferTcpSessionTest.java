@@ -223,6 +223,75 @@ public class LanTransferTcpSessionTest {
     }
 
     @Test
+    public void replayedOfferAndChunkAreAcknowledgedIdempotently() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        context.deleteDatabase("lan_p2p_transfer.db");
+        deleteTree(new File(context.getFilesDir(), "lan-transfer-staging"));
+        deleteTree(new File(context.getFilesDir(), "lan-transfer-received"));
+        LanTransferStore store = new LanTransferStore(context);
+        String id = "session-replay-idempotent";
+        LanTransferStore.Offer offer = new LanTransferStore.Offer(id, "sender", "receiver",
+                "replay.bin", PAYLOAD.length, sha(PAYLOAD), 1L, "text/plain");
+        store.createOffer(offer, 1L, LanTransferStore.DEFAULT_CHUNK_SIZE);
+        store.transition(id, "accepted", 2L);
+        store.transition(id, "transferring", 3L);
+        LanTransferFilesystem filesystem = new LanTransferFilesystem(context, store,
+                LanTransferFilesystem.DEFAULT_STAGING_QUOTA_BYTES, fileOps());
+        LanTransferTcpSession session = new LanTransferTcpSession(context, store, filesystem,
+                "receiver", SECRET, "sender"::equals, () -> 1000L, 3, 1024 * 1024, 3000);
+        ServerSocket listener = new ServerSocket(0);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<Integer> served = executor.submit(() -> {
+                try (Socket accepted = listener.accept()) { return session.serve(accepted); }
+            });
+            try (Socket client = new Socket("127.0.0.1", listener.getLocalPort())) {
+                client.setSoTimeout(3000);
+                LanTransferAuthenticator.AuthenticatedPeer peer =
+                        LanTransferAuthenticator.authenticateClient(client, "sender", "receiver", SECRET);
+                JSONObject metadata = new JSONObject()
+                        .put("filename", offer.filename)
+                        .put("size_bytes", offer.sizeBytes)
+                        .put("sha256", offer.sha256)
+                        .put("created_at_ms", offer.createdAtMs)
+                        .put("mime_type", offer.mimeType)
+                        .put("chunk_size_bytes", LanTransferStore.DEFAULT_CHUNK_SIZE);
+                LanTransferFrameCodec.send(client, new LanTransferFrameCodec.Frame(
+                        "offer", id, "sender", "receiver", null, new byte[0], metadata),
+                        peer.sessionKey, 1024 * 1024);
+                LanTransferFrameCodec.Frame offerAck = LanTransferFrameCodec.receive(client,
+                        peer.sessionKey, 1024 * 1024, "receiver", "sender");
+                assertEquals("offer_ack", offerAck.kind);
+                assertFalse(offerAck.metadata.getBoolean("new_offer"));
+                assertEquals("transferring", offerAck.metadata.getString("state"));
+
+                LanTransferFrameCodec.Frame chunk = new LanTransferFrameCodec.Frame(
+                        "chunk", id, "sender", "receiver", 0, PAYLOAD, null);
+                LanTransferFrameCodec.send(client, chunk, peer.sessionKey, 1024 * 1024);
+                LanTransferFrameCodec.Frame firstAck = LanTransferFrameCodec.receive(client,
+                        peer.sessionKey, 1024 * 1024, "receiver", "sender");
+                assertEquals("chunk_ack", firstAck.kind);
+                assertEquals(0, firstAck.metadata.getInt("index"));
+                assertTrue(firstAck.metadata.getBoolean("new_receipt"));
+
+                LanTransferFrameCodec.send(client, chunk, peer.sessionKey, 1024 * 1024);
+                LanTransferFrameCodec.Frame replayAck = LanTransferFrameCodec.receive(client,
+                        peer.sessionKey, 1024 * 1024, "receiver", "sender");
+                assertEquals("chunk_ack", replayAck.kind);
+                assertEquals(0, replayAck.metadata.getInt("index"));
+                assertFalse(replayAck.metadata.getBoolean("new_receipt"));
+            }
+            assertEquals(3, (int) served.get(4, TimeUnit.SECONDS));
+            assertNotNull(store.getChunkReceipt(id, 0));
+            assertEquals("transferring", store.getTransfer(id).state);
+        } finally {
+            listener.close();
+            executor.shutdownNow();
+            store.closeStore();
+        }
+    }
+
+    @Test
     public void completionResumesAfterProcessRestartLeftTransferVerifying() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         context.deleteDatabase("lan_p2p_transfer.db");
