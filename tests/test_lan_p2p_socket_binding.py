@@ -161,6 +161,37 @@ class LanSocketBindingTests(unittest.TestCase):
             client.close()
             listener.close()
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux SO_BINDTODEVICE smoke test")
+    def test_linux_so_bindtodevice_binds_real_loopback_socket(self):
+        path = SimpleNamespace(
+            interface_name="lo",
+            address="127.0.0.1",
+            prefix_length=8,
+            broadcast_address=None,
+        )
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        accepted = None
+        try:
+            listener.bind(("127.0.0.2", 0))
+            listener.listen(1)
+            listener.settimeout(3.0)
+            client.settimeout(3.0)
+            binding = bind_socket_to_path(
+                client, path, remote_address="127.0.0.2",
+                platform="linux", socket_module=socket,
+            )
+            self.assertEqual(socket.if_nametoindex("lo"), binding.interface_index)
+            self.assertEqual("lo", binding.interface_name)
+            client.connect(listener.getsockname())
+            accepted, _address = listener.accept()
+            self.assertEqual("127.0.0.1", accepted.getpeername()[0])
+        finally:
+            if accepted is not None:
+                accepted.close()
+            client.close()
+            listener.close()
+
     def test_endpoint_validation(self):
         validate_endpoint_on_path(self.path, "192.168.40.99")
         with self.assertRaises(ValueError):
