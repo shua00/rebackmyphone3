@@ -122,6 +122,21 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertNotIn("scheduleAtFixedRate(", runtime)
         self.assertNotIn("socket.close()", runtime)
 
+    def test_authenticated_ack_ingress_uses_receive_loop_path_snapshot_not_global_slot(self):
+        root = Path(__file__).resolve().parents[1]
+        service = (root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
+        realtime = extract_java_method(service, "private boolean handleLanRealtimePacket(")
+        authenticated = extract_java_method(service, "private boolean handleAuthenticatedLanPacket(")
+        listener = extract_java_method(service, "private void startRescueListener()")
+        self.assertIn("listenerPathFingerprint, listenerGeneration", listener)
+        self.assertIn("listenerPathFingerprint, listenerGeneration", realtime)
+        self.assertIn("listenerPathFingerprint, long listenerGeneration", authenticated)
+        self.assertIn("listenerPathFingerprint != null", authenticated)
+        self.assertIn("ingressListener.generation == listenerGeneration", authenticated)
+        self.assertIn("ingressListener.socket == socket", authenticated)
+        self.assertNotIn("rescueSocketPathFingerprint", authenticated)
+        self.assertIn("isCurrentLanChatIngress(verifiedPathFingerprint, socket", authenticated)
+
     def test_chat_listener_runtime_keeps_single_path_fast_path_and_multi_path_isolation(self):
         root = Path(__file__).resolve().parents[1]
         runtime = (root / "app/src/main/java/com/example/devicefinder/LanChatListenerRuntime.java").read_text(encoding="utf-8")
