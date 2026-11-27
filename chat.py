@@ -31,6 +31,7 @@ UDP_PORT = 8890  # 独立监听端口，避免与 server2/rescue2 冲突
 UDP_LISTENER_SOCKET = None
 UDP_CHAT_SEND_LOCK = threading.Lock()
 _V2_RECOVERY_RETRY_PEERS = set()
+_V2_FRAGMENT_WINDOW_PEERS = set()
 _V2_RECOVERY_RETRY_LOCK = threading.Lock()
 _V2_RECOVERY_WAKE_EVENT = threading.Event()
 _V2_RECOVERY_INFLIGHT = set()
@@ -39,7 +40,7 @@ _V2_RECOVERY_SCHEMA_READY = False
 
 
 RESCUE_SECRET = "your_private_secret_key"  # ⚠️ 必须与手机端一致
-from lan_p2p_core import LanP2PStorageError, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, BoundedPacketDispatcher, list_known_peers, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, send_discovery_broadcast_with_retries, load_active_pending_targets, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, next_peer_recovery_eligible_at_ms, list_due_outgoing_peers
+from lan_p2p_core import LanP2PStorageError, assemble_chat_fragments, store_incoming_chat_fragment, load_incoming_chat_fragments, record_outgoing_fragment_ack, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, BoundedPacketDispatcher, list_known_peers, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, send_discovery_broadcast_with_retries, load_active_pending_targets, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, next_peer_recovery_eligible_at_ms, list_due_outgoing_peers
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.sqlite3"), "chat.py")
 SERVER2_URL = "http://127.0.0.1:8080"      # server2.py 的地址
 # ==========================================
@@ -483,6 +484,33 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
                 _V2_RECOVERY_RETRY_PEERS.add(sender)
             _V2_RECOVERY_WAKE_EVENT.set()
         return
+    if packet_type == "chat.fragment.ack":
+        message_id = str(envelope.get("message_id") or "")
+        target = str(envelope.get("target_peer_id") or "")
+        fragment_index = envelope.get("fragment_index")
+        if (target != PEER_NODE_ID or envelope.get("status") != "received"
+                or not sender or type(fragment_index) is not int
+                or int(addr[1]) not in (8887, 8888, 8889, 8890)):
+            return
+        active_route = peer_endpoint_matches(CHAT_DB, "chat.py", sender, addr[0], addr[1])
+        sent_endpoint_route = outgoing_ack_endpoint_matches(
+            CHAT_DB, "chat.py", message_id, sender, addr[0], addr[1])
+        discovery_flight = fragment_index < 8 and is_outgoing_discovery_pending(
+            CHAT_DB, "chat.py", message_id)
+        if not (active_route or sent_endpoint_route or discovery_flight):
+            return
+        try:
+            bitmap = record_outgoing_fragment_ack(
+                CHAT_DB, "chat.py", message_id, sender, fragment_index,
+                addr[0], int(addr[1]))
+        except LanP2PStorageError as exc:
+            print(f"⚠️ chat.py fragment ACK persistence failed: {type(exc).__name__}")
+            return
+        if bitmap is not None:
+            with _V2_RECOVERY_RETRY_LOCK:
+                _V2_FRAGMENT_WINDOW_PEERS.add(sender)
+            _V2_RECOVERY_WAKE_EVENT.set()
+        return
     if packet_type == "chat.ack":
         message_id = str(envelope.get("message_id") or "")
         target = str(envelope.get("target_peer_id") or "")
@@ -492,6 +520,57 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
         if (target == PEER_NODE_ID and envelope.get("status") == "stored"
                 and sender and (active_route or sent_endpoint_route)):
             acknowledge_outgoing_message(CHAT_DB, "chat.py", message_id, sender)
+        return
+    if packet_type == "chat.fragment":
+        target = envelope.get("target_peer_id", "*")
+        message_id = str(envelope.get("message_id") or "")
+        if (target not in ("*", PEER_NODE_ID) or not sender or not message_id
+                or int(addr[1]) not in (8887, 8888, 8889, 8890)):
+            return
+        try:
+            stored = store_incoming_chat_fragment(CHAT_DB, "chat.py", sender, envelope)
+        except LanP2PStorageError as exc:
+            print(f"⚠️ chat.py fragment persistence failed: {type(exc).__name__}")
+            return
+        if stored == "rejected":
+            return
+        fragment_index = int(envelope.get("fragment_index", -1))
+        fragment_ack = {"type": "chat.fragment.ack", "sender_peer_id": PEER_NODE_ID,
+                        "sender_peer_type": "chat.py", "service_id": PEER_NODE_ID,
+                        "target_peer_id": sender, "message_id": message_id,
+                        "fragment_index": fragment_index, "status": "received"}
+        try:
+            sock.sendto(encode_packet(fragment_ack, RESCUE_SECRET), addr)
+        except OSError:
+            return
+        cached = load_incoming_chat_fragments(CHAT_DB, "chat.py", sender, message_id)
+        if not cached or len(cached) != int(envelope.get("fragment_count", -1)):
+            return
+        try:
+            body = assemble_chat_fragments(cached)
+        except ValueError as exc:
+            print(f"⚠️ chat.py fragment reassembly failed: {type(exc).__name__}")
+            return
+        claim_result = _claim_chat_message(sender, message_id, body)
+        if claim_result is None:
+            return
+        record_peer(CHAT_DB, "chat.py", sender,
+                    envelope.get("sender_peer_type", "unknown"),
+                    envelope.get("service_id", ""), addr[0], addr[1], "suspect")
+        final_ack = {"type": "chat.ack", "sender_peer_id": PEER_NODE_ID,
+                     "sender_peer_type": "chat.py", "service_id": PEER_NODE_ID,
+                     "target_peer_id": sender, "message_id": message_id, "status": "stored"}
+        try:
+            sock.sendto(encode_packet(final_ack, RESCUE_SECRET), addr)
+        except OSError:
+            return
+        if not claim_result:
+            return
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        with print_lock:
+            print(f"\\n🗣️ [对讲机] {display_sender} 说: {body}")
+            CHAT_MESSAGES.append({"time": ts, "sender": display_sender, "content": body})
+            if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
         return
     if packet_type != "chat.message":
         return
