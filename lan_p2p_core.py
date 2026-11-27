@@ -2216,3 +2216,21 @@ def load_incoming_chat_fragments(db_path, receiver_scope, sender_peer_id,
     finally:
         if conn is not None:
             _safe_close(conn)
+
+
+LAN_CHAT_DISCOVERY_PORTS = (8888, 8887, 8889, 8890)
+
+
+def build_chat_discovery_destinations(ip_addresses, own_port):
+    """Build deduplicated discovery destinations for every other LAN chat listener."""
+    try:
+        excluded_port = int(own_port)
+    except (TypeError, ValueError):
+        return []
+    ips = []
+    for value in (ip_addresses or []):
+        ip = str(value or "").strip()
+        if ip and ip not in ips:
+            ips.append(ip)
+    return [(ip, port) for ip in ips for port in LAN_CHAT_DISCOVERY_PORTS
+            if port != excluded_port]
