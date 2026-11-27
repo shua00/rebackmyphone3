@@ -634,6 +634,8 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
                     _CHAT_DEDUP_DB, pending["message_id"], peer_id,
                     pending["endpoint_ip"], target_port, allow_fast_retry=False)
             except LanP2PStorageError as e:
+                _diag_exception("chat_recovery_attempt_admission_failed", peer_id=peer_id,
+                                message_id=pending["message_id"], error_type=type(e).__name__)
                 # No durable attempt was admitted, so a recovery permission remains valid.
                 if recovery_event:
                     with _V2_RECOVERY_RETRY_LOCK:
@@ -657,12 +659,16 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
                             message_id=pending["message_id"], endpoint_ip=pending["endpoint_ip"],
                             endpoint_port=target_port)
             except LanP2PStorageError as e:
+                _diag_exception("chat_recovery_send_storage_failed", peer_id=peer_id,
+                                message_id=pending["message_id"], error_type=type(e).__name__)
                 # The durable attempt is already consumed; let normal persisted backoff
                 # take over instead of force-reopening the same retry epoch.
                 with print_lock:
                     print(f"⚠️ rescue2 pending chat send stopped; backoff retained: {type(e).__name__}")
                 return
             except Exception as e:
+                _diag_exception("chat_recovery_send_failed", peer_id=peer_id,
+                                message_id=pending["message_id"], error_type=type(e).__name__)
                 with print_lock:
                     print(f"⚠️ rescue2 pending chat retry failed peer={peer_id}: {type(e).__name__}")
                 return
@@ -1069,14 +1075,30 @@ def get_arp_ips(prefix):
 def _probe_ips(ips, local_ip):
     temp_url = f"http://{local_ip}:{LOG_PORT}/api/report"
     cmd = f"FIND_ME_REPORT_TEMP:{RESCUE_SECRET}:{temp_url}"
+    probe_stats = {"sent": 0, "failed": 0}
+    probe_stats_lock = threading.Lock()
     def probe(ip):
+        s = None
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.sendto(cmd.encode(), (ip, UDP_DEVICE_PORT))
-            s.close()
-        except Exception: pass
+            with probe_stats_lock:
+                probe_stats["sent"] += 1
+        except Exception:
+            with probe_stats_lock:
+                probe_stats["failed"] += 1
+        finally:
+            if s is not None:
+                try:
+                    s.close()
+                except OSError:
+                    pass
     with concurrent.futures.ThreadPoolExecutor(max_workers=50) as ex:
         list(ex.map(probe, ips))
+    _diag_event("lan_probe_batch_complete", candidate_count=len(ips),
+                sent_count=probe_stats["sent"], failed_count=probe_stats["failed"],
+                target_port=UDP_DEVICE_PORT)
+    return probe_stats
 
 def scan_lan_devices():
     real_local_ips = [ip for ip in get_all_local_ips() if not ip.startswith("127.")] or ["127.0.0.1"]
