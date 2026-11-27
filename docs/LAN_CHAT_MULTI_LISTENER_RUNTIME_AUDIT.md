@@ -217,3 +217,11 @@ CI：前一组 path-plan commits 的 run `45982642484` 已全部成功（Python�
 - [x] 增加双路径 owner 独立性、同路径旧实例不能移除替换实例、snapshot 不可变等 Java 单元测试。
 - [ ] 该改动尚未创建 AP secondary worker；旧 primary 接收循环仍负责 legacy UDP commands，后续 secondary 必须只分发 authenticated LAN P2P frames，避免两条路径重复执行 legacy 命令。
 - [ ] 继续完成 secondary candidate 精确绑定、独立 receive loop、secondary HELLO discovery、generation/path-plan reconciliation、onDestroy 批量停止及竞态测试。
+
+
+CI 验证（2026-11-27）：
+
+- [x] commit `05c001486f08dceef53ed86c10badb945a226934` / run [45986410871](https://github.com/shua00/rebackmyphone3/actions/runs/45986410871)：Python 443 tests（skipped=1）、Windows socket binding、Android unit/debug/slim build 全通过；artifact `15191124437`。
+- [x] commit `9a9b40749d95e17a53a52f8ff1304e3367b23909` / run [45986436210](https://github.com/shua00/rebackmyphone3/actions/runs/45986436210)：上述 jobs 全通过；artifact `15191777902`。
+- [x] commit `ac2c15d977fc12caa9cc7769e19a961213b49320` / run [45986488456](https://github.com/shua00/rebackmyphone3/actions/runs/45986488456)：上述 jobs 全通过；artifact `15192185065`。
+- [ ] 以上是 owner-map 前置阶段的构建验证，不等于 secondary listener 已实现或完成真机验收。
