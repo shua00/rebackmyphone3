@@ -176,3 +176,13 @@
 - 最新验证 commit：`96fb9c03eacd67f51079272b54923b0ceef32760`；Actions run [45981692678](https://github.com/shua00/rebackmyphone3/actions/runs/45981692678) 全部成功。
 - Python：440 tests，OK（skipped=1）；Windows socket binding success；Android `testDebugUnitTest` + `assembleDebug` success；Slim Release `assembleRelease -PincludeDiagnostics=false` success。
 - APK artifact：`app-diagnostic-and-slim-apks`，ID `15189847113`。
+
+
+## 批次 B（进行中）：AP/local-interface 路径计划与识别边界
+
+- 新增 `LanChatListenerPathPlan`：从已验证的 `LanTransferPathSet` 生成确定性 primary/secondary 路径计划；优先选择 Android Network 作为 primary，单路径时 secondary 为空。
+- `TrackingService.refreshWifiLanTransport()` 仅在实际 Wi-Fi LAN fingerprint 变化后刷新聊天路径计划；调用既有 `currentLanTransferPathSet()` 规则，不在每包、发送路径或稳定单路径运行期做接口枚举。
+- 计划组件只保存路径元数据，不创建 Socket/Thread/Timer/Probe；本轮尚未启动第二个聊天 Listener。
+- **AP 识别边界**：`LOCAL_INTERFACE_CANDIDATE` 仅代表未被 ConnectivityManager Wi-Fi Network 表示、且通过 IPv4/subnet/broadcast 与 cellular/VPN 排除检查的本地接口候选。接口名不能证明它是 AP；多候选、快照不完整时 fail closed。只有精确地址 bind 成功才算该候选可作为监听路径。
+- 新增 `LanChatListenerPathPlanTest`，覆盖单路径不产生 secondary、STA 优先、AP 候选作为 secondary、无 STA 时单候选 primary 及非法空输入。
+- 当前仍未完成：热点状态独立事件触发、候选接口真实角色确认、第二聊天 Listener 的 per-path socket/thread/stop 生命周期、跨路径 ACK ingress 和 peer×path 认证接入。不得将路径计划测试等同于多 Listener runtime 完成。
