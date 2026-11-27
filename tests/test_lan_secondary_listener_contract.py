@@ -115,7 +115,7 @@ class LanSecondaryListenerContractTests(unittest.TestCase):
     def test_service_destroy_closes_ingress_and_retires_secondary_start_races(self):
         destroy = self._method(
             "public void onDestroy()",
-            "private void closeLanChatStoreAfterExecutors(",
+            "// ★ 补丁3：无痕极速复活",
         )
         self.assertLess(
             destroy.index("serviceDestroyed = true;"),
