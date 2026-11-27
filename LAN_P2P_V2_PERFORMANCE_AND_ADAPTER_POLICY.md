@@ -6,13 +6,13 @@ Status: normative architecture constraints for the IPv4 P0 implementation and la
 
 LAN P2P v2 must support multiple independently usable IPv4 network paths (including Android STA + SoftAP topologies) without imposing permanent multi-path cost on ordinary single-path LAN devices.
 
-Complex-topology support is an additive capability. It must not make the common two-device/single-router case slower, noisier, less reliable, or materially more expensive in CPU, memory, sockets, wakeups, battery, or network traffic.
+Complex-topology support is an additive capability. It must not make the common single-router LAN case slower, noisier, less reliable, or materially more expensive in CPU, memory, sockets, wakeups, battery, or network traffic. The baseline is not limited to exactly two devices: it includes two or more peers on the same ordinary router, with any supported mix of Android and Python endpoints.
 
 ## Runtime operating modes
 
 ### Single-path fast path
 
-When exactly one fresh, authenticated, usable path exists for a peer:
+When exactly one fresh, authenticated, usable path exists for a peer (including a multi-peer ordinary-router LAN where several Android and/or Python devices share the same routed subnet):
 
 - Send directly over that path; do not fan out or duplicate packets across interfaces.
 - Keep one listener for each actually active local path, not one listener per hypothetical adapter.
@@ -66,7 +66,7 @@ P2 candidates (IPv6, Wi-Fi Direct and other special transports) remain optional 
 
 ## Performance and regression acceptance
 
-The implementation must compare a simple single-router baseline against the complex STA/AP topology. At minimum, record:
+The implementation must compare (A) an ordinary single-router LAN with two or more peers, including Android↔Android, Android↔Python and Python↔Android communication, against (B) the complex STA/AP topology. A is the baseline fast-path scenario, not a two-device-only special case. Include three-or-more-peer fan-in/fan-out and simultaneous conversations where supported. At minimum, record:
 
 - number of active listener sockets and receive workers;
 - idle CPU/wakeup behavior and memory attributable to path management;
@@ -85,4 +85,4 @@ Acceptance rules:
 
 ## Current scope
 
-Current priority remains IPv4 STA/AP and complex IPv4 LAN topologies. P1/P2 are compatibility constraints, not implementation commitments for this phase. Existing chat, long-message, pairing, file-transfer isolation, Rescue2 command handling and log collection behavior must not regress.
+Current priority remains IPv4 ordinary-router LAN (two or more Android/Python peers), IPv4 STA/AP and complex IPv4 LAN topologies. The ordinary-router Android/Python multi-peer case is a required P0 regression baseline, not merely a performance comparison. P1/P2 are compatibility constraints, not implementation commitments for this phase. Existing chat, long-message, pairing, file-transfer isolation, Rescue2 command handling and log collection behavior must not regress.
