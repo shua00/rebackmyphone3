@@ -1060,11 +1060,19 @@ def send_chat_v2(body, target_ips):
              "created_at_ms": created, "display_name": "PC_Terminal", "body": body}
     try:
         broadcast_bytes = encode_packet(probe, RESCUE_SECRET)
-    except ValueError as exc:
-        _diag_event("chat_send_packet_encode_failed", logging.WARNING,
-                    message_id=message_id, error_type=type(exc).__name__)
-        print("⚠️ 对讲消息过长，超过局域网 UDP 单包限制，未发送。")
-        return False
+        long_message = False
+    except ValueError:
+        try:
+            build_authenticated_chat_fragment_packets(
+                message_id, "*", body, created, PEER_NODE_ID, "rescue2",
+                PEER_NODE_ID, RESCUE_SECRET, "PC_Terminal")
+            broadcast_bytes = None
+            long_message = True
+        except ValueError as exc:
+            _diag_event("chat_send_packet_encode_failed", logging.WARNING,
+                        message_id=message_id, error_type=type(exc).__name__)
+            print("⚠️ 对讲消息超过长消息支持上限，未发送。")
+            return False
     if not persist_outgoing_message(_CHAT_DEDUP_DB, "rescue2", PEER_NODE_ID,
                                     message_id, body, target_ids, created):
         _diag_event("chat_send_persist_failed", logging.ERROR, message_id=message_id,
@@ -1081,24 +1089,51 @@ def send_chat_v2(body, target_ips):
         return False
     try:
         if target_ids:
-            # Fixed identities remain immutable; send to their persisted endpoint immediately.
-            send_outbox_to_active_peers(
-                sock, _CHAT_DEDUP_DB, "rescue2", message_id, probe, RESCUE_SECRET,
-                send_lock=UDP_CHAT_SEND_LOCK, attempts=1, retry_delay_seconds=0.25)
+            # Fixed identities remain immutable; long messages use the same per-target
+            # selective ACK bitmap and bounded 8-fragment flight as Android.
+            if long_message:
+                for peer in peer_snapshot:
+                    if peer["peer_id"] not in target_ids:
+                        continue
+                    endpoint_ip = peer.get("endpoint_ip") or ""
+                    endpoint_port = int(peer.get("endpoint_port") or UDP_DEVICE_PORT)
+                    if endpoint_ip and endpoint_port in (8887, 8888, 8889, 8890):
+                        send_outgoing_fragment_window(
+                            sock, _CHAT_DEDUP_DB, "rescue2", message_id, peer["peer_id"],
+                            body, created, (endpoint_ip, endpoint_port), PEER_NODE_ID,
+                            "rescue2", PEER_NODE_ID, RESCUE_SECRET,
+                            send_lock=UDP_CHAT_SEND_LOCK, display_name="PC_Terminal",
+                            mark_attempt=True, allow_fast_retry=True)
+            else:
+                send_outbox_to_active_peers(
+                    sock, _CHAT_DEDUP_DB, "rescue2", message_id, probe, RESCUE_SECRET,
+                    send_lock=UDP_CHAT_SEND_LOCK, attempts=1, retry_delay_seconds=0.25)
         elif broadcast_all:
             subnet = get_subnet_broadcast()
             destinations = [(ip, UDP_DEVICE_PORT) for ip in dict.fromkeys(
                 [subnet, "255.255.255.255"])]
-            send_discovery_broadcast_with_retries(
-                sock, _CHAT_DEDUP_DB, "rescue2", message_id, broadcast_bytes, destinations,
-                send_lock=UDP_CHAT_SEND_LOCK, attempts=3, retry_delay_seconds=0.25)
+            if long_message:
+                send_discovery_fragment_window(
+                    sock, _CHAT_DEDUP_DB, "rescue2", message_id, body, created,
+                    destinations, PEER_NODE_ID, "rescue2", PEER_NODE_ID, RESCUE_SECRET,
+                    send_lock=UDP_CHAT_SEND_LOCK, display_name="PC_Terminal")
+            else:
+                send_discovery_broadcast_with_retries(
+                    sock, _CHAT_DEDUP_DB, "rescue2", message_id, broadcast_bytes, destinations,
+                    send_lock=UDP_CHAT_SEND_LOCK, attempts=3, retry_delay_seconds=0.25)
         elif selected_ips:
             # A specifically requested IP with no known peer identity is a directed
             # first-discovery probe, never a subnet-wide fallback.
             destinations = [(ip, UDP_DEVICE_PORT) for ip in selected_ips if ip != "255.255.255.255"]
-            send_discovery_broadcast_with_retries(
-                sock, _CHAT_DEDUP_DB, "rescue2", message_id, broadcast_bytes, destinations,
-                send_lock=UDP_CHAT_SEND_LOCK, attempts=3, retry_delay_seconds=0.25)
+            if long_message:
+                send_discovery_fragment_window(
+                    sock, _CHAT_DEDUP_DB, "rescue2", message_id, body, created,
+                    destinations, PEER_NODE_ID, "rescue2", PEER_NODE_ID, RESCUE_SECRET,
+                    send_lock=UDP_CHAT_SEND_LOCK, display_name="PC_Terminal")
+            else:
+                send_discovery_broadcast_with_retries(
+                    sock, _CHAT_DEDUP_DB, "rescue2", message_id, broadcast_bytes, destinations,
+                    send_lock=UDP_CHAT_SEND_LOCK, attempts=3, retry_delay_seconds=0.25)
         _diag_event("chat_send_submitted", message_id=message_id,
                     target_peer_count=len(target_ids), broadcast=broadcast_all)
         print(f"{I.ok} 对讲消息已提交发送队列: {message_id}")
