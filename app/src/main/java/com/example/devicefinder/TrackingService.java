@@ -2653,6 +2653,10 @@ public class TrackingService extends Service implements LocationListener {
         }
         FileLogger.log(this, "UDP", "主动重启 LAN UDP listener generation="
                 + generation + " reason=" + reason);
+        for (LanChatListenerInstance instance : lanChatListenerRuntime.instanceSnapshot()) {
+            if (instance != activeLanChatListenerInstance) stopSecondaryLanChatListener(instance);
+        }
+        reconcileLanChatSecondaryListeners(lanChatListenerPathPlan);
         if (oldSocket != null && !oldSocket.isClosed()) {
             try {
                 oldSocket.close();
@@ -9213,6 +9217,12 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.log(this, "SERVICE", "⚠️ close rescueSocket 失败: "
                         + e.getClass().getSimpleName());
             }
+        }
+        // Retire every secondary owner on service teardown. Each worker is marked stale
+        // before its lease/socket/thread is stopped, and blocking operations occur outside
+        // rescueLock and LanChatListenerRuntime's monitor.
+        for (LanChatListenerInstance instance : lanChatListenerRuntime.instanceSnapshot()) {
+            if (instance != activeLanChatListenerInstance) stopSecondaryLanChatListener(instance);
         }
     }
 
