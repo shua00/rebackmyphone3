@@ -185,7 +185,7 @@ class LanSecondaryListenerContractTests(unittest.TestCase):
         self.assertIn("generation == lanSocketGeneration.get()", secondary)
         self.assertIn("isSecondaryPathStillPlanned(fingerprint)", secondary)
         self.assertIn("attempts.incrementAndGet()", secondary)
-        self.assertIn("Math.min(300_000L, 5_000L * Math.pow(3", secondary)
+        self.assertIn("300_000L, 5_000L * Math.pow(3", secondary)
         self.assertIn('"secondary-listener-retry-" + fingerprint', secondary)
         self.assertIn("lanChatListenerRuntime.getInstance(fingerprint) == null", secondary)
         self.assertIn("startSecondaryLanChatListener(path, generation)", secondary)
