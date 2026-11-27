@@ -1613,7 +1613,7 @@ class LanP2PCoreTests(unittest.TestCase):
         packet_end = source.index("\n        } catch (Exception e)", packet_start)
         packet_handler = source[packet_start:packet_end]
         persist_call = packet_handler.index("persistIncomingLanChat(")
-        ack_call = packet_handler.index("sendLanChatReceiveAck(")
+        ack_call = packet_handler.index("sendLanChatReceiveAck(", persist_call)
         self.assertLess(persist_call, ack_call)
         self.assertIn("if (stored)", packet_handler)
         self.assertIn('persisted=false ackSent=false', packet_handler)
