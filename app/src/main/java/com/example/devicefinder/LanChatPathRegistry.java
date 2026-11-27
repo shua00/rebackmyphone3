@@ -161,6 +161,22 @@ public final class LanChatPathRegistry {
         return Collections.unmodifiableList(result);
     }
 
+    /**
+     * Revalidate a previously captured binding immediately before dispatch. This does not
+     * hold the registry lock across socket I/O; callers must still check socket/generation
+     * ownership at the send boundary and treat a failed check as a stale-path retry.
+     */
+    public synchronized boolean isCurrentBinding(RouteBinding binding) {
+        if (binding == null || binding.route == null || binding.listener == null
+                || !binding.listener.isUsable()) return false;
+        Listener current = listeners.get(binding.route.pathFingerprint);
+        if (current != binding.listener
+                || current.generation != binding.route.listenerGeneration) return false;
+        Map<String, PeerRoute> peerRoutes = routes.get(binding.route.peerId);
+        return peerRoutes != null
+                && peerRoutes.get(binding.route.pathFingerprint) == binding.route;
+    }
+
     /** Compatibility view for callers that only need endpoint metadata. */
     public synchronized List<PeerRoute> getFreshPeerRoutes(String peer, long now) {
         List<RouteBinding> bindings = getFreshPeerRouteBindings(peer, now);
