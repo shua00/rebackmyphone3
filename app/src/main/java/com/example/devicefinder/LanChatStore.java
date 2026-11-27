@@ -280,6 +280,13 @@ public final class LanChatStore extends SQLiteOpenHelper {
 
     private boolean hasOutboxCapacity(SQLiteDatabase db, String body) {
         if (body == null) return false;
+        // Expire stale pending rows before enforcing capacity, but keep their history intact.
+        ContentValues expired = new ContentValues();
+        expired.put("state", LanChatDeliveryState.EXPIRED);
+        expired.put("terminal_reason", "ttl");
+        db.update("lan_outbox", expired,
+                "state NOT IN ('delivered','expired') AND expires_at_ms>0 AND expires_at_ms<=?",
+                new String[]{String.valueOf(System.currentTimeMillis())});
         long incomingBytes = body.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
         if (incomingBytes > MAX_PENDING_BODY_BYTES) return false;
         Cursor c = null;
