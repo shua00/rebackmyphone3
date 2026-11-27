@@ -5,11 +5,12 @@ import threading
 import unittest
 from pathlib import Path
 
-from lan_p2p_transfer import TransferLimits, TransferOffer, TransferState
+from lan_p2p_transfer import ChunkDescriptor, TransferLimits, TransferOffer, TransferState
 from lan_p2p_transfer_store import TransferStore
 from lan_p2p_transfer_files import TransferFilesystem
 from lan_p2p_transfer_session import serve_transfer_session
 from lan_p2p_transfer_sender import send_file_over_session, send_offer_over_session
+from lan_p2p_transfer_tcp import TransferFrame, send_frame, recv_frame
 
 
 class TransferSenderIntegrationTests(unittest.TestCase):
@@ -172,6 +173,50 @@ class TransferSenderIntegrationTests(unittest.TestCase):
                 self.assertFalse(worker.is_alive())
                 self.assertEqual([], errors)
                 self.assertEqual(expected_remaining, remaining)
+            self.assertEqual(TransferState.COMPLETED, store.get_transfer(offer.transfer_id).state)
+            published = next((root / "received").iterdir())
+            self.assertEqual(payload, published.read_bytes())
+
+    def test_complete_request_recovers_receiver_left_in_verifying_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = b"recover-after-restart"
+            offer = TransferOffer("sender-verifying-recovery", "sender", "receiver",
+                "recover.txt", len(payload), hashlib.sha256(payload).hexdigest(), 1)
+            store = TransferStore(str(root / "ledger.db"), TransferLimits(chunk_size_bytes=4096))
+            files = TransferFilesystem(store, str(root / "stage"), str(root / "received"))
+            store.create_offer(offer, 1)
+            store.transition(offer.transfer_id, TransferState.ACCEPTED, 2)
+            store.transition(offer.transfer_id, TransferState.TRANSFERRING, 3)
+            files.write_chunk(ChunkDescriptor(offer.transfer_id, 0, payload,
+                hashlib.sha256(payload).hexdigest()), 4)
+            store.transition(offer.transfer_id, TransferState.VERIFYING, 5)
+
+            server, client = socket.socketpair()
+            errors = []
+            def serve():
+                try:
+                    serve_transfer_session(server, store, files, local_peer_id="receiver",
+                        authenticated_peer_id="sender", session_secret=self.SECRET,
+                        now_ms=lambda: 10, max_frames=1)
+                except Exception as exc:
+                    errors.append(exc)
+                finally:
+                    server.close()
+            worker = threading.Thread(target=serve)
+            worker.start()
+            try:
+                send_frame(client, TransferFrame("complete", offer.transfer_id,
+                    "sender", "receiver"), self.SECRET)
+                response = recv_frame(client, self.SECRET,
+                    expected_sender_peer_id="receiver", expected_target_peer_id="sender")
+                self.assertEqual("complete", response.kind)
+                self.assertEqual({"state": "completed"}, response.metadata)
+            finally:
+                client.close()
+                worker.join(timeout=3)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual([], errors)
             self.assertEqual(TransferState.COMPLETED, store.get_transfer(offer.transfer_id).state)
             published = next((root / "received").iterdir())
             self.assertEqual(payload, published.read_bytes())
