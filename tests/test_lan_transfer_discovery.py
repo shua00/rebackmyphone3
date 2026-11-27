@@ -39,6 +39,19 @@ class LanTransferDiscoveryIsolationTests(unittest.TestCase):
         self.assertIn("item.networkFingerprint.equals(network)", source)
         self.assertIn("now-item.lastSeenAtMs<=ENDPOINT_TTL_MS", source)
 
+    def test_pairing_control_is_independent_per_path_and_uses_all_fresh_endpoints(self):
+        service = self.read("TrackingService.java")
+        directory = self.read("LanTransferPeerDirectory.java")
+        self.assertIn("lanTransferPairingControlHosts", service)
+        self.assertIn("createLanTransferPairingControlHost()", service)
+        self.assertIn("findLanTransferPairingHost(sessionId, peerId)", service)
+        self.assertIn("closeLanTransferPairingInitiatorsForMissingPaths(desired)", service)
+        self.assertIn("LanTransferPeerDirectory.findCurrentAll", service)
+        self.assertIn("pathsByFingerprint.get(candidate.networkFingerprint)", service)
+        self.assertIn("LanTransferPeerDirectory.findCurrentAll", directory)
+        self.assertIn("private void closeLanTransferPairingControlHostLocked()", service)
+        self.assertNotIn("lanTransferPairingControlFingerprint", service)
+
     def test_tracking_service_owns_discovery_lifecycle_and_feature_gate(self):
         service = self.read("TrackingService.java")
         self.assertIn("refreshLanTransferDiscovery(reason);", service)
