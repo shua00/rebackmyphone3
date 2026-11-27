@@ -2594,6 +2594,13 @@ public class TrackingService extends Service implements LocationListener {
      * or listener rebind will resume the durable outbox.
      */
     private boolean hasUsableWifiLanPath() {
+        LanChatListenerPathPlan currentPlan = lanChatListenerPathPlan;
+        if (currentPlan != null
+                && currentPlan.primary().kind == LanNetworkPath.Kind.LOCAL_INTERFACE_CANDIDATE) {
+            DatagramSocket primarySocket = rescueSocketRef;
+            return primarySocket != null && !primarySocket.isClosed()
+                    && currentPlan.primary().diagnosticFingerprint().equals(rescueSocketPathFingerprint);
+        }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             // Pre-M cannot bind a DatagramSocket to a non-default Wi-Fi Network.
             // Require Wi-Fi to be the actual default route; a secondary Wi-Fi interface
@@ -7031,8 +7038,17 @@ public class TrackingService extends Service implements LocationListener {
         if (!hasUsableWifiLanPath()) return;
         DatagramSocket socket = rescueSocketRef;
         if (serviceDestroyed || socket == null || socket.isClosed()) return;
-        String broadcast = getWifiBroadcastAddress();
-        if (broadcast == null || broadcast.isEmpty()) broadcast = "255.255.255.255";
+        LanChatListenerPathPlan currentPlan = lanChatListenerPathPlan;
+        String broadcast;
+        if (currentPlan != null
+                && currentPlan.primary().kind == LanNetworkPath.Kind.LOCAL_INTERFACE_CANDIDATE) {
+            java.net.Inet4Address candidateBroadcast = currentPlan.primary().broadcastAddress;
+            if (candidateBroadcast == null) return;
+            broadcast = candidateBroadcast.getHostAddress();
+        } else {
+            broadcast = getWifiBroadcastAddress();
+            if (broadcast == null || broadcast.isEmpty()) broadcast = "255.255.255.255";
+        }
         sendPeerHello(socket, broadcast, new int[]{8888, 8887, 8889, 8890},
                 false, null, null);
     }
@@ -8204,7 +8220,13 @@ public class TrackingService extends Service implements LocationListener {
 
     private void startRescueListener() {
         final long listenerGeneration = lanSocketGeneration.get();
-        final String listenerPathFingerprint = wifiLanFingerprint;
+        final LanChatListenerPathPlan listenerPlanSnapshot = lanChatListenerPathPlan;
+        final LanNetworkPath plannedPrimaryPath = listenerPlanSnapshot == null
+                ? null : listenerPlanSnapshot.primary();
+        final boolean primaryIsLocalCandidate = plannedPrimaryPath != null
+                && plannedPrimaryPath.kind == LanNetworkPath.Kind.LOCAL_INTERFACE_CANDIDATE;
+        final String listenerPathFingerprint = primaryIsLocalCandidate
+                ? plannedPrimaryPath.diagnosticFingerprint() : wifiLanFingerprint;
         final LanChatListenerInstance listenerInstance =
                 new LanChatListenerInstance(listenerPathFingerprint, listenerGeneration);
         synchronized (rescueLock) {
@@ -8246,10 +8268,19 @@ public class TrackingService extends Service implements LocationListener {
                 if (!listenerInstance.attachSocket(rescueSocket)) {
                     throw new java.net.SocketException("Listener instance no longer accepts a socket");
                 }
-                Network boundWifiNetwork = bindSocketToWifi(rescueSocket, 8888);
-                // Keep the legacy non-Wi-Fi UDP fallback only when no concrete Wi-Fi
-                // Network was selected. A selected LAN path is always exact-address bound.
-                if (!rescueSocket.isBound()) {
+                Network boundWifiNetwork;
+                if (primaryIsLocalCandidate) {
+                    // When the device has only an unrepresented AP/local LAN interface,
+                    // the primary listener must still bind that exact address, never wildcard.
+                    LanSocketBinding.bindDatagramListenerSocket(
+                            plannedPrimaryPath, rescueSocket, 8888);
+                    boundWifiNetwork = null;
+                } else {
+                    boundWifiNetwork = bindSocketToWifi(rescueSocket, 8888);
+                }
+                // Keep the legacy non-Wi-Fi UDP fallback only when no validated local path
+                // plan exists. A selected LAN path is always exact-address bound.
+                if (!rescueSocket.isBound() && !primaryIsLocalCandidate) {
                     rescueSocket.setReuseAddress(true);
                     rescueSocket.setBroadcast(true);
                     rescueSocket.bind(new InetSocketAddress(8888));
