@@ -635,24 +635,27 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
                 with print_lock:
                     print(f"⚠️ rescue2 pending chat retry payload preparation failed peer={peer_id}: {type(e).__name__}")
                 return
-            try:
-                attempt_admitted = mark_outgoing_attempt(
-                    _CHAT_DEDUP_DB, pending["message_id"], peer_id,
-                    pending["endpoint_ip"], target_port, allow_fast_retry=False)
-            except LanP2PStorageError as e:
-                _diag_exception("chat_recovery_attempt_admission_failed", peer_id=peer_id,
-                                message_id=pending["message_id"], error_type=type(e).__name__)
-                # No durable attempt was admitted, so a recovery permission remains valid.
-                if recovery_event:
-                    with _V2_RECOVERY_RETRY_LOCK:
-                        _V2_RECOVERY_RETRY_PEERS.add(peer_id)
-                with print_lock:
-                    print(f"⚠️ rescue2 pending chat attempt admission failed; recovery retained: {type(e).__name__}")
-                return
-            if not attempt_admitted:
-                _diag_event("chat_recovery_attempt_not_admitted", peer_id=peer_id,
-                            message_id=pending["message_id"])
-                continue
+            # Long-message admission belongs to the fragment sender: it first
+            # determines the missing flight, then consumes retry budget only for
+            # an actual recovery send. Short messages retain the original admission.
+            if not long_message:
+                try:
+                    attempt_admitted = mark_outgoing_attempt(
+                        _CHAT_DEDUP_DB, pending["message_id"], peer_id,
+                        pending["endpoint_ip"], target_port, allow_fast_retry=False)
+                except LanP2PStorageError as e:
+                    _diag_exception("chat_recovery_attempt_admission_failed", peer_id=peer_id,
+                                    message_id=pending["message_id"], error_type=type(e).__name__)
+                    if recovery_event:
+                        with _V2_RECOVERY_RETRY_LOCK:
+                            _V2_RECOVERY_RETRY_PEERS.add(peer_id)
+                    with print_lock:
+                        print(f"⚠️ rescue2 pending chat attempt admission failed; recovery retained: {type(e).__name__}")
+                    return
+                if not attempt_admitted:
+                    _diag_event("chat_recovery_attempt_not_admitted", peer_id=peer_id,
+                                message_id=pending["message_id"])
+                    continue
             try:
                 _diag_event("chat_recovery_send_started", peer_id=peer_id,
                             message_id=pending["message_id"], endpoint_ip=pending["endpoint_ip"],
@@ -663,7 +666,7 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
                         pending["body"], pending["created_at_ms"],
                         (pending["endpoint_ip"], target_port), PEER_NODE_ID, "rescue2",
                         PEER_NODE_ID, RESCUE_SECRET, send_lock=UDP_CHAT_SEND_LOCK,
-                        display_name="PC_Terminal", mark_attempt=False)
+                        display_name="PC_Terminal", mark_attempt=True, allow_fast_retry=False)
                 else:
                     send_outgoing_packet(
                         sock, raw, (pending["endpoint_ip"], target_port),
