@@ -7235,6 +7235,8 @@ public class TrackingService extends Service implements LocationListener {
                 final String peerNetwork = envelope.optString("network_scope", "");
                 final String peerIp = peerAddress.getHostAddress();
                 final boolean challengeOnly = envelope.optBoolean("challenge_only", false);
+                final String helloIngressPath = listenerPathFingerprint;
+                final long helloIngressGeneration = listenerGeneration;
                 try {
                     lanChatPeerExecutor.execute(() -> {
                         long peerQueueMs = android.os.SystemClock.elapsedRealtime()
@@ -7244,11 +7246,20 @@ public class TrackingService extends Service implements LocationListener {
                                     + peerQueueMs + " peer=" + senderId);
                         }
                         try {
+                            // A queued HELLO must not mutate peer state or send a reply after
+                            // the exact ingress listener has been replaced. Path-less legacy
+                            // ingress remains compatible only when no path identity exists.
+                            if (helloIngressPath != null
+                                    && !isCurrentLanChatIngress(helloIngressPath, socket,
+                                            helloIngressGeneration)) return;
                             if (!store.observePeer(senderId, peerType, serviceId, peerNetwork,
                                     peerIp, sourcePort, now, now + 120_000L)) {
                                 FileLogger.log(this, "CHAT", "⚠️ peer HELLO 持久化未确认，不发送 peer.ack");
                                 return;
                             }
+                            if (helloIngressPath != null
+                                    && !isCurrentLanChatIngress(helloIngressPath, socket,
+                                            helloIngressGeneration)) return;
                             sendLanUdpPacket(socket, response, "PEER_ACK_V2");
                             // A normal beacon also challenges its sender once, allowing an
                             // existing sender to rediscover this device and resume its outbox.
