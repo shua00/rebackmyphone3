@@ -565,3 +565,11 @@
 - [x] Windows runner 专项校验通过（Run `45927389104`）：Windows 真实 loopback TCP socket 通过 `IP_UNICAST_IF` 绑定指定接口，并成功从 `127.0.0.1` 连接 `127.0.0.2`；Windows socket binding 专项 10 项通过。测试过程中发现并修正 `socket.if_nameindex()` 在 Windows 返回 `(index, name)` 的平台差异。该结果验证 Windows API 参数/字节序与本机 loopback 连接，不替代多网卡物理 LAN 出口验收。
 - [x] 新增服务进程重启集成测试：关闭并重新创建 `LanTransferService` 后，未完成任务仍为 TRANSFERRING，已 fsync/登记的 staging 分片与 receipt 可重新校验，缺失分片账本保持正确，可信 Peer 列表可加载，服务可重新启动。Run `45928099513`：Python 全量 `427 tests` 通过（1 项跨平台跳过），Windows socket binding 专项通过，Android 变更检测通过；仅 Python 变更，Android build 按条件跳过。
 - [x] 启动等待网络就绪修正代码提交 `9b2121649a8ad9803445382d66d5af0d8ffbf037`，测试夹具修正后 Run `45927181959` 全部通过：Python 全量 `424 tests`，Android 变更检测通过；Android build 按条件跳过。
+
+## 第六批并行推进（2026-11-27）：Android 聊天 Listener 精确 STA 绑定
+
+- [x] 将现有 STA Wi-Fi 聊天 UDP Listener 从“Network.bindSocket + wildcard 0.0.0.0:8888”改为 `LanSocketBinding.bindDatagramListenerSocket()`，直接绑定所选 `LanNetworkPath.localAddress:8888`；Network path、interface、IPv4 地址及 prefix 均来自同一 LinkProperties snapshot。
+- [x] 仅当当前没有可用 Android Wi-Fi Network 时，保留原有 wildcard UDP 兼容入口；若已选择 Wi-Fi Network 但精确绑定失败，则启动失败并按既有退避重试，不回退到默认路由。
+- [x] 新增 Python 静态架构回归，约束聊天 Listener 必须使用精确地址绑定、并验证 wildcard 仅位于未绑定 fallback 分支。
+- [ ] AP local-interface candidate 尚未接入 TrackingService 聊天 Listener；不能据此宣称 STA/AP 双 Listener 已实现。
+- [ ] 仍需 Android Robolectric/单元测试、Python 全量测试、Windows 检查及 Debug/Slim Release APK 构建验证；真机多网卡和热点验收另计。
