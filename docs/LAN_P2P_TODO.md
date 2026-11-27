@@ -493,6 +493,9 @@
 - [x] 新增 Python 130-chunk 多页恢复测试：按每连接 62 个 chunk 的预算，跨三条认证 TCP 连接依次处理 62/62/6 个 chunk，验证 Missing 页持续前进、无重复死循环、最终 SHA-256 与发布文件完全一致。
 - [x] 新增 Android 对应 130-chunk/三次认证重连测试，验证同一多页语义和最终文件内容。
 - [x] 新增 Python 与 Android 终态重放测试：已完成任务重复 `complete` 返回 completed；随后重放 `cancel` 仍返回 completed，不能回退状态或删除已发布文件。
-- [ ] 上述新增 Python/Android 回归测试已提交，等待本批 CI；不能以提交成功代替测试通过。
+- [x] 新增回归测试 CI 已通过：Python 全量 417 tests（Run `45917117043`）；Android `testDebugUnitTest`、诊断 `assembleDebug`、slim `assembleRelease -PincludeDiagnostics=false` 均通过（同一 Run `45917117043`）。
 - [ ] 多页协议当前采用“每次连接从 Missing 起点重新查询、发送本连接首批缺片、Complete 再返回下一批缺片”的有界推进方式；`more` 是提示后面仍有缺片，不代表客户端必须在同一连接无限翻页。跨连接测试用于证明该约定无漏片/死循环。
 - [ ] Android↔Python 运行时真实跨语言 TCP 互通仍是独立验收项：当前 golden vectors、双方本地 loopback 和跨连接语义测试尚不能替代 JVM Android 客户端与 Python 服务端（及反向）的真实 socket 互通。
+
+- [ ] 后续补测“staging 文件已写入但进程在 receipt 提交前崩溃”的 orphan chunk 窗口：若无 receipt 的孤立文件本身损坏，Python 当前 `write_chunk` 仍会拒绝覆盖；应只允许安全修复无 receipt 的 regular-file orphan，绝不能覆盖已有有效 receipt 对应的冲突数据。该项与本批已修复的“损坏 receipt + 损坏文件”是不同崩溃窗口。
+- [ ] 下一项优先实现 JVM Android 客户端↔Python 服务端真实 TCP 双向互通测试，覆盖真实认证握手、Offer、显式 Accept、Chunk ACK、Missing、Complete 和 SHA-256 发布；不得仅以共享 golden vectors 或两端各自 loopback 测试替代。
