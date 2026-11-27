@@ -659,19 +659,27 @@ def list_due_outgoing_peers(db_path, sender_scope, limit=500, now_ms=None):
         rows = conn.execute("""SELECT DISTINCT t.peer_id
             FROM lan_outbox o
             JOIN lan_outbox_targets t ON t.message_id=o.message_id
-            JOIN lan_peers p ON p.receiver_scope=? AND p.peer_id=t.peer_id
+            LEFT JOIN lan_peers p ON p.receiver_scope=? AND p.peer_id=t.peer_id
             WHERE o.sender_scope=? AND o.state NOT IN ('delivered','expired','waiting_peers')
               AND t.status!='acked' AND t.attempt_count<?
-              AND p.status='active' AND p.lease_expires_at>?
-              AND (t.attempt_count=0
-                   OR t.last_endpoint != (p.endpoint_ip || ':' || p.endpoint_port)
-                   OR t.last_attempt_at +
+              AND (
+                (p.status='active' AND p.lease_expires_at>?
+                 AND (t.attempt_count=0
+                      OR t.last_endpoint != (p.endpoint_ip || ':' || p.endpoint_port)
+                      OR t.last_attempt_at +
+                         CASE t.attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000
+                           WHEN 3 THEN 10000 WHEN 4 THEN 20000 WHEN 5 THEN 40000
+                           ELSE 60000 END <= ?))
+                OR
+                (t.fragment_count>1 AND t.last_endpoint!=''
+                 AND (t.attempt_count=0 OR t.last_attempt_at +
                       CASE t.attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000
                         WHEN 3 THEN 10000 WHEN 4 THEN 20000 WHEN 5 THEN 40000
-                        ELSE 60000 END <= ?)
+                        ELSE 60000 END <= ?))
+              )
             ORDER BY t.peer_id LIMIT ?""",
             (sender_scope, sender_scope, MAX_OUTBOX_TARGET_ATTEMPTS,
-             now / 1000.0, now, max(1, min(500, int(limit))))).fetchall()
+             now / 1000.0, now, now, max(1, min(500, int(limit))))).fetchall()
         return [str(row[0]) for row in rows]
     except Exception as exc:
         if conn is not None:
