@@ -215,7 +215,7 @@ public class LanChatPathRegistryTest {
                     registry.getFreshPeerRouteBindings("peer", NOW + 2);
             assertEquals(2, bindings.size());
             for (LanChatPathRegistry.RouteBinding binding : bindings) {
-                assertTrue(binding.isCurrentAndUsable());
+                assertTrue(registry.isCurrentBinding(binding));
                 if (s.equals(binding.route.pathFingerprint)) {
                     assertSame(sta, binding.listener.socket);
                     assertEquals(31L, binding.listener.generation);
@@ -247,6 +247,7 @@ public class LanChatPathRegistryTest {
             // silently become a binding to the replacement listener.
             assertSame(old, before.get(0).listener.socket);
             assertEquals(51L, before.get(0).listener.generation);
+            assertFalse(registry.isCurrentBinding(before.get(0)));
         } finally { old.close(); replacement.close(); }
     }
 
