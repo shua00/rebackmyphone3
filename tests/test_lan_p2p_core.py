@@ -6462,3 +6462,35 @@ assert indexes == [1, 3, 4, 5, 6, 7], indexes
                 [sys.executable, "-c", second_process, db_path, message_id],
                 cwd=str(repo_root), env=env, capture_output=True, text=True, timeout=20)
             self.assertEqual(0, resumed.returncode, resumed.stderr)
+
+
+class PythonLongChatCrossServiceDiscoveryTests(unittest.TestCase):
+    def test_discovery_targets_every_other_listener_without_looping_to_self(self):
+        from lan_p2p_core import build_chat_discovery_destinations
+        expected_ports = {
+            8888: {8887, 8889, 8890},
+            8887: {8888, 8889, 8890},
+            8889: {8888, 8887, 8890},
+            8890: {8888, 8887, 8889},
+        }
+        for own_port, expected in expected_ports.items():
+            with self.subTest(own_port=own_port):
+                destinations = build_chat_discovery_destinations(
+                    ["192.0.2.10", "192.0.2.10", "255.255.255.255"], own_port)
+                self.assertEqual(2 * len(expected), len(destinations))
+                self.assertEqual(expected, {port for _, port in destinations})
+                self.assertEqual(2, len({ip for ip, _ in destinations}))
+                self.assertNotIn(own_port, {port for _, port in destinations})
+
+    def test_all_python_services_use_the_shared_cross_service_discovery_policy(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        expected_calls = {
+            "rescue2.py": "build_chat_discovery_destinations(",
+            "chat.py": "build_chat_discovery_destinations(targets, UDP_PORT)",
+            "server2.py": "build_chat_discovery_destinations(",
+        }
+        for filename, expected in expected_calls.items():
+            with self.subTest(service=filename):
+                source = (repo_root / filename).read_text(encoding="utf-8")
+                self.assertIn("build_chat_discovery_destinations", source)
+                self.assertIn(expected, source)
