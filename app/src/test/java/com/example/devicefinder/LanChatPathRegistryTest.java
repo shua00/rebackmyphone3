@@ -73,6 +73,24 @@ public class LanChatPathRegistryTest {
         } finally { old.close(); replacement.close(); }
     }
 
+    @Test public void advancingStaGenerationPreservesIndependentApRoute() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket sta = socket(), ap = socket();
+        try {
+            String s = "sta|wlan0|192.168.1.20/24", a = "ap|ap0|192.168.43.1/24";
+            registry.registerListener(s, sta, 1);
+            registry.registerListener(a, ap, 1);
+            registry.recordVerifiedPeer("peer", s, endpoint("192.168.1.31"), NOW, NOW + 100);
+            registry.recordVerifiedPeer("peer", a, endpoint("192.168.43.2"), NOW, NOW + 100);
+            registry.registerListener(s, sta, 2);
+            List<LanChatPathRegistry.PeerRoute> remaining =
+                    registry.getFreshPeerRoutes("peer", NOW + 1);
+            assertEquals(1, remaining.size());
+            assertEquals(a, remaining.get(0).pathFingerprint);
+            assertEquals(1L, remaining.get(0).listenerGeneration);
+        } finally { sta.close(); ap.close(); }
+    }
+
     @Test public void removingApPathPreservesStaRoute() throws Exception {
         LanChatPathRegistry registry = new LanChatPathRegistry();
         DatagramSocket sta = socket(), ap = socket();
