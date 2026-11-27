@@ -346,3 +346,18 @@ PR #1 仍 Open，未合并 main；本轮完成的是代码和 CI 层面的批次
 - [x] 源码提交 `afc4249f224c4861b5fc16e7d2ab6d73ae9cfc90`；测试提交/当前 head `b60303b3aa2ec867de7f81c4dc2117047af2b1c0`。
 - [x] PR Actions run [46034311338](https://github.com/shua00/rebackmyphone3/actions/runs/46034311338)：Python 471 tests（skipped=1）、Windows Socket Binding、Android `testDebugUnitTest`、Debug APK、Slim Release 全部成功；artifact `15216630552`（`app-diagnostic-and-slim-apks`，711489 bytes）。
 - [ ] CI 只证明代码契约与构建通过；API 21–22 实机兼容、OEM AP bind、STA/AP 双向广播/单播、热点 NAT/客户端隔离及三设备任意两台通信仍需真机验收。
+
+
+## Rescue2 local runtime diagnostics (batch C close-out)
+
+Scope: diagnostics emitted by the Rescue2 Python process itself. This is separate from Android single-device diagnostic reports and the HTTP endpoint that receives uploaded device logs.
+
+- The bounded rotating local log remains `rescue2_runtime.log` beside `rescue2.py` (4 MiB per file, four backups); startup reports the resolved path.
+- Added scan lifecycle events: scan id, local interface/network counts, ARP/full-subnet fallback outcome, discovered count and elapsed time.
+- Added v2 peer lifecycle events: HELLO receipt/rejection, HELLO persistence and ACK send outcomes, challenge verification result.
+- Added chat lifecycle events: send request/persistence/queue outcome, inbound persistence/dedup outcome, ACK send/receive/acceptance/persistence, and recovery replay stages correlated by message id.
+- Added recovery worker/schema/ledger failure events and exception tracebacks for actionable failure paths.
+- Existing UDP ingress/rejection/dispatch-queue/listener lifecycle diagnostics are retained.
+- Log fields continue to exclude message bodies, packet payloads, credentials, tokens and secrets. No protocol changes, additional periodic probes, or new background workers are introduced by diagnostics.
+
+Operational note: collect `rescue2_runtime.log` from the PC/Termux host after reproducing an issue. Correlate events by scan id, peer id and message id; compare send, receive, challenge and ACK timestamps across both endpoints where possible. Logs are bounded and rotate automatically.
