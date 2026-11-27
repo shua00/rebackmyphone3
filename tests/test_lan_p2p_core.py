@@ -5695,6 +5695,33 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
         self.assertEqual(bitmap, load_outgoing_fragment_ack_bitmap(
             db_path, "tx-long-1", "peer-b"))
 
+    def test_python_broadcast_fragment_target_retries_without_active_peer_lease(self):
+        from lan_p2p_core import (
+            persist_outgoing_message, begin_outgoing_discovery_window,
+            record_outgoing_fragment_ack, list_due_outgoing_peers,
+            load_outgoing_fragment_targets_for_peer, fragment_chat_message,
+        )
+        fd, db_path = tempfile.mkstemp(prefix="lan-fragment-pinned-route-")
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(db_path) and os.unlink(db_path))
+        body = "message-scoped endpoint🙂" * 200
+        self.assertTrue(persist_outgoing_message(
+            db_path, "rescue2", "peer-a", "tx-pinned-route", body, [], 123456))
+        self.assertTrue(begin_outgoing_discovery_window(
+            db_path, "rescue2", "tx-pinned-route", window_ms=30000))
+        fragments = fragment_chat_message("tx-pinned-route", "*", body, 123456)
+        self.assertIsNotNone(record_outgoing_fragment_ack(
+            db_path, "rescue2", "tx-pinned-route", "peer-unknown", 0,
+            "192.0.2.77", 8888, now_ms=2000))
+        due = list_due_outgoing_peers(db_path, "rescue2", now_ms=3501)
+        self.assertIn("peer-unknown", due)
+        rows = load_outgoing_fragment_targets_for_peer(
+            db_path, "rescue2", "peer-unknown")
+        self.assertEqual(1, len(rows))
+        self.assertEqual(("192.0.2.77", 8888),
+                         (rows[0]["endpoint_ip"], rows[0]["endpoint_port"]))
+        self.assertEqual(len(fragments), rows[0]["fragment_count"])
+
     def test_python_fragment_sender_advances_only_after_eight_selective_acks(self):
         from lan_p2p_core import (
             persist_outgoing_message, send_outgoing_fragment_window,
