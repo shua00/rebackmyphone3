@@ -948,6 +948,12 @@ def record_outgoing_fragment_ack(db_path, sender_scope, message_id, peer_id,
             if state != "discovery_pending" or not deadline or now >= int(deadline) or fragment_index >= 8:
                 _safe_rollback(conn)
                 return None
+            target_count = conn.execute(
+                "SELECT COUNT(*) FROM lan_outbox_targets WHERE message_id=?",
+                (message_id,)).fetchone()[0]
+            if int(target_count or 0) >= MAX_FRAGMENT_DISCOVERY_TARGETS:
+                _safe_rollback(conn)
+                return None
             conn.execute("""INSERT INTO lan_outbox_targets
                 (message_id,peer_id,status,attempt_count,last_attempt_at,last_ack_at,
                  last_endpoint,last_attempt_endpoint,last_sent_endpoint,
@@ -2021,6 +2027,7 @@ def assemble_chat_fragments(fragments):
 CHAT_FRAGMENT_SESSION_TTL_MS = 30 * 60 * 1000
 MAX_CHAT_FRAGMENT_SESSIONS = 32
 MAX_CHAT_FRAGMENT_CACHE_CHARS = 2 * 1024 * 1024
+MAX_FRAGMENT_DISCOVERY_TARGETS = 64
 
 
 def _ensure_chat_fragment_schema(conn):
