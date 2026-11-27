@@ -21,20 +21,37 @@ public final class LanTransferSenderWorker implements Runnable {
         Network currentWifiNetwork() throws IOException;
         /** Complete immutable production path; null is retained only for legacy protocol tests. */
         default LanNetworkPath currentLanNetworkPath() throws IOException { return null; }
+        /** All currently usable paths; legacy providers remain single-path by default. */
+        default List<LanNetworkPath> currentLanNetworkPaths() throws IOException {
+            LanNetworkPath path = currentLanNetworkPath();
+            return path == null ? java.util.Collections.<LanNetworkPath>emptyList()
+                    : java.util.Collections.singletonList(path);
+        }
     }
     public interface Listener {
         void onState(String state);
         void onProgress(int sentInBatch, int batchSize);
     }
-    public interface EndpointProvider { Endpoint currentEndpoint() throws IOException; }
+    public interface EndpointProvider {
+        Endpoint currentEndpoint() throws IOException;
+        default List<Endpoint> currentEndpoints() throws IOException {
+            Endpoint endpoint = currentEndpoint();
+            return endpoint == null ? java.util.Collections.<Endpoint>emptyList()
+                    : java.util.Collections.singletonList(endpoint);
+        }
+    }
     public static final class Endpoint {
         public final String host;
         public final int port;
-        public Endpoint(String host, int port) {
+        /** Fingerprint of the exact local path on which this endpoint was discovered. */
+        public final String networkFingerprint;
+        public Endpoint(String host, int port) { this(host, port, null); }
+        public Endpoint(String host, int port, String networkFingerprint) {
             if (host == null || host.trim().isEmpty() || port < 1 || port > 65535)
                 throw new IllegalArgumentException("Invalid discovered transfer endpoint");
             this.host = host.trim();
             this.port = port;
+            this.networkFingerprint = networkFingerprint;
         }
     }
 
@@ -104,6 +121,71 @@ public final class LanTransferSenderWorker implements Runnable {
         return endpoint;
     }
 
+    /** Resolve endpoint leases and path snapshots together; never bind an endpoint to another path. */
+    private List<Endpoint> currentEndpoints() throws IOException {
+        List<Endpoint> found = endpoints.currentEndpoints();
+        if (found == null || found.isEmpty())
+            throw new IOException("Trusted peer has no fresh endpoint on active LAN paths");
+        List<Endpoint> bounded = new java.util.ArrayList<>();
+        for (Endpoint endpoint : found) {
+            if (endpoint != null && bounded.size() < 4) bounded.add(endpoint);
+        }
+        if (bounded.isEmpty()) throw new IOException("No valid discovered transfer endpoint");
+        return bounded;
+    }
+
+    private LanNetworkPath pathFor(Endpoint endpoint, List<LanNetworkPath> paths) throws IOException {
+        if (endpoint.networkFingerprint == null) return networks.currentLanNetworkPath();
+        for (LanNetworkPath path : paths)
+            if (endpoint.networkFingerprint.equals(path.diagnosticFingerprint())) return path;
+        throw new IOException("Discovered endpoint path is no longer active");
+    }
+
+    private JSONObject sendOfferAcrossCurrentPaths() throws IOException, GeneralSecurityException {
+        Exception last = null;
+        List<LanNetworkPath> paths = networks.currentLanNetworkPaths();
+        for (Endpoint endpoint : currentEndpoints()) {
+            try {
+                LanNetworkPath path = pathFor(endpoint, paths);
+                if (path != null) return LanTransferTcpClient.sendOffer(path, endpoint.host, endpoint.port,
+                        source, offer, localPeerId, offer.targetPeerId, requirePeerSecret(),
+                        chunkSizeBytes, 1024 * 1024, (int) CONNECT_TIMEOUT_MS);
+                Network network = networks.currentWifiNetwork();
+                if (network == null) throw new IOException("No selected Wi-Fi LAN network");
+                return LanTransferTcpClient.sendOffer(network, endpoint.host, endpoint.port,
+                        source, offer, localPeerId, offer.targetPeerId, requirePeerSecret(),
+                        chunkSizeBytes, 1024 * 1024, (int) CONNECT_TIMEOUT_MS);
+            } catch (IOException failure) { last = failure; }
+        }
+        if (last instanceof IOException) throw (IOException) last;
+        throw new IOException("No active endpoint/path pair could send Offer", last);
+    }
+
+    private List<Integer> connectAndSendAcrossCurrentPaths() throws IOException, GeneralSecurityException {
+        Exception last = null;
+        List<LanNetworkPath> paths = networks.currentLanNetworkPaths();
+        for (Endpoint endpoint : currentEndpoints()) {
+            try {
+                LanNetworkPath path = pathFor(endpoint, paths);
+                LanTransferTcpClient.Progress progress = (sent, batch) -> {
+                    if (listener != null) listener.onProgress(sent, batch);
+                };
+                if (path != null) return LanTransferTcpClient.connectAndSend(path, endpoint.host, endpoint.port,
+                        source, offer, localPeerId, offer.targetPeerId, requirePeerSecret(),
+                        chunkSizeBytes, LanTransferTcpClient.DEFAULT_CHUNKS_PER_SESSION,
+                        1024 * 1024, (int) CONNECT_TIMEOUT_MS, progress);
+                Network network = networks.currentWifiNetwork();
+                if (network == null) throw new IOException("No selected Wi-Fi LAN network");
+                return LanTransferTcpClient.connectAndSend(network, endpoint.host, endpoint.port,
+                        source, offer, localPeerId, offer.targetPeerId, requirePeerSecret(),
+                        chunkSizeBytes, LanTransferTcpClient.DEFAULT_CHUNKS_PER_SESSION,
+                        1024 * 1024, (int) CONNECT_TIMEOUT_MS, progress);
+            } catch (IOException failure) { last = failure; }
+        }
+        if (last instanceof IOException) throw (IOException) last;
+        throw new IOException("No active endpoint/path pair could send transfer data", last);
+    }
+
     public void cancel() { cancelled.set(true); }
 
     /** Stop at the next safe protocol boundary while retaining the durable task for resume. */
@@ -143,19 +225,7 @@ public final class LanTransferSenderWorker implements Runnable {
         JSONObject acknowledgement = null;
         while (!cancelled.get() && !pauseRequested.get() && System.currentTimeMillis() < offerDeadline) {
             try {
-                LanNetworkPath path = networks.currentLanNetworkPath();
-                Endpoint endpoint = currentEndpoint();
-                if (path != null) {
-                    acknowledgement = LanTransferTcpClient.sendOffer(path, endpoint.host, endpoint.port,
-                            source, offer, localPeerId, offer.targetPeerId, requirePeerSecret(),
-                            chunkSizeBytes, 1024 * 1024, (int) CONNECT_TIMEOUT_MS);
-                } else {
-                    Network network = networks.currentWifiNetwork();
-                    if (network == null) throw new IOException("No selected Wi-Fi LAN network");
-                    acknowledgement = LanTransferTcpClient.sendOffer(network, endpoint.host, endpoint.port,
-                            source, offer, localPeerId, offer.targetPeerId, requirePeerSecret(),
-                            chunkSizeBytes, 1024 * 1024, (int) CONNECT_TIMEOUT_MS);
-                }
+                acknowledgement = sendOfferAcrossCurrentPaths();
                 String remoteState = acknowledgement.optString("state", "");
                 if ("rejected".equals(remoteState) || "cancelled".equals(remoteState)
                         || "expired".equals(remoteState) || "failed".equals(remoteState)) {
@@ -195,24 +265,7 @@ public final class LanTransferSenderWorker implements Runnable {
         backoff = 1000L;
         for (int session = 0; session < maxSessions && !cancelled.get() && !pauseRequested.get(); session++) {
             try {
-                LanNetworkPath path = networks.currentLanNetworkPath();
-                Endpoint endpoint = currentEndpoint();
-                List<Integer> missing;
-                if (path != null) {
-                    missing = LanTransferTcpClient.connectAndSend(path, endpoint.host, endpoint.port,
-                            source, offer, localPeerId, offer.targetPeerId, requirePeerSecret(),
-                            chunkSizeBytes, LanTransferTcpClient.DEFAULT_CHUNKS_PER_SESSION,
-                            1024 * 1024, (int) CONNECT_TIMEOUT_MS,
-                            (sent, batch) -> { if (listener != null) listener.onProgress(sent, batch); });
-                } else {
-                    Network network = networks.currentWifiNetwork();
-                    if (network == null) throw new IOException("No selected Wi-Fi LAN network");
-                    missing = LanTransferTcpClient.connectAndSend(network, endpoint.host, endpoint.port,
-                            source, offer, localPeerId, offer.targetPeerId, requirePeerSecret(),
-                            chunkSizeBytes, LanTransferTcpClient.DEFAULT_CHUNKS_PER_SESSION,
-                            1024 * 1024, (int) CONNECT_TIMEOUT_MS,
-                            (sent, batch) -> { if (listener != null) listener.onProgress(sent, batch); });
-                }
+                List<Integer> missing = connectAndSendAcrossCurrentPaths();
                 if (missing == null) throw new IOException("Sender returned no transfer result");
                 if (missing.isEmpty()) {
                     store.markSenderCompleted(offer.transferId, localPeerId, System.currentTimeMillis());
