@@ -4452,7 +4452,8 @@ public class TrackingService extends Service implements LocationListener {
         return "255.255.255.255";
     }
 
-    private Network bindSocketToWifi(java.net.DatagramSocket socket) throws java.io.IOException {
+    private Network bindSocketToWifi(java.net.DatagramSocket socket, int listenerPort)
+            throws java.io.IOException {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             return null;
         }
@@ -4502,12 +4503,12 @@ public class TrackingService extends Service implements LocationListener {
             }
             LanNetworkPath selectedPath = LanNetworkPath.fromAndroidNetwork(selected,
                     links.getInterfaceName(), localAddress, prefixLength, broadcastAddress);
-            LanSocketBinding.bindDatagramSocket(selectedPath, socket);
-            FileLogger.logD("CHAT", "UDP listener socket bound to selected LAN path="
-                    + selectedPath.diagnosticFingerprint());
+            LanSocketBinding.bindDatagramListenerSocket(selectedPath, socket, listenerPort);
+            FileLogger.logD("CHAT", "UDP listener socket exact-address bound to selected LAN path="
+                    + selectedPath.diagnosticFingerprint() + " port=" + listenerPort);
             return selected;
         } catch (Exception bindError) {
-            throw new java.io.IOException("Wi-Fi LAN socket binding failed", bindError);
+            throw new java.io.IOException("Wi-Fi LAN listener binding failed", bindError);
         }
     }
 
@@ -7937,10 +7938,14 @@ public class TrackingService extends Service implements LocationListener {
                 // Exit before opening/binding a socket when teardown already won that race.
                 if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 rescueSocket = new DatagramSocket(null);
-                rescueSocket.setReuseAddress(true);
-                rescueSocket.setBroadcast(true);
-                Network boundWifiNetwork = bindSocketToWifi(rescueSocket);
-                rescueSocket.bind(new InetSocketAddress(8888));
+                Network boundWifiNetwork = bindSocketToWifi(rescueSocket, 8888);
+                // Keep the legacy non-Wi-Fi UDP fallback only when no concrete Wi-Fi
+                // Network was selected. A selected LAN path is always exact-address bound.
+                if (!rescueSocket.isBound()) {
+                    rescueSocket.setReuseAddress(true);
+                    rescueSocket.setBroadcast(true);
+                    rescueSocket.bind(new InetSocketAddress(8888));
+                }
                 rescueSocket.setSoTimeout(3000);
                 synchronized (rescueLock) {
                     if (serviceDestroyed || listenerGeneration != lanSocketGeneration.get()) {
