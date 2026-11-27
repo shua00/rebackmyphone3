@@ -162,6 +162,27 @@ public final class LanChatPathRegistry {
     }
 
     /**
+     * O(1) preferred-path lookup for the common single-path fast path. Unlike
+     * getFreshPeerRouteBindings(), this does not allocate or enumerate a route list.
+     */
+    public synchronized RouteBinding getFreshPeerRouteBinding(String peer, String path, long now) {
+        if (peer == null || peer.trim().isEmpty() || path == null || path.trim().isEmpty())
+            return null;
+        Listener listener = listeners.get(path);
+        if (listener == null || !listener.isUsable()) return null;
+        Map<String, PeerRoute> peerRoutes = routes.get(peer);
+        if (peerRoutes == null) return null;
+        PeerRoute route = peerRoutes.get(path);
+        if (route == null) return null;
+        if (now >= route.expiresAtMs || route.listenerGeneration != listener.generation) {
+            peerRoutes.remove(path);
+            if (peerRoutes.isEmpty()) routes.remove(peer);
+            return null;
+        }
+        return new RouteBinding(route, listener);
+    }
+
+    /**
      * Resolve an authenticated ACK/source endpoint only within the exact ingress path epoch.
      * Direct path lookup keeps the single-path ACK fast path O(1); it never searches other
      * interfaces or borrows another path's authentication.
