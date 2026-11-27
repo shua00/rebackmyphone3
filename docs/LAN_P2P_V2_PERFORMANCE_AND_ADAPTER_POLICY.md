@@ -86,3 +86,8 @@ Acceptance rules:
 ## Current scope
 
 Current priority remains IPv4 ordinary-router LAN (two or more Android/Python peers), IPv4 STA/AP and complex IPv4 LAN topologies. The ordinary-router Android/Python multi-peer case is a required P0 regression baseline, not merely a performance comparison. P1/P2 are compatibility constraints, not implementation commitments for this phase. Existing chat, long-message, pairing, file-transfer isolation, Rescue2 command handling and log collection behavior must not regress.
+
+
+## Unified network awareness and adaptive routing
+
+The project-wide P0 architecture contract is defined in `docs/UNIFIED_NETWORK_AWARENESS_AND_ADAPTIVE_ROUTING.md`. This performance policy is a binding constraint on that architecture: awareness and route selection must be event-driven and path-scoped, and the single-path ordinary-router fast path must not incur multi-path scanning, probing, fan-out, or worker overhead. Rescue2/Server2 UDP-versus-HTTP command routing is a later P0 integration stage after LAN P2P v2 IPv4 real-device acceptance; it must reuse authenticated reachability facts and command idempotency rather than infer LAN reachability from subnet similarity.
