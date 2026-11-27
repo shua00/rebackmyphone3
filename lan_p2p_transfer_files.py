@@ -137,10 +137,18 @@ class TransferFilesystem:
             task_dir = self._task_dir(descriptor.transfer_id)
             final = self._chunk_path(task_dir, descriptor.index)
             if final.exists() or final.is_symlink():
+                receipt = self.store.get_chunk_receipt(descriptor.transfer_id, descriptor.index)
                 existing = self._read_regular(final, expected)
                 if existing is None or hashlib.sha256(existing).hexdigest() != digest:
-                    raise TransferValidationError("existing staged chunk conflicts with incoming content")
-                return self.store.record_verified_chunk(descriptor, now_ms)
+                    if receipt is not None:
+                        raise TransferValidationError("existing staged chunk conflicts with durable receipt")
+                    # Crash window: staging bytes may have reached disk before the
+                    # receipt transaction committed. Without a receipt this entry is
+                    # not durable evidence; replace only a regular-file orphan.
+                    final.unlink()
+                    self._fsync_dir(task_dir)
+                else:
+                    return self.store.record_verified_chunk(descriptor, now_ms)
             if self._used_bytes() + len(descriptor.payload) > self.max_staging_bytes:
                 raise TransferValidationError("staging disk quota exceeded")
             fd, temp_name = tempfile.mkstemp(prefix=".chunk-", suffix=".tmp", dir=str(task_dir))
