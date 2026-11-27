@@ -163,6 +163,10 @@ def serve_transfer_session(
                 response_state = TransferState.CANCELLED
             else:
                 response_state = record.state
+            # Match Android: cancellation ACK follows durable state change and
+            # private staging cleanup; replayed cancellation remains idempotent.
+            if response_state == TransferState.CANCELLED:
+                filesystem.cleanup(frame.transfer_id)
             response_kind = "cancel"
             response_metadata = {"state": response_state.value}
         else:
