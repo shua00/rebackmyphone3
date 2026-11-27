@@ -995,6 +995,104 @@ def load_outgoing_fragment_ack_bitmap(db_path, message_id, peer_id):
             _safe_close(conn)
 
 
+def build_authenticated_chat_fragment_packets(message_id, target_peer_id, body,
+        created_at_ms, sender_peer_id, sender_peer_type, service_id, secret, display_name=""):
+    """Build authenticated, datagram-bounded packets for one fixed target."""
+    fragments = fragment_chat_message(message_id, target_peer_id, body, created_at_ms)
+    packets = []
+    for fields in fragments:
+        fields.update({
+            "sender_peer_id": sender_peer_id,
+            "sender_peer_type": sender_peer_type,
+            "service_id": service_id,
+        })
+        if display_name:
+            fields["display_name"] = str(display_name)
+        raw = encode_packet(fields, secret)
+        if len(raw) > MAX_DATAGRAM_BYTES:
+            raise ValueError("chat fragment datagram exceeds protocol limit")
+        packets.append(raw)
+    return packets
+
+
+def send_outgoing_fragment_window(sock, db_path, sender_scope, message_id, peer_id,
+        body, created_at_ms, endpoint, sender_peer_id, sender_peer_type,
+        service_id, secret, send_lock=None, display_name="", mark_attempt=False,
+        allow_fast_retry=False):
+    """Send one bounded 8-fragment flight or a final-fragment completion probe."""
+    if sock is None or not endpoint or len(endpoint) != 2:
+        return 0
+    packets = build_authenticated_chat_fragment_packets(
+        message_id, peer_id, body, created_at_ms, sender_peer_id,
+        sender_peer_type, service_id, secret, display_name)
+    if not initialize_outgoing_fragment_progress(db_path, message_id, peer_id, len(packets)):
+        return 0
+    bitmap = load_outgoing_fragment_ack_bitmap(db_path, message_id, peer_id)
+    if bitmap is None or len(bitmap) != len(packets):
+        return 0
+    if mark_attempt and not mark_outgoing_attempt(
+            db_path, message_id, peer_id, str(endpoint[0]), int(endpoint[1]),
+            allow_fast_retry=allow_fast_retry):
+        return 0
+    first_missing = bitmap.find("0")
+    if first_missing < 0:
+        indices = [len(packets) - 1]  # repeat final fragment until whole-message chat.ack
+    else:
+        if not mark_attempt and first_missing % 8 != 0:
+            return 0  # ACK-driven advancement waits for the current flight to complete
+        window_start = (first_missing // 8) * 8
+        window_end = min(len(packets), window_start + 8)
+        indices = [index for index in range(window_start, window_end)
+                   if bitmap[index] == "0"]
+    sent = 0
+    for index in indices:
+        try:
+            send_outgoing_packet(sock, packets[index], endpoint, db_path,
+                                 sender_scope, message_id, peer_id, send_lock=send_lock)
+            sent += 1
+        except Exception:
+            continue
+    return sent
+
+
+def send_discovery_fragment_window(sock, db_path, sender_scope, message_id,
+        body, created_at_ms, destinations, sender_peer_id, sender_peer_type,
+        service_id, secret, send_lock=None, display_name=""):
+    """Broadcast only the first 8 fragments while the bounded empty-recipient window is open."""
+    if sock is None or not db_path or not sender_scope or not message_id:
+        return 0
+    packets = build_authenticated_chat_fragment_packets(
+        message_id, "*", body, created_at_ms, sender_peer_id,
+        sender_peer_type, service_id, secret, display_name)
+    if not begin_outgoing_discovery_window(db_path, sender_scope, message_id):
+        return 0
+    sent = 0
+    targets = []
+    for destination in (destinations or []):
+        if not isinstance(destination, (tuple, list)) or len(destination) != 2:
+            continue
+        ip, port = str(destination[0]), int(destination[1])
+        if ip and 1 <= port <= 65535:
+            targets.append((ip, port))
+    targets = list(dict.fromkeys(targets))
+    try:
+        for raw in packets[:8]:
+            for destination in targets:
+                try:
+                    if send_lock is None:
+                        sock.sendto(raw, destination)
+                    else:
+                        with send_lock:
+                            sock.sendto(raw, destination)
+                    sent += 1
+                except OSError:
+                    continue
+    finally:
+        if sent == 0:
+            _reset_unsent_discovery_window(db_path, sender_scope, message_id)
+    return sent
+
+
 def load_outgoing_fragment_targets_for_peer(db_path, sender_scope, peer_id, limit=50):
     """Load persisted long-message recipients for ACK-driven window advancement."""
     if not db_path or not sender_scope or not peer_id:
