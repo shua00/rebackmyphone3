@@ -41,6 +41,17 @@ public class LanChatListenerInstanceTest {
         }
     }
 
+    @Test public void closedSocketAndAlreadyStartedThreadCannotBeAttached() throws Exception {
+        LanChatListenerInstance instance = new LanChatListenerInstance("sta|192.168.1.2/24", 9L);
+        DatagramSocket closed = socket();
+        closed.close();
+        Thread started = new Thread(() -> { });
+        started.start();
+        started.join();
+        assertFalse(instance.attachSocket(closed));
+        assertFalse(instance.attachThread(started));
+    }
+
     @Test public void oldGenerationCannotClaimReplacementResources() throws Exception {
         LanChatListenerInstance oldInstance = new LanChatListenerInstance("sta|192.168.1.2/24", 10L);
         LanChatListenerInstance replacement = new LanChatListenerInstance("sta|192.168.1.2/24", 11L);
