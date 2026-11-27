@@ -118,6 +118,7 @@ public class ChatActivity extends Activity {
         btnChatSettings.setOnClickListener(v -> showChatSettings());
         tvNewMsg = findViewById(R.id.tvNewMsg); // 绑定新标签
         tvDeliveryStatus = findViewById(R.id.tvDeliveryStatus);
+        tvDeliveryStatus.setOnClickListener(v -> managePendingOutboxMessages());
         deliveryStatusExecutor = Executors.newSingleThreadExecutor();
 
         // 【新增】监听滚动，判断是否滑到了底部
@@ -368,6 +369,76 @@ public class ChatActivity extends Activity {
         }, COMPOSER_IME_RESTORE_DELAY_MS);
     }
 
+    /** Open an explicit cancellation flow for unfinished durable Outbox rows. */
+    private void managePendingOutboxMessages() {
+        if (deliveryStatusExecutor == null) return;
+        try {
+            deliveryStatusExecutor.execute(() -> {
+                final java.util.ArrayList<LanChatStore.DeliverySummary> pending = new java.util.ArrayList<>();
+                try {
+                    LanChatStore store = new LanChatStore(getApplicationContext());
+                    try {
+                        store.expireOutboxMessages(System.currentTimeMillis());
+                        for (LanChatStore.DeliverySummary item : store.loadRecentDeliverySummaries(20)) {
+                            if (!"delivered".equals(item.state) && !"expired".equals(item.state)) {
+                                pending.add(item);
+                            }
+                        }
+                    } finally {
+                        store.closeStore();
+                    }
+                } catch (Exception e) {
+                    runOnUiThread(() -> Toast.makeText(this, "读取待处理消息失败", Toast.LENGTH_SHORT).show());
+                    return;
+                }
+                runOnUiThread(() -> {
+                    if (isFinishing()) return;
+                    if (pending.isEmpty()) {
+                        Toast.makeText(this, "当前没有可取消的待处理消息", Toast.LENGTH_SHORT).show();
+                        refreshDeliveryStatusAsync();
+                        return;
+                    }
+                    String[] labels = new String[pending.size()];
+                    for (int i = 0; i < pending.size(); i++) {
+                        LanChatStore.DeliverySummary item = pending.get(i);
+                        String body = item.body == null ? "" : item.body.replace('\n', ' ').trim();
+                        if (body.length() > 24) body = body.substring(0, 24) + "…";
+                        labels[i] = body + " (" + item.ackedTargets + "/" + item.totalTargets + ")";
+                    }
+                    new android.app.AlertDialog.Builder(this)
+                            .setTitle("选择要取消的待处理消息")
+                            .setItems(labels, (dialog, which) -> {
+                                LanChatStore.DeliverySummary selected = pending.get(which);
+                                new android.app.AlertDialog.Builder(this)
+                                        .setTitle("取消发送？")
+                                        .setMessage("已送达的收件人不会撤回；未送达收件人将停止自动重试。")
+                                        .setNegativeButton("返回", null)
+                                        .setPositiveButton("确认取消", (d, w) -> {
+                                            if (deliveryStatusExecutor == null) return;
+                                            deliveryStatusExecutor.execute(() -> {
+                                                boolean cancelled = false;
+                                                try {
+                                                    LanChatStore store = new LanChatStore(getApplicationContext());
+                                                    try { cancelled = store.cancelPendingMessage(selected.messageId); }
+                                                    finally { store.closeStore(); }
+                                                } catch (Exception ignored) {}
+                                                final boolean result = cancelled;
+                                                runOnUiThread(() -> {
+                                                    Toast.makeText(this,
+                                                            result ? "已取消后续发送" : "消息状态已变化，未执行取消",
+                                                            Toast.LENGTH_SHORT).show();
+                                                    refreshDeliveryStatusAsync();
+                                                });
+                                            });
+                                        }).show();
+                            }).setNegativeButton("关闭", null).show();
+                });
+            });
+        } catch (RejectedExecutionException rejected) {
+            Toast.makeText(this, "消息管理暂不可用", Toast.LENGTH_SHORT).show();
+        }
+    }
+
     /**
      * Render progress from the same durable Outbox/target ledger used by retry.
      * SQLite reads stay off the main thread; polling runs only while this screen is visible.
@@ -388,10 +459,11 @@ public class ChatActivity extends Activity {
                 try {
                     LanChatStore store = new LanChatStore(getApplicationContext());
                     try {
+                        store.expireOutboxMessages(System.currentTimeMillis());
                         List<LanChatStore.DeliverySummary> summaries =
-                                store.loadRecentDeliverySummaries(3);
+                                store.loadRecentDeliverySummaries(20);
                         if (!summaries.isEmpty()) {
-                            StringBuilder text = new StringBuilder("发送状态");
+                            StringBuilder text = new StringBuilder("发送状态（点此管理未完成消息）");
                             SimpleDateFormat timeFormat = new SimpleDateFormat("HH:mm", Locale.getDefault());
                             for (LanChatStore.DeliverySummary item : summaries) {
                                 if (awaitingNewOutbox && item.createdAtMs >= awaitingSinceMs) {
@@ -408,7 +480,7 @@ public class ChatActivity extends Activity {
                                 } else if ("retry_paused".equals(item.state)) {
                                     stateLabel = "重试已暂停，等待恢复";
                                 } else if ("expired".equals(item.state)) {
-                                    stateLabel = "已过期";
+                                    stateLabel = "cancelled".equals(item.terminalReason) ? "已取消" : "已过期";
                                 } else if ("pending".equals(item.state)) {
                                     stateLabel = item.ackedTargets > 0 ? "部分送达" : "等待设备确认";
                                     hasPending = true;
