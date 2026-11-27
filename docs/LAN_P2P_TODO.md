@@ -466,3 +466,10 @@
 - [x] 新增 Android loopback TCP 回归测试：预置完整 chunk receipt 并将任务置于 `verifying`，模拟进程重启后发送 `complete`，验证服务端完成发布、状态进入 `completed` 且文件 SHA-256/内容一致。
 - [x] Android Gradle `testDebugUnitTest`、诊断 Debug APK 与 slim Release APK 构建均通过（CI run `45914317953`）；Python 全量 unittest/py_compile 在加入 VERIFYING 恢复回归测试后通过（CI run `45914457579`）。此修正只解决一个已定位的跨端恢复状态门禁差异，不代表完整 Android↔Python 端到端互通验收完成。
 - [x] 同步新增 Python socketpair 回归测试：将接收端任务预置为 `VERIFYING`，重连发送 `complete`，验证 Python 服务端同样可恢复并完成 SHA-256 校验与文件发布；Android/Python 两端分别覆盖同一恢复语义。
+
+## 第二批次推进补充（2026-11-27）：重复 Offer / Chunk 幂等性
+
+- [x] 新增 Python TCP socketpair 回归测试：在已有 `TRANSFERRING` 任务上重放完全相同的 Offer，确认返回 `new_offer=false` 且不重置状态；同一 Chunk 连续发送两次，确认第一次 `new_receipt=true`、重放 `new_receipt=false`，账本只保留同一份 durable receipt。
+- [x] 新增 Android loopback TCP 回归测试，覆盖相同的 Offer 与 Chunk 重放语义。
+- [x] Python 全量 CI（Run `45915399980`）通过，Android Gradle 单测及两种 APK 构建仍在执行中。
+- [ ] 后续继续覆盖断开导致 ACK 丢失后的新连接重新查询、损坏 receipt 失效后的缺片回补，以及两端真实 socket 互通；当前幂等测试不等同于跨进程/跨设备端到端验收。
