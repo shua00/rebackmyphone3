@@ -156,3 +156,14 @@
 - 单 Listener 仍只有原有一个接收线程和一个 socket；本批没有启动第二 Listener，也没有改变 UDP 8888 绑定策略、ACK ingress snapshot、消息/文件传输协议。
 - 新增 `LanChatListenerInstanceTest`，覆盖唯一资源附着、停止后禁止迟到资源附着、旧 generation 不能冒充替换实例；更新 Python 静态契约测试。
 - **范围说明**：这是把现有单 Listener 的身份/资源所有权显式化，不等于完成完整 manager 化；socket bind/receive/close 和 multicast lock 仍由 TrackingService 控制，后续批次再逐步把状态迁入 owner，并审查 onDestroy/网络切换/启动失败的所有退出路径。
+
+
+### 批次 A CI 结果（代码基线 `6b7d7e0207bf96fddf868612d5338d529da1e09f`）
+
+- GitHub Actions run [45980782340](https://github.com/shua00/rebackmyphone3/actions/runs/45980782340)：全部 jobs success。
+- Python：440 tests，OK（skipped=1）。
+- Windows socket binding：success。
+- Android：`testDebugUnitTest`、`assembleDebug` 成功；Debug build 1m21s。
+- Slim Release：`assembleRelease -PincludeDiagnostics=false` 成功，17s。
+- APK artifact：`app-diagnostic-and-slim-apks`，artifact ID `15189696370`。
+- 以上是代码/构建验证，不是 Android 真机验收；本批仍未启动第二 Listener。
