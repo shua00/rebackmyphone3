@@ -99,10 +99,12 @@ class HostLifecycleTests(unittest.TestCase):
             made.append(service)
             return service
 
-        with patch.object(lan_p2p_transfer_host, "LanTransferService", side_effect=service_factory), \\
-             patch.object(lan_p2p_transfer_host, "load_or_create_peer_id", return_value="python-node-1"), \\
-             patch.object(lan_p2p_transfer_host.signal, "signal"), \\
-             patch.object(lan_p2p_transfer_host.threading, "Event", return_value=stop_event):
+        with (
+            patch.object(lan_p2p_transfer_host, "LanTransferService", side_effect=service_factory),
+            patch.object(lan_p2p_transfer_host, "load_or_create_peer_id", return_value="python-node-1"),
+            patch.object(lan_p2p_transfer_host.signal, "signal"),
+            patch.object(lan_p2p_transfer_host.threading, "Event", return_value=stop_event),
+        ):
             result = lan_p2p_transfer_host.main([
                 "--credentials", "trusted.json",
                 "--data-dir", "data",
