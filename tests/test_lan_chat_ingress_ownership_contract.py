@@ -140,6 +140,24 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
         self.assertIn("helloIngressPath, socket, helloIngressGeneration", hello)
         self.assertIn("lanChatPathRegistry.listenerCount() <= 1", hello)
 
+    def test_peer_wide_sqlite_endpoint_is_challenge_candidate_not_payload_authorization(self):
+        sender = self._method(
+            "private void transmitLocalUdpMessageInternal(",
+            "private boolean hasFreshLanChatPeerRoute(",
+        )
+        self.assertIn("preparedCachedEndpoints.get(target.peerId)", sender)
+        self.assertIn("directed-challenge candidate only", sender)
+        self.assertNotIn("dispatchEndpoints.put(target.peerId, cachedRoute)", sender)
+        binding_guard = self._method(
+            "private boolean isCurrentLanChatSendBinding(",
+            "private void scheduleLanChatFragmentWindowAdvance(",
+        )
+        self.assertIn("lanChatPathRegistry.isCurrentBinding(binding)", binding_guard)
+        self.assertIn("return false;", binding_guard)
+        self.assertNotIn("listenerCount() == 1", binding_guard)
+        self.assertIn("dispatchBindings.put(target.peerId, liveBinding)", sender)
+        self.assertIn("DatagramSocket peerSocket = routeBinding == null ? socket : routeBinding.listener.socket", sender)
+
         self.assertIn("hasFreshLanChatPeerRoute(target.peerId)", self.source)
         self.assertIn("hasFreshLanChatPeerRoute(challengePeerId)", self.source)
         self.assertNotIn("verifiedChatPeers.containsKey(target.peerId)", self.source)
