@@ -140,12 +140,14 @@ class LanSocketBindingTests(unittest.TestCase):
         client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         accepted = None
         try:
-            listener.bind(("127.0.0.1", 0))
+            # Use two addresses in the loopback /8 so the remote endpoint is
+            # distinct from the selected local source address.
+            listener.bind(("127.0.0.2", 0))
             listener.listen(1)
             listener.settimeout(3.0)
             client.settimeout(3.0)
             binding = bind_socket_to_path(
-                client, path, remote_address="127.0.0.1",
+                client, path, remote_address="127.0.0.2",
                 platform="win32", socket_module=socket,
             )
             self.assertGreater(binding.interface_index, 0)
