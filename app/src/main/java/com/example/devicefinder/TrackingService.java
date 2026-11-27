@@ -2680,7 +2680,10 @@ public class TrackingService extends Service implements LocationListener {
     private void refreshLanChatListenerPathPlan(ConnectivityManager cm, String reason) {
         try {
             LanTransferPathSet paths = currentLanTransferPathSet(cm);
-            LanChatListenerPathPlan plan = LanChatListenerPathPlan.from(paths);
+            // Keep the path plan's primary identical to the Wi-Fi Network selected by
+            // the existing primary listener binder; other validated paths become secondary.
+            Network preferredWifiNetwork = selectWifiLanNetwork(cm);
+            LanChatListenerPathPlan plan = LanChatListenerPathPlan.from(paths, preferredWifiNetwork);
             lanChatListenerPathPlan = plan;
             FileLogger.logD("CHAT", "LAN chat path plan refreshed reason=" + reason
                     + " listenerPaths=" + plan.listenerCount()
@@ -2705,8 +2708,7 @@ public class TrackingService extends Service implements LocationListener {
         final java.util.Map<String, LanNetworkPath> desired = new java.util.HashMap<>();
         if (!serviceDestroyed && plan != null) {
             for (LanNetworkPath path : plan.secondary()) {
-                if (path != null
-                        && path.kind == LanNetworkPath.Kind.LOCAL_INTERFACE_CANDIDATE) {
+                if (path != null) {
                     desired.put(path.diagnosticFingerprint(), path);
                 }
             }
@@ -2760,8 +2762,8 @@ public class TrackingService extends Service implements LocationListener {
      * candidate. Legacy management UDP commands remain on the primary listener only.
      */
     private void startSecondaryLanChatListener(final LanNetworkPath path, final long generation) {
-        if (path == null || path.kind != LanNetworkPath.Kind.LOCAL_INTERFACE_CANDIDATE
-                || serviceDestroyed || generation != lanSocketGeneration.get()) return;
+        if (path == null || serviceDestroyed
+                || generation != lanSocketGeneration.get()) return;
         final String fingerprint = path.diagnosticFingerprint();
         if (fingerprint == null || fingerprint.isEmpty()
                 || lanChatListenerRuntime.getInstance(fingerprint) != null) return;
@@ -2845,8 +2847,7 @@ public class TrackingService extends Service implements LocationListener {
         LanChatListenerPathPlan plan = lanChatListenerPathPlan;
         if (plan == null || fingerprint == null) return false;
         for (LanNetworkPath path : plan.secondary()) {
-            if (path != null && path.kind == LanNetworkPath.Kind.LOCAL_INTERFACE_CANDIDATE
-                    && fingerprint.equals(path.diagnosticFingerprint())) return true;
+            if (path != null && fingerprint.equals(path.diagnosticFingerprint())) return true;
         }
         return false;
     }
