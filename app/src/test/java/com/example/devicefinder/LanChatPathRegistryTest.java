@@ -105,4 +105,39 @@ public class LanChatPathRegistryTest {
         } finally { socket.close(); }
     }
 
+
+    @Test public void ordinaryRouterSupportsMultipleAndroidAndPythonPeersOnOnePath() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket routerLan = socket();
+        try {
+            // Platform labels do not establish trust; all peers use authenticated peer IDs.
+            String path = "sta|wlan0|192.168.1.20/24";
+            registry.registerListener(path, routerLan, 7);
+            registry.recordVerifiedPeer("android-peer-a", path, endpoint("192.168.1.31"), NOW, NOW + 120000);
+            registry.recordVerifiedPeer("python-peer-b", path, endpoint("192.168.1.32"), NOW + 1, NOW + 120001);
+            registry.recordVerifiedPeer("android-peer-c", path, endpoint("192.168.1.33"), NOW + 2, NOW + 120002);
+            assertEquals(1, registry.listenerCount());
+            assertEquals(1, registry.getFreshPeerRoutes("android-peer-a", NOW + 3).size());
+            assertEquals(1, registry.getFreshPeerRoutes("python-peer-b", NOW + 3).size());
+            assertEquals(1, registry.getFreshPeerRoutes("android-peer-c", NOW + 3).size());
+            assertTrue(registry.getFreshPeerRoutes("unknown-peer", NOW + 3).isEmpty());
+        } finally { routerLan.close(); }
+    }
+
+    @Test public void routeUpdatesForOnePeerDoNotOverwriteAnotherPeerOnSamePath() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket routerLan = socket();
+        try {
+            String path = "sta|wlan0|192.168.1.20/24";
+            registry.registerListener(path, routerLan, 8);
+            registry.recordVerifiedPeer("peer-a", path, endpoint("192.168.1.31"), NOW, NOW + 120000);
+            registry.recordVerifiedPeer("peer-b", path, endpoint("192.168.1.32"), NOW, NOW + 120000);
+            registry.recordVerifiedPeer("peer-a", path, endpoint("192.168.1.41"), NOW + 5, NOW + 120005);
+            assertEquals("192.168.1.41", registry.getFreshPeerRoutes("peer-a", NOW + 6)
+                    .get(0).endpoint.getAddress().getHostAddress());
+            assertEquals("192.168.1.32", registry.getFreshPeerRoutes("peer-b", NOW + 6)
+                    .get(0).endpoint.getAddress().getHostAddress());
+        } finally { routerLan.close(); }
+    }
+
 }
