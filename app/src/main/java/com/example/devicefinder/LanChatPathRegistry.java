@@ -35,10 +35,12 @@ public final class LanChatPathRegistry {
         public final InetSocketAddress endpoint;
         public final long verifiedAtMs;
         public final long expiresAtMs;
+        public final long listenerGeneration;
         private PeerRoute(String peer, String path, InetSocketAddress endpoint,
-                long verifiedAt, long expiresAt) {
+                long verifiedAt, long expiresAt, long listenerGeneration) {
             this.peerId = peer; this.pathFingerprint = path; this.endpoint = endpoint;
             this.verifiedAtMs = verifiedAt; this.expiresAtMs = expiresAt;
+            this.listenerGeneration = listenerGeneration;
         }
     }
 
@@ -56,7 +58,7 @@ public final class LanChatPathRegistry {
         if (socket == null || socket.isClosed() || !socket.isBound() || generation < 0L)
             throw new IllegalArgumentException("Listener must be open, bound, and have a valid generation");
         Listener previous = listeners.get(path);
-        if (previous != null && previous.socket != socket) {
+        if (previous != null && (previous.socket != socket || previous.generation != generation)) {
             // A re-created listener has a new receive/send ownership epoch. Do not
             // carry peer routes verified against the previous socket into that epoch.
             removeRoutesForPath(path);
@@ -94,7 +96,8 @@ public final class LanChatPathRegistry {
             throw new IllegalStateException("Cannot verify a peer route without its active path listener");
         Map<String, PeerRoute> peerRoutes = routes.get(peer);
         if (peerRoutes == null) { peerRoutes = new HashMap<>(); routes.put(peer, peerRoutes); }
-        PeerRoute route = new PeerRoute(peer, path, endpoint, verifiedAt, expiresAt);
+        PeerRoute route = new PeerRoute(peer, path, endpoint, verifiedAt, expiresAt,
+                listener.generation);
         peerRoutes.put(path, route);
         return route;
     }
@@ -110,7 +113,8 @@ public final class LanChatPathRegistry {
             if (now >= route.expiresAtMs) iterator.remove();
             else {
                 Listener listener = listeners.get(route.pathFingerprint);
-                if (listener != null && listener.isUsable()) result.add(route);
+                if (listener != null && listener.isUsable()
+                        && listener.generation == route.listenerGeneration) result.add(route);
             }
         }
         if (peerRoutes.isEmpty()) routes.remove(peer);
