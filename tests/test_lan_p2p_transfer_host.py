@@ -7,9 +7,11 @@ import lan_p2p_transfer_host
 class _StopAfterOneRefresh:
     def __init__(self):
         self.waits = 0
+        self.timeouts = []
 
     def wait(self, timeout):
         self.waits += 1
+        self.timeouts.append(timeout)
         if self.waits == 1:
             return False
         return True
@@ -60,7 +62,7 @@ class HostLifecycleTests(unittest.TestCase):
         self.assertEqual(1, len(made))
         self.assertEqual(1, made[0].refresh_calls)
         self.assertTrue(made[0].closed)
-        self.assertEqual(0.25, stop_event.waits and 0.25)
+        self.assertEqual([0.25, 0.25], stop_event.timeouts)
 
     def test_refresh_interval_must_be_positive(self):
         with self.assertRaises(SystemExit):
