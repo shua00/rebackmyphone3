@@ -8789,6 +8789,14 @@ public class TrackingService extends Service implements LocationListener {
                             && listenerGeneration != lanSocketGeneration.get();
                 }
 
+                // A former primary path may now be a desired secondary path after
+                // primary-role selection changes. Its old owner was intentionally retained
+                // until the socket closed; reconcile again only after that owner is retired.
+                // This is event-driven lifecycle work, not a timer or network rescan.
+                if (!serviceDestroyed) {
+                    reconcileLanChatSecondaryListeners(lanChatListenerPathPlan);
+                }
+
                 if (rescueListenerThread == null && !serviceDestroyed && networkGenerationChanged) {
                     FileLogger.log(this, "NETWORK", "旧 UDP listener 代际已失效，立即重建 Wi-Fi LAN socket oldGeneration="
                             + listenerGeneration + " newGeneration=" + lanSocketGeneration.get());
