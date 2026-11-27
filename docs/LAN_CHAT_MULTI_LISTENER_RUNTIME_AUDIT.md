@@ -198,3 +198,13 @@
 - [ ] 当前仍需完成接收循环共享分发抽取、per-path listener map/manager、第二 Listener 精确绑定与并发竞态测试。
 
 CI：前一组 path-plan commits 的 run `45982642484` 已全部成功（Python、Windows socket binding、Android unit/debug/slim build，artifact `15189534048`）。本次热点 receiver 两个 Android 源码提交已触发新的 CI，结果待核验。
+
+
+### 批次 B 本轮验证补充（2026-11-27）
+
+- [x] Receiver 注册与 Service teardown 的窄竞态已关闭：若 onDestroy 在 receiver 发布前观察到空字段，注册线程发布后会再次检查 `serviceDestroyed` 并立即注销。
+- [x] 新增 `tests/test_lan_hotspot_event_contract.py`，锁定启动初始 plan、AP/Tethering action、Android 13 receiver flag、事件回调不启动 Listener/Socket/Thread、不引入周期轮询，以及销毁时注销。
+- [x] Android 源码 commit `8d2bb949ca08d8bfb408573ea35dfe55193c40a4`：Actions run [45984239869](https://github.com/shua00/rebackmyphone3/actions/runs/45984239869) 全部成功；Python、Windows socket binding、Android unit/debug/slim build 均通过，artifact `15191455609`。
+- [x] Android 源码 commit `b58578e739125a85e90205978c618457d95e8bac`：Actions run [45984421449](https://github.com/shua00/rebackmyphone3/actions/runs/45984421449) 全部成功；Python、Windows socket binding、Android unit/debug/slim build 均通过，artifact `15190816457`。
+- [x] 热点事件静态契约测试 commit `1a6a42a24b21f51034437310257cb81f190116b7`：Actions run [45984525071](https://github.com/shua00/rebackmyphone3/actions/runs/45984525071) Python 与 Windows jobs 成功；Android build 按 path filter 正确跳过（仅 tests 变更）。
+- [ ] 上述 CI 不代表 OEM 实际广播覆盖率，也不代表 AP Listener 可绑定或 STA/AP 互通；真机确认仍待进行。
