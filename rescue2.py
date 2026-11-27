@@ -1072,7 +1072,7 @@ def get_arp_ips(prefix):
     ips.update(_try_proc_net_arp(prefix))
     return list(ips)
 
-def _probe_ips(ips, local_ip):
+def _probe_ips(ips, local_ip, scan_id=None):
     temp_url = f"http://{local_ip}:{LOG_PORT}/api/report"
     cmd = f"FIND_ME_REPORT_TEMP:{RESCUE_SECRET}:{temp_url}"
     probe_stats = {"sent": 0, "failed": 0}
@@ -1095,7 +1095,8 @@ def _probe_ips(ips, local_ip):
                     pass
     with concurrent.futures.ThreadPoolExecutor(max_workers=50) as ex:
         list(ex.map(probe, ips))
-    _diag_event("lan_probe_batch_complete", candidate_count=len(ips),
+    _diag_event("lan_probe_batch_complete", scan_id=scan_id or "unscoped",
+                candidate_count=len(ips),
                 sent_count=probe_stats["sent"], failed_count=probe_stats["failed"],
                 target_port=UDP_DEVICE_PORT)
     return probe_stats
@@ -1122,7 +1123,7 @@ def scan_lan_devices():
         if not arp_ips: continue
         arp_hit = True
         print(f"   [{prefix}.x] ARP 表里找到 {len(arp_ips)} 个 IP，先探测...")
-        _probe_ips(arp_ips, local_ip)
+        _probe_ips(arp_ips, local_ip, scan_id)
         time.sleep(3)
     if not arp_hit: print(f"{I.warn} ARP 表为空")
     with _state_lock:
@@ -1131,7 +1132,7 @@ def scan_lan_devices():
         print(f"{I.warn} ARP 未命中，开始全网段扫描 ...")
         for prefix, local_ip in targets:
             all_ips = [f"{prefix}.{i}" for i in range(1, 255) if f"{prefix}.{i}" != local_ip]
-            _probe_ips(all_ips, local_ip)
+            _probe_ips(all_ips, local_ip, scan_id)
     print(f"{I.ping} 等待手机响应（10 秒）...")
     time.sleep(10)
     with _state_lock:
