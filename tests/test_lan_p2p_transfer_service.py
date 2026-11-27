@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import os
 import tempfile
@@ -6,7 +7,8 @@ import unittest
 from pathlib import Path
 
 from lan_p2p_network_paths import IPv4InterfacePath
-from lan_p2p_transfer import TransferValidationError
+from lan_p2p_transfer import (ChunkDescriptor, TransferOffer, TransferState,
+                              TransferValidationError)
 from lan_p2p_transfer_service import LanTransferService, PeerCredentialStore
 
 
@@ -118,6 +120,47 @@ class TransferServiceTests(unittest.TestCase):
         service.close()
         with self.assertRaisesRegex(RuntimeError, "closed"):
             service.start()
+
+    def test_service_process_restart_preserves_partial_transfer_and_staging(self):
+        data_dir = Path(self.temp.name) / "restartable-service"
+        paths = (IPv4InterfacePath("wlan-test", "192.168.50.2", 24, "192.168.50.255"),)
+        payload = b"r" * 65536
+        offer = TransferOffer(
+            "service-restart-001", "android-peer-1", "python-node-1",
+            "restart.bin", len(payload) + 1,
+            hashlib.sha256(payload + b"x").hexdigest(), 100,
+        )
+
+        first = LanTransferService(
+            local_peer_id="python-node-1", data_dir=str(data_dir),
+            credentials_path=self.credentials_path,
+            path_provider=lambda: paths, server_factory=lambda **kwargs: FakeServer(**kwargs),
+        )
+        first.start()
+        first.store.create_offer(offer, 101)
+        first.store.transition(offer.transfer_id, TransferState.ACCEPTED, 102)
+        first.store.transition(offer.transfer_id, TransferState.TRANSFERRING, 103)
+        first.filesystem.write_chunk(
+            ChunkDescriptor(offer.transfer_id, 0, payload, hashlib.sha256(payload).hexdigest()),
+            104,
+        )
+        first.close()
+
+        restarted = LanTransferService(
+            local_peer_id="python-node-1", data_dir=str(data_dir),
+            credentials_path=self.credentials_path,
+            path_provider=lambda: paths, server_factory=lambda **kwargs: FakeServer(**kwargs),
+        )
+        try:
+            record = restarted.store.get_transfer(offer.transfer_id)
+            self.assertEqual(TransferState.TRANSFERRING, record.state)
+            self.assertEqual((), restarted.filesystem.reconcile(offer.transfer_id, 105))
+            self.assertEqual((1,), restarted.store.missing_chunks(offer.transfer_id))
+            self.assertEqual(("android-peer-1",), restarted.credentials.trusted_peer_ids)
+            restarted.start()
+            self.assertTrue(restarted.is_running)
+        finally:
+            restarted.close()
 
     def test_service_requires_stable_identity_and_unambiguous_path(self):
         with self.assertRaisesRegex(TransferValidationError, "stable"):
