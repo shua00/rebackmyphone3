@@ -2859,7 +2859,7 @@ public class TrackingService extends Service implements LocationListener {
         final String nonce = java.util.UUID.randomUUID().toString();
         final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
         pendingPeerChallenges.put(nonce, latch);
-        if (!scheduleLanChatTask("secondary-peer-discovery-timeout",
+        if (!scheduleLanChatTask("secondary-peer-discovery-timeout-" + nonce,
                 () -> clearPendingPeerChallenge(nonce), LAN_PEER_CHALLENGE_TIMEOUT_MS)) {
             clearPendingPeerChallenge(nonce);
             return;
