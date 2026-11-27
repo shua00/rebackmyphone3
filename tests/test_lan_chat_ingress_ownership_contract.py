@@ -249,6 +249,16 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
         self.assertNotIn("FIND_ME_", receive_code)
         self.assertNotIn("lanUdpCommandDeduplicator.shouldAccept(", receive_code)
 
+        primary = self.source[
+            self.source.index("private void startRescueListener()"):
+            self.source.index("private void releaseLanMulticastLock()")
+        ]
+        primary_finally = primary[primary.index("} finally {"):]
+        self.assertLess(
+            primary_finally.index("rescueSocket.close()"),
+            primary_finally.index("lanChatListenerRuntime.removeInstance(listenerInstance)"),
+        )
+
         primary_ingress = self.source.index(
             "if (handleLanRealtimePacket(rescueSocket, packet,"
         )
