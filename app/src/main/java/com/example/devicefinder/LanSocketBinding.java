@@ -9,9 +9,11 @@ import java.net.InetAddress;
 /**
  * The only supported socket-binding boundary for LAN paths.
  *
- * A local interface candidate is not a bindable Android Network. Android's public Java API
- * does not provide a portable SO_BINDTODEVICE equivalent for such a candidate, so fail closed
- * rather than binding a wildcard socket to the process default (which may be cellular/VPN).
+ * Network-backed paths use Network.bindSocket. OEM hotspot AP interfaces that are not
+ * represented by ConnectivityManager can still host listeners on their exact local address,
+ * and outgoing direct-LAN sockets are source-address-bound after the caller validates that the
+ * peer is in the same subnet. This is not equivalent to Network.bindSocket: if the OS cannot
+ * route that source/subnet directly, the connection fails rather than falling back to wildcard.
  */
 public final class LanSocketBinding {
     private LanSocketBinding() { }
@@ -50,8 +52,7 @@ public final class LanSocketBinding {
 
     /**
      * ServerSocket cannot be passed to Network.bindSocket. Binding it to the exact local
-     * address from a Network-backed snapshot constrains inbound traffic to that interface.
-     * This is address binding, not a claim that Android has bound the ServerSocket via Network.
+     * address from the selected interface snapshot constrains inbound traffic to that address.
      */
     public static void validateServerSocketAddress(LanNetworkPath path, InetAddress address)
             throws IOException {
