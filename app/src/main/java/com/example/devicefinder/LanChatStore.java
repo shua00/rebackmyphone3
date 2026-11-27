@@ -132,15 +132,17 @@ public final class LanChatStore extends SQLiteOpenHelper {
         public final String state;
         public final int totalTargets;
         public final int ackedTargets;
+        public final String terminalReason;
 
         DeliverySummary(String id, String body, long createdAtMs, String state,
-                        int totalTargets, int ackedTargets) {
+                        int totalTargets, int ackedTargets, String terminalReason) {
             this.messageId = id;
             this.body = body;
             this.createdAtMs = createdAtMs;
             this.state = state;
             this.totalTargets = totalTargets;
             this.ackedTargets = ackedTargets;
+            this.terminalReason = terminalReason == null ? "" : terminalReason;
         }
     }
 
@@ -688,14 +690,14 @@ public final class LanChatStore extends SQLiteOpenHelper {
         try {
             c = getReadableDatabase().rawQuery(
                     "SELECT o.message_id,o.body,o.created_at_ms,o.state,COUNT(t.peer_id)," +
-                    "COALESCE(SUM(CASE WHEN t.status='acked' THEN 1 ELSE 0 END),0) " +
+                    "COALESCE(SUM(CASE WHEN t.status='acked' THEN 1 ELSE 0 END),0),o.terminal_reason " +
                     "FROM lan_outbox o LEFT JOIN lan_outbox_targets t ON t.message_id=o.message_id " +
-                    "GROUP BY o.message_id,o.body,o.created_at_ms,o.state " +
+                    "GROUP BY o.message_id,o.body,o.created_at_ms,o.state,o.terminal_reason " +
                     "ORDER BY o.created_at_ms DESC LIMIT ?",
                     new String[]{String.valueOf(Math.max(1, Math.min(20, limit)))});
             while (c.moveToNext()) {
                 result.add(new DeliverySummary(c.getString(0), c.getString(1), c.getLong(2),
-                        c.getString(3), c.getInt(4), c.getInt(5)));
+                        c.getString(3), c.getInt(4), c.getInt(5), c.getString(6)));
             }
             return result;
         } finally {
