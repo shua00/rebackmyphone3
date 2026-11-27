@@ -311,3 +311,18 @@ CI 验证补充（secondary listener 代码阶段，2026-11-27）：
 - [x] 待发送目标的 directed challenge 与 discoveryNeeded 均基于 path-scoped binding 判断，避免 STA 路由失效后被 peer-wide cache 错误抑制 AP/剩余路径重新发现。
 - [x] Python 静态契约覆盖 peer-wide cache 不得抑制 path-scoped discovery。
 - [ ] 本轮最终 CI 仍待当前 head 的 Python、Windows、Android Gradle / Debug APK / Slim Release 全部完成；以最新 Actions run 为准。
+
+
+## 2026-11-27 批次 C：Listener 角色切换与异常恢复收口补充
+
+- [x] 修复 primary 角色切换为 secondary 后的遗漏：旧 primary receive loop 在 Socket 关闭、Lease/Instance owner 释放并清除 active owner 后，按当前已验证 path plan 再执行一次 secondary reconciliation。避免旧 primary owner 阻挡 secondary 启动后，finally 又没有恢复触发点。
+- [x] secondary Listener 的非主动 bind/receive 异常增加 path-scoped 指数退避重试：5 秒起步、逐步增长、上限 5 分钟；任务执行前再次校验 Service、generation、当前 secondary path plan 和 owner 空缺。
+- [x] 重试次数仅在实际成功接收数据包后清零；拓扑主动撤销/角色切换会清除该路径失败计数；Service 销毁或主动 stop 不触发重试。
+- [x] 重试只针对已存在的 secondary path。普通单路径 path plan 不启动 secondary worker，不产生 secondary retry task、探测或周期扫描。
+- [x] 新增静态回归契约覆盖 primary→secondary handoff、secondary→primary owner 交接、Service destroy 与 worker start 交错、异常恢复退避和主动撤销不重试。
+- [x] 最新 head `a7023c33ad8e1d0e3416923c1ab0c57b4df548ac` / PR Actions run [46030626544](https://github.com/shua00/rebackmyphone3/actions/runs/46030626544)：Python 466 tests（skipped=1）、Windows Socket Binding、Android `testDebugUnitTest`、Debug APK、Slim Release 全部成功；artifact `15214292613`（`app-diagnostic-and-slim-apks`）。
+- [x] 同一 head Push run [46030618890](https://github.com/shua00/rebackmyphone3/actions/runs/46030618890)：Python、Windows Socket Binding 成功；Android build 按仅测试文件变更的路径过滤正确跳过。Android 源码最新变更 `8ff8472` 已在 PR build 中完整编译并打包。
+- [ ] CI 仍不能证明 OEM AP 地址可绑定、热点广播/单播/回程路由可达、客户端隔离行为或三设备任意两台双向通信；这些必须留到真机验收。
+- [ ] 当前未接入发送失败/ACK timeout 的 selector fallback 和 per-peer×path 质量评分；不提前把 Listener 恢复能力当作端到端发送回退完成。
+
+PR #1 仍 Open，未合并 main；本轮完成的是代码和 CI 层面的批次 C 生命周期收口补充，不代表真机验收完成。
