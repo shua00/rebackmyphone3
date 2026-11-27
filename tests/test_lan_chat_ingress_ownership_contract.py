@@ -214,8 +214,24 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
             receive.index("lanChatListenerRuntime.removeInstance(instance)", receive.index("} finally {")),
         )
         self.assertIn("Secondary ingress is intentionally authenticated P2P only", receive)
-        self.assertNotIn("handleLegacyUdpCommand(", receive)
-        self.assertIn("lanUdpCommandDeduplicator.shouldAccept(", self.source)
+        receive_code = "\n".join(
+            line for line in receive.splitlines()
+            if not line.lstrip().startswith("//")
+        )
+        self.assertNotIn("FIND_ME_", receive_code)
+        self.assertNotIn("lanUdpCommandDeduplicator.shouldAccept(", receive_code)
+
+        primary_ingress = self.source.index(
+            "if (handleLanRealtimePacket(rescueSocket, packet,"
+        )
+        primary_legacy = self.source.index(
+            'if (message.startsWith("FIND_ME_ALARM:")', primary_ingress
+        )
+        primary_dedup = self.source.index(
+            "lanUdpCommandDeduplicator.shouldAccept(", primary_ingress
+        )
+        self.assertLess(primary_ingress, primary_legacy)
+        self.assertLess(primary_legacy, primary_dedup)
 
     def test_inbound_chat_ack_is_sent_on_the_socket_that_received_the_message(self):
         method = self._method(
