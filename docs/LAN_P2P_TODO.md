@@ -505,7 +505,7 @@
 ## 第三批次推进（2026-11-27）：Android↔Python 双向真实 TCP 互通
 
 - [x] JVM Android `LanTransferTcpClient` → Python `authenticate_tcp_server` + `serve_transfer_session`：真实 TCP 两连接，先 Offer/Offer ACK，接收端显式 ACCEPTED→TRANSFERRING，再 Missing/Chunk ACK/Complete；Python 校验最终发布文件字节与内容。
-- [x] Python `authenticate_tcp_client` + `send_file_over_session` → Android Robolectric `LanTransferTcpSession`：真实 TCP socket，Android 预置接收端 Offer/ACCEPTED 状态，Python 执行 Missing/Chunk/Complete；验证 Android 最终 COMPLETED 状态及发布文件字节一致。
+- [x] Python `authenticate_tcp_client` + `send_offer_over_session` → Android Robolectric `LanTransferTcpSession`：真实 TCP 两连接；Python 发送 Offer，Android 持久化后由测试显式执行 ACCEPTED→TRANSFERRING，Python 再执行 Missing/Chunk/Complete；验证 Android 最终 COMPLETED 状态及发布文件字节一致。
 - [x] 两条跨语言方向使用测试专用 PSK，不依赖聊天密钥或生产设备凭据；仅 Linux CI 执行子进程互通测试，避免将 Python 可执行文件要求强加给 Windows/macOS 开发环境。
-- [x] CI Run `45919960578`：Python 全量 418 tests；Android `testDebugUnitTest`、诊断 Debug APK、slim Release APK 均通过。
+- [x] CI Run `45920419820`：Python 全量 418 tests；Android `testDebugUnitTest`、诊断 Debug APK、slim Release APK 均通过。
 - [ ] 该项验证的是 JVM/Robolectric Android 实现与 Python 运行时在同一主机上的真实 TCP 协议互通，不等同于实体 Android 手机经 Wi-Fi/AP 的真机网络验收；后者仍需双机/热点场景验收。
