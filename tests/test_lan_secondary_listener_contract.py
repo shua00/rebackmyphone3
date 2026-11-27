@@ -181,6 +181,10 @@ class LanSecondaryListenerContractTests(unittest.TestCase):
             "private boolean isSecondaryPathStillPlanned(",
         )
         self.assertIn("secondaryListenerRetryAttempts.remove(fingerprint)", secondary)
+        self.assertLess(
+            secondary.index("socket.receive(packet)"),
+            secondary.index("secondaryListenerRetryAttempts.remove(fingerprint)"),
+        )
         self.assertIn("!instance.isStopRequested() && !serviceDestroyed", secondary)
         self.assertIn("generation == lanSocketGeneration.get()", secondary)
         self.assertIn("isSecondaryPathStillPlanned(fingerprint)", secondary)
