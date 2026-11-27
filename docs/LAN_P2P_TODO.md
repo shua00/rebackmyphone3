@@ -497,5 +497,8 @@
 - [ ] 多页协议当前采用“每次连接从 Missing 起点重新查询、发送本连接首批缺片、Complete 再返回下一批缺片”的有界推进方式；`more` 是提示后面仍有缺片，不代表客户端必须在同一连接无限翻页。跨连接测试用于证明该约定无漏片/死循环。
 - [ ] Android↔Python 运行时真实跨语言 TCP 互通仍是独立验收项：当前 golden vectors、双方本地 loopback 和跨连接语义测试尚不能替代 JVM Android 客户端与 Python 服务端（及反向）的真实 socket 互通。
 
-- [ ] 后续补测“staging 文件已写入但进程在 receipt 提交前崩溃”的 orphan chunk 窗口：若无 receipt 的孤立文件本身损坏，Python 当前 `write_chunk` 仍会拒绝覆盖；应只允许安全修复无 receipt 的 regular-file orphan，绝不能覆盖已有有效 receipt 对应的冲突数据。该项与本批已修复的“损坏 receipt + 损坏文件”是不同崩溃窗口。
+- [x] 补测“staging 文件已写入但进程在 receipt 提交前崩溃”的 orphan chunk 窗口：Python 仅在无 receipt 且目标是可安全读取的普通文件时允许替换孤立损坏数据；有 receipt 的冲突数据仍拒绝覆盖；Android 覆盖单文件 staging 的同一恢复窗口。Python 418 tests 和 Android 单测/Debug APK/slim Release APK 均通过（Run `45917427009`）。
 - [ ] 下一项优先实现 JVM Android 客户端↔Python 服务端真实 TCP 双向互通测试，覆盖真实认证握手、Offer、显式 Accept、Chunk ACK、Missing、Complete 和 SHA-256 发布；不得仅以共享 golden vectors 或两端各自 loopback 测试替代。
+- [x] orphan chunk 修复的 Python 回归覆盖：模拟只写入部分/损坏 staging 文件、未提交 receipt 的崩溃窗口，重传后文件被正确替换并建立 durable receipt。
+- [x] orphan chunk 修复的 Android 回归覆盖：模拟 `payload.part` 已存在但 receipt 尚未提交，重传正确覆盖对应偏移、恢复 receipt 并通过 reconciliation。
+- [x] 最新验证：Python 全量 418 tests（Run `45917427009`）；Android `testDebugUnitTest`、`assembleDebug`、`assembleRelease -PincludeDiagnostics=false` 全部通过（Run `45917427009`）。
