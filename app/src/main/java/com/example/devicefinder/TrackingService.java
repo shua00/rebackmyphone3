@@ -2345,6 +2345,13 @@ public class TrackingService extends Service implements LocationListener {
         return selectLanTransferPath(cm);
     }
 
+    private static boolean isConfirmedLocalLanPathUnavailable(Exception failure) {
+        if (failure == null || failure.getMessage() == null) return false;
+        String message = failure.getMessage();
+        return message.contains("No unambiguous local LAN interface candidate")
+                || message.contains("Multiple local LAN interface candidates");
+    }
+
     private static java.net.Inet4Address computeLanBroadcastAddress(
             java.net.Inet4Address address, int prefix) throws java.io.IOException {
         if (address == null || prefix < 1 || prefix > 32)
@@ -3098,11 +3105,13 @@ public class TrackingService extends Service implements LocationListener {
                     + permissionFailure.getClass().getSimpleName());
             // Keep a previously running listener and its last-known-good route intact.
         } catch (Exception failure) {
+            if (isConfirmedLocalLanPathUnavailable(failure))
+                stopLanTransferTcpListener("selected local LAN path disappeared or became ambiguous");
             if (lanTransferTcpListener == null)
                 LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_FAILED);
             FileLogger.log(this, "LAN_TRANSFER", "TCP listener reconcile failed: "
                     + failure.getClass().getSimpleName());
-            // A transient snapshot failure does not prove the old LAN path is gone.
+            // Only a confirmed empty/ambiguous candidate set revokes the previous path.
         }
     }
 
@@ -3228,6 +3237,10 @@ public class TrackingService extends Service implements LocationListener {
             FileLogger.log(this, "LAN_TRANSFER", "Pairing control permission denied: "
                     + permissionFailure.getClass().getSimpleName());
         } catch (Exception failure) {
+            if (isConfirmedLocalLanPathUnavailable(failure)) {
+                closeLanTransferPairingInitiators();
+                stopLanTransferPairingControlHost();
+            }
             FileLogger.log(this, "LAN_TRANSFER", "Pairing control host reconcile failed: "
                     + failure.getClass().getSimpleName());
         }
@@ -3286,11 +3299,13 @@ public class TrackingService extends Service implements LocationListener {
                     + permissionFailure.getClass().getSimpleName());
             // Preserve an existing discovery socket after a transient permission failure.
         } catch (Exception failure) {
+            if (isConfirmedLocalLanPathUnavailable(failure))
+                stopLanTransferDiscovery();
             if (lanTransferDiscovery == null || !lanTransferDiscovery.isRunning())
                 LanTransferRuntimeDiagnostics.publishDiscoveryState(LanTransferRuntimeDiagnostics.STATE_FAILED);
             FileLogger.log(this, "LAN_TRANSFER", "Independent discovery reconcile failed: "
                     + failure.getClass().getSimpleName());
-            // Preserve an existing discovery socket after a transient snapshot failure.
+            // Preserve only on transient snapshot failures, not confirmed path loss/ambiguity.
         }
     }
 
