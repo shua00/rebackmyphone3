@@ -483,6 +483,14 @@ public class TrackingService extends Service implements LocationListener {
                         if (oldInstance != null) oldInstance.requestStop();
                         oldSocket = oldInstance != null ? oldInstance.socket() : rescueSocketRef;
                     }
+                    // The epoch invalidates every path lease, not just the primary one.
+                    // Retire secondary sockets before allowing any new generation to start.
+                    for (LanChatListenerInstance instance : lanChatListenerRuntime.instanceSnapshot()) {
+                        if (instance != null && instance != activeLanChatListenerInstance) {
+                            stopSecondaryLanChatListener(instance);
+                        }
+                    }
+                    reconcileLanChatSecondaryListeners(lanChatListenerPathPlan);
                     invalidateVerifiedChatPeers("Pre-M default LAN route changed: " + reason);
                     lastPeerDiscoveryAt = 0L;
                     FileLogger.log(this, "NETWORK", "Pre-M 默认网络变化，撤销旧 LAN peer 并重绑 UDP listener");
@@ -2811,7 +2819,10 @@ public class TrackingService extends Service implements LocationListener {
      */
     private void reconcileLanChatSecondaryListeners(LanChatListenerPathPlan plan) {
         final java.util.Map<String, LanNetworkPath> desired = new java.util.HashMap<>();
-        if (!serviceDestroyed && plan != null) {
+        // API 21-22 cannot bind a DatagramSocket to a secondary Android Network.
+        // Keep the legacy transport single-path there; never create a misleading worker
+        // that would actually send/receive through the default route.
+        if (!serviceDestroyed && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && plan != null) {
             for (LanNetworkPath path : plan.secondary()) {
                 if (path != null) {
                     desired.put(path.diagnosticFingerprint(), path);
@@ -2938,22 +2949,8 @@ public class TrackingService extends Service implements LocationListener {
                 lanChatListenerRuntime.removeInstance(instance);
                 // Retry only an unexpected failure of a path that is still secondary.
                 // Intentional topology handoff and Service teardown must stay quiet.
-                if (!instance.isStopRequested() && !serviceDestroyed
-                        && generation == lanSocketGeneration.get()
-                        && isSecondaryPathStillPlanned(fingerprint)) {
-                    java.util.concurrent.atomic.AtomicInteger attempts =
-                            secondaryListenerRetryAttempts.computeIfAbsent(
-                                    fingerprint, ignored -> new java.util.concurrent.atomic.AtomicInteger());
-                    int attempt = attempts.incrementAndGet();
-                    long retryDelayMs = (long) Math.min(
-                            300_000L, 5_000L * Math.pow(3, Math.min(attempt - 1, 4)));
-                    scheduleLanChatTask("secondary-listener-retry-" + fingerprint, () -> {
-                        if (!serviceDestroyed && generation == lanSocketGeneration.get()
-                                && isSecondaryPathStillPlanned(fingerprint)
-                                && lanChatListenerRuntime.getInstance(fingerprint) == null) {
-                            startSecondaryLanChatListener(path, generation);
-                        }
-                    }, retryDelayMs);
+                if (!instance.isStopRequested()) {
+                    scheduleSecondaryLanChatListenerRetry(path, fingerprint, generation);
                 }
             }
         }, "LAN-UDP-Secondary-" + serviceInstanceId);
@@ -2974,7 +2971,32 @@ public class TrackingService extends Service implements LocationListener {
             lanChatListenerRuntime.removeInstance(instance);
             FileLogger.log(this, "CHAT", "Secondary listener worker could not start path="
                     + fingerprint + " error=" + startFailure.getClass().getSimpleName());
+            // Thread.start() failure occurs before the Runnable enters its try/finally.
+            // Schedule the same bounded path-scoped recovery explicitly after releasing owner.
+            scheduleSecondaryLanChatListenerRetry(path, fingerprint, generation);
         }
+    }
+
+    private void scheduleSecondaryLanChatListenerRetry(
+            LanNetworkPath path, String fingerprint, long generation) {
+        if (path == null || fingerprint == null || serviceDestroyed
+                || generation != lanSocketGeneration.get()
+                || !isSecondaryPathStillPlanned(fingerprint)
+                || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+        java.util.concurrent.atomic.AtomicInteger attempts =
+                secondaryListenerRetryAttempts.computeIfAbsent(
+                        fingerprint, ignored -> new java.util.concurrent.atomic.AtomicInteger());
+        int attempt = attempts.incrementAndGet();
+        long retryDelayMs = (long) Math.min(
+                300_000L, 5_000L * Math.pow(3, Math.min(attempt - 1, 4)));
+        scheduleLanChatTask("secondary-listener-retry-" + fingerprint, () -> {
+            if (!serviceDestroyed && generation == lanSocketGeneration.get()
+                    && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                    && isSecondaryPathStillPlanned(fingerprint)
+                    && lanChatListenerRuntime.getInstance(fingerprint) == null) {
+                startSecondaryLanChatListener(path, generation);
+            }
+        }, retryDelayMs);
     }
 
     private boolean isSecondaryPathStillPlanned(String fingerprint) {
