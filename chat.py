@@ -804,11 +804,18 @@ class RequestHandler(BaseHTTPRequestHandler):
                     try:
                         encoded_packet = encode_packet(packet, RESCUE_SECRET)
                     except ValueError:
-                        self.send_response(413)
-                        self.send_header('Content-Type', 'application/json')
-                        self.end_headers()
-                        self.wfile.write(b'{"status":"message_too_large"}')
-                        return
+                        try:
+                            build_authenticated_chat_fragment_packets(
+                                message_id, "*", content, packet["created_at_ms"],
+                                PEER_NODE_ID, "chat.py", PEER_NODE_ID,
+                                RESCUE_SECRET, sender)
+                            encoded_packet = None
+                        except ValueError:
+                            self.send_response(413)
+                            self.send_header('Content-Type', 'application/json')
+                            self.end_headers()
+                            self.wfile.write(b'{"status":"message_too_large"}')
+                            return
                     local_saved = _claim_chat_message(sender, message_id, content)
                     if local_saved is None:
                         print("⚠️ 本机网页消息历史持久化失败，仍按原有方式发送")
