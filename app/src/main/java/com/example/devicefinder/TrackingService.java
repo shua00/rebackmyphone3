@@ -8628,7 +8628,18 @@ public class TrackingService extends Service implements LocationListener {
         // no ACK can be sent on the closed socket. Accepted IO tasks are drained below.
         closeLanChatIngressSocket();
         Thread listenerToStop = rescueListenerThread;
-        if (listenerToStop != null) listenerToStop.interrupt();
+        if (listenerToStop != null) {
+            listenerToStop.interrupt();
+            if (listenerToStop != Thread.currentThread()) {
+                try {
+                    // Socket close normally wakes receive immediately; bounded join ensures
+                    // teardown does not return while the owned ingress worker is still unwinding.
+                    listenerToStop.join(1000L);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }
         // These peer-scoped events are process-local permissions, not durable message state.
         // The Outbox survives; a recreated service establishes fresh authenticated routes.
         lanChatPeerRecoveryEvents.clear();
