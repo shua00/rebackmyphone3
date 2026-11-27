@@ -2337,26 +2337,39 @@ public class TrackingService extends Service implements LocationListener {
         }
     }
 
-    /** Build one complete, immutable Network-backed IPv4 path for outbound pairing. */
+    /** Build one immutable path snapshot shared by listener, discovery and pairing. */
     private LanNetworkPath currentLanNetworkPath() throws java.io.IOException {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M)
-            throw new java.io.IOException("Android Network socket binding requires API 23+");
+            throw new java.io.IOException("LAN socket binding requires API 23+");
         ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        return selectLanTransferPath(cm);
+    }
+
+    private LanNetworkPath selectLanTransferPath(ConnectivityManager cm) throws java.io.IOException {
         Network selected = selectWifiLanNetwork(cm);
-        if (selected == null) throw new java.io.IOException("No selected Wi-Fi LAN Network");
-        LinkProperties links = cm.getLinkProperties(selected);
-        if (links == null || links.getInterfaceName() == null
-                || links.getLinkAddresses() == null)
-            throw new java.io.IOException("Selected LAN Network snapshot is incomplete");
-        for (LinkAddress item : links.getLinkAddresses()) {
-            java.net.InetAddress address = item.getAddress();
-            if (address instanceof java.net.Inet4Address && !address.isLoopbackAddress()
-                    && !address.isLinkLocalAddress()) {
-                return LanNetworkPath.fromAndroidNetwork(selected, links.getInterfaceName(),
-                        (java.net.Inet4Address) address, item.getPrefixLength(), null);
+        if (selected != null) {
+            LinkProperties links = cm.getLinkProperties(selected);
+            if (links == null || links.getInterfaceName() == null || links.getLinkAddresses() == null)
+                throw new java.io.IOException("Selected Wi-Fi Network snapshot is incomplete");
+            for (LinkAddress item : links.getLinkAddresses()) {
+                java.net.InetAddress address = item.getAddress();
+                int prefix = item.getPrefixLength();
+                if (address instanceof java.net.Inet4Address
+                        && LanNetworkPath.isUsableLanIpv4((java.net.Inet4Address) address)
+                        && prefix >= 1 && prefix <= 32) {
+                    return LanTransferPathSelector.select(
+                            LanNetworkPath.fromAndroidNetwork(selected, links.getInterfaceName(),
+                                    (java.net.Inet4Address) address, prefix, null),
+                            java.util.Collections.emptyList());
+                }
             }
+            throw new java.io.IOException("Selected Wi-Fi Network has no usable IPv4 address");
         }
-        throw new java.io.IOException("Selected LAN Network has no usable IPv4 address");
+        // A non-Network AP interface is accepted only when exactly one complete private IPv4
+        // interface exists. Source-address binding is not Network.bindSocket; the OS must route
+        // that exact source/subnet or the connection fails. Ambiguity is always fail-closed.
+        return LanTransferPathSelector.select(null,
+                LanNetworkPath.enumerateLocalInterfaceCandidates());
     }
 
     private String buildWifiLanFingerprint(ConnectivityManager cm) {
@@ -2994,33 +3007,8 @@ public class TrackingService extends Service implements LocationListener {
         }
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-            Network selected = selectWifiLanNetwork(cm);
-            if (selected == null) {
-                stopLanTransferTcpListener("no selected Wi-Fi network");
-                return;
-            }
-            LinkProperties links = cm.getLinkProperties(selected);
-            if (links == null || links.getInterfaceName() == null || links.getLinkAddresses() == null) {
-                stopLanTransferTcpListener("incomplete Wi-Fi link properties");
-                return;
-            }
-            java.net.Inet4Address bindAddress = null;
-            int bindPrefix = -1;
-            for (LinkAddress linkAddress : links.getLinkAddresses()) {
-                java.net.InetAddress address = linkAddress.getAddress();
-                if (address instanceof java.net.Inet4Address && !address.isLoopbackAddress()
-                        && !address.isLinkLocalAddress()) {
-                    bindAddress = (java.net.Inet4Address) address;
-                    bindPrefix = linkAddress.getPrefixLength();
-                    break;
-                }
-            }
-            if (bindAddress == null || bindPrefix < 1 || bindPrefix > 32) {
-                stopLanTransferTcpListener("no usable Wi-Fi IPv4 path");
-                return;
-            }
-            LanNetworkPath selectedPath = LanNetworkPath.fromAndroidNetwork(selected,
-                    links.getInterfaceName(), bindAddress, bindPrefix, null);
+            LanNetworkPath selectedPath = selectLanTransferPath(cm);
+            java.net.Inet4Address bindAddress = selectedPath.localAddress;
             String credentialFingerprint = transferCredentialsFingerprint(credentials);
             String fingerprint = selectedPath.diagnosticFingerprint();
             synchronized (lanTransferListenerLock) {
@@ -3047,8 +3035,8 @@ public class TrackingService extends Service implements LocationListener {
                 LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_RUNNING);
                 lanTransferListenerFingerprint = fingerprint;
                 lanTransferCredentialsFingerprint = credentialFingerprint;
-                FileLogger.log(this, "LAN_TRANSFER", "TCP listener active on selected Wi-Fi "
-                        + links.getInterfaceName() + " address=" + bindAddress.getHostAddress()
+                FileLogger.log(this, "LAN_TRANSFER", "TCP listener active on "
+                        + selectedPath.interfaceName + " address=" + bindAddress.getHostAddress()
                         + " reason=" + reason);
             }
         } catch (SecurityException permissionFailure) {
@@ -3082,35 +3070,8 @@ public class TrackingService extends Service implements LocationListener {
         }
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-            Network selected = selectWifiLanNetwork(cm);
-            if (selected == null) {
-                closeLanTransferPairingInitiators();
-                stopLanTransferPairingControlHost();
-                return;
-            }
-            LinkProperties links = cm.getLinkProperties(selected);
-            if (links == null || links.getInterfaceName() == null || links.getLinkAddresses() == null) {
-                stopLanTransferPairingControlHost();
-                return;
-            }
-            java.net.Inet4Address bindAddress = null;
-            int bindPrefix = -1;
-            for (LinkAddress item : links.getLinkAddresses()) {
-                java.net.InetAddress address = item.getAddress();
-                if (address instanceof java.net.Inet4Address && !address.isLoopbackAddress()
-                        && !address.isLinkLocalAddress()) {
-                    bindAddress = (java.net.Inet4Address) address;
-                    bindPrefix = item.getPrefixLength();
-                    break;
-                }
-            }
-            if (bindAddress == null || bindPrefix < 1 || bindPrefix > 32) {
-                closeLanTransferPairingInitiators();
-                stopLanTransferPairingControlHost();
-                return;
-            }
-            LanNetworkPath selectedPath = LanNetworkPath.fromAndroidNetwork(selected,
-                    links.getInterfaceName(), bindAddress, bindPrefix, null);
+            LanNetworkPath selectedPath = selectLanTransferPath(cm);
+            java.net.Inet4Address bindAddress = selectedPath.localAddress;
             String fingerprint = selectedPath.diagnosticFingerprint();
             synchronized (lanTransferListenerLock) {
                 if (serviceDestroyed) return;
@@ -3207,7 +3168,7 @@ public class TrackingService extends Service implements LocationListener {
                 lanTransferPairingControlHost = host;
                 lanTransferPairingControlFingerprint = fingerprint;
                 FileLogger.log(this, "LAN_TRANSFER", "Pairing control host active on "
-                        + links.getInterfaceName() + " address=" + bindAddress.getHostAddress()
+                        + selectedPath.interfaceName + " address=" + bindAddress.getHostAddress()
                         + " port=" + host.getBoundPort() + " reason=" + reason);
                 resumePendingLanPairingCommits();
             }
@@ -3244,52 +3205,17 @@ public class TrackingService extends Service implements LocationListener {
         }
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-            Network selected = selectWifiLanNetwork(cm);
-            if (selected == null) { stopLanTransferDiscovery(); return; }
-            LinkProperties links = cm.getLinkProperties(selected);
-            if (links == null || links.getInterfaceName() == null || links.getLinkAddresses() == null) {
-                stopLanTransferDiscovery(); return;
-            }
-            java.net.Inet4Address local = null;
-            int prefix = -1;
-            for (LinkAddress item : links.getLinkAddresses()) {
-                java.net.InetAddress address = item.getAddress();
-                if (address instanceof java.net.Inet4Address && !address.isLoopbackAddress()
-                        && !address.isLinkLocalAddress()) {
-                    local = (java.net.Inet4Address) address;
-                    prefix = item.getPrefixLength();
-                    break;
-                }
-            }
-            if (local == null || prefix < 1 || prefix > 30) {
-                stopLanTransferDiscovery(); return;
-            }
-            byte[] raw = local.getAddress();
-            int value = ((raw[0] & 255) << 24) | ((raw[1] & 255) << 16)
-                    | ((raw[2] & 255) << 8) | (raw[3] & 255);
-            int mask = (int) (0xffffffffL << (32 - prefix));
-            int broadcastValue = (value & mask) | (~mask);
-            byte[] broadcastBytes = new byte[] {
-                    (byte) (broadcastValue >>> 24), (byte) (broadcastValue >>> 16),
-                    (byte) (broadcastValue >>> 8), (byte) broadcastValue };
-            java.net.Inet4Address broadcast =
-                    (java.net.Inet4Address) java.net.InetAddress.getByAddress(broadcastBytes);
-            List<String> addressEntries = new ArrayList<>();
-            for (LinkAddress item : links.getLinkAddresses()) addressEntries.add(item.toString());
-            List<String> routeEntries = new ArrayList<>();
-            if (links.getRoutes() != null) {
-                for (RouteInfo route : links.getRoutes()) routeEntries.add(route.toString());
-            }
-            String fingerprint = LanTransferNetworkFingerprint.create(selected.toString(),
-                    links.getInterfaceName(), addressEntries, routeEntries);
+            LanNetworkPath selectedPath = selectLanTransferPath(cm);
+            java.net.Inet4Address local = selectedPath.localAddress;
+            java.net.Inet4Address broadcast = selectedPath.broadcastAddress;
+            if (broadcast == null) throw new java.io.IOException("Selected LAN path has no broadcast address");
+            String fingerprint = selectedPath.diagnosticFingerprint();
             synchronized (lanTransferListenerLock) {
                 if (serviceDestroyed) return;
                 if (fingerprint.equals(lanTransferDiscoveryFingerprint)
                         && lanTransferDiscovery != null && lanTransferDiscovery.isRunning()) return;
                 closeLanTransferDiscoveryLocked();
                 LanTransferPeerDirectory.activateNetwork(this, fingerprint);
-                LanNetworkPath selectedPath = LanNetworkPath.fromAndroidNetwork(selected,
-                        links.getInterfaceName(), local, prefix, broadcast);
                 LanTransferDiscovery discovery = new LanTransferDiscovery(this, selectedPath,
                         getUniqueDeviceId(), local, broadcast, fingerprint,
                         () -> lanTransferTcpListener == null ? 0 : lanTransferTcpListener.getBoundPort());
@@ -3298,7 +3224,7 @@ public class TrackingService extends Service implements LocationListener {
                 LanTransferRuntimeDiagnostics.publishDiscoveryState(LanTransferRuntimeDiagnostics.STATE_RUNNING);
                 lanTransferDiscoveryFingerprint = fingerprint;
                 FileLogger.log(this, "LAN_TRANSFER", "Independent discovery active on "
-                        + links.getInterfaceName() + " address=" + local.getHostAddress()
+                        + selectedPath.interfaceName + " address=" + local.getHostAddress()
                         + " reason=" + reason);
             }
         } catch (SecurityException permissionFailure) {
