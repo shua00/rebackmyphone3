@@ -5,6 +5,9 @@ import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.Assert.*;
 
 public class LanChatPathRegistryTest {
@@ -14,6 +17,59 @@ public class LanChatPathRegistryTest {
     }
     private static InetSocketAddress endpoint(String ip) throws Exception {
         return new InetSocketAddress(InetAddress.getByName(ip), 8888);
+    }
+
+    @Test public void concurrentStaAndApAuthenticationRetainsBothPeerRoutes() throws Exception {
+        final LanChatPathRegistry registry = new LanChatPathRegistry();
+        final DatagramSocket sta = socket(), ap = socket();
+        final String staPath = "sta|wlan0|192.168.1.20/24";
+        final String apPath = "ap|ap0|192.168.43.1/24";
+        final CountDownLatch start = new CountDownLatch(1);
+        final CountDownLatch done = new CountDownLatch(2);
+        final AtomicReference<Throwable> failure = new AtomicReference<>();
+        try {
+            registry.registerListener(staPath, sta, 101L);
+            registry.registerListener(apPath, ap, 202L);
+            Thread staAdmission = new Thread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        start.await();
+                        registry.recordVerifiedPeer("same-peer", staPath,
+                                endpoint("192.168.1.31"), NOW, NOW + 120000L, sta, 101L);
+                    } catch (Throwable error) {
+                        failure.compareAndSet(null, error);
+                    } finally { done.countDown(); }
+                }
+            }, "sta-route-admission-test");
+            Thread apAdmission = new Thread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        start.await();
+                        registry.recordVerifiedPeer("same-peer", apPath,
+                                endpoint("192.168.43.2"), NOW + 1L, NOW + 120001L, ap, 202L);
+                    } catch (Throwable error) {
+                        failure.compareAndSet(null, error);
+                    } finally { done.countDown(); }
+                }
+            }, "ap-route-admission-test");
+            staAdmission.start();
+            apAdmission.start();
+            start.countDown();
+            assertTrue("both path admissions must finish", done.await(2, TimeUnit.SECONDS));
+            if (failure.get() != null) throw new AssertionError("concurrent route admission failed", failure.get());
+
+            LanChatPathRegistry.RouteBinding staBinding =
+                    registry.getFreshPeerRouteBinding("same-peer", staPath, NOW + 2L);
+            LanChatPathRegistry.RouteBinding apBinding =
+                    registry.getFreshPeerRouteBinding("same-peer", apPath, NOW + 2L);
+            assertNotNull(staBinding);
+            assertNotNull(apBinding);
+            assertTrue(registry.isCurrentBinding(staBinding));
+            assertTrue(registry.isCurrentBinding(apBinding));
+            assertEquals("192.168.1.31", staBinding.route.endpoint.getAddress().getHostAddress());
+            assertEquals("192.168.43.2", apBinding.route.endpoint.getAddress().getHostAddress());
+            assertEquals(2, registry.getFreshPeerRoutes("same-peer", NOW + 2L).size());
+        } finally { sta.close(); ap.close(); }
     }
 
     @Test public void samePeerCanHaveStaAndApRoutes() throws Exception {
