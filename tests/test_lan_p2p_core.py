@@ -1471,10 +1471,12 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("store.matchesAttemptedAckEndpoint(messageId, senderId", ack_handler)
         self.assertLess(ack_handler.index("if (!routeMatches && !persistedEndpointMatch)"),
                         ack_handler.index("store.acknowledge(messageId, senderId)"))
-        self.assertIn("if (routeMatches) {", ack_handler)
-        self.assertIn("verifiedChatPeerRouteVersions.put(senderId", ack_handler)
-        self.assertIn("verifiedChatPeerSeen.put(senderId, System.currentTimeMillis())", ack_handler)
-        self.assertIn("synchronized (verifiedChatPeerRouteVersions)", ack_handler)
+        # ACK acceptance is scoped to the captured ingress path and must not
+        # refresh the peer-wide compatibility endpoint cache.
+        self.assertIn("findCurrentPeerRouteBinding(senderId, ingressPath", ack_handler)
+        self.assertNotIn("verifiedChatPeerRouteVersions.put(senderId", ack_handler)
+        self.assertNotIn("verifiedChatPeerSeen.put(senderId", ack_handler)
+        self.assertNotIn("synchronized (verifiedChatPeerRouteVersions)", ack_handler)
         self.assertIn("if (store.allTargetsAcked(messageId))", ack_handler)
         self.assertIn("scheduleLanChatMirrorCleanup(messageId)", ack_handler)
         self.assertIn("P2P 最终 ACK 已落账；兼容队列清理已异步排队", ack_handler)
