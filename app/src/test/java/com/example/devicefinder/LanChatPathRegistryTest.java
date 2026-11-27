@@ -84,4 +84,25 @@ public class LanChatPathRegistryTest {
             } catch (IllegalArgumentException expected) { }
         } finally { sta.close(); }
     }
+    @Test public void verifiedRouteRequiresAnActivePathListener() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        String path = "sta|wlan0|192.168.1.20/24";
+        try {
+            registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.31"), NOW, NOW + 100);
+            fail("route admission must be tied to a live listener path");
+        } catch (IllegalStateException expected) { }
+        assertTrue(registry.getFreshPeerRoutes("peer", NOW + 1).isEmpty());
+    }
+
+    @Test public void listenerRejectsNegativeGeneration() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket socket = socket();
+        try {
+            try {
+                registry.registerListener("sta|wlan0|192.168.1.20/24", socket, -1);
+                fail("negative generations are invalid");
+            } catch (IllegalArgumentException expected) { }
+        } finally { socket.close(); }
+    }
+
 }
