@@ -974,6 +974,27 @@ def record_outgoing_fragment_ack(db_path, sender_scope, message_id, peer_id,
             _safe_close(conn)
 
 
+def load_outgoing_message(db_path, sender_scope, message_id):
+    """Read the immutable durable Outbox payload for a shared-ID sender path."""
+    if not db_path or not sender_scope or not message_id:
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        row = conn.execute("""SELECT body,created_at_ms,state FROM lan_outbox
+            WHERE sender_scope=? AND message_id=?""",
+            (sender_scope, message_id)).fetchone()
+        if row is None:
+            return None
+        return {"body": row[0], "created_at_ms": int(row[1]), "state": row[2]}
+    except Exception as exc:
+        raise LanP2PStorageError("failed to load durable LAN Outbox payload") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
 def load_outgoing_fragment_ack_bitmap(db_path, message_id, peer_id):
     """Return the durable selective-ACK bitmap, or None for a short/uninitialized target."""
     if not db_path or not message_id or not peer_id:
