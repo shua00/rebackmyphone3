@@ -1479,7 +1479,7 @@ class LanP2PCoreTests(unittest.TestCase):
             with self.subTest(service=filename):
                 source = (repo_root / filename).read_text(encoding="utf-8")
                 start = source.index('if packet_type == "chat.ack":')
-                end = source.index('if packet_type != "chat.message":', start)
+                end = source.index('if packet_type == "chat.fragment":', start)
                 handler = source[start:end]
                 self.assertIn("active_route = peer_endpoint_matches(", handler)
                 self.assertIn("sent_endpoint_route = outgoing_ack_endpoint_matches(", handler)
@@ -2970,7 +2970,7 @@ class LanP2PCoreTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "server2.py").read_text(encoding="utf-8")
         start = source.index('if packet_type == "chat.ack":')
-        end = source.index('if packet_type != "chat.message":', start)
+        end = source.index('if packet_type == "chat.fragment":', start)
         handler = source[start:end]
         route = handler.index("peer_endpoint_matches(")
         persist = handler.index("acknowledge_outgoing_message(")
@@ -4264,7 +4264,7 @@ class PythonFixedTargetImmediateDispatchTests(unittest.TestCase):
             elif packet_type == "peer.hello":
                 peer_started.set()
                 release_peer.wait(2)
-            elif packet_type == "chat.ack":
+            elif packet_type in ("chat.ack", "chat.fragment.ack"):
                 ack_finished.set()
 
         dispatcher = BoundedPacketDispatcher(
@@ -4275,7 +4275,7 @@ class PythonFixedTargetImmediateDispatchTests(unittest.TestCase):
             self.assertTrue(dispatcher.submit({"type": "peer.hello"}, None, None))
             self.assertTrue(message_started.wait(1))
             self.assertTrue(peer_started.wait(1))
-            self.assertTrue(dispatcher.submit({"type": "chat.ack"}, None, None))
+            self.assertTrue(dispatcher.submit({"type": "chat.fragment.ack"}, None, None))
             self.assertTrue(ack_finished.wait(1))
         finally:
             release_message.set()
@@ -5125,6 +5125,13 @@ class LanP2PPacketSchemaTests(unittest.TestCase):
             {"type": "chat.ack", "sender_peer_id": "android-a", "sender_peer_type": "android",
              "service_id": "android-main", "target_peer_id": "pc-a", "message_id": "m-1",
              "status": "stored"},
+            {"type": "chat.fragment", "sender_peer_id": "pc-a", "sender_peer_type": "pc",
+             "service_id": "pc-main", "target_peer_id": "android-a", "message_id": "m-2",
+             "fragment_index": 0, "fragment_count": 2, "total_bytes": 301,
+             "sha256": "a" * 64, "fragment_data": "eA==", "created_at_ms": 123},
+            {"type": "chat.fragment.ack", "sender_peer_id": "android-a", "sender_peer_type": "android",
+             "service_id": "android-main", "target_peer_id": "pc-a", "message_id": "m-2",
+             "fragment_index": 0, "status": "received"},
         ]
         for packet in packets:
             with self.subTest(packet_type=packet["type"]):
