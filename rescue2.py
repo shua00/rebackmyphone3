@@ -771,6 +771,7 @@ def _retry_deferred_v2_peer_recoveries():
                             error_type=type(exc).__name__)
             with _V2_RECOVERY_RETRY_LOCK:
                 _V2_RECOVERY_RETRY_PEERS.update(recovery_event_peers)
+                _V2_FRAGMENT_WINDOW_PEERS.update(fragment_window_peers)
             with print_lock:
                 print(f"⚠️ rescue2 LAN recovery retry scan deferred: {type(exc).__name__}")
             continue
