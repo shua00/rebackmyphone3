@@ -1638,7 +1638,7 @@ class LanP2PCoreTests(unittest.TestCase):
         handler = source[start:end]
 
         claim = handler.index("pendingLanChatV2Receives.putIfAbsent(")
-        ack_target = handler.index("pendingReceive.ackTargets.add(ackTarget)", claim)
+        ack_target = handler.index("pendingReceive.addAckTarget(ackTarget)", claim)
         duplicate_branch = handler.index("if (!ownsReceive)", ack_target)
         dispatch = handler.index("lanChatIoExecutor.execute", duplicate_branch)
         persist = handler.index("persistIncomingLanChat(", dispatch)
