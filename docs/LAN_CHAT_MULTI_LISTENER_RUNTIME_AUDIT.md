@@ -280,3 +280,14 @@ CI 验证补充（secondary listener 代码阶段，2026-11-27）：
 - 代码和 CI 已有 secondary Listener，不等于 AP 接口一定可绑定或热点网络允许双向客户端通信。
 - 当前路径质量尚无可靠的 per-peer×path RTT/失败事实；selector 只能使用认证时间与显式 preferred path。
 - PR #1 仍 Open，未合并 main；真机验收未开始。
+
+
+## 2026-11-27 批次 C：peer.ack 认证登记 generation 原子性
+
+- [x] `LanChatPathRegistry.recordVerifiedPeer(...)` 增加精确 ingress overload，要求调用方传入接收 ACK 的 DatagramSocket 与 generation。
+- [x] 路由登记在 Registry 同一同步临界区内校验当前 Listener 的 socket identity、generation，并写入对应 PeerRoute；Listener 替换与 route admission 不再存在“先检查、后登记”的跨锁竞态。
+- [x] `TrackingService` 的 peer.ack 处理改用精确 ingress overload；若 socket/generation 已被替换，拒绝 route promotion，并且不更新 peer-wide verified cache、不释放 discovery latch。
+- [x] 新增 Android 单测：旧 socket/generation 在 Listener replacement 后不能把旧 endpoint 登记到新 generation；新 Listener 的正确 generation 仍可独立建立路由。
+- [x] 新增 Python 静态契约：锁定 peer.ack 使用精确 ingress epoch，且 route admission 失败必须先于全局 peer cache promotion。
+- [ ] 本轮新提交尚未取得 Android Gradle / Python / Windows CI 结果；必须以新 head 的完整 Actions 结果作为构建验收，不得引用前一轮成功 run。
+- [ ] 同一 peer 在多路径同时认证时，Registry 保留 peer × path 的独立路由；peer-wide SQLite/cache 仍只是兼容性提示，不得在多 Listener 下作为发送授权或 ACK 归属依据。后续继续审查其过期、发现抑制与路径降级语义。
