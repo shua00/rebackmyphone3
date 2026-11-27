@@ -244,6 +244,13 @@ public class TrackingService extends Service implements LocationListener {
     //   TrackingService 启动后由 batteryMonitor 持续刷新，-1 表示尚未采集。
     public static volatile int GLOBAL_BATTERY_LEVEL = -1;
 
+    // Hidden/OEM hotspot AP interfaces may not produce ConnectivityManager Network callbacks.
+    // Reconcile the selected LAN path periodically while the independent transfer feature is on.
+    private final Runnable lanTransferPathRefreshRunnable = () -> {
+        if (!serviceDestroyed && LanTransferFeature.isEnabled(this))
+            refreshLanTransferTcpListener("periodic LAN path reconciliation");
+    };
+
     private volatile boolean serviceDestroyed = false;
     // 每个进程只生成一次；进程被系统杀死后重启会得到新的 Session。
     private static final String PROCESS_SESSION_ID = java.util.UUID.randomUUID().toString();
@@ -3032,6 +3039,9 @@ public class TrackingService extends Service implements LocationListener {
      * absent credentials means the file-transfer listener remains closed.
      */
     private void refreshLanTransferTcpListener(String reason) {
+        handler.removeCallbacks(lanTransferPathRefreshRunnable);
+        if (!serviceDestroyed && LanTransferFeature.isEnabled(this))
+            handler.postDelayed(lanTransferPathRefreshRunnable, 15_000L);
         logLocalLanInterfaceCandidates(reason);
         // Pairing must be available before the first peer credential exists. Its listener is
         // deliberately independent of the credential-gated file-data listener.
