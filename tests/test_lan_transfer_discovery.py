@@ -49,6 +49,9 @@ class LanTransferDiscoveryIsolationTests(unittest.TestCase):
         self.assertIn("currentLanTransferPathSet(cm)", service)
         self.assertIn("lanTransferDiscoveries", service)
         self.assertIn("lanTransferTcpListeners", service)
+        self.assertIn("lanTransferPairingControlHosts", service)
+        self.assertIn("createLanTransferPairingControlHost()", service)
+        self.assertIn("findLanTransferPairingHost(sessionId, peerId)", service)
         self.assertIn("private void closeLanTransferResources()", service)
 
 

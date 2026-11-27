@@ -139,6 +139,55 @@ public class LanTransferPairingControlHostTest {
         }
     }
 
+    @Test public void separatePathHostsKeepResponderSessionsAndPortsIndependent() throws Exception {
+        final CountDownLatch firstRequested = new CountDownLatch(1);
+        final CountDownLatch secondRequested = new CountDownLatch(1);
+        final String[] firstSession = new String[2];
+        final String[] secondSession = new String[2];
+        LanTransferPairingControlHost firstHost = new LanTransferPairingControlHost("receiver",
+                (sessionId, peerId, sas, expiresAt) -> {
+                    firstSession[0] = sessionId; firstSession[1] = peerId;
+                    firstRequested.countDown();
+                });
+        LanTransferPairingControlHost secondHost = new LanTransferPairingControlHost("receiver",
+                (sessionId, peerId, sas, expiresAt) -> {
+                    secondSession[0] = sessionId; secondSession[1] = peerId;
+                    secondRequested.countDown();
+                });
+        try {
+            firstHost.start(InetAddress.getLoopbackAddress(), 0);
+            secondHost.start(InetAddress.getLoopbackAddress(), 0);
+            assertNotEquals(firstHost.getBoundPort(), secondHost.getBoundPort());
+
+            LanTransferPairingInitiator first = LanTransferPairingInitiator.connect("sender-a",
+                    "receiver", InetAddress.getLoopbackAddress(), firstHost.getBoundPort(), 2000, 3000);
+            LanTransferPairingInitiator second = LanTransferPairingInitiator.connect("sender-b",
+                    "receiver", InetAddress.getLoopbackAddress(), secondHost.getBoundPort(), 2000, 3000);
+            try {
+                assertTrue(firstRequested.await(1, TimeUnit.SECONDS));
+                assertTrue(secondRequested.await(1, TimeUnit.SECONDS));
+                assertEquals(1, firstHost.pendingSessions().size());
+                assertEquals(1, secondHost.pendingSessions().size());
+                assertEquals("sender-a", firstHost.pendingSessions().get(0).remotePeerId);
+                assertEquals("sender-b", secondHost.pendingSessions().get(0).remotePeerId);
+                assertNull(firstHost.state(secondSession[0], secondSession[1]));
+                assertNull(secondHost.state(firstSession[0], firstSession[1]));
+                firstHost.confirmLocal(firstSession[0], firstSession[1], "000000");
+                assertEquals(1, secondHost.pendingSessions().size());
+                assertEquals(LanTransferPairingSession.State.WAITING_LOCAL_CONFIRMATION,
+                        secondHost.state(secondSession[0], secondSession[1]));
+            } finally {
+                first.close();
+                second.close();
+            }
+        } finally {
+            firstHost.close();
+            secondHost.close();
+        }
+        assertFalse(firstHost.isRunning());
+        assertFalse(secondHost.isRunning());
+    }
+
     private static byte[] initiatorConfirmationProofForTest(
             LanTransferPairingHandshake.InitiatorStart start,
             LanTransferPairingControlProtocol.Message response) throws Exception {
