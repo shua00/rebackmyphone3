@@ -12,6 +12,8 @@ final class LanChatRetryPolicy {
 
     static final long FIRST_DISCOVERY_WINDOW_MS = 10_000L;
     static final int MAX_PENDING_MESSAGES = 200;
+    /** Unconfirmed messages expire after seven days; history is retained. */
+    static final long OUTBOX_MESSAGE_TTL_MS = 7L * 24L * 60L * 60L * 1000L;
     // Bound aggregate UTF-8 message bodies as well as row count; metadata/index overhead is additional.
     static final long MAX_PENDING_BODY_BYTES = 8L * 1024L * 1024L;
     static final int MAX_AUTOMATIC_RETRY_ATTEMPTS = 8;
