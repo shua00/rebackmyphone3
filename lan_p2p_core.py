@@ -1058,7 +1058,9 @@ def send_outgoing_fragment_window(sock, db_path, sender_scope, message_id, peer_
         return 0
     first_missing = bitmap.find("0")
     if first_missing < 0:
-        indices = [len(packets) - 1]  # repeat final fragment until whole-message chat.ack
+        if not mark_attempt:
+            return 0  # ACK-driven window advance must not create a completion-probe ping-pong
+        indices = [len(packets) - 1]  # retry worker probes until whole-message chat.ack
     else:
         if not mark_attempt and first_missing % 8 != 0:
             return 0  # ACK-driven advancement waits for the current flight to complete
