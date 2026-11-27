@@ -1417,7 +1417,12 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
                            "display_name": "Web_Console", "body": pending["body"]}
             try:
                 target_port = int(pending.get("endpoint_port") or addr[1])
-                raw = encode_packet(chat_packet, RESCUE_SECRET)
+                try:
+                    raw = encode_packet(chat_packet, RESCUE_SECRET)
+                    long_message = False
+                except ValueError:
+                    raw = None
+                    long_message = True
             except Exception as e:
                 with print_lock:
                     print(f"⚠️ server2 pending chat retry payload preparation failed peer={peer_id}: {type(e).__name__}")
@@ -1437,10 +1442,18 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
             if not attempt_admitted:
                 continue
             try:
-                send_outgoing_packet(
-                    sock, raw, (pending["endpoint_ip"], target_port),
-                    CHAT_DEDUP_DB, "server2", pending["message_id"], peer_id,
-                    send_lock=UDP_CHAT_SEND_LOCK)
+                if long_message:
+                    send_outgoing_fragment_window(
+                        sock, CHAT_DEDUP_DB, "server2", pending["message_id"], peer_id,
+                        pending["body"], pending["created_at_ms"],
+                        (pending["endpoint_ip"], target_port), PEER_NODE_ID, "server2",
+                        PEER_NODE_ID, RESCUE_SECRET, send_lock=UDP_CHAT_SEND_LOCK,
+                        display_name="Web_Console", mark_attempt=False)
+                else:
+                    send_outgoing_packet(
+                        sock, raw, (pending["endpoint_ip"], target_port),
+                        CHAT_DEDUP_DB, "server2", pending["message_id"], peer_id,
+                        send_lock=UDP_CHAT_SEND_LOCK)
             except LanP2PStorageError as e:
                 # The durable attempt is already consumed; let normal persisted backoff
                 # take over instead of force-reopening the same retry epoch.
