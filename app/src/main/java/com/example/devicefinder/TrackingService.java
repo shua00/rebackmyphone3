@@ -2852,6 +2852,9 @@ public class TrackingService extends Service implements LocationListener {
             lanChatListenerRuntime.remove(lease);
         }
         lanChatListenerRuntime.removeInstance(instance);
+        // A topology-driven retirement resets this path's failure streak; if it becomes
+        // secondary again, the new role starts with a fresh bounded retry budget.
+        secondaryListenerRetryAttempts.remove(instance.pathFingerprint);
     }
 
     private boolean isCurrentSecondaryLanChatListener(LanChatListenerInstance instance,
