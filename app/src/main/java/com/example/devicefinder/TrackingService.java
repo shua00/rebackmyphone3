@@ -6562,10 +6562,7 @@ public class TrackingService extends Service implements LocationListener {
         };
         if (!scheduleLanChatTask("outbox-ttl-expiry", expireAndRearm, delay)) {
             lanChatOutboxExpiryScheduled.set(false);
-            if (!serviceDestroyed && !handler.postDelayed(
-                    () -> scheduleLanChatOutboxExpiry(store), 500L)) {
-                FileLogger.log(this, "CHAT", "LAN Outbox TTL scheduler unavailable");
-            }
+            FileLogger.log(this, "CHAT", "LAN Outbox TTL scheduler unavailable");
         }
     }
 
@@ -6573,7 +6570,7 @@ public class TrackingService extends Service implements LocationListener {
         if (serviceDestroyed || store == null) return;
         if (!scheduleLanChatTask("outbox-ttl-expiry-retry",
                 () -> scheduleLanChatOutboxExpiry(store), 500L)) {
-            handler.postDelayed(() -> scheduleLanChatOutboxExpiry(store), 500L);
+            FileLogger.log(this, "CHAT", "LAN Outbox TTL retry scheduler unavailable");
         }
     }
 
