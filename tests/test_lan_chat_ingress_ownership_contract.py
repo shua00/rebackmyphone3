@@ -186,7 +186,7 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
         self.assertIn("ackTargets.size() >= MAX_ACK_TARGETS", receive_class)
         self.assertIn("existing.socket == candidate.socket", receive_class)
         self.assertIn("existing.generation == candidate.generation", receive_class)
-        self.assertIn("existing.pathFingerprint.equals(candidate.pathFingerprint)", receive_class)
+        self.assertIn("java.util.Objects.equals(existing.pathFingerprint, candidate.pathFingerprint)", receive_class)
         self.assertIn("pendingReceive.completed && pendingReceive.stored", source)
         self.assertIn("new java.util.ArrayList<>(pendingReceive.ackTargets)", source)
         self.assertIn("pendingLanChatV2Receives.remove(receiveKey, pendingReceive)", source)
