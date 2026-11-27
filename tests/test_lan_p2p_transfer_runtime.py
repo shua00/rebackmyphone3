@@ -152,7 +152,7 @@ class TransferListenerRuntimeTests(unittest.TestCase):
         runtime.close()
 
     def test_refresh_recovers_after_interface_enumeration_failure(self):
-        snapshots = [self.wifi]
+        snapshots = [[self.wifi]]
         made = []
 
         class FakeServer:
