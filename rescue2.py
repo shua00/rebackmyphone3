@@ -119,7 +119,7 @@ PACKAGE_NAME = "com.example.devicefinder"
 
 # ===== 配置区 =====
 RESCUE_SECRET = "your_private_secret_key"
-from lan_p2p_core import LanP2PStorageError, assemble_chat_fragments, store_incoming_chat_fragment, load_incoming_chat_fragments, record_outgoing_fragment_ack, is_outgoing_discovery_pending, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, BoundedPacketDispatcher, list_known_peers, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, send_discovery_broadcast_with_retries, load_active_pending_targets, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, next_peer_recovery_eligible_at_ms, list_due_outgoing_peers
+from lan_p2p_core import LanP2PStorageError, assemble_chat_fragments, store_incoming_chat_fragment, load_incoming_chat_fragments, record_outgoing_fragment_ack, load_outgoing_fragment_targets_for_peer, send_outgoing_fragment_window, build_authenticated_chat_fragment_packets, send_discovery_fragment_window, is_outgoing_discovery_pending, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, BoundedPacketDispatcher, list_known_peers, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, send_discovery_broadcast_with_retries, load_active_pending_targets, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, next_peer_recovery_eligible_at_ms, list_due_outgoing_peers
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "rescue2")
 DEFAULT_SERVER_URL = "http://dingwei.bai001.de5.net/api/report"
 DEFAULT_CONFIG_URL = "https://your-config-url.com/config.txt"
@@ -680,6 +680,37 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
             _V2_RECOVERY_INFLIGHT.discard(peer_id)
 
 
+def _advance_v2_fragment_windows(sock, peer_id, fallback_addr=None):
+    """Advance only fully ACKed 8-fragment flights; never consume a retry epoch."""
+    try:
+        rows = load_outgoing_fragment_targets_for_peer(
+            _CHAT_DEDUP_DB, "rescue2", peer_id, limit=50)
+    except Exception as exc:
+        _diag_exception("chat_fragment_window_load_failed", peer_id=peer_id,
+                        error_type=type(exc).__name__)
+        return
+    for row in rows:
+        endpoint_ip = row.get("endpoint_ip") or ""
+        endpoint_port = int(row.get("endpoint_port") or 0)
+        if (not endpoint_ip or endpoint_port not in (8887, 8888, 8889, 8890)) and fallback_addr:
+            endpoint_ip, endpoint_port = fallback_addr[0], int(fallback_addr[1])
+        if not endpoint_ip or endpoint_port not in (8887, 8888, 8889, 8890):
+            continue
+        try:
+            sent = send_outgoing_fragment_window(
+                sock, _CHAT_DEDUP_DB, "rescue2", row["message_id"], peer_id,
+                row["body"], row["created_at_ms"], (endpoint_ip, endpoint_port),
+                PEER_NODE_ID, "rescue2", PEER_NODE_ID, RESCUE_SECRET,
+                send_lock=UDP_CHAT_SEND_LOCK, display_name="PC_Terminal",
+                mark_attempt=False)
+            if sent:
+                _diag_event("chat_fragment_window_advanced", peer_id=peer_id,
+                            message_id=row["message_id"], sent=sent)
+        except Exception as exc:
+            _diag_exception("chat_fragment_window_send_failed", peer_id=peer_id,
+                            message_id=row["message_id"], error_type=type(exc).__name__)
+
+
 def _retry_deferred_v2_peer_recoveries():
     """One process-wide worker handles ACK-timeout retries and deferred storage failures."""
     global _V2_RECOVERY_SCHEMA_READY
@@ -699,20 +730,24 @@ def _retry_deferred_v2_peer_recoveries():
                 continue
         with _V2_RECOVERY_RETRY_LOCK:
             recovery_event_peers = set(_V2_RECOVERY_RETRY_PEERS)
+            fragment_window_peers = set(_V2_FRAGMENT_WINDOW_PEERS)
             _V2_RECOVERY_RETRY_PEERS.clear()
+            _V2_FRAGMENT_WINDOW_PEERS.clear()
             pending_peer_ids = set(recovery_event_peers)
         sock = UDP_LISTENER_SOCKET
         if sock is None:
             with _V2_RECOVERY_RETRY_LOCK:
                 _V2_RECOVERY_RETRY_PEERS.update(recovery_event_peers)
+                _V2_FRAGMENT_WINDOW_PEERS.update(fragment_window_peers)
             continue
         try:
             if sock.fileno() < 0:
                 with _V2_RECOVERY_RETRY_LOCK:
                     _V2_RECOVERY_RETRY_PEERS.update(recovery_event_peers)
+                    _V2_FRAGMENT_WINDOW_PEERS.update(fragment_window_peers)
                 continue
             pending_peer_ids.update(list_due_outgoing_peers(_CHAT_DEDUP_DB, "rescue2", limit=500))
-            if not pending_peer_ids:
+            if not pending_peer_ids and not fragment_window_peers:
                 continue
             known_peers = {row["peer_id"]: row for row in list_known_peer_snapshot(_CHAT_DEDUP_DB, "rescue2", limit=500)}
         except Exception as exc:
@@ -724,6 +759,11 @@ def _retry_deferred_v2_peer_recoveries():
             with print_lock:
                 print(f"⚠️ rescue2 LAN recovery retry scan deferred: {type(exc).__name__}")
             continue
+        for fragment_peer_id in fragment_window_peers:
+            peer = known_peers.get(fragment_peer_id)
+            fallback_addr = ((peer["endpoint_ip"], int(peer.get("endpoint_port") or 0))
+                             if peer and peer.get("endpoint_ip") else None)
+            _advance_v2_fragment_windows(sock, fragment_peer_id, fallback_addr)
         unresolved_recovery_peers = recovery_event_peers - set(known_peers)
         with _V2_RECOVERY_RETRY_LOCK:
             _V2_RECOVERY_RETRY_PEERS.update(unresolved_recovery_peers)
