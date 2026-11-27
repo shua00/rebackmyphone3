@@ -635,8 +635,8 @@
 - [x] Android 只有全局网络/Listener 恢复或对应 Peer 路径重新验证等真实恢复事件才能重新开放耗尽预算，并持久化 60 秒冷却；恢复事件和 SQLite 失败有保留/重试保护。
 - [x] Python Outbox 同样按 target 记录 ACK/attempt count，8 次封顶，只有 Peer 验证恢复事件可在 60 秒冷却后重开；已 ACK target 不会被重复发送。
 - [x] 已有回归覆盖 partial ACK 只重试剩余固定 Peer、重试次数封顶、恢复冷却、普通 timer 不重开耗尽预算及进程重启后恢复状态。
-- [ ] **剩余产品策略缺口：固定收件人 partial / retry_paused 消息没有最大存活时间或自动过期策略。** Android 的 50 条待处理容量统计会继续计入 retry_paused 行；长期未确认记录可能占用 Outbox 容量。需明确消息保留期限、用户可见的重试/取消/清理行为及过期后状态，不得静默删除或把部分送达伪装成全部送达。
-- 结论：旧日志中的无界连续自动重发路径已由有限 attempt budget + retry_paused + recovery cooldown 收敛；但“未完成记录长期滞留”尚未完全解决。代码核查不替代真机验证。
+- [x] **Android Outbox 生命周期收尾（2026-11-28）**：容量提升为 200 条 + 8 MiB 正文预算；未完成消息自创建起 7 天过期，过期只转为 `expired` 并保留投递记录，不静默删除；用户可在聊天发送状态中确认取消未完成消息，或二次确认清理已送达/已取消/已过期的本机 Outbox 终态记录。清理不删除聊天历史、不操作对端设备。迟到的已认证 ACK 仍可更新目标状态；全部目标最终 ACK 时可收敛为 `delivered`，未全部 ACK 时保持过期终态。
+- 结论：旧日志中的无界连续自动重发路径已由有限 attempt budget + retry_paused + recovery cooldown 收敛；Android 长期滞留风险已由 7 天 TTL 与显式取消/清理入口收敛。Python Outbox 的 TTL/容量策略仍需单独对齐；代码与 CI 通过不替代真机验证。
 
 ### 历史问题 2：UDP 对讲长消息单包上限
 
