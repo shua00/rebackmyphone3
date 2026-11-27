@@ -4724,8 +4724,9 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         self.assertLess(resolve, lock)
         self.assertIn("preparedCachedEndpoints.put(target.peerId", send)
         self.assertIn("preparedCachedEndpoints.get(target.peerId)", internal)
-        self.assertIn("if (liveRoute != null)", internal)
-        self.assertLess(internal.index("if (liveRoute != null)"),
+        self.assertIn("getFreshPeerRouteBinding(", internal)
+        self.assertIn("if (activeChatListenerCount == 1)", internal)
+        self.assertLess(internal.index("getFreshPeerRouteBinding("),
                         internal.index("preparedCachedEndpoints.get(target.peerId)"))
         self.assertNotIn("InetAddress.getByName(target.endpointIp)", internal)
         self.assertIn("preLockEndpointResolveMs=", internal)
