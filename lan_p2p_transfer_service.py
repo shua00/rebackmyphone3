@@ -192,7 +192,14 @@ class LanTransferService:
                 address=self._address,
                 **self._runtime_options,
             )
-            self._runtime.start()
+            try:
+                self._runtime.start()
+            except Exception:
+                # A failed initial bind must not leave a half-started runtime
+                # retained by the service. The foreground host may retry later.
+                self._runtime.close()
+                self._runtime = None
+                raise
             self._started = True
             _LOG.info("LAN transfer listener started at %s", self.address)
             return self.address

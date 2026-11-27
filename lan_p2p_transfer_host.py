@@ -53,13 +53,24 @@ def main(argv=None) -> int:
         port=args.port,
     )
     try:
-        address = service.start()
-        print(json.dumps({"peer_id": peer_id, "listen_address": address[0],
-                          "listen_port": address[1]}, separators=(",", ":")), flush=True)
+        # Startup can race boot-time Wi-Fi/AP readiness. Keep the explicitly
+        # launched host alive and retry; never bind wildcard or another network.
+        started = False
+        while not stopped.is_set() and not started:
+            try:
+                address = service.start()
+                started = True
+                print(json.dumps({"peer_id": peer_id, "listen_address": address[0],
+                                  "listen_port": address[1]}, separators=(",", ":")), flush=True)
+            except Exception:
+                log.exception("LAN transfer startup failed; will retry without fallback")
+                if not stopped.wait(args.refresh_interval):
+                    continue
+                break
         # The host, not an unrelated chat process, owns network-path lifecycle.
         # A missing/ambiguous path causes refresh() to stop the listener fail-closed;
         # a later valid path can bring it back without changing the stable Peer ID.
-        while not stopped.wait(args.refresh_interval):
+        while started and not stopped.wait(args.refresh_interval):
             try:
                 refreshed = service.refresh()
                 if refreshed is not None:
