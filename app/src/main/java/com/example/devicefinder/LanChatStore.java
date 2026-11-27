@@ -27,6 +27,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
     public static final int MAX_FRAGMENT_SESSIONS = 32;
     public static final int MAX_FRAGMENT_CACHE_CHARS = 2 * 1024 * 1024;
     public static final int MAX_PENDING_MESSAGES = LanChatRetryPolicy.MAX_PENDING_MESSAGES;
+    public static final long MAX_PENDING_BODY_BYTES = LanChatRetryPolicy.MAX_PENDING_BODY_BYTES;
     /** Maximum automatic sends in one retry epoch, including the original send. */
     public static final int MAX_AUTOMATIC_RETRY_ATTEMPTS = LanChatRetryPolicy.MAX_AUTOMATIC_RETRY_ATTEMPTS;
     /** A real network/peer recovery event may reopen an exhausted retry epoch once per minute. */
@@ -261,6 +262,28 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
+    /**
+     * Enforce both row-count and UTF-8 body-byte budgets in the same transaction as enqueue.
+     * Delivered/expired rows are terminal history and do not consume pending capacity;
+     * waiting_peers and retry_paused rows remain pending and therefore do consume it.
+     */
+    private boolean hasOutboxCapacity(SQLiteDatabase db, String body) {
+        if (body == null) return false;
+        long incomingBytes = body.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        if (incomingBytes > MAX_PENDING_BODY_BYTES) return false;
+        Cursor c = null;
+        try {
+            c = db.rawQuery("SELECT COUNT(*),COALESCE(SUM(LENGTH(CAST(body AS BLOB))),0) " +
+                    "FROM lan_outbox WHERE state NOT IN ('delivered','expired')", null);
+            if (!c.moveToFirst()) return false;
+            int count = c.getInt(0);
+            long bytes = c.getLong(1);
+            return count < MAX_PENDING_MESSAGES && bytes <= MAX_PENDING_BODY_BYTES - incomingBytes;
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
     private boolean rowExists(SQLiteDatabase db, String table, String where, String[] args) {
         Cursor c = null;
         try {
@@ -384,12 +407,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
             cursor = null;
 
             if (!exists) {
-                cursor = db.rawQuery("SELECT COUNT(*) FROM lan_outbox "
-                        + "WHERE state NOT IN ('delivered','expired','waiting_peers')", null);
-                int count = 0;
-                try { if (cursor.moveToFirst()) count = cursor.getInt(0); }
-                finally { cursor.close(); cursor = null; }
-                if (count >= MAX_PENDING_MESSAGES) return false;
+                if (!hasOutboxCapacity(db, body)) return false;
                 ContentValues outbox = new ContentValues();
                 outbox.put("message_id", messageId);
                 outbox.put("sender_peer_id", senderPeerId);
@@ -488,10 +506,6 @@ public final class LanChatStore extends SQLiteOpenHelper {
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
-            Cursor c = db.rawQuery("SELECT COUNT(*) FROM lan_outbox WHERE state NOT IN ('delivered','expired','waiting_peers')", null);
-            int count = 0;
-            try { if (c.moveToFirst()) count = c.getInt(0); } finally { c.close(); }
-
             Cursor exists = db.rawQuery(
                     "SELECT sender_peer_id,body FROM lan_outbox WHERE message_id=?",
                     new String[]{messageId});
@@ -505,7 +519,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 }
             } finally { exists.close(); }
 
-            if (count >= MAX_PENDING_MESSAGES) return false;
+            if (!hasOutboxCapacity(db, body)) return false;
             ContentValues v = new ContentValues();
             v.put("message_id", messageId);
             v.put("sender_peer_id", senderPeerId);
