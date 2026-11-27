@@ -25,7 +25,11 @@ public class LanTransferPathSetTest {
     }
 
     private static LanNetworkPath ap(String iface, String address) throws Exception {
-        return LanNetworkPath.localInterfaceCandidate(iface, ip(address), 24, ip("192.168.43.255"));
+        Inet4Address local = ip(address);
+        byte[] raw = local.getAddress();
+        raw[3] = (byte) 255;
+        return LanNetworkPath.localInterfaceCandidate(iface, local, 24,
+                (Inet4Address) InetAddress.getByAddress(raw));
     }
 
     @Test public void retainsStaAndOneUnrepresentedHotspotApPath() throws Exception {
