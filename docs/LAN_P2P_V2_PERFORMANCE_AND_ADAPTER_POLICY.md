@@ -91,3 +91,8 @@ Current priority remains IPv4 ordinary-router LAN (two or more Android/Python pe
 ## Unified network awareness and adaptive routing
 
 The project-wide P0 architecture contract is defined in `docs/UNIFIED_NETWORK_AWARENESS_AND_ADAPTIVE_ROUTING.md`. This performance policy is a binding constraint on that architecture: awareness and route selection must be event-driven and path-scoped, and the single-path ordinary-router fast path must not incur multi-path scanning, probing, fan-out, or worker overhead. Rescue2/Server2 UDP-versus-HTTP command routing is a later P0 integration stage after LAN P2P v2 IPv4 real-device acceptance; it must reuse authenticated reachability facts and command idempotency rather than infer LAN reachability from subnet similarity.
+
+
+## Network awareness activation budget (hard constraint)
+
+The shared awareness capability may be present in every build, but its work is conditional. A stable single-path peer with a fresh authenticated route must not cause interface scans, route-list allocation, active probes, extra workers/timers, or periodic wakeups. Path changes, stale leases, explicit failures/timeouts, or user-requested diagnostics may activate targeted work for only the affected peer/path, with coalescing, cooldown, backoff, and bounded concurrency. Quality scores must come from real RTT/ACK/retry observations; insufficient samples use a deterministic conservative fallback rather than invented scores.
