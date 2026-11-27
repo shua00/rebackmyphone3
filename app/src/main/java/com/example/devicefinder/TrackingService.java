@@ -6828,7 +6828,8 @@ public class TrackingService extends Service implements LocationListener {
             // Only ACK frames need an ingress ownership snapshot. Keep ordinary chat,
             // fragments, and peer-control packets off this additional Registry lookup.
             final String ingressPathFingerprint =
-                    ("chat.ack".equals(type) || "chat.fragment.ack".equals(type))
+                    ("peer.ack".equals(type) || "chat.ack".equals(type)
+                            || "chat.fragment.ack".equals(type))
                             ? rescueSocketPathFingerprint : null;
             final LanChatPathRegistry.Listener ingressListener = ingressPathFingerprint == null
                     ? null : lanChatPathRegistry.getListener(ingressPathFingerprint);
@@ -6923,7 +6924,10 @@ public class TrackingService extends Service implements LocationListener {
                     if (store == null) return true;
                     final String peerType = envelope.optString("sender_peer_type", "unknown");
                     final String peerNetwork = envelope.optString("network_scope", "");
-                    final String verifiedPathFingerprint = rescueSocketPathFingerprint;
+                    // Preserve the path identity of the socket that received peer.ack;
+                    // never infer it later from whichever listener happens to be current.
+                    final String verifiedPathFingerprint = ackIngressPath;
+                    final long verifiedListenerGeneration = ackIngressGeneration;
                     try {
                         lanChatControlExecutor.execute(() -> {
                             long controlQueueMs = android.os.SystemClock.elapsedRealtime()
@@ -6941,21 +6945,19 @@ public class TrackingService extends Service implements LocationListener {
                             // Mirror the durable authenticated route into the path-scoped
                             // runtime registry only if this exact listener still owns the
                             // receive socket that accepted the challenge response.
-                            if (verifiedPathFingerprint != null) {
-                                LanChatPathRegistry.Listener activeListener =
-                                        lanChatPathRegistry.getListener(verifiedPathFingerprint);
-                                if (activeListener != null && activeListener.socket == socket
-                                        && activeListener.generation == lanSocketGeneration.get()) {
-                                    try {
-                                        long verifiedAt = System.currentTimeMillis();
-                                        lanChatPathRegistry.recordVerifiedPeer(senderId,
-                                                verifiedPathFingerprint,
-                                                new java.net.InetSocketAddress(peerAddress, port),
-                                                verifiedAt, verifiedAt + 120_000L);
-                                    } catch (RuntimeException registryFailure) {
-                                        FileLogger.logD("CHAT", "verified route registry mirror deferred: "
-                                                + registryFailure.getClass().getSimpleName());
-                                    }
+                            if (isCurrentLanChatIngress(verifiedPathFingerprint, socket,
+                                    verifiedListenerGeneration)) {
+                                try {
+                                    // Registry leases and ACK freshness use elapsed realtime,
+                                    // never wall-clock time (which can jump after clock sync).
+                                    long verifiedAt = android.os.SystemClock.elapsedRealtime();
+                                    lanChatPathRegistry.recordVerifiedPeer(senderId,
+                                            verifiedPathFingerprint,
+                                            new java.net.InetSocketAddress(peerAddress, port),
+                                            verifiedAt, verifiedAt + 120_000L);
+                                } catch (RuntimeException registryFailure) {
+                                    FileLogger.logD("CHAT", "verified route registry mirror deferred: "
+                                            + registryFailure.getClass().getSimpleName());
                                 }
                             }
                             // upsertPeer() atomically commits this verified route and joins all
