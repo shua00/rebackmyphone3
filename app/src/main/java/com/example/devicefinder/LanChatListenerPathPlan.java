@@ -26,15 +26,39 @@ public final class LanChatListenerPathPlan {
     }
 
     public static LanChatListenerPathPlan from(LanTransferPathSet paths) {
+        return from(paths, null);
+    }
+
+    /**
+     * Prefer the same active Wi-Fi Network selected by the legacy primary socket binder.
+     * This keeps the existing single-listener fast path and its path identity aligned when
+     * Android exposes more than one Wi-Fi Network concurrently.
+     */
+    public static LanChatListenerPathPlan from(LanTransferPathSet paths,
+            android.net.Network preferredNetwork) {
         if (paths == null || paths.size() == 0)
             throw new IllegalArgumentException("A non-empty validated LAN path set is required");
         LanNetworkPath primary = null;
         List<LanNetworkPath> secondary = new ArrayList<>();
-        // Prefer a ConnectivityManager-backed Wi-Fi path for the legacy fast path.
-        for (LanNetworkPath path : paths.paths()) {
-            if (path == null) throw new IllegalArgumentException("Path set contains a null path");
-            if (primary == null && path.kind == LanNetworkPath.Kind.ANDROID_NETWORK) {
-                primary = path;
+        if (preferredNetwork != null) {
+            for (LanNetworkPath path : paths.paths()) {
+                if (path == null) throw new IllegalArgumentException("Path set contains a null path");
+                if (path.kind == LanNetworkPath.Kind.ANDROID_NETWORK
+                        && preferredNetwork.equals(path.network)) {
+                    primary = path;
+                    break;
+                }
+            }
+            if (primary == null)
+                throw new IllegalArgumentException("Preferred Wi-Fi Network is absent from validated path set");
+        }
+        // Without an explicit preferred Network, prefer a ConnectivityManager-backed path.
+        if (primary == null) {
+            for (LanNetworkPath path : paths.paths()) {
+                if (path == null) throw new IllegalArgumentException("Path set contains a null path");
+                if (primary == null && path.kind == LanNetworkPath.Kind.ANDROID_NETWORK) {
+                    primary = path;
+                }
             }
         }
         if (primary == null) primary = paths.paths().get(0);
