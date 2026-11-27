@@ -187,6 +187,8 @@ public class TrackingService extends Service implements LocationListener {
     private volatile String rescueSocketPathFingerprint;
     // Exact Network that owns the currently published UDP listener socket.
     private volatile Network lanChatBoundWifiNetwork;
+    // Event-driven immutable path plan; it creates no sockets, workers, timers, or probes.
+    private volatile LanChatListenerPathPlan lanChatListenerPathPlan;
     private AlarmManager alarmManager;
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
@@ -2653,6 +2655,28 @@ public class TrackingService extends Service implements LocationListener {
         }
     }
 
+    /**
+     * Refresh the chat listener path plan only at an explicit LAN path-change boundary.
+     * Reuses the existing strict path-set rules: represented Wi-Fi Networks plus at most one
+     * unrepresented local-interface candidate; ambiguity/incomplete snapshots fail closed.
+     * This method only publishes metadata. It never starts a secondary listener.
+     */
+    private void refreshLanChatListenerPathPlan(ConnectivityManager cm, String reason) {
+        try {
+            LanTransferPathSet paths = currentLanTransferPathSet(cm);
+            LanChatListenerPathPlan plan = LanChatListenerPathPlan.from(paths);
+            lanChatListenerPathPlan = plan;
+            FileLogger.logD("CHAT", "LAN chat path plan refreshed reason=" + reason
+                    + " listenerPaths=" + plan.listenerCount()
+                    + " secondaryCandidates=" + plan.secondary().size());
+        } catch (Exception unavailable) {
+            // Do not retain stale AP/local-interface candidates after a topology change.
+            lanChatListenerPathPlan = null;
+            FileLogger.logD("CHAT", "LAN chat path plan unavailable reason=" + reason
+                    + " error=" + unavailable.getClass().getSimpleName());
+        }
+    }
+
     private void refreshWifiLanTransport(String reason) {
         // File transfer has a separate TCP listener and is disabled until AndroidKeyStore
         // credentials plus an explicit peer allow-list have been provisioned.
@@ -2681,6 +2705,9 @@ public class TrackingService extends Service implements LocationListener {
                 if (oldInstance != null) oldInstance.requestStop();
                 oldSocket = oldInstance != null ? oldInstance.socket() : rescueSocketRef;
             }
+            // This is an event-driven topology reconciliation, not a periodic scan.
+            // Stable single-path packet/send fast paths never invoke interface enumeration.
+            refreshLanChatListenerPathPlan(cm, reason);
             FileLogger.log(this, "NETWORK", "Wi-Fi LAN socket generation advanced generation="
                     + socketGeneration + " reason=" + reason);
             invalidateVerifiedChatPeers("Wi-Fi LAN path changed: " + reason);
