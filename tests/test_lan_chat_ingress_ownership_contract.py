@@ -124,6 +124,27 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
             "pendingPeerChallengeIngress.remove(nonce, challengeIngress)", peer_ack
         )
 
+    def test_peer_wide_cache_cannot_suppress_path_scoped_discovery(self):
+        helper = self._method(
+            "private boolean hasFreshLanChatPeerRoute(",
+            "private boolean isCurrentLanChatSendBinding(",
+        )
+        self.assertIn("LanAdaptiveRouteSelector.selectPrimaryBinding(", helper)
+        self.assertIn("lanChatPathRegistry.isCurrentBinding(binding)", helper)
+
+        hello = self._method(
+            'if ("peer.hello".equals(type))',
+            'if ("peer.ack".equals(type))',
+        )
+        self.assertIn("findCurrentPeerRouteBinding(", hello)
+        self.assertIn("helloIngressPath, socket, helloIngressGeneration", hello)
+        self.assertIn("lanChatPathRegistry.listenerCount() <= 1", hello)
+
+        self.assertIn("hasFreshLanChatPeerRoute(target.peerId)", self.source)
+        self.assertIn("hasFreshLanChatPeerRoute(challengePeerId)", self.source)
+        self.assertNotIn("verifiedChatPeers.containsKey(target.peerId)", self.source)
+        self.assertNotIn("verifiedChatPeers.containsKey(challengePeerId)", self.source)
+
     def test_peer_ack_route_admission_is_atomic_with_listener_epoch(self):
         registry = (
             ROOT / "app/src/main/java/com/example/devicefinder/LanChatPathRegistry.java"
