@@ -211,12 +211,17 @@ public final class LanTransferDiscovery implements AutoCloseable {
         }
     }
 
+    static boolean isOnSelectedSubnet(LanNetworkPath path, InetAddress remoteAddress) {
+        return path != null && remoteAddress instanceof Inet4Address
+                && !remoteAddress.isLoopbackAddress()
+                && LanTransferIpv4Subnet.contains(path.localAddress, path.prefixLength,
+                        (Inet4Address) remoteAddress);
+    }
+
     private void acceptCandidate(DatagramPacket packet) {
         if (!(packet.getAddress() instanceof Inet4Address)
-                || packet.getAddress().isLoopbackAddress()
                 || packet.getAddress().equals(localAddress)
-                || !LanTransferIpv4Subnet.contains(localAddress, networkPath.prefixLength,
-                        (Inet4Address) packet.getAddress())
+                || !isOnSelectedSubnet(networkPath, packet.getAddress())
                 || packet.getLength() < 8 || packet.getLength() > 200) return;
         recordBeaconCandidate(context, packet, localPeerId, networkFingerprint,
                 System.currentTimeMillis());
