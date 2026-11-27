@@ -480,3 +480,8 @@
 - [x] 新增 Python 回归测试，确认 ACK 返回后 staging 占用归零且任务状态为 `CANCELLED`（Run `45915548543` 全部通过）。
 - [x] 新增 Android 对应 loopback TCP 回归测试；Android Gradle `testDebugUnitTest`、诊断 Debug APK 与 slim Release APK 全部通过（Run `45915577083`）。
 - [x] 同一 Run 的 Python `py_compile` 与全量 unittest 通过：`413 tests`。
+
+## 第二批次推进补充（2026-11-27）：ACK 未被发送端观察后的跨连接恢复
+
+- [x] 新增 Python 与 Android 回归场景：接收端已持久化 Chunk 并发送 ACK，但发送端主动关闭连接且不读取 ACK；随后建立新 TCP 会话，重新查询 Missing 页面，必须以 durable receipt 为准跳过已落盘分片并完成剩余分片。
+- [ ] 两端新增测试等待 CI 验证；该测试覆盖应用层未观察到 ACK 的断线恢复路径，不模拟物理网络设备丢包或 Wi-Fi/AP 切换。
