@@ -656,4 +656,38 @@ public class LanTransferTcpSessionTest {
         }
     }
 
+
+    @Test
+    public void orphanStagingBytesWithoutReceiptAreRepairedOnChunkRetry() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        context.deleteDatabase("lan_p2p_transfer.db");
+        deleteTree(new File(context.getFilesDir(), "lan-transfer-staging"));
+        deleteTree(new File(context.getFilesDir(), "lan-transfer-received"));
+        LanTransferStore store = new LanTransferStore(context);
+        String id = "orphan-staging-repair";
+        store.createOffer(new LanTransferStore.Offer(id, "sender", "receiver",
+                "orphan.txt", PAYLOAD.length, sha(PAYLOAD), 1L, "text/plain"),
+                1L, 4096);
+        store.transition(id, "accepted", 2L);
+        store.transition(id, "transferring", 3L);
+        LanTransferFilesystem filesystem = new LanTransferFilesystem(context, store,
+                LanTransferFilesystem.DEFAULT_STAGING_QUOTA_BYTES, fileOps());
+        File staged = new File(new File(new File(context.getFilesDir(),
+                "lan-transfer-staging"), id), "payload.part");
+        staged.getParentFile().mkdirs();
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(staged)) {
+            out.write("partial-crash-data".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            out.getFD().sync();
+        }
+        assertNull(store.getChunkReceipt(id, 0));
+
+        assertTrue(filesystem.writeChunk(id, 0, PAYLOAD, 4L));
+        assertArrayEquals(PAYLOAD, Files.readAllBytes(staged.toPath()));
+        assertNotNull(store.getChunkReceipt(id, 0));
+        LanTransferStore.MissingPage missing = filesystem.reconcilePage(id, 5L);
+        assertTrue(missing.indexes.isEmpty());
+        assertFalse(missing.more);
+        store.closeStore();
+    }
+
 }
