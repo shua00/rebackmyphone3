@@ -40,6 +40,14 @@ public final class LanTransferPeerDirectory {
         if (context == null || !validFingerprint(fingerprint))
             throw new IllegalArgumentException("Invalid current LAN fingerprint");
         synchronized (LOCK) {
+            persistActiveNetworks(context, java.util.Collections.singleton(fingerprint));
+        }
+    }
+    /** Add one independently active path without revoking other path endpoints. */
+    public static void activatePath(Context context, String fingerprint) {
+        if (context == null || !validFingerprint(fingerprint))
+            throw new IllegalArgumentException("Invalid active LAN fingerprint");
+        synchronized (LOCK) {
             java.util.Set<String> active = readActiveNetworks(context);
             active.add(fingerprint);
             persistActiveNetworks(context, active);
