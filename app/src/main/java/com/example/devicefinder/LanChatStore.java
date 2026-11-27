@@ -253,6 +253,17 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 "ON lan_chat_fragments(receiver_scope,sender_peer_id,message_id)");
     }
 
+    private boolean hasTable(SQLiteDatabase db, String table) {
+        Cursor c = null;
+        try {
+            c = db.rawQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    new String[]{table});
+            return c.moveToFirst();
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
     private boolean hasColumn(SQLiteDatabase db, String table, String column) {
         Cursor c = null;
         try {
@@ -382,7 +393,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_lan_fragments_session " +
                     "ON lan_chat_fragments(receiver_scope,sender_peer_id,message_id)");
         }
-        if (oldVersion < 12) {
+        if (oldVersion < 12 && hasTable(db, "lan_outbox")) {
             if (!hasColumn(db, "lan_outbox", "expires_at_ms")) {
                 db.execSQL("ALTER TABLE lan_outbox ADD COLUMN expires_at_ms INTEGER NOT NULL DEFAULT 0");
             }
