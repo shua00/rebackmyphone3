@@ -162,6 +162,76 @@ class TransferServiceTests(unittest.TestCase):
         finally:
             restarted.close()
 
+    def test_service_rebinds_after_path_disappears_and_returns_on_new_subnet(self):
+        paths = [IPv4InterfacePath("wlan-test", "192.168.50.2", 24, "192.168.50.255")]
+        servers = []
+
+        def factory(**kwargs):
+            server = FakeServer(**kwargs)
+            servers.append(server)
+            return server
+
+        service = LanTransferService(
+            local_peer_id="python-node-stable",
+            data_dir=str(Path(self.temp.name) / "path-recovery"),
+            credentials_path=self.credentials_path,
+            path_provider=lambda: tuple(paths),
+            server_factory=factory,
+        )
+        try:
+            self.assertEqual(("192.168.50.2", 49152), service.start())
+            paths.clear()
+            self.assertIsNone(service.refresh())
+            self.assertFalse(service.is_running)
+            self.assertTrue(servers[0].stopped)
+
+            paths.append(IPv4InterfacePath(
+                "vendor_ap42", "192.168.43.1", 24, "192.168.43.255"))
+            self.assertEqual(("192.168.43.1", 49152), service.refresh())
+            self.assertTrue(service.is_running)
+            self.assertEqual(2, len(servers))
+            self.assertTrue(servers[1].started)
+            self.assertEqual("python-node-stable", service.local_peer_id)
+        finally:
+            service.close()
+
+    def test_restart_chunk_replay_is_idempotent_and_keeps_other_chunks_missing(self):
+        data_dir = Path(self.temp.name) / "restart-replay"
+        paths = (IPv4InterfacePath("wlan-test", "192.168.50.2", 24, "192.168.50.255"),)
+        first_chunk = b"a" * (256 * 1024)
+        descriptor = ChunkDescriptor(
+            "restart-replay-001", 0, first_chunk, hashlib.sha256(first_chunk).hexdigest())
+        offer = TransferOffer(
+            "restart-replay-001", "android-peer-1", "python-node-1",
+            "replay.bin", len(first_chunk) + 1,
+            hashlib.sha256(first_chunk + b"b").hexdigest(), 100,
+        )
+        first = LanTransferService(
+            local_peer_id="python-node-1", data_dir=str(data_dir),
+            credentials_path=self.credentials_path, path_provider=lambda: paths,
+            server_factory=lambda **kwargs: FakeServer(**kwargs),
+        )
+        first.start()
+        first.store.create_offer(offer, 101)
+        first.store.transition(offer.transfer_id, TransferState.ACCEPTED, 102)
+        first.store.transition(offer.transfer_id, TransferState.TRANSFERRING, 103)
+        first.filesystem.write_chunk(descriptor, 104)
+        first.close()
+
+        restarted = LanTransferService(
+            local_peer_id="python-node-1", data_dir=str(data_dir),
+            credentials_path=self.credentials_path, path_provider=lambda: paths,
+            server_factory=lambda **kwargs: FakeServer(**kwargs),
+        )
+        try:
+            replay_result = restarted.filesystem.write_chunk(descriptor, 105)
+            self.assertFalse(replay_result)
+            self.assertEqual((1,), restarted.filesystem.reconcile(offer.transfer_id, 106))
+            self.assertEqual((1,), restarted.store.missing_chunks(offer.transfer_id))
+            self.assertEqual(1, len(list((data_dir / "staging").glob("*.part"))))
+        finally:
+            restarted.close()
+
     def test_service_requires_stable_identity_and_unambiguous_path(self):
         with self.assertRaisesRegex(TransferValidationError, "stable"):
             LanTransferService(
