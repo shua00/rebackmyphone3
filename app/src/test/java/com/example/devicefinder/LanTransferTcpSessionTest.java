@@ -50,6 +50,14 @@ public class LanTransferTcpSessionTest {
     }
 
 
+    private static File repositoryRoot() {
+        File current = new File(System.getProperty("user.dir")).getAbsoluteFile();
+        while (current != null && !new File(current, "lan_p2p_transfer.py").isFile())
+            current = current.getParentFile();
+        if (current == null) throw new AssertionError("Unable to locate Python LAN P2P repository root");
+        return current;
+    }
+
     private static Process startPythonIntegration(String script, File workingDirectory, String... args)
             throws Exception {
         java.util.List<String> command = new java.util.ArrayList<>();
@@ -68,6 +76,7 @@ public class LanTransferTcpSessionTest {
         assertTrue("Python integration process timed out", process.waitFor(30, TimeUnit.SECONDS));
         byte[] output = process.getInputStream().readAllBytes();
         String text = new String(output, java.nio.charset.StandardCharsets.UTF_8);
+        if (process.exitValue() != 0) System.err.println("Python integration process failed: " + text);
         assertEquals("Python integration process failed: " + text, 0, process.exitValue());
         return text;
     }
@@ -754,7 +763,7 @@ public class LanTransferTcpSessionTest {
                 "published=next((root/'received').iterdir())",
                 "assert published.read_bytes()==" + "bytes((i*31)%256 for i in range(10000))",
                 "listener.close(); print('ANDROID_TO_PYTHON_TCP_OK')");
-        Process python = startPythonIntegration(script, new File(System.getProperty("user.dir")),
+        Process python = startPythonIntegration(script, repositoryRoot(),
                 root.getAbsolutePath(), portFile.getAbsolutePath());
         try {
             long deadline = System.currentTimeMillis() + 10000;
