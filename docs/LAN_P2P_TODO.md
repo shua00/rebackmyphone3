@@ -465,3 +465,4 @@
 - [x] Android TCP session 现允许 `verifying` 状态收到 `complete` 后进入既有恢复/校验流程；未改变状态机迁移规则、文件落盘顺序或聊天数据面。
 - [x] 新增 Android loopback TCP 回归测试：预置完整 chunk receipt 并将任务置于 `verifying`，模拟进程重启后发送 `complete`，验证服务端完成发布、状态进入 `completed` 且文件 SHA-256/内容一致。
 - [ ] 最新修正仍需由 Android Gradle 单测和 APK CI 验证；此修正只解决一个已定位的跨端恢复状态门禁差异，不代表完整 Android↔Python 端到端互通验收完成。
+- [x] 同步新增 Python socketpair 回归测试：将接收端任务预置为 `VERIFYING`，重连发送 `complete`，验证 Python 服务端同样可恢复并完成 SHA-256 校验与文件发布；Android/Python 两端分别覆盖同一恢复语义。
