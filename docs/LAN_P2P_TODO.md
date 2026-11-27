@@ -526,6 +526,10 @@
 - [x] `lan_p2p_transfer_host.py` 现默认每 3 秒重新枚举 LAN IPv4 路径并刷新服务；新增 `--refresh-interval` 可配置项，必须为正数。
 - [x] 继续 fail-closed：无可用/唯一 LAN 路径时由既有 runtime 关闭监听，不回退 wildcard/蜂窝；后续周期发现有效路径时可重新绑定，稳定 Peer ID 不变。重绑定失败或凭据 reload 异常会记录日志并重试，不让瞬时故障直接杀死前台宿主。
 - [x] 新增宿主生命周期测试：验证周期刷新被调用、刷新间隔被传递、退出时关闭服务，以及非正刷新间隔被拒绝。
-- [ ] 本次新增代码与测试提交后，CI 尚未回报；必须等待 Python 全量测试/py_compile 结果，不能提前标记验证通过。
+- [x] Python CI Run `45926201669`：`validate-python` 与 Android 变更检测均通过；本批只修改 Python 文件，因此 Android build 按 workflow 条件跳过。
 - [ ] Android AP 候选路径仍需真机验证：源地址绑定不是底层设备绑定，也不是 Android `Network.bindSocket`；双机热点场景需核实接口路由、广播接收和回连，不得静默回退蜂窝。
 - [ ] Windows ACL 和 Windows 网卡绑定仍需 Windows runner/实机单独验证；POSIX 0600 检查不能作为 Windows 凭据文件安全证明。
+
+- [x] 追加 runtime 回归：模拟网卡枚举临时抛出异常，确认旧 listener 先关闭；下一轮有效接口快照恢复后重新绑定成功。
+- [x] 追加 Linux/Windows 绑定失败回归：模拟 `SO_BINDTODEVICE` 权限错误及 `IP_UNICAST_IF` 不可用，确认不会退化为仅绑定源 IP 的假成功。
+- [ ] 上述追加测试的 CI 尚待回报；Run `45926201669` 仅验证了此前宿主周期刷新代码，不包含本次追加的 runtime/socket-binding 测试。
