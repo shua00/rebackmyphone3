@@ -5002,7 +5002,8 @@ class LanP2PEnvelopeBudgetParityTests(unittest.TestCase):
         self.assertIn("MAX_PEER_ID_BYTES = 128", protocol)
         self.assertIn("MAX_PEER_ID_BYTES = 128", python_core)
         self.assertIn("LanP2pProtocol.maxPeerIdBudgetProbe()", service)
-        self.assertIn('budget_packet["target_peer_id"] = max_peer_id_budget_probe()', server)
+        self.assertIn("build_authenticated_chat_fragment_packets(", server)
+        self.assertIn("max_peer_id_budget_probe()", server)
         self.assertIn("validatePeerId(packet, \"target_peer_id\")", protocol)
         self.assertIn("_validate_peer_id_fields(packet)", python_core)
 
