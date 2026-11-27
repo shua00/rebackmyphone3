@@ -602,4 +602,56 @@ public class LanTransferTcpSessionTest {
         }
     }
 
+
+    @Test
+    public void completedTransferReplaysCompleteAndCancelWithoutRegression() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        context.deleteDatabase("lan_p2p_transfer.db");
+        deleteTree(new File(context.getFilesDir(), "lan-transfer-staging"));
+        deleteTree(new File(context.getFilesDir(), "lan-transfer-received"));
+        LanTransferStore store = new LanTransferStore(context);
+        String id = "terminal-replay";
+        store.createOffer(new LanTransferStore.Offer(id, "sender", "receiver",
+                "terminal.txt", PAYLOAD.length, sha(PAYLOAD), 1L, "text/plain"),
+                1L, 4096);
+        store.transition(id, "accepted", 2L);
+        store.transition(id, "transferring", 3L);
+        LanTransferFilesystem filesystem = new LanTransferFilesystem(context, store,
+                LanTransferFilesystem.DEFAULT_STAGING_QUOTA_BYTES, fileOps());
+        filesystem.writeChunk(id, 0, PAYLOAD, 4L);
+        File published = filesystem.assembleAndPublish(id, 5L);
+        assertTrue(published.isFile());
+
+        LanTransferTcpSession session = new LanTransferTcpSession(context, store, filesystem,
+                "receiver", SECRET, "sender"::equals, () -> 10L, 2, 1024 * 1024, 3000);
+        ServerSocket listener = new ServerSocket(0);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<Integer> served = executor.submit(() -> {
+                try (Socket accepted = listener.accept()) { return session.serve(accepted); }
+            });
+            try (Socket client = new Socket("127.0.0.1", listener.getLocalPort())) {
+                LanTransferAuthenticator.AuthenticatedPeer authenticated =
+                        LanTransferAuthenticator.authenticateClient(client, "sender", "receiver", SECRET);
+                for (String kind : new String[]{"complete", "cancel"}) {
+                    LanTransferFrameCodec.send(client, new LanTransferFrameCodec.Frame(
+                            kind, id, "sender", "receiver", null, new byte[0], null),
+                            authenticated.sessionKey, 1024 * 1024);
+                    LanTransferFrameCodec.Frame response = LanTransferFrameCodec.receive(client,
+                            authenticated.sessionKey, 1024 * 1024, "receiver", "sender");
+                    assertEquals(kind, response.kind);
+                    assertEquals("completed", response.metadata.getString("state"));
+                }
+            }
+            assertEquals(2, (int) served.get(4, TimeUnit.SECONDS));
+            assertEquals("completed", store.getTransfer(id).state);
+            assertTrue(published.isFile());
+            assertArrayEquals(PAYLOAD, Files.readAllBytes(published.toPath()));
+        } finally {
+            listener.close();
+            executor.shutdownNow();
+            store.closeStore();
+        }
+    }
+
 }
