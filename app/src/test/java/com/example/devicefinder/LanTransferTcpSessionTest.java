@@ -839,7 +839,7 @@ public class LanTransferTcpSessionTest {
             Future<Integer> served = executor.submit(() -> {
                 try (Socket accepted = listener.accept()) { return session.serve(accepted); }
             });
-            python = startPythonIntegration(script, new File(System.getProperty("user.dir")),
+            python = startPythonIntegration(script, repositoryRoot(),
                     Integer.toString(listener.getLocalPort()), "", source.getAbsolutePath());
             assertTrue(finishPythonIntegration(python).contains("PYTHON_TO_ANDROID_TCP_OK"));
             assertEquals(3, (int) served.get(10, TimeUnit.SECONDS));
