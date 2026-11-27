@@ -1695,3 +1695,187 @@ def assemble_chat_fragments(fragments):
         return raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
         raise ValueError("reassembled chat message is not valid UTF-8") from exc
+
+
+CHAT_FRAGMENT_SESSION_TTL_MS = 30 * 60 * 1000
+MAX_CHAT_FRAGMENT_SESSIONS = 32
+MAX_CHAT_FRAGMENT_CACHE_BYTES = 2 * 1024 * 1024
+
+
+def _ensure_chat_fragment_schema(conn):
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("""CREATE TABLE IF NOT EXISTS lan_chat_fragment_sessions (
+        receiver_scope TEXT NOT NULL,
+        sender_peer_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        fragment_count INTEGER NOT NULL,
+        total_bytes INTEGER NOT NULL,
+        sha256 TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        first_seen_at_ms INTEGER NOT NULL,
+        expires_at_ms INTEGER NOT NULL,
+        PRIMARY KEY(receiver_scope,sender_peer_id,message_id))""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS lan_chat_fragments (
+        receiver_scope TEXT NOT NULL,
+        sender_peer_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        fragment_index INTEGER NOT NULL,
+        fragment_data TEXT NOT NULL,
+        PRIMARY KEY(receiver_scope,sender_peer_id,message_id,fragment_index),
+        FOREIGN KEY(receiver_scope,sender_peer_id,message_id)
+            REFERENCES lan_chat_fragment_sessions(receiver_scope,sender_peer_id,message_id)
+            ON DELETE CASCADE)""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_lan_chat_fragment_expiry "
+                 "ON lan_chat_fragment_sessions(expires_at_ms)")
+
+
+def store_incoming_chat_fragment(db_path, receiver_scope, sender_peer_id,
+                                 packet, now_ms=None):
+    """Persist one authenticated fragment before ACK; completed sessions remain as short-lived
+    tombstones so a duplicate tail fragment can trigger another final chat.ack after ACK loss.
+    """
+    import base64
+    if not db_path or not isinstance(receiver_scope, str) or not receiver_scope:
+        return "rejected"
+    if not is_valid_peer_id(sender_peer_id) or not isinstance(packet, dict):
+        return "rejected"
+    if packet.get("type") != "chat.fragment":
+        return "rejected"
+    message_id = packet.get("message_id")
+    target_peer_id = packet.get("target_peer_id")
+    count = packet.get("fragment_count")
+    total = packet.get("total_bytes")
+    index = packet.get("fragment_index")
+    digest = packet.get("sha256")
+    created = packet.get("created_at_ms", 0)
+    encoded = packet.get("fragment_data")
+    if (not isinstance(message_id, str) or not message_id
+            or len(message_id.encode("utf-8", errors="strict")) > 128
+            or not isinstance(target_peer_id, str) or not target_peer_id
+            or type(count) is not int or not 1 <= count <= MAX_CHAT_MESSAGE_FRAGMENTS
+            or type(total) is not int or not 1 <= total <= MAX_CHAT_MESSAGE_BYTES
+            or type(index) is not int or not 0 <= index < count
+            or count != (total + CHAT_FRAGMENT_RAW_BYTES - 1) // CHAT_FRAGMENT_RAW_BYTES
+            or type(created) is not int or created < 0
+            or not isinstance(digest, str) or len(digest) != 64
+            or any(ch not in "0123456789abcdef" for ch in digest)
+            or not isinstance(encoded, str) or not encoded or len(encoded) > 400):
+        return "rejected"
+    try:
+        raw = base64.b64decode(encoded.encode("ascii"), validate=True)
+        if base64.b64encode(raw).decode("ascii") != encoded:
+            return "rejected"
+        expected = (CHAT_FRAGMENT_RAW_BYTES if index < count - 1
+                    else total - CHAT_FRAGMENT_RAW_BYTES * (count - 1))
+        if len(raw) != expected:
+            return "rejected"
+    except Exception:
+        return "rejected"
+
+    now = int(now_ms if now_ms is not None else time.time() * 1000)
+    if now < 0:
+        return "rejected"
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        _ensure_chat_fragment_schema(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM lan_chat_fragment_sessions WHERE expires_at_ms<=?", (now,))
+        session = conn.execute("""SELECT fragment_count,total_bytes,sha256,created_at_ms
+            FROM lan_chat_fragment_sessions
+            WHERE receiver_scope=? AND sender_peer_id=? AND message_id=?""",
+            (receiver_scope, sender_peer_id, message_id)).fetchone()
+        if session is not None and session != (count, total, digest, created):
+            _safe_rollback(conn)
+            return "rejected"
+        if session is None:
+            sessions = conn.execute(
+                "SELECT COUNT(*) FROM lan_chat_fragment_sessions").fetchone()[0]
+            if int(sessions or 0) >= MAX_CHAT_FRAGMENT_SESSIONS:
+                _safe_rollback(conn)
+                return "rejected"
+            conn.execute("""INSERT INTO lan_chat_fragment_sessions
+                (receiver_scope,sender_peer_id,message_id,fragment_count,total_bytes,sha256,
+                 created_at_ms,first_seen_at_ms,expires_at_ms)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (receiver_scope, sender_peer_id, message_id, count, total, digest,
+                 created, now, now + CHAT_FRAGMENT_SESSION_TTL_MS))
+        existing = conn.execute("""SELECT fragment_data FROM lan_chat_fragments
+            WHERE receiver_scope=? AND sender_peer_id=? AND message_id=? AND fragment_index=?""",
+            (receiver_scope, sender_peer_id, message_id, index)).fetchone()
+        if existing is not None:
+            if existing[0] != encoded:
+                _safe_rollback(conn)
+                return "rejected"
+            received = conn.execute("""SELECT COUNT(*) FROM lan_chat_fragments
+                WHERE receiver_scope=? AND sender_peer_id=? AND message_id=?""",
+                (receiver_scope, sender_peer_id, message_id)).fetchone()[0]
+            conn.commit()
+            return "complete" if int(received) == count else "duplicate"
+        cached_chars = conn.execute(
+            "SELECT COALESCE(SUM(LENGTH(fragment_data)),0) FROM lan_chat_fragments").fetchone()[0]
+        if int(cached_chars or 0) + len(encoded) > MAX_CHAT_FRAGMENT_CACHE_BYTES:
+            _safe_rollback(conn)
+            return "rejected"
+        conn.execute("""INSERT INTO lan_chat_fragments
+            (receiver_scope,sender_peer_id,message_id,fragment_index,fragment_data)
+            VALUES(?,?,?,?,?)""",
+            (receiver_scope, sender_peer_id, message_id, index, encoded))
+        received = conn.execute("""SELECT COUNT(*) FROM lan_chat_fragments
+            WHERE receiver_scope=? AND sender_peer_id=? AND message_id=?""",
+            (receiver_scope, sender_peer_id, message_id)).fetchone()[0]
+        conn.commit()
+        return "complete" if int(received) == count else "stored"
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        raise LanP2PStorageError("failed to persist incoming LAN chat fragment") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def load_incoming_chat_fragments(db_path, receiver_scope, sender_peer_id,
+                                 message_id, now_ms=None):
+    """Load a durable partial or complete fragment session in index order."""
+    if not db_path or not receiver_scope or not sender_peer_id or not message_id:
+        return []
+    now = int(now_ms if now_ms is not None else time.time() * 1000)
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        _ensure_chat_fragment_schema(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM lan_chat_fragment_sessions WHERE expires_at_ms<=?", (now,))
+        rows = conn.execute("""SELECT s.fragment_count,s.total_bytes,s.sha256,s.created_at_ms,
+                    f.fragment_index,f.fragment_data
+            FROM lan_chat_fragment_sessions s
+            JOIN lan_chat_fragments f ON f.receiver_scope=s.receiver_scope
+                AND f.sender_peer_id=s.sender_peer_id AND f.message_id=s.message_id
+            WHERE s.receiver_scope=? AND s.sender_peer_id=? AND s.message_id=?
+              AND s.expires_at_ms>? ORDER BY f.fragment_index""",
+            (receiver_scope, sender_peer_id, message_id, now)).fetchall()
+        conn.commit()
+        if not rows:
+            return []
+        first = rows[0]
+        return [{
+            "type": "chat.fragment",
+            "message_id": message_id,
+            "target_peer_id": "*",
+            "fragment_count": int(first[0]),
+            "total_bytes": int(first[1]),
+            "sha256": first[2],
+            "created_at_ms": int(first[3]),
+            "fragment_index": int(row[4]),
+            "fragment_data": row[5],
+        } for row in rows]
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        raise LanP2PStorageError("failed to load incoming LAN chat fragments") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
