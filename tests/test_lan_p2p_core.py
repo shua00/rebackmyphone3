@@ -3311,7 +3311,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("selectWifiLanNetwork(cm)", method)
         self.assertIn("LanNetworkPath.fromAndroidNetwork(selected", method)
         self.assertIn("LanSocketBinding.bindDatagramListenerSocket(selectedPath, socket, listenerPort)", method)
-        self.assertLess(method.index("LanSocketBinding.bindDatagramSocket(selectedPath, socket)"),
+        self.assertLess(method.index("LanSocketBinding.bindDatagramListenerSocket(selectedPath, socket, listenerPort)"),
                         method.index('FileLogger.logD("CHAT"'))
         self.assertLess(method.index('FileLogger.logD("CHAT"'),
                         method.index("return selected;"))
