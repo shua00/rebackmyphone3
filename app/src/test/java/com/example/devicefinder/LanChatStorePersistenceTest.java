@@ -517,4 +517,22 @@ public class LanChatStorePersistenceTest {
         } finally { c.close(); }
     }
 
+    @Test
+    public void terminalOutboxCleanupNeverDeletesPendingRows() {
+        long now = System.currentTimeMillis();
+        assertTrue(store.enqueue("cleanup-delivered", "desktop-peer", "done", now));
+        assertTrue(store.enqueue("cleanup-pending", "desktop-peer", "waiting", now + 1L));
+        store.getWritableDatabase().execSQL(
+                "UPDATE lan_outbox SET state='delivered' WHERE message_id=?",
+                new Object[]{"cleanup-delivered"});
+        assertEquals(1, store.clearTerminalOutboxRecords());
+        Cursor c = store.getReadableDatabase().rawQuery(
+                "SELECT message_id FROM lan_outbox ORDER BY message_id", null);
+        try {
+            assertTrue(c.moveToFirst());
+            assertEquals("cleanup-pending", c.getString(0));
+            assertFalse(c.moveToNext());
+        } finally { c.close(); }
+    }
+
 }
