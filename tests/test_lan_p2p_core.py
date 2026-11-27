@@ -6283,3 +6283,120 @@ class PythonLongChatRecoveryAdmissionTests(unittest.TestCase):
                 self.assertIn("send_outgoing_fragment_window(", long_branch)
                 self.assertIn("mark_attempt=True", long_branch)
                 self.assertIn("allow_fast_retry=False", long_branch)
+
+
+class PythonLongChatRecoveryProbeAndReceiverRestartTests(unittest.TestCase):
+    def test_completion_probe_requires_durable_recovery_admission(self):
+        from unittest.mock import patch
+        from lan_p2p_core import (
+            persist_outgoing_message, send_outgoing_fragment_window,
+            record_outgoing_fragment_ack, decode_packet, fragment_chat_message,
+        )
+        fd, db_path = tempfile.mkstemp(prefix="lan-fragment-probe-budget-")
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(db_path) and os.unlink(db_path))
+        body = "completion-probe-budget🙂" * 500
+        created = 123456
+        message_id = "tx-completion-probe-budget"
+        peer_id = "peer-probe-target"
+        endpoint = ("192.0.2.50", 8888)
+        self.assertTrue(persist_outgoing_message(
+            db_path, "chat.py", "peer-sender", message_id, body, [peer_id], created))
+
+        class FakeSocket:
+            def __init__(self):
+                self.sent = []
+            def sendto(self, raw, destination):
+                self.sent.append((raw, destination))
+
+        sock = FakeSocket()
+        with patch("lan_p2p_core.time.time", return_value=1000.0):
+            self.assertEqual(8, send_outgoing_fragment_window(
+                sock, db_path, "chat.py", message_id, peer_id, body, created,
+                endpoint, "peer-sender", "chat.py", "peer-sender", "secret",
+                mark_attempt=True, allow_fast_retry=True))
+        fragments = fragment_chat_message(message_id, peer_id, body, created)
+        for index in range(len(fragments)):
+            self.assertIsNotNone(record_outgoing_fragment_ack(
+                db_path, "chat.py", message_id, peer_id, index,
+                endpoint[0], endpoint[1], now_ms=1000500))
+
+        # ACK-driven advancement must not send an unbudgeted completion probe.
+        before = len(sock.sent)
+        self.assertEqual(0, send_outgoing_fragment_window(
+            sock, db_path, "chat.py", message_id, peer_id, body, created,
+            endpoint, "peer-sender", "chat.py", "peer-sender", "secret",
+            mark_attempt=False))
+        self.assertEqual(before, len(sock.sent))
+
+        # A due recovery pass may send exactly one final-fragment probe and
+        # must persist the retry admission before network I/O.
+        with patch("lan_p2p_core.time.time", return_value=1002.0):
+            self.assertEqual(1, send_outgoing_fragment_window(
+                sock, db_path, "chat.py", message_id, peer_id, body, created,
+                endpoint, "peer-sender", "chat.py", "peer-sender", "secret",
+                mark_attempt=True, allow_fast_retry=False))
+        self.assertEqual(len(fragments) - 1,
+                         decode_packet(sock.sent[-1][0], "secret")["fragment_index"])
+        conn = sqlite3.connect(db_path)
+        try:
+            attempts = conn.execute(
+                "SELECT attempt_count FROM lan_outbox_targets WHERE message_id=? AND peer_id=?",
+                (message_id, peer_id)).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(2, attempts)
+
+    def test_receiver_partial_fragments_survive_process_restart_and_final_ack_probe(self):
+        from lan_p2p_core import fragment_chat_message
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "receiver.sqlite3")
+            body = "receiver-restart-恢复🙂" * 500
+            message_id = "receiver-restart-message"
+            fragments = fragment_chat_message(message_id, "peer-receiver", body, 123456)
+            first_process = """
+import sys
+from lan_p2p_core import store_incoming_chat_fragment
+db, message_id = sys.argv[1], sys.argv[2]
+fragments = __import__('lan_p2p_core').fragment_chat_message(
+    message_id, 'peer-receiver', 'receiver-restart-恢复🙂' * 500, 123456)
+assert store_incoming_chat_fragment(
+    db, 'receiver-service', 'peer-sender', fragments[0], now_ms=200000) == 'stored'
+"""
+            env = os.environ.copy()
+            repo_root = Path(__file__).resolve().parents[1]
+            env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+            created = subprocess.run(
+                [sys.executable, "-c", first_process, db_path, message_id],
+                cwd=str(repo_root), env=env, capture_output=True, text=True, timeout=20)
+            self.assertEqual(0, created.returncode, created.stderr)
+
+            # A separate interpreter loads the durable partial session, then
+            # accepts the remaining fragments out of order and verifies assembly.
+            second_process = """
+import sys
+from lan_p2p_core import (
+    fragment_chat_message, load_incoming_chat_fragments,
+    store_incoming_chat_fragment, assemble_chat_fragments,
+)
+db, message_id = sys.argv[1], sys.argv[2]
+body = 'receiver-restart-恢复🙂' * 500
+fragments = fragment_chat_message(message_id, 'peer-receiver', body, 123456)
+partial = load_incoming_chat_fragments(
+    db, 'receiver-service', 'peer-sender', message_id, now_ms=200001)
+assert [row['fragment_index'] for row in partial] == [0], partial
+for fragment in reversed(fragments[1:]):
+    result = store_incoming_chat_fragment(
+        db, 'receiver-service', 'peer-sender', fragment, now_ms=200002)
+assert result == 'completed', result
+cached = load_incoming_chat_fragments(
+    db, 'receiver-service', 'peer-sender', message_id, now_ms=200003)
+assert assemble_chat_fragments(cached) == body
+duplicate = store_incoming_chat_fragment(
+    db, 'receiver-service', 'peer-sender', fragments[-1], now_ms=200004)
+assert duplicate == 'complete_duplicate', duplicate
+"""
+            resumed = subprocess.run(
+                [sys.executable, "-c", second_process, db_path, message_id],
+                cwd=str(repo_root), env=env, capture_output=True, text=True, timeout=20)
+            self.assertEqual(0, resumed.returncode, resumed.stderr)
