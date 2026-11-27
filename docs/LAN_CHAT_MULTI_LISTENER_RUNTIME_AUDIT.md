@@ -186,3 +186,15 @@
 - **AP 识别边界**：`LOCAL_INTERFACE_CANDIDATE` 仅代表未被 ConnectivityManager Wi-Fi Network 表示、且通过 IPv4/subnet/broadcast 与 cellular/VPN 排除检查的本地接口候选。接口名不能证明它是 AP；多候选、快照不完整时 fail closed。只有精确地址 bind 成功才算该候选可作为监听路径。
 - 新增 `LanChatListenerPathPlanTest`，覆盖单路径不产生 secondary、STA 优先、AP 候选作为 secondary、无 STA 时单候选 primary 及非法空输入。
 - 当前仍未完成：热点状态独立事件触发、候选接口真实角色确认、第二聊天 Listener 的 per-path socket/thread/stop 生命周期、跨路径 ACK ingress 和 peer×path 认证接入。不得将路径计划测试等同于多 Listener runtime 完成。
+
+
+### 批次 B 补充：热点事件感知与初始路径计划
+
+- [x] 新增动态热点/Tethering 广播观察：监听平台 Wi-Fi AP 状态变化与 tether 状态变化 action；Android 13+ 使用 `Context.RECEIVER_NOT_EXPORTED`，旧版本使用兼容注册重载。
+- [x] 广播回调只提交一个有界 maintenance refresh，重建候选路径计划；不解析 OEM 私有 extras、不依赖接口名、不直接把候选标记为 AP，也不创建 Listener/socket/thread/timer。
+- [x] 广播不可用/注册失败时 fail soft，不影响服务启动、不启动周期扫描；ConnectivityManager Wi-Fi callback 仍是 represented Network 的权威来源。
+- [x] 服务启动时显式生成一次初始路径计划。此前 fingerprint 在 NetworkCallback 注册时即初始化，等待 fingerprint 后续变化会使首次稳定网络的 path plan 长期为空。
+- [ ] 广播事件只解决拓扑变化触发，不证明本地候选可绑定或 AP peer 可达；第二 Listener 仍未接入。
+- [ ] 当前仍需完成接收循环共享分发抽取、per-path listener map/manager、第二 Listener 精确绑定与并发竞态测试。
+
+CI：前一组 path-plan commits 的 run `45982642484` 已全部成功（Python、Windows socket binding、Android unit/debug/slim build，artifact `15189534048`）。本次热点 receiver 两个 Android 源码提交已触发新的 CI，结果待核验。
