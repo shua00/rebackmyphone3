@@ -739,6 +739,8 @@ public final class LanChatStore extends SQLiteOpenHelper {
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
+            db.execSQL("DELETE FROM lan_outbox_targets WHERE message_id IN "
+                    + "(SELECT message_id FROM lan_outbox WHERE state IN ('delivered','expired'))");
             int deleted = db.delete("lan_outbox", "state IN ('delivered','expired')", null);
             db.setTransactionSuccessful();
             return deleted;
