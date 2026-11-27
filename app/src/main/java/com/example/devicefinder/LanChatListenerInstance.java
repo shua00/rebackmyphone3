@@ -22,14 +22,15 @@ public final class LanChatListenerInstance {
 
     /** Attach exactly one socket; a stopped or replaced instance cannot acquire resources. */
     public synchronized boolean attachSocket(DatagramSocket candidate) {
-        if (candidate == null || stopRequested || socket != null) return false;
+        if (candidate == null || candidate.isClosed() || stopRequested || socket != null) return false;
         socket = candidate;
         return true;
     }
 
     /** Attach exactly one worker before start; no worker is created by this class. */
     public synchronized boolean attachThread(Thread candidate) {
-        if (candidate == null || stopRequested || thread != null) return false;
+        if (candidate == null || candidate.getState() != Thread.State.NEW
+                || stopRequested || thread != null) return false;
         thread = candidate;
         return true;
     }
