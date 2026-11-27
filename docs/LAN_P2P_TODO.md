@@ -11,6 +11,7 @@
 - [x] **当前 P0-A（第一阶段）**：引入 `LanAdaptiveRouteSelector`；单 Listener 走 O(1) 首选路径查询，多 Listener 才枚举 fresh authenticated bindings；首选路径优先，缺省按最近认证时间排序；备用候选仅在调用方请求时构造，最多 2 条。
 - [ ] **当前 P0-A（下一阶段）**：将显式发送失败/ACK 超时与备用 RouteBinding 回退闭环；每次切换必须重新校验 binding、记录具体 path failure，避免对同一消息重复执行或无限重试。
 - [ ] **当前 P0-A**：STA/AP 多 Listener 生命周期、socket ownership、generation 和按路径清理；三设备任意两台双向互通。
+- [x] **多路径感知前置**：服务启动时生成一次初始 LAN chat path plan；热点/AP 与 Tethering 状态广播仅在事件到达时触发一次候选快照刷新，不启动 Listener、不扫描轮询；OEM 广播不可用时 fail soft。
 - [x] **多 Listener 前置保护**：旧 UDP 管理命令去重提升为 TrackingService 级共享 `LanUdpCommandDeduplicator`，避免同一广播经 STA/AP 两个接收循环分别执行；仍待真实多 Listener runtime 集成验收。
 - [x] **去重并发回归保护**：Java 12 并发 ingress 单测验证同一广播仅一次接纳；Python 静态契约防止后续接收循环复制时退回局部去重表。
 - [ ] **当前 P0-A**：普通路由器两台或多台 Android/Python 设备快路径回归；不增加无关周期扫描、高频探测、每包全路径枚举或默认多路径重复发送。
