@@ -58,6 +58,7 @@ class LanSecondaryListenerContractTests(unittest.TestCase):
         self.assertIn("path.broadcastAddress", hello)
         self.assertIn("pendingPeerChallenges.put(nonce, latch)", hello)
         self.assertIn("LAN_PEER_CHALLENGE_TIMEOUT_MS", hello)
+        self.assertIn('"secondary-peer-discovery-timeout-" + nonce', hello)
         self.assertIn("SECONDARY_PEER_HELLO_", hello)
 
     def test_path_reconciliation_and_teardown_retire_secondary_owners(self):
