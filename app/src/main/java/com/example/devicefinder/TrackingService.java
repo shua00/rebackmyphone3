@@ -181,6 +181,9 @@ public class TrackingService extends Service implements LocationListener {
     // Path-keyed lease owner; no worker/timer is created by this registry wrapper.
     private final LanChatListenerRuntime lanChatListenerRuntime =
             new LanChatListenerRuntime(lanChatPathRegistry);
+    // Shared across every chat ingress path: legacy UDP commands must not execute once per listener.
+    private final LanUdpCommandDeduplicator lanUdpCommandDeduplicator =
+            new LanUdpCommandDeduplicator();
     private volatile String rescueSocketPathFingerprint;
     // Exact Network that owns the currently published UDP listener socket.
     private volatile Network lanChatBoundWifiNetwork;
@@ -7976,7 +7979,6 @@ public class TrackingService extends Service implements LocationListener {
 
                 byte[] buffer = new byte[4096];
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
-                java.util.Map<String, Long> udpCmdDedup = new java.util.HashMap<>();
 
                 while (!serviceDestroyed) {
                     try {
@@ -8009,19 +8011,9 @@ public class TrackingService extends Service implements LocationListener {
                             || message.startsWith("FIND_ME_TEST_LOW_BATTERY:")
                             ) {
                         String dedupKey = message.length() > 64 ? message.substring(0, 64) : message;
-                        long nowMs = System.currentTimeMillis();
-                        Long last = udpCmdDedup.get(dedupKey);
-                        if (last != null && nowMs - last < 3000) {
+                        if (!lanUdpCommandDeduplicator.shouldAccept(
+                                dedupKey, android.os.SystemClock.elapsedRealtime())) {
                             continue;
-                        }
-                        udpCmdDedup.put(dedupKey, nowMs);
-                        if (udpCmdDedup.size() > 50) {
-                            long cutoff = nowMs - 30000;
-                            java.util.Iterator<java.util.Map.Entry<String, Long>> it =
-                                    udpCmdDedup.entrySet().iterator();
-                            while (it.hasNext()) {
-                                if (it.next().getValue() < cutoff) it.remove();
-                            }
                         }
                     }
 
