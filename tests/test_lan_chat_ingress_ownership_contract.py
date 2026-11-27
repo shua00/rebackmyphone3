@@ -97,6 +97,28 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
         self.assertIn("findCurrentPeerRouteBinding(senderId, ingressPath,", fragment)
         self.assertIn("lanChatPathRegistry.listenerCount() == 1", fragment)
 
+    def test_duplicate_chat_message_collects_per_ingress_ack_targets(self):
+        source = self.source
+        self.assertIn("pendingLanChatV2Receives.putIfAbsent(", source)
+        self.assertIn("pendingReceive.ackTargets.add(ackTarget)", source)
+        self.assertIn("pendingReceive.completed && pendingReceive.stored", source)
+        self.assertIn("new java.util.ArrayList<>(pendingReceive.ackTargets)", source)
+        self.assertIn("pendingLanChatV2Receives.remove(receiveKey, pendingReceive)", source)
+
+        receive = self._method(
+            'if ("chat.message".equals(type))',
+            "private boolean sendLanChatReceiveAck(",
+        )
+        self.assertEqual(receive.count("persistIncomingLanChat(senderId, messageId, body"), 1)
+        self.assertIn("sendLanChatReceiveAck(ackTarget, senderId, messageId)", receive)
+        ack = self._method(
+            "private boolean sendLanChatReceiveAck(",
+            "private boolean isCurrentLanChatIngress(",
+        )
+        self.assertIn("isCurrentLanChatIngress(target.pathFingerprint, target.socket,", ack)
+        self.assertIn("target.generation)) return false;", ack)
+        self.assertIn("sendAuthenticatedChatAck(target.socket, target.address, target.port,", ack)
+
     def test_inbound_chat_ack_is_sent_on_the_socket_that_received_the_message(self):
         method = self._method(
             "private boolean handleAuthenticatedLanPacket(",
