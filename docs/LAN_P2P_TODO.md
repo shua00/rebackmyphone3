@@ -625,3 +625,27 @@
 - [ ] 批次 C 剩余：peer.hello 异步回包 stale ingress 检查、peer.ack route admission/generation 竞争、双路径重复消息持久化与 ACK 幂等、共享旧命令语义逐项审查。
 - [ ] 批次 D：一次性/有界备用 RouteBinding 回退、按 peer×path 记录真实 ACK RTT/失败事实、普通单路径性能回归与真机验收包。
 - [ ] 首次真机验收估算修订为：批次 C 收口 + 批次 D 测试准备，约 2 个主要实施批次；另预留条件修复批次 E。进入真机验收不代表拓扑通过。
+
+## 2026-11-28 历史日志问题复核（代码核查，不等于真机验收）
+
+### 历史问题 1：固定收件人部分 ACK 后长期补发
+
+- [x] Android Outbox 按 peer 持久化 ACK 与 attempt count；已 ACK 的 target 不参与后续重发，部分 ACK 只重试未 ACK target。
+- [x] Android 单 target 每轮最多 8 次自动发送；耗尽后进入 `retry_paused`，普通 retry timer 不会重置预算。
+- [x] Android 只有全局网络/Listener 恢复或对应 Peer 路径重新验证等真实恢复事件才能重新开放耗尽预算，并持久化 60 秒冷却；恢复事件和 SQLite 失败有保留/重试保护。
+- [x] Python Outbox 同样按 target 记录 ACK/attempt count，8 次封顶，只有 Peer 验证恢复事件可在 60 秒冷却后重开；已 ACK target 不会被重复发送。
+- [x] 已有回归覆盖 partial ACK 只重试剩余固定 Peer、重试次数封顶、恢复冷却、普通 timer 不重开耗尽预算及进程重启后恢复状态。
+- [ ] **剩余产品策略缺口：固定收件人 partial / retry_paused 消息没有最大存活时间或自动过期策略。** Android 的 50 条待处理容量统计会继续计入 retry_paused 行；长期未确认记录可能占用 Outbox 容量。需明确消息保留期限、用户可见的重试/取消/清理行为及过期后状态，不得静默删除或把部分送达伪装成全部送达。
+- 结论：旧日志中的无界连续自动重发路径已由有限 attempt budget + retry_paused + recovery cooldown 收敛；但“未完成记录长期滞留”尚未完全解决。代码核查不替代真机验证。
+
+### 历史问题 2：UDP 对讲长消息单包上限
+
+- [x] Android→Android 代码路径已支持长消息分片：短消息保留原单包快路径；超限消息按 300 raw-byte 分片，单个认证 UDP 数据报仍不超过 1200 bytes；同一 messageId 绑定整条消息 SHA-256。
+- [x] Android 固定收件人有持久化分片 ACK 位图和最多 8 片的选择性窗口；接收端分片缓存有 TTL/数量/总容量上限，先持久化分片、再回分片 ACK，完整组装并写入 Inbox 后才回最终 chat.ack。
+- [x] Python `lan_p2p_core.py` 已有分片编码/组装 helper 和边界测试；这只证明 helper/packet schema，不代表 Rescue2 服务已经接入。
+- [ ] **Rescue2 发送端仍未接入分片**：当前 `rescue2.py::send_chat_v2()` 仍先调用 `encode_packet(chat.message)`；超过单包限制会在写入 Outbox 前直接拒绝。
+- [ ] **Python 接收端仍未接入分片重组**：当前 `rescue2.py` 和 `chat.py` 的 authenticated packet handler 未处理 `chat.fragment` / `chat.fragment.ack`；收到此类包会在类型分支处被忽略。
+- [ ] 补齐 Rescue2/Python 与 Android 的双向长消息协议接入：同一 messageId、字节级 SHA-256、1200-byte 数据报限制、分片 ACK/有界窗口、持久化接收缓存、乱序/重复/缺片处理、最终 Inbox ACK、TTL 与容量限制；短消息继续走单包快路径。
+- [ ] 增加 Rescue2→Android、Android→Rescue2、Python peer↔Python peer 的真实 UDP socket 双向测试，覆盖长 UTF-8/emoji、乱序、丢片、重复片/ACK、进程重启和最终送达；helper 单测和静态源码契约不能替代端到端验证。
+- 结论：Android 端长消息实现已有代码与组件测试；Rescue2/Python 跨端长消息仍未闭环。不能将“Android 已分片”表述为“所有对讲端均支持长消息”。
+
