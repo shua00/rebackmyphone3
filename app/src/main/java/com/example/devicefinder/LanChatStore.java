@@ -703,6 +703,36 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
+    /** Mark elapsed messages terminal without deleting their delivery history or payload. */
+    public int expireOutboxMessages(long now) {
+        SQLiteDatabase db = getWritableDatabase();
+        ContentValues expired = new ContentValues();
+        expired.put("state", LanChatDeliveryState.EXPIRED);
+        expired.put("terminal_reason", "ttl");
+        return db.update("lan_outbox", expired,
+                "state NOT IN ('delivered','expired') AND expires_at_ms>0 AND expires_at_ms<=?",
+                new String[]{String.valueOf(now)});
+    }
+
+    /** User cancellation stops future sends but retains the row and ACK history. */
+    public boolean cancelPendingMessage(String messageId) {
+        if (messageId == null || messageId.isEmpty()) return false;
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            ContentValues cancelled = new ContentValues();
+            cancelled.put("state", LanChatDeliveryState.EXPIRED);
+            cancelled.put("terminal_reason", "cancelled");
+            int changed = db.update("lan_outbox", cancelled,
+                    "message_id=? AND state NOT IN ('delivered','expired')",
+                    new String[]{messageId});
+            db.setTransactionSuccessful();
+            return changed == 1;
+        } finally {
+            db.endTransaction();
+        }
+    }
+
     public boolean allTargetsAcked(String messageId) {
         if (messageId == null || messageId.length() == 0) return false;
         SQLiteDatabase db = getWritableDatabase();
@@ -717,8 +747,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     new String[]{messageId});
             if (!c.moveToFirst()) return false;
             String state = c.getString(0);
-            // Expired is terminal: reconciliation must never resurrect it as delivered.
-            if (LanChatDeliveryState.EXPIRED.equals(state)) return false;
+            // Expired messages stop retrying, but late authenticated ACKs may still complete delivery.
             long deadline = c.getLong(1);
             int total = c.getInt(2);
             int acked = c.isNull(3) ? 0 : c.getInt(3);
@@ -1515,7 +1544,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     deadline = outbox.getLong(1);
                 }
             } finally { outbox.close(); }
-            if (state.isEmpty() || "expired".equals(state)) return false;
+            if (state.isEmpty()) return false;
 
             ContentValues ackValues = new ContentValues();
             ackValues.put("status", LanChatDeliveryState.TARGET_ACKED);
@@ -1574,9 +1603,13 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 boolean hasRetryBudget = rowExists(db, "lan_outbox_targets",
                         "message_id=? AND status!='acked' AND attempt_count<?",
                         new String[]{messageId, String.valueOf(MAX_AUTOMATIC_RETRY_ATTEMPTS)});
-                next.put("state", total > 0 && total == acked ? "delivered"
-                        : (hasRetryBudget ? "pending" : "retry_paused"));
-                if (db.update("lan_outbox", next, "message_id=?", new String[]{messageId}) != 1) return false;
+                if (total > 0 && total == acked) {
+                    next.put("state", "delivered");
+                    next.put("terminal_reason", "");
+                } else if (!LanChatDeliveryState.EXPIRED.equals(state)) {
+                    next.put("state", hasRetryBudget ? "pending" : "retry_paused");
+                }
+                if (next.size() > 0 && db.update("lan_outbox", next, "message_id=?", new String[]{messageId}) != 1) return false;
             }
             db.setTransactionSuccessful();
             return true;
