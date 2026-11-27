@@ -72,7 +72,7 @@ class BoundedPacketDispatcher:
         if not self._start_workers():
             return False
         packet_type = envelope.get("type")
-        if packet_type == "chat.ack":
+        if packet_type in ("chat.ack", "chat.fragment.ack"):
             target_queue = self._ack_queue
         elif packet_type in self.PEER_PACKET_TYPES:
             target_queue = self._peer_queue
