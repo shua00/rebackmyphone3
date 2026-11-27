@@ -1102,7 +1102,7 @@ def load_outgoing_fragment_targets_for_peer(db_path, sender_scope, peer_id, limi
         conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("PRAGMA busy_timeout=10000")
         rows = conn.execute("""SELECT o.message_id,o.body,o.created_at_ms,
-                    t.fragment_count,t.fragment_ack_bitmap,p.endpoint_ip,p.endpoint_port
+                    t.fragment_count,t.fragment_ack_bitmap,p.endpoint_ip,p.endpoint_port,t.last_endpoint
             FROM lan_outbox o JOIN lan_outbox_targets t ON t.message_id=o.message_id
             LEFT JOIN lan_peers p ON p.receiver_scope=? AND p.peer_id=t.peer_id
             WHERE o.sender_scope=? AND t.peer_id=? AND t.status!='acked'
@@ -1110,11 +1110,27 @@ def load_outgoing_fragment_targets_for_peer(db_path, sender_scope, peer_id, limi
               AND o.state NOT IN ('delivered','expired','waiting_peers')
             ORDER BY o.created_at_ms LIMIT ?""",
             (sender_scope, sender_scope, peer_id, max(1, min(100, int(limit))))).fetchall()
-        return [{
-            "message_id": row[0], "body": row[1], "created_at_ms": int(row[2]),
-            "fragment_count": int(row[3]), "fragment_ack_bitmap": row[4] or "",
-            "endpoint_ip": row[5] or "", "endpoint_port": int(row[6] or 0),
-        } for row in rows]
+        endpoint_ip = ""
+        endpoint_port = 0
+        result = []
+        for row in rows:
+            saved_endpoint = row[7] or ""
+            if row[5] and row[6]:
+                endpoint_ip, endpoint_port = row[5], int(row[6])
+            elif ":" in saved_endpoint:
+                endpoint_ip, port_text = saved_endpoint.rsplit(":", 1)
+                try:
+                    endpoint_port = int(port_text)
+                except ValueError:
+                    endpoint_ip, endpoint_port = "", 0
+            else:
+                endpoint_ip, endpoint_port = "", 0
+            result.append({
+                "message_id": row[0], "body": row[1], "created_at_ms": int(row[2]),
+                "fragment_count": int(row[3]), "fragment_ack_bitmap": row[4] or "",
+                "endpoint_ip": endpoint_ip, "endpoint_port": endpoint_port,
+            })
+        return result
     except Exception as exc:
         raise LanP2PStorageError("failed to load outgoing fragment targets") from exc
     finally:
