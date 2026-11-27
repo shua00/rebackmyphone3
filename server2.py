@@ -1489,7 +1489,7 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
             _V2_RECOVERY_INFLIGHT.discard(peer_id)
 
 
-def _advance_v2_fragment_windows(sock, peer_id, fallback_addr=None):
+def _advance_v2_fragment_windows(sock, peer_id, fallback_addr=None, retry_round=False):
     """Advance a completed 8-fragment flight without consuming a retry epoch."""
     try:
         rows = load_outgoing_fragment_targets_for_peer(
@@ -1511,7 +1511,7 @@ def _advance_v2_fragment_windows(sock, peer_id, fallback_addr=None):
                 row["body"], row["created_at_ms"], (endpoint_ip, endpoint_port),
                 PEER_NODE_ID, "server2", PEER_NODE_ID, RESCUE_SECRET,
                 send_lock=UDP_CHAT_SEND_LOCK, display_name="Web_Console",
-                mark_attempt=False)
+                mark_attempt=retry_round, allow_fast_retry=False)
         except Exception as exc:
             with print_lock:
                 print(f"⚠️ server2 fragment window send failed: {type(exc).__name__}")
@@ -1572,6 +1572,7 @@ def _retry_deferred_v2_peer_recoveries():
         for peer_id in pending_peer_ids:
             peer = known_peers.get(peer_id)
             if not peer or not peer.get("endpoint_ip"):
+                _advance_v2_fragment_windows(sock, peer_id, retry_round=True)
                 if peer_id in recovery_event_peers:
                     unresolved_recovery_peers.add(peer_id)
                 continue
@@ -1580,6 +1581,7 @@ def _retry_deferred_v2_peer_recoveries():
             except (TypeError, ValueError):
                 target_port = 0
             if target_port not in (8887, 8888, 8889, 8890):
+                _advance_v2_fragment_windows(sock, peer_id, retry_round=True)
                 if peer_id in recovery_event_peers:
                     unresolved_recovery_peers.add(peer_id)
                 continue
