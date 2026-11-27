@@ -464,5 +464,5 @@
 - [x] 确认 Android `LanTransferFilesystem.assembleAndPublish()` 已具备 `verifying` 状态恢复逻辑：可恢复 rename 前后的崩溃窗口、重新校验 staging receipts、完成 SHA-256 并原子发布；但 TCP session 的状态门禁此前阻止了远端重连触发该恢复。
 - [x] Android TCP session 现允许 `verifying` 状态收到 `complete` 后进入既有恢复/校验流程；未改变状态机迁移规则、文件落盘顺序或聊天数据面。
 - [x] 新增 Android loopback TCP 回归测试：预置完整 chunk receipt 并将任务置于 `verifying`，模拟进程重启后发送 `complete`，验证服务端完成发布、状态进入 `completed` 且文件 SHA-256/内容一致。
-- [ ] 最新修正仍需由 Android Gradle 单测和 APK CI 验证；此修正只解决一个已定位的跨端恢复状态门禁差异，不代表完整 Android↔Python 端到端互通验收完成。
+- [x] Android Gradle `testDebugUnitTest`、诊断 Debug APK 与 slim Release APK 构建均通过（CI run `45914317953`）；Python 全量 unittest/py_compile 在加入 VERIFYING 恢复回归测试后通过（CI run `45914457579`）。此修正只解决一个已定位的跨端恢复状态门禁差异，不代表完整 Android↔Python 端到端互通验收完成。
 - [x] 同步新增 Python socketpair 回归测试：将接收端任务预置为 `VERIFYING`，重连发送 `complete`，验证 Python 服务端同样可恢复并完成 SHA-256 校验与文件发布；Android/Python 两端分别覆盖同一恢复语义。
