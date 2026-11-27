@@ -97,6 +97,28 @@ class LanSocketBindingTests(unittest.TestCase):
             bind_socket_to_path(FakeSocket(), self.path, platform="freebsd",
                                 socket_module=FakeSocketModule)
 
+    def test_linux_permission_failure_does_not_fall_back_to_source_address_only(self):
+        class DeniedSocket(FakeSocket):
+            def setsockopt(self, level, option, value):
+                raise PermissionError("SO_BINDTODEVICE denied")
+
+        sock = DeniedSocket()
+        with self.assertRaises(PermissionError):
+            bind_socket_to_path(sock, self.path, remote_address="192.168.40.9",
+                                platform="linux", socket_module=FakeSocketModule)
+        self.assertIsNone(sock.bound)
+
+    def test_windows_interface_binding_failure_does_not_fall_back(self):
+        class DeniedSocket(FakeSocket):
+            def setsockopt(self, level, option, value):
+                raise OSError("IP_UNICAST_IF unavailable")
+
+        sock = DeniedSocket()
+        with self.assertRaisesRegex(OSError, "IP_UNICAST_IF"):
+            bind_socket_to_path(sock, self.path, platform="win32",
+                                socket_module=FakeSocketModule)
+        self.assertIsNone(sock.bound)
+
     def test_endpoint_validation(self):
         validate_endpoint_on_path(self.path, "192.168.40.99")
         with self.assertRaises(ValueError):
