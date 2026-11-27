@@ -3304,10 +3304,12 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("LanSocketBinding.bindDatagramListenerSocket(selectedPath, socket, listenerPort)", method)
         self.assertIn("socket, listenerPort", method)
         self.assertIn("socket.bind(new java.net.InetSocketAddress(path.localAddress, port))", binding)
-        self.assertIn("if (!rescueSocket.isBound())", listener)
-        # The wildcard bind remains only as a compatibility fallback when no Wi-Fi
-        # Network/path was selected; it must not follow a successful exact bind.
-        self.assertLess(listener.index("if (!rescueSocket.isBound())"),
+        self.assertIn("LanSocketBinding.bindDatagramListenerSocket(", listener)
+        self.assertIn("plannedPrimaryPath, rescueSocket, 8888", listener)
+        self.assertIn("if (!rescueSocket.isBound() && !primaryIsLocalCandidate)", listener)
+        # Wildcard remains only for the legacy no-path compatibility case; a validated
+        # local AP candidate must be exact-address bound and can never reach this fallback.
+        self.assertLess(listener.index("if (!rescueSocket.isBound() && !primaryIsLocalCandidate)"),
                         listener.index("rescueSocket.bind(new InetSocketAddress(8888))"))
 
     def test_android_wifi_socket_binding_failure_does_not_fall_back_to_default_route(self):
@@ -3329,8 +3331,11 @@ class LanP2PCoreTests(unittest.TestCase):
         listener_start = source.index("private void startRescueListener()")
         listener_end = source.index("private void parseResponse(", listener_start)
         listener = source[listener_start:listener_end]
-        self.assertIn("Network boundWifiNetwork = bindSocketToWifi(rescueSocket, 8888);", listener)
-        self.assertIn("if (!rescueSocket.isBound())", listener)
+        self.assertIn("boundWifiNetwork = bindSocketToWifi(rescueSocket, 8888);", listener)
+        self.assertIn("if (primaryIsLocalCandidate)", listener)
+        self.assertIn("LanSocketBinding.bindDatagramListenerSocket(", listener)
+        self.assertIn("plannedPrimaryPath, rescueSocket, 8888", listener)
+        self.assertIn("if (!rescueSocket.isBound() && !primaryIsLocalCandidate)", listener)
         self.assertIn("rescueSocket.bind(new InetSocketAddress(8888))", listener)
         generation_guard = listener.index("listenerGeneration != lanSocketGeneration.get()")
         publish_network = listener.index("lanChatBoundWifiNetwork = boundWifiNetwork")
