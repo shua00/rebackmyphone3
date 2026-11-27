@@ -2820,7 +2820,9 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("private static final Object rescueLock = new Object();", source)
         self.assertIn("private volatile Thread rescueListenerThread = null;", source)
         self.assertIn("boolean ownsListener = rescueListenerThread == Thread.currentThread();", source)
-        self.assertIn("if (listenerToStop != null) listenerToStop.interrupt();", source)
+        self.assertIn("Thread listenerToStop = rescueListenerThread;", source)
+        self.assertIn("listenerToStop.interrupt();", source)
+        self.assertIn("listenerToStop.join(1000L);", source)
         self.assertIn('"LAN-UDP-Listener-" + serviceInstanceId', source)
         self.assertNotIn("private final Object rescueLock = new Object();", source)
 
