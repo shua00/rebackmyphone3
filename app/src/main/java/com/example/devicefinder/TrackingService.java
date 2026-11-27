@@ -2631,6 +2631,8 @@ public class TrackingService extends Service implements LocationListener {
         synchronized (rescueLock) {
             generation = lanSocketGeneration.incrementAndGet();
             lanChatBoundWifiNetwork = null;
+            LanChatListenerInstance oldInstance = activeLanChatListenerInstance;
+            if (oldInstance != null) oldInstance.requestStop();
             oldSocket = rescueSocketRef;
         }
         FileLogger.log(this, "UDP", "主动重启 LAN UDP listener generation="
@@ -2673,6 +2675,8 @@ public class TrackingService extends Service implements LocationListener {
                 if (previous == null || previous.equals(current)) return;
                 socketGeneration = lanSocketGeneration.incrementAndGet();
                 lanChatBoundWifiNetwork = null;
+                LanChatListenerInstance oldInstance = activeLanChatListenerInstance;
+                if (oldInstance != null) oldInstance.requestStop();
                 oldSocket = rescueSocketRef;
             }
             FileLogger.log(this, "NETWORK", "Wi-Fi LAN socket generation advanced generation="
@@ -7959,7 +7963,8 @@ public class TrackingService extends Service implements LocationListener {
                 }
                 rescueSocket.setSoTimeout(3000);
                 synchronized (rescueLock) {
-                    if (serviceDestroyed || listenerGeneration != lanSocketGeneration.get()) {
+                    if (serviceDestroyed || listenerInstance.isStopRequested()
+                            || listenerGeneration != lanSocketGeneration.get()) {
                         throw new java.net.SocketException("Wi-Fi LAN generation changed during UDP bind");
                     }
                     // Publish the route before the volatile socket reference; readers that
@@ -7975,6 +7980,10 @@ public class TrackingService extends Service implements LocationListener {
                         rescueSocketPathFingerprint = listenerPathFingerprint;
                     } else {
                         rescueSocketPathFingerprint = null;
+                    }
+                    if (activeLanChatListenerInstance != listenerInstance
+                            || !listenerInstance.ownsSocket(rescueSocket)) {
+                        throw new java.net.SocketException("Listener instance was replaced before publication");
                     }
                     rescueSocketRef = rescueSocket;
                 }
