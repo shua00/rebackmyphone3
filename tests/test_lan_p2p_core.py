@@ -5687,6 +5687,64 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
         self.assertEqual(bitmap, load_outgoing_fragment_ack_bitmap(
             db_path, "tx-long-1", "peer-b"))
 
+    def test_python_fragment_sender_advances_only_after_eight_selective_acks(self):
+        from lan_p2p_core import (
+            persist_outgoing_message, send_outgoing_fragment_window,
+            record_outgoing_fragment_ack, load_outgoing_fragment_ack_bitmap,
+            decode_packet, MAX_CHAT_MESSAGE_BYTES,
+        )
+        fd, db_path = tempfile.mkstemp(prefix="lan-fragment-window-")
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(db_path) and os.unlink(db_path))
+        body = "长消息窗口🙂" * 500
+        created = int(time.time() * 1000)
+        self.assertTrue(persist_outgoing_message(
+            db_path, "rescue2", "peer-a", "tx-window", body, ["peer-b"], created))
+
+        class FakeSocket:
+            def __init__(self):
+                self.sent = []
+            def sendto(self, raw, endpoint):
+                self.sent.append((raw, endpoint))
+
+        sock = FakeSocket()
+        endpoint = ("192.0.2.30", 8888)
+        first_sent = send_outgoing_fragment_window(
+            sock, db_path, "rescue2", "tx-window", "peer-b", body, created,
+            endpoint, "peer-a", "rescue2", "peer-a", "shared-secret",
+            mark_attempt=True, allow_fast_retry=True)
+        self.assertEqual(8, first_sent)
+        self.assertEqual(8, len(sock.sent))
+        first = decode_packet(sock.sent[0][0], "shared-secret")
+        self.assertEqual("chat.fragment", first["type"])
+        self.assertEqual(0, first["fragment_index"])
+
+        for index in range(8):
+            self.assertIsNotNone(record_outgoing_fragment_ack(
+                db_path, "rescue2", "tx-window", "peer-b", index,
+                endpoint[0], endpoint[1]))
+        second_sent = send_outgoing_fragment_window(
+            sock, db_path, "rescue2", "tx-window", "peer-b", body, created,
+            endpoint, "peer-a", "rescue2", "peer-a", "shared-secret",
+            mark_attempt=False)
+        self.assertEqual(8, second_sent)
+        self.assertEqual(16, len(sock.sent))
+        self.assertEqual(8, decode_packet(sock.sent[8][0], "shared-secret")["fragment_index"])
+
+        bitmap = load_outgoing_fragment_ack_bitmap(db_path, "tx-window", "peer-b")
+        for index in range(8, len(bitmap)):
+            self.assertIsNotNone(record_outgoing_fragment_ack(
+                db_path, "rescue2", "tx-window", "peer-b", index,
+                endpoint[0], endpoint[1]))
+        before_probe = len(sock.sent)
+        self.assertEqual(1, send_outgoing_fragment_window(
+            sock, db_path, "rescue2", "tx-window", "peer-b", body, created,
+            endpoint, "peer-a", "rescue2", "peer-a", "shared-secret",
+            mark_attempt=False))
+        self.assertEqual(before_probe + 1, len(sock.sent))
+        self.assertEqual(len(bitmap) - 1,
+                         decode_packet(sock.sent[-1][0], "shared-secret")["fragment_index"])
+
     def test_python_broadcast_fragment_ack_can_admit_only_first_window_target(self):
         from lan_p2p_core import (
             persist_outgoing_message, begin_outgoing_discovery_window,
