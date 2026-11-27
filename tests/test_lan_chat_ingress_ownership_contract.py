@@ -45,7 +45,8 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
         executable = "\n".join(
             line for line in method.splitlines()
             if not line.lstrip().startswith("//")
-        )\n        self.assertNotIn("rescueSocketPathFingerprint", executable)
+        )
+        self.assertNotIn("rescueSocketPathFingerprint", executable)
 
         self.assertIn("if (ackIngressPath == null || ackIngressGeneration < 0L) return true;", method)
         self.assertIn("isCurrentLanChatIngress(verifiedPathFingerprint, socket,", method)
