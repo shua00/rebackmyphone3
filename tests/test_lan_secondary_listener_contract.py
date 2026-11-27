@@ -199,7 +199,8 @@ class LanSecondaryListenerContractTests(unittest.TestCase):
             secondary.index("socket.receive(packet)"),
             secondary.index("secondaryListenerRetryAttempts.remove(fingerprint)"),
         )
-        self.assertIn("!instance.isStopRequested() && !serviceDestroyed", secondary)
+        self.assertIn("if (!instance.isStopRequested())", secondary)
+        self.assertIn("scheduleSecondaryLanChatListenerRetry(path, fingerprint, generation)", secondary)
         self.assertIn("generation == lanSocketGeneration.get()", secondary)
         self.assertIn("isSecondaryPathStillPlanned(fingerprint)", secondary)
         self.assertIn("attempts.incrementAndGet()", secondary)
@@ -211,6 +212,40 @@ class LanSecondaryListenerContractTests(unittest.TestCase):
 
         source = self.source
         self.assertIn("single-listener fast path never allocates retry tasks", source)
+
+    def test_thread_start_failure_schedules_the_same_bounded_path_retry(self):
+        secondary = self._method(
+            "private void startSecondaryLanChatListener(",
+            "private boolean isSecondaryPathStillPlanned(",
+        )
+        start_failure = secondary[secondary.index("} catch (RuntimeException startFailure) {"):]
+        self.assertIn("instance.requestStop()", start_failure)
+        self.assertIn("lanChatListenerRuntime.removeInstance(instance)", start_failure)
+        self.assertIn("scheduleSecondaryLanChatListenerRetry(path, fingerprint, generation)", start_failure)
+        retry = self._method(
+            "private void scheduleSecondaryLanChatListenerRetry(",
+            "private boolean isSecondaryPathStillPlanned(",
+        )
+        self.assertIn("serviceDestroyed", retry)
+        self.assertIn("generation != lanSocketGeneration.get()", retry)
+        self.assertIn("isSecondaryPathStillPlanned(fingerprint)", retry)
+        self.assertIn("attempts.incrementAndGet()", retry)
+        self.assertIn("300_000L, 5_000L * Math.pow(3", retry)
+        self.assertIn("lanChatListenerRuntime.getInstance(fingerprint) == null", retry)
+
+    def test_pre_m_generation_change_retires_secondary_and_disables_secondary_workers(self):
+        reconcile = self._method(
+            "private void reconcileLanChatSecondaryListeners(",
+            "private void stopSecondaryLanChatListener(",
+        )
+        self.assertIn("Build.VERSION.SDK_INT >= Build.VERSION_CODES.M", reconcile)
+        refresh = self._method(
+            "private void refreshPeerRoutesForNetworkChange(",
+            "private void invalidateVerifiedChatPeers(",
+        )
+        self.assertIn("lanChatListenerRuntime.instanceSnapshot()", refresh)
+        self.assertIn("stopSecondaryLanChatListener(instance)", refresh)
+        self.assertIn("reconcileLanChatSecondaryListeners(lanChatListenerPathPlan)", refresh)
 
 
 if __name__ == "__main__":
