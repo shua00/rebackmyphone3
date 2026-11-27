@@ -10,18 +10,18 @@
 - [x] **当前 P0-A（第一阶段）**：LAN 聊天发送端使用 path-scoped RouteBinding；发送任务捕获具体 path/socket/listener generation，发送前复核 binding 仍有效；不再从 peer-wide endpoint 或其他路径认证借用路由。
 - [x] **当前 P0-A（第一阶段）**：引入 `LanAdaptiveRouteSelector`；单 Listener 走 O(1) 首选路径查询，多 Listener 才枚举 fresh authenticated bindings；首选路径优先，缺省按最近认证时间排序；备用候选仅在调用方请求时构造，最多 2 条。
 - [ ] **当前 P0-A（下一阶段）**：将显式发送失败/ACK 超时与备用 RouteBinding 回退闭环；每次切换必须重新校验 binding、记录具体 path failure，避免对同一消息重复执行或无限重试。
-- [ ] **当前 P0-A**：STA/AP 多 Listener 生命周期、socket ownership、generation 和按路径清理；三设备任意两台双向互通。
+- [x] **多 Listener runtime 代码阶段**：STA primary + validated secondary path 已接入独立 socket/worker/lease/generation 与按路径清理；CI 通过，仍待批次 C ingress/ACK 闭环与真机可达性验收。
 - [x] **多路径感知前置**：服务启动时生成一次初始 LAN chat path plan；热点/AP 与 Tethering 状态广播仅在事件到达时触发一次候选快照刷新，不启动 Listener、不扫描轮询；OEM 广播不可用时 fail soft。
 - [x] **Listener 生命周期前置**：primary Listener 实例已纳入 path-keyed worker owner map；实例按身份安装/清理，避免旧 receive loop 移除同路径新实例；Java 单测覆盖双路径 owner 和 stale cleanup。
 - [x] **多路径 secondary Listener 代码接入（CI 已通过，真机待验收）**：已增加按已验证路径精确绑定的独立接收循环，支持额外 Android Wi-Fi Network 与未表示的 AP/local-interface candidate；只处理 authenticated P2P 帧。路径变化、generation handoff、显式重启和 Service teardown 会按实例身份停止旧 worker。普通单路径不创建额外 Listener。AP 广播/ACK、NAT/客户端隔离和三设备任意两台互通仍待真机验收。
-- [x] **多 Listener 前置保护**：旧 UDP 管理命令去重提升为 TrackingService 级共享 `LanUdpCommandDeduplicator`，避免同一广播经 STA/AP 两个接收循环分别执行；仍待真实多 Listener runtime 集成验收。
+- [x] **多 Listener 旧命令保护**：旧 UDP 管理命令去重提升为 TrackingService 级共享 `LanUdpCommandDeduplicator`；secondary 只处理 authenticated P2P 帧，legacy FIND_ME_* 仍只由 primary 处理。
 - [x] **去重并发回归保护**：Java 12 并发 ingress 单测验证同一广播仅一次接纳；Python 静态契约防止后续接收循环复制时退回局部去重表。
 - [ ] **当前 P0-A**：普通路由器两台或多台 Android/Python 设备快路径回归；不增加无关周期扫描、高频探测、每包全路径枚举或默认多路径重复发送。
 - [ ] **P0-B**：沉淀 Android/Python 对齐的 path state、route lease、failure reason、route decision 语义及可复用接口。
 - [ ] **P0-C（LAN P2P v2 真机验收后排期）**：Rescue2/Server2 复用感知结果，LAN 内优先 UDP 即时指令，LAN 外或 LAN route 不可用时走 HTTP；以 commandId 幂等、TTL、接收/执行状态和结果回传防止重复执行。
 - [ ] P0-C 不提前实现，不改变当前 Rescue2 新诊断封存状态；旧版 `pull_logs_multi()`、Shell/ADB/Root 能力及聊天/文件传输隔离必须保持。
 
-## 2026-11-27 多 Listener runtime 审计结论
+## 2026-11-27 多 Listener runtime 审计结论（历史记录；当前状态见下方批次 B/C 更新）
 
 - [x] 审计 TrackingService 当前聊天 Listener 生命周期：确认仍是单一 wildcard-bound UDP Listener，Registry/Selector 的多 Listener 逻辑尚无 runtime 多 Listener 接入。
 - [x] 审计现有精确路径绑定能力：`LanSocketBinding.bindDatagramListenerSocket()` 已存在，但尚未接入聊天 Listener。
@@ -615,3 +615,13 @@
 - [ ] 第二聊天 Listener 真正 per-path socket/thread 生命周期接入；不能只停留在计划对象。
 - [ ] 多 Listener ingress、ACK、peer×path 独立认证与旧命令分发集成。
 - [ ] 真机确认 AP candidate 的实际角色与 exact-address bind 成功。
+
+
+## 2026-11-27 批次 B/C 状态修订
+
+- [x] 批次 B secondary Listener 代码接入：独立 socket/worker/path/generation/lease，精确地址绑定，secondary authenticated-only ingress，按身份停止与清理；相关 Android/Python/Windows CI 已通过。
+- [x] 批次 C 已启动：审查 ACK/fragment ACK 的 ingress snapshot，确认异步处理传递接收时的 path/socket/generation；ACK 账本更新需当前 listener lease 与 peer×path route；多 Listener 下禁用 pathless peer-wide endpoint fallback。
+- [x] 新增 tests/test_lan_chat_ingress_ownership_contract.py，锁定 secondary ingress snapshot、ACK 回发 socket 归属和 path-scoped ACK 接纳契约；CI run 45993507802 待完成。
+- [ ] 批次 C 剩余：peer.hello 异步回包 stale ingress 检查、peer.ack route admission/generation 竞争、双路径重复消息持久化与 ACK 幂等、共享旧命令语义逐项审查。
+- [ ] 批次 D：一次性/有界备用 RouteBinding 回退、按 peer×path 记录真实 ACK RTT/失败事实、普通单路径性能回归与真机验收包。
+- [ ] 首次真机验收估算修订为：批次 C 收口 + 批次 D 测试准备，约 2 个主要实施批次；另预留条件修复批次 E。进入真机验收不代表拓扑通过。
