@@ -162,6 +162,35 @@ public final class LanChatPathRegistry {
     }
 
     /**
+     * Resolve an authenticated ACK/source endpoint only within the exact ingress path epoch.
+     * Direct path lookup keeps the single-path ACK fast path O(1); it never searches other
+     * interfaces or borrows another path's authentication.
+     */
+    public synchronized RouteBinding findCurrentPeerRouteBinding(String peer, String path,
+            DatagramSocket expectedSocket, long expectedGeneration,
+            InetSocketAddress expectedEndpoint, long now) {
+        if (peer == null || peer.trim().isEmpty() || path == null || path.trim().isEmpty()
+                || expectedSocket == null || expectedEndpoint == null
+                || expectedEndpoint.isUnresolved()) return null;
+        Listener listener = listeners.get(path);
+        if (listener == null || listener.socket != expectedSocket
+                || listener.generation != expectedGeneration || !listener.isUsable()) return null;
+        Map<String, PeerRoute> peerRoutes = routes.get(peer);
+        if (peerRoutes == null) return null;
+        PeerRoute route = peerRoutes.get(path);
+        if (route == null) return null;
+        if (now >= route.expiresAtMs || route.listenerGeneration != expectedGeneration
+                || !route.endpoint.equals(expectedEndpoint)) {
+            if (now >= route.expiresAtMs || route.listenerGeneration != expectedGeneration) {
+                peerRoutes.remove(path);
+                if (peerRoutes.isEmpty()) routes.remove(peer);
+            }
+            return null;
+        }
+        return new RouteBinding(route, listener);
+    }
+
+    /**
      * Revalidate a previously captured binding immediately before dispatch. This does not
      * hold the registry lock across socket I/O; callers must still check socket/generation
      * ownership at the send boundary and treat a failed check as a stale-path retry.
