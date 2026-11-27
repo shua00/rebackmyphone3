@@ -8310,6 +8310,10 @@ public class TrackingService extends Service implements LocationListener {
         }, "LAN-UDP-Listener-" + serviceInstanceId);
         synchronized (rescueLock) {
             if (serviceDestroyed) {
+                listenerInstance.requestStop();
+                if (activeLanChatListenerInstance == listenerInstance) {
+                    activeLanChatListenerInstance = null;
+                }
                 isListeningForRescue = false;
                 return;
             }
