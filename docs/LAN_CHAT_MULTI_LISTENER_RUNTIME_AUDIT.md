@@ -229,10 +229,11 @@ CI 验证（2026-11-27）：
 
 ### 批次 B：AP/local-interface secondary ingress 接入（代码阶段）
 
-- [x] 路径计划 reconciliation 只选择 `LOCAL_INTERFACE_CANDIDATE` 作为 secondary；普通单 Wi-Fi 路径不会创建第二 socket/thread。
-- [x] secondary worker 先登记 path-keyed instance，再创建 Socket；必须通过 `LanSocketBinding.bindDatagramListenerSocket(path, socket, 8888)` 精确绑定候选地址，绑定失败不回退 wildcard、不影响 primary。
+- [x] 路径计划 reconciliation 使用当前选中的 active Wi-Fi Network 作为 primary，其余所有已验证路径（额外 Android Wi-Fi Network 或 `LOCAL_INTERFACE_CANDIDATE`）作为 secondary；普通单 Wi-Fi 路径不会创建第二 socket/thread。
+- [x] secondary worker 先登记 path-keyed instance，再创建 Socket；必须通过 `LanSocketBinding.bindDatagramListenerSocket(path, socket, 8888)` 精确绑定所选路径地址，绑定失败不回退 wildcard、不影响 primary。
 - [x] secondary 使用独立 socket/thread/generation/lease，接收循环只调用 authenticated `handleLanRealtimePacket`，不会重复执行 primary 的 legacy `FIND_ME_*` 管理命令。
 - [x] secondary 启动时只在候选接口具备 broadcast address 时发一次带 nonce 的 peer.hello；挑战超时使用既有有界调度器。
 - [x] path plan 变化、generation 变化、显式 Listener restart 和 Service teardown 均按实例身份停止 secondary；先标记 stop、撤销 lease，再在锁外关闭 socket/interrupt worker。
 - [ ] 新增的 `tests/test_lan_secondary_listener_contract.py` 与 Android build 正在 CI 验证；CI 通过后才确认代码阶段完成。
+- [x] 若设备仅有未被 ConnectivityManager 表示的 AP/local LAN path，primary 也按 path plan 精确绑定该本地地址；广播和 network_scope 使用同一 primary path identity。
 - [ ] 仍需设备验证：OEM AP 地址是否可绑定、AP/STA 广播和 ACK 是否双向到达、热点 NAT/客户端隔离对任意两台通信的影响，以及三设备三组双向验收。
