@@ -8,16 +8,21 @@ class _StopAfterOneRefresh:
     def __init__(self):
         self.waits = 0
         self.timeouts = []
+        self.stopped = False
+
+    def is_set(self):
+        return self.stopped
 
     def wait(self, timeout):
         self.waits += 1
         self.timeouts.append(timeout)
         if self.waits == 1:
             return False
+        self.stopped = True
         return True
 
     def set(self):
-        pass
+        self.stopped = True
 
 
 class HostLifecycleTests(unittest.TestCase):
@@ -69,7 +74,8 @@ class HostLifecycleTests(unittest.TestCase):
             def wait(self, timeout):
                 self.waits += 1
                 self.timeouts.append(timeout)
-                return self.waits == 3
+                self.stopped = self.waits == 3
+                return self.stopped
 
         stop_event = StopAfterRetries()
 
