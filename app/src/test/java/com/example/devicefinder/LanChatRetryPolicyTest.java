@@ -26,4 +26,9 @@ public class LanChatRetryPolicyTest {
         assertEquals(5_000L, LanChatRetryPolicy.outboxRetryWakeDelayMs(Integer.MAX_VALUE, true));
         assertEquals(Long.MAX_VALUE, LanChatRetryPolicy.outboxRetryWakeDelayMs(Integer.MAX_VALUE, false));
     }
+    @Test public void pendingOutboxCapacityIsRaisedAndByteBounded() {
+        assertEquals(200, LanChatRetryPolicy.MAX_PENDING_MESSAGES);
+        assertEquals(8L * 1024L * 1024L, LanChatRetryPolicy.MAX_PENDING_BODY_BYTES);
+    }
+
 }
