@@ -461,7 +461,7 @@ class LanP2PCoreTests(unittest.TestCase):
     def test_android_outbox_persists_per_recipient_fragment_ack_bitmap(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
-        self.assertIn("private static final int DB_VERSION = 11;", source)
+        self.assertIn("private static final int DB_VERSION = 12;", source)
         self.assertIn('"fragment_count INTEGER NOT NULL DEFAULT 0,"', source)
         self.assertIn('"fragment_ack_bitmap TEXT NOT NULL DEFAULT \'\',"', source)
         self.assertIn('if (oldVersion < 11)', source)
@@ -1676,7 +1676,7 @@ class LanP2PCoreTests(unittest.TestCase):
                         acknowledge.index('db.update("lan_outbox_targets", ackValues'))
         self.assertIn('if (state.isEmpty() || "expired".equals(state)) return false;', acknowledge)
 
-    def test_android_expired_outbox_rejects_late_ack_without_mutating_targets(self):
+    def test_android_expired_outbox_accepts_late_ack_without_reopening_retry(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
@@ -1684,11 +1684,11 @@ class LanP2PCoreTests(unittest.TestCase):
         start = source.index("public boolean acknowledge(String messageId, String peerId)")
         end = source.index("public boolean beginDiscoveryWindow(", start)
         acknowledge = source[start:end]
-        terminal_guard = acknowledge.index('if (state.isEmpty() || "expired".equals(state)) return false;')
-        target_mutation = acknowledge.index('db.update("lan_outbox_targets", ackValues')
-        self.assertLess(terminal_guard, target_mutation)
+        self.assertIn('if (state.isEmpty()) return false;', acknowledge)
+        self.assertIn('db.update("lan_outbox_targets", ackValues', acknowledge)
+        self.assertIn('if (total > 0 && total == acked)', acknowledge)
+        self.assertIn('else if (!LanChatDeliveryState.EXPIRED.equals(state))', acknowledge)
         self.assertIn('"SELECT state,delivery_deadline_ms FROM lan_outbox WHERE message_id=?"', acknowledge)
-        self.assertNotIn('next.put("state", total > 0 && total == acked ? "delivered"', acknowledge[:terminal_guard])
 
     def test_android_all_targets_acked_never_resurrects_expired_outbox(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -1698,9 +1698,10 @@ class LanP2PCoreTests(unittest.TestCase):
         start = source.index("public boolean allTargetsAcked(")
         end = source.index("public List<Target> loadKnownPeers(", start)
         method = source[start:end]
-        expired_guard = method.index("LanChatDeliveryState.EXPIRED.equals(state)")
+        self.assertNotIn("if (LanChatDeliveryState.EXPIRED.equals(state)) return false;", method)
+        self.assertIn("Expired messages stop retrying, but late authenticated ACKs may still complete delivery.", method)
         delivered_mutation = method.index("LanChatDeliveryState.DELIVERED")
-        self.assertLess(expired_guard, delivered_mutation)
+        self.assertGreater(delivered_mutation, method.index("if (discoveryOpen || total == 0) return false;"))
         self.assertIn("db.beginTransaction();", method)
         self.assertIn("db.setTransactionSuccessful();", method)
         self.assertIn("db.endTransaction();", method)
@@ -1967,7 +1968,7 @@ class LanP2PCoreTests(unittest.TestCase):
         store = (
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         ).read_text(encoding="utf-8")
-        self.assertIn("DB_VERSION = 11", store)
+        self.assertIn("DB_VERSION = 12", store)
         self.assertIn("retry_attempt_count INTEGER NOT NULL DEFAULT 0", store)
         self.assertIn("state='retry_paused'", store)
         self.assertIn("'retry_paused' ELSE state", store)
@@ -2041,9 +2042,9 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("SUM(CASE WHEN status!='acked'", progress)
         self.assertIn("retry_attempt_count<?", attempt)
         self.assertIn("last_recovery_at_ms INTEGER NOT NULL DEFAULT 0", store)
-        self.assertIn("DB_VERSION = 11", store)
+        self.assertIn("DB_VERSION = 12", store)
         self.assertIn("idx_lan_targets_retry", store)
-        self.assertIn("DB_VERSION = 11", store)
+        self.assertIn("DB_VERSION = 12", store)
         self.assertIn("retry_attempt_count=0,last_retry_at_ms=0", store)
         ack = extract_java_method(store, "public boolean acknowledge(")
         self.assertIn('hasRetryBudget ? "pending" : "retry_paused"', ack)
@@ -5672,7 +5673,7 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
     def test_android_fragment_receive_cache_is_durable_bounded_and_separate_from_final_ack(self):
         repo_root = Path(__file__).resolve().parents[1]
         store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
-        self.assertIn("DB_VERSION = 11", store)
+        self.assertIn("DB_VERSION = 12", store)
         self.assertIn("CREATE TABLE IF NOT EXISTS lan_chat_fragment_sessions", store)
         self.assertIn("CREATE TABLE IF NOT EXISTS lan_chat_fragments", store)
         self.assertIn("FRAGMENT_SESSION_TTL_MS = 30L * 60L * 1000L", store)
