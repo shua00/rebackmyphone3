@@ -8019,6 +8019,12 @@ public class TrackingService extends Service implements LocationListener {
                 FileLogger.log(this, "UDP", "⚠️ 监听已在运行，跳过重复启动");
                 return;
             }
+            if (listenerPathFingerprint != null
+                    && !lanChatListenerRuntime.installInstance(listenerInstance)) {
+                FileLogger.log(this, "UDP", "⚠️ 同一路径已有 receive-loop owner，拒绝重复启动 path="
+                        + listenerPathFingerprint);
+                return;
+            }
             isListeningForRescue = true;
             activeLanChatListenerInstance = listenerInstance;
             // Acquire under the same lifecycle lock used by onDestroy. This closes the
@@ -8349,7 +8355,10 @@ public class TrackingService extends Service implements LocationListener {
                             }
                         }
                     }
+                    lanChatListenerRuntime.removeInstance(listenerInstance);
                     if (!rescueSocket.isClosed()) rescueSocket.close();
+                } else {
+                    lanChatListenerRuntime.removeInstance(listenerInstance);
                 }
                 final boolean networkGenerationChanged;
                 synchronized (rescueLock) {
@@ -8400,6 +8409,7 @@ public class TrackingService extends Service implements LocationListener {
         synchronized (rescueLock) {
             if (serviceDestroyed) {
                 listenerInstance.requestStop();
+                lanChatListenerRuntime.removeInstance(listenerInstance);
                 if (activeLanChatListenerInstance == listenerInstance) {
                     activeLanChatListenerInstance = null;
                 }
@@ -8411,6 +8421,7 @@ public class TrackingService extends Service implements LocationListener {
                 activeLanChatListenerInstance = null;
                 rescueListenerThread = null;
                 isListeningForRescue = false;
+                lanChatListenerRuntime.removeInstance(listenerInstance);
                 releaseLanMulticastLock();
                 return;
             }
@@ -8424,6 +8435,7 @@ public class TrackingService extends Service implements LocationListener {
                     activeLanChatListenerInstance = null;
                     rescueListenerThread = null;
                     isListeningForRescue = false;
+                    lanChatListenerRuntime.removeInstance(listenerInstance);
                     releaseLanMulticastLock();
                 }
             }
