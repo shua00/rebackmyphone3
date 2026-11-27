@@ -97,6 +97,35 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
         self.assertIn("findCurrentPeerRouteBinding(senderId, ingressPath,", fragment)
         self.assertIn("lanChatPathRegistry.listenerCount() == 1", fragment)
 
+    def test_peer_ack_route_admission_is_atomic_with_listener_epoch(self):
+        registry = (
+            ROOT / "app/src/main/java/com/example/devicefinder/LanChatPathRegistry.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "DatagramSocket expectedSocket, long expectedGeneration", registry
+        )
+        self.assertIn("listener.socket != expectedSocket", registry)
+        self.assertIn("listener.generation != expectedGeneration", registry)
+        self.assertIn(
+            "Ingress listener epoch changed before peer route admission", registry
+        )
+
+        peer_ack = self._method(
+            'if ("peer.ack".equals(type))',
+            'if ("chat.ack".equals(type))',
+        )
+        self.assertIn(
+            "verifiedAt, verifiedAt + 120_000L,\n"
+            "                                            socket, verifiedListenerGeneration)",
+            peer_ack,
+        )
+        self.assertIn("verified route registry admission rejected:", peer_ack)
+        self.assertIn("verifiedListenerGeneration)) return;", peer_ack)
+        self.assertLess(
+            peer_ack.index("verified route registry admission rejected:"),
+            peer_ack.index("verifiedChatPeers.put(senderId,"),
+        )
+
     def test_duplicate_chat_message_collects_per_ingress_ack_targets(self):
         source = self.source
         self.assertIn("pendingLanChatV2Receives.putIfAbsent(", source)
