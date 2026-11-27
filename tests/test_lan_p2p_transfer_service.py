@@ -124,7 +124,7 @@ class TransferServiceTests(unittest.TestCase):
     def test_service_process_restart_preserves_partial_transfer_and_staging(self):
         data_dir = Path(self.temp.name) / "restartable-service"
         paths = (IPv4InterfacePath("wlan-test", "192.168.50.2", 24, "192.168.50.255"),)
-        payload = b"r" * 65536
+        payload = b"r" * (256 * 1024)
         offer = TransferOffer(
             "service-restart-001", "android-peer-1", "python-node-1",
             "restart.bin", len(payload) + 1,
