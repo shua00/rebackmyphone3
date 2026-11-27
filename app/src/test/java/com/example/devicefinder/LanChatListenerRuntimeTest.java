@@ -123,6 +123,52 @@ public class LanChatListenerRuntimeTest {
         }
     }
 
+    @Test public void receiveLoopInstancesAreOwnedIndependentlyByPath() {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        LanChatListenerRuntime runtime = new LanChatListenerRuntime(registry);
+        LanChatListenerInstance sta =
+                new LanChatListenerInstance("sta|192.168.1.2/24", 60L);
+        LanChatListenerInstance ap =
+                new LanChatListenerInstance("ap|192.168.43.1/24", 61L);
+        assertTrue(runtime.installInstance(sta));
+        assertTrue(runtime.installInstance(ap));
+        assertEquals(2, runtime.instanceCount());
+        assertSame(sta, runtime.getInstance(sta.pathFingerprint));
+        assertSame(ap, runtime.getInstance(ap.pathFingerprint));
+        assertTrue(runtime.removeInstance(ap));
+        assertFalse(runtime.removeInstance(ap));
+        assertSame(sta, runtime.getInstance(sta.pathFingerprint));
+        assertEquals(1, runtime.instanceCount());
+    }
+
+    @Test public void staleReceiveLoopCannotRemoveReplacementForSamePath() {
+        LanChatListenerRuntime runtime =
+                new LanChatListenerRuntime(new LanChatPathRegistry());
+        String path = "ap|192.168.43.1/24";
+        LanChatListenerInstance oldInstance = new LanChatListenerInstance(path, 70L);
+        LanChatListenerInstance newInstance = new LanChatListenerInstance(path, 71L);
+        assertTrue(runtime.installInstance(oldInstance));
+        assertFalse(runtime.installInstance(newInstance));
+        assertTrue(runtime.removeInstance(oldInstance));
+        assertTrue(runtime.installInstance(newInstance));
+        assertFalse(runtime.removeInstance(oldInstance));
+        assertSame(newInstance, runtime.getInstance(path));
+        assertEquals(1, runtime.instanceCount());
+    }
+
+    @Test public void receiveLoopInstanceSnapshotIsImmutable() {
+        LanChatListenerRuntime runtime =
+                new LanChatListenerRuntime(new LanChatPathRegistry());
+        assertTrue(runtime.instanceSnapshot().isEmpty());
+        assertTrue(runtime.installInstance(
+                new LanChatListenerInstance("sta|192.168.1.2/24", 80L)));
+        List<LanChatListenerInstance> snapshot = runtime.instanceSnapshot();
+        try {
+            snapshot.clear();
+            fail("instance snapshot must be immutable");
+        } catch (UnsupportedOperationException expected) { }
+    }
+
     @Test public void snapshotIsImmutableAndEmptySnapshotIsShared() throws Exception {
         LanChatPathRegistry registry = new LanChatPathRegistry();
         LanChatListenerRuntime runtime = new LanChatListenerRuntime(registry);
