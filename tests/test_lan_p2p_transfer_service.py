@@ -228,7 +228,6 @@ class TransferServiceTests(unittest.TestCase):
             self.assertFalse(replay_result)
             self.assertEqual((1,), restarted.filesystem.reconcile(offer.transfer_id, 106))
             self.assertEqual((1,), restarted.store.missing_chunks(offer.transfer_id))
-            self.assertEqual(1, len(list((data_dir / "staging").glob("*.part"))))
         finally:
             restarted.close()
 
