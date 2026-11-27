@@ -5768,3 +5768,33 @@ class AndroidLanChatBroadcastFragmentWindowTests(unittest.TestCase):
         self.assertNotIn("observePeer(", admission)
         self.assertIn("CHAT_FRAGMENT_COMPLETION_PROBE", advance)
         self.assertIn("finalDelivery=false", ack)
+
+
+class AndroidLanMultiListenerLegacyCommandDedupTests(unittest.TestCase):
+    def test_legacy_alarm_dedup_is_service_scoped_not_receive_loop_scoped(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (
+            repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "private final LanUdpCommandDeduplicator lanUdpCommandDeduplicator",
+            source,
+        )
+        self.assertIn(
+            "lanUdpCommandDeduplicator.shouldAccept(",
+            source,
+        )
+        self.assertNotIn(
+            "java.util.Map<String, Long> udpCmdDedup",
+            source,
+        )
+        self.assertNotIn(
+            "java.util.Map<String, Long> udpCmdDedup = new java.util.HashMap",
+            source,
+        )
+        helper = (
+            repo_root / "app/src/main/java/com/example/devicefinder/LanUdpCommandDeduplicator.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn("public synchronized boolean shouldAccept(", helper)
+        self.assertIn("MAX_ENTRIES = 50", helper)
+        self.assertIn("DUPLICATE_WINDOW_MS = 3000L", helper)
