@@ -11,7 +11,9 @@ final class LanChatRetryPolicy {
     private LanChatRetryPolicy() {}
 
     static final long FIRST_DISCOVERY_WINDOW_MS = 10_000L;
-    static final int MAX_PENDING_MESSAGES = 50;
+    static final int MAX_PENDING_MESSAGES = 200;
+    // Bound aggregate UTF-8 message bodies as well as row count; metadata/index overhead is additional.
+    static final long MAX_PENDING_BODY_BYTES = 8L * 1024L * 1024L;
     static final int MAX_AUTOMATIC_RETRY_ATTEMPTS = 8;
     static final long RETRY_RECOVERY_EVENT_COOLDOWN_MS = 60_000L;
 
