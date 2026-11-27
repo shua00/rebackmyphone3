@@ -536,4 +536,5 @@
 - [x] 复核发现宿主首次启动时若 Wi-Fi/AP 尚未就绪，原实现会直接退出，无法等候网络恢复。宿主现对初始绑定失败按刷新周期重试；Service 对失败的初始 runtime 执行关闭和清理，后续重试不遗留半启动实例。
 - [ ] 新增启动竞态回归测试：第一次启动因接口未就绪失败，第二次启动恢复成功，之后正常刷新并在退出时关闭服务；不启用 wildcard 或其他网络回退。首次 CI Run `45927045464` 发现测试文件续行语法错误，已修正为括号式 with 语句；Run `45927106157` 进一步发现测试 Event mock 缺少 `is_set()` 状态接口，已补齐并等待重跑。
 - [ ] Windows ACL 和 Linux/Windows 真实网卡出口行为仍需对应平台实机验收；当前模拟套件不代表操作系统实测。
-- [ ] 启动等待网络就绪修正代码提交 `9b2121649a8ad9803445382d66d5af0d8ffbf037`，测试语法修正提交 `aa51c576139527d59dfa6bf1a25fa746c0f43371`；修正后的提交 CI 尚待结果。
+- [ ] 下一批增加 Windows runner 专项校验：真实 Windows loopback TCP socket 配合 `IP_UNICAST_IF`，验证 interface index/字节序及实际 connect；该 smoke test 不替代多网卡物理 LAN 出口验收。
+- [x] 启动等待网络就绪修正代码提交 `9b2121649a8ad9803445382d66d5af0d8ffbf037`，测试夹具修正后 Run `45927181959` 全部通过：Python 全量 `424 tests`，Android 变更检测通过；Android build 按条件跳过。

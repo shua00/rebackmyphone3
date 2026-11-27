@@ -92,8 +92,23 @@ jobs:
           python3 -m py_compile server2.py rescue2.py rescue2_admin_identity.py chat.py lan_p2p_core.py lan_p2p_transfer.py lan_p2p_transfer_store.py lan_p2p_transfer_files.py lan_p2p_transfer_tcp.py lan_p2p_transfer_session.py lan_p2p_transfer_sender.py lan_p2p_transfer_network.py lan_p2p_transfer_auth.py lan_p2p_network_paths.py lan_p2p_socket_binding.py lan_p2p_transfer_runtime.py lan_p2p_transfer_service.py lan_p2p_transfer_provision.py lan_p2p_transfer_host.py
           python3 -m unittest discover -s tests -v
 
+  validate-windows-socket-binding:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Validate Windows interface binding
+        shell: pwsh
+        run: |
+          python -m py_compile lan_p2p_socket_binding.py tests/test_lan_p2p_socket_binding.py
+          python -m unittest discover -s tests -p test_lan_p2p_socket_binding.py -v
+
   build:
-    needs: [detect-android-changes, validate-python]
+    needs: [detect-android-changes, validate-python, validate-windows-socket-binding]
     if: needs.detect-android-changes.outputs.build_apk == 'true'
     runs-on: ubuntu-latest
     steps:

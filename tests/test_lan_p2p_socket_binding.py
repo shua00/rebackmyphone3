@@ -1,4 +1,5 @@
 import socket
+import sys
 import unittest
 from types import SimpleNamespace
 
@@ -118,6 +119,45 @@ class LanSocketBindingTests(unittest.TestCase):
             bind_socket_to_path(sock, self.path, platform="win32",
                                 socket_module=FakeSocketModule)
         self.assertIsNone(sock.bound)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows IP_UNICAST_IF smoke test")
+    def test_windows_ip_unicast_if_binds_real_loopback_socket(self):
+        loopback_name = next(
+            (name for name, _index in socket.if_nameindex()
+             if "loopback" in name.lower()),
+            None,
+        )
+        if loopback_name is None:
+            self.skipTest("Windows loopback interface name is unavailable")
+
+        path = SimpleNamespace(
+            interface_name=loopback_name,
+            address="127.0.0.1",
+            prefix_length=8,
+            broadcast_address=None,
+        )
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        accepted = None
+        try:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            listener.settimeout(3.0)
+            client.settimeout(3.0)
+            binding = bind_socket_to_path(
+                client, path, remote_address="127.0.0.1",
+                platform="win32", socket_module=socket,
+            )
+            self.assertGreater(binding.interface_index, 0)
+            self.assertEqual(loopback_name, binding.interface_name)
+            client.connect(listener.getsockname())
+            accepted, _address = listener.accept()
+            self.assertEqual("127.0.0.1", accepted.getpeername()[0])
+        finally:
+            if accepted is not None:
+                accepted.close()
+            client.close()
+            listener.close()
 
     def test_endpoint_validation(self):
         validate_endpoint_on_path(self.path, "192.168.40.99")
