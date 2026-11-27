@@ -61,6 +61,34 @@ public class LanChatPathRegistryTest {
         } finally { listener.close(); }
     }
 
+    @Test public void staleGenerationCannotRemoveSameSocketReplacement() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket listener = socket();
+        try {
+            String path = "sta|wlan0|192.168.1.20/24";
+            registry.registerListener(path, listener, 10);
+            registry.registerListener(path, listener, 11);
+            assertFalse(registry.removeListener(path, listener, 10));
+            assertSame(listener, registry.getListener(path).socket);
+            assertEquals(11L, registry.getListener(path).generation);
+            assertTrue(registry.removeListener(path, listener, 11));
+            assertEquals(0, registry.listenerCount());
+        } finally { listener.close(); }
+    }
+
+    @Test public void staleGenerationRoutesArePrunedWhenQueried() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket listener = socket();
+        try {
+            String path = "sta|wlan0|192.168.1.20/24";
+            registry.registerListener(path, listener, 20);
+            registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.31"), NOW, NOW + 100);
+            registry.registerListener(path, listener, 21);
+            assertTrue(registry.getFreshPeerRoutes("peer", NOW + 1).isEmpty());
+            assertTrue(registry.getFreshPeerRoutes("peer", NOW + 2).isEmpty());
+        } finally { listener.close(); }
+    }
+
     @Test public void replacingListenerInvalidatesRoutesFromPreviousSocketEpoch() throws Exception {
         LanChatPathRegistry registry = new LanChatPathRegistry();
         DatagramSocket old = socket(), replacement = socket();
