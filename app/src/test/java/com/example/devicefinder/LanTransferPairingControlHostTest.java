@@ -172,7 +172,7 @@ public class LanTransferPairingControlHostTest {
                 assertEquals("sender-b", secondHost.pendingSessions().get(0).remotePeerId);
                 assertNull(firstHost.state(secondSession[0], secondSession[1]));
                 assertNull(secondHost.state(firstSession[0], firstSession[1]));
-                firstHost.confirmLocal(firstSession[0], firstSession[1], "000000");
+                firstHost.cancelPendingForRemote(firstSession[0], firstSession[1]);
                 assertEquals(1, secondHost.pendingSessions().size());
                 assertEquals(LanTransferPairingSession.State.WAITING_LOCAL_CONFIRMATION,
                         secondHost.state(secondSession[0], secondSession[1]));
