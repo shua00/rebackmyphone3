@@ -5782,6 +5782,96 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
         self.assertEqual(len(bitmap) - 1,
                          decode_packet(sock.sent[-1][0], "shared-secret")["fragment_index"])
 
+    def test_python_long_chat_round_trip_over_real_udp_sockets(self):
+        import socket
+        from lan_p2p_core import (
+            persist_outgoing_message, send_outgoing_fragment_window,
+            decode_packet, encode_packet, store_incoming_chat_fragment,
+            load_incoming_chat_fragments, assemble_chat_fragments,
+            record_outgoing_fragment_ack, acknowledge_outgoing_message,
+            fragment_chat_message,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sender_db = os.path.join(temp_dir, "sender.db")
+            receiver_db = os.path.join(temp_dir, "receiver.db")
+            sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.addCleanup(sender.close)
+            self.addCleanup(receiver.close)
+            sender.bind(("127.0.0.1", 0))
+            receiver.bind(("127.0.0.1", 0))
+            sender.settimeout(1.0)
+            receiver.settimeout(1.0)
+            sender_id, receiver_id = "peer-python-a", "peer-python-b"
+            message_id = "real-udp-long-message"
+            secret = "shared-test-secret"
+            body = "真实UDP长消息🙂跨端分片" * 420
+            created = int(time.time() * 1000)
+            self.assertTrue(persist_outgoing_message(
+                sender_db, "rescue2", sender_id, message_id, body, [receiver_id], created))
+            fragments = fragment_chat_message(message_id, receiver_id, body, created)
+            endpoint = receiver.getsockname()
+            next_index = 0
+            final_ack_received = False
+            while next_index < len(fragments):
+                sent = send_outgoing_fragment_window(
+                    sender, sender_db, "rescue2", message_id, receiver_id,
+                    body, created, endpoint, sender_id, "rescue2", sender_id,
+                    secret, mark_attempt=(next_index == 0), allow_fast_retry=True)
+                self.assertGreater(sent, 0)
+                for _ in range(sent):
+                    raw, source = receiver.recvfrom(1200)
+                    self.assertLessEqual(len(raw), 1200)
+                    packet = decode_packet(raw, secret)
+                    self.assertEqual("chat.fragment", packet["type"])
+                    stored = store_incoming_chat_fragment(
+                        receiver_db, "python-receiver", sender_id, packet)
+                    self.assertNotEqual("rejected", stored)
+                    if stored != "complete_duplicate":
+                        fragment_ack = {
+                            "type": "chat.fragment.ack", "sender_peer_id": receiver_id,
+                            "sender_peer_type": "python", "service_id": receiver_id,
+                            "target_peer_id": sender_id, "message_id": message_id,
+                            "fragment_index": packet["fragment_index"], "status": "received",
+                        }
+                        receiver.sendto(encode_packet(fragment_ack, secret), source)
+                    if stored in ("completed", "complete_duplicate"):
+                        cached = load_incoming_chat_fragments(
+                            receiver_db, "python-receiver", sender_id, message_id)
+                        self.assertEqual(body, assemble_chat_fragments(cached))
+                        # The final ACK is emitted only after the complete body is durable.
+                        final_ack = {
+                            "type": "chat.ack", "sender_peer_id": receiver_id,
+                            "sender_peer_type": "python", "service_id": receiver_id,
+                            "target_peer_id": sender_id, "message_id": message_id,
+                            "status": "stored",
+                        }
+                        receiver.sendto(encode_packet(final_ack, secret), source)
+                for _ in range(sent):
+                    raw, _ = sender.recvfrom(1200)
+                    ack = decode_packet(raw, secret)
+                    if ack["type"] == "chat.fragment.ack":
+                        record_outgoing_fragment_ack(
+                            sender_db, "rescue2", message_id, receiver_id,
+                            ack["fragment_index"], endpoint[0], endpoint[1])
+                next_index = min(len(fragments), next_index + sent)
+                if next_index == len(fragments):
+                    raw, _ = sender.recvfrom(1200)
+                    final = decode_packet(raw, secret)
+                    self.assertEqual("chat.ack", final["type"])
+                    self.assertEqual("stored", final["status"])
+                    final_ack_received = acknowledge_outgoing_message(
+                        sender_db, "rescue2", message_id, receiver_id)
+                    break
+            self.assertTrue(final_ack_received)
+            conn = sqlite3.connect(sender_db)
+            try:
+                state = conn.execute(
+                    "SELECT state FROM lan_outbox WHERE message_id=?", (message_id,)).fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual("delivered", state)
+
     def test_python_broadcast_fragment_ack_can_admit_only_first_window_target(self):
         from lan_p2p_core import (
             persist_outgoing_message, begin_outgoing_discovery_window,
