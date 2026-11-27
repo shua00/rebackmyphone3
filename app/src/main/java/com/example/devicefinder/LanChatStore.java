@@ -723,6 +723,19 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 new String[]{String.valueOf(now)});
     }
 
+    /** Explicitly clear terminal delivery-ledger rows only; chat history and remote peers are untouched. */
+    public int clearTerminalOutboxRecords() {
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            int deleted = db.delete("lan_outbox", "state IN ('delivered','expired')", null);
+            db.setTransactionSuccessful();
+            return deleted;
+        } finally {
+            db.endTransaction();
+        }
+    }
+
     /** User cancellation stops future sends but retains the row and ACK history. */
     public boolean cancelPendingMessage(String messageId) {
         if (messageId == null || messageId.isEmpty()) return false;
