@@ -100,6 +100,10 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
     def test_peer_challenge_nonce_is_bound_to_egress_listener_epoch(self):
         self.assertIn("pendingPeerChallengeIngress", self.source)
         self.assertIn("registerPendingPeerChallengeIngress(nonce, socket)", self.source)
+        self.assertEqual(
+            self.source.count("pendingPeerChallenges.put("),
+            self.source.count("registerPendingPeerChallengeIngress(nonce, socket)"),
+        )
         self.assertIn("lease.socket == socket && lanChatListenerRuntime.isCurrent(lease)", self.source)
         self.assertIn("challengeIngress.matches(ackIngressPath, socket, ackIngressGeneration)", self.source)
         self.assertIn("pendingPeerChallengeIngress.clear()", self.source)
