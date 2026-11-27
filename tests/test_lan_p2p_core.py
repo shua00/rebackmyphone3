@@ -5127,7 +5127,7 @@ class LanP2PPacketSchemaTests(unittest.TestCase):
              "status": "stored"},
             {"type": "chat.fragment", "sender_peer_id": "pc-a", "sender_peer_type": "pc",
              "service_id": "pc-main", "target_peer_id": "android-a", "message_id": "m-2",
-             "fragment_index": 0, "fragment_count": 2, "total_bytes": 301,
+             "fragment_index": 0, "fragment_count": 1, "total_bytes": 1,
              "sha256": "a" * 64, "fragment_data": "eA==", "created_at_ms": 123},
             {"type": "chat.fragment.ack", "sender_peer_id": "android-a", "sender_peer_type": "android",
              "service_id": "android-main", "target_peer_id": "pc-a", "message_id": "m-2",
