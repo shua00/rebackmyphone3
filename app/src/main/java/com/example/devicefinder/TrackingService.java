@@ -6539,6 +6539,7 @@ public class TrackingService extends Service implements LocationListener {
                 lanChatOutboxExpiryScheduled.set(false);
                 return;
             }
+            boolean failed = false;
             try {
                 LanChatStore current = lanChatStore;
                 if (current != null) {
@@ -6548,11 +6549,15 @@ public class TrackingService extends Service implements LocationListener {
                     }
                 }
             } catch (Exception e) {
+                failed = true;
                 FileLogger.log(this, "CHAT", "LAN Outbox TTL expiry deferred: "
                         + e.getClass().getSimpleName());
             } finally {
                 lanChatOutboxExpiryScheduled.set(false);
-                if (!serviceDestroyed) scheduleLanChatOutboxExpiry(lanChatStore);
+                if (!serviceDestroyed) {
+                    if (failed) scheduleLanChatOutboxExpiryRetry(lanChatStore);
+                    else scheduleLanChatOutboxExpiry(lanChatStore);
+                }
             }
         };
         if (!scheduleLanChatTask("outbox-ttl-expiry", expireAndRearm, delay)) {
@@ -6566,8 +6571,10 @@ public class TrackingService extends Service implements LocationListener {
 
     private void scheduleLanChatOutboxExpiryRetry(final LanChatStore store) {
         if (serviceDestroyed || store == null) return;
-        scheduleLanChatTask("outbox-ttl-expiry-retry",
-                () -> scheduleLanChatOutboxExpiry(store), 500L);
+        if (!scheduleLanChatTask("outbox-ttl-expiry-retry",
+                () -> scheduleLanChatOutboxExpiry(store), 500L)) {
+            handler.postDelayed(() -> scheduleLanChatOutboxExpiry(store), 500L);
+        }
     }
 
     private void transmitLocalUdpMessageInternal(final String message, final String messageId,
