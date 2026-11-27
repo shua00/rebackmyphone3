@@ -40,7 +40,7 @@ _V2_RECOVERY_SCHEMA_READY = False
 
 
 RESCUE_SECRET = "your_private_secret_key"  # ⚠️ 必须与手机端一致
-from lan_p2p_core import LanP2PStorageError, assemble_chat_fragments, store_incoming_chat_fragment, load_incoming_chat_fragments, record_outgoing_fragment_ack, load_outgoing_fragment_targets_for_peer, send_outgoing_fragment_window, build_authenticated_chat_fragment_packets, send_discovery_fragment_window, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, BoundedPacketDispatcher, list_known_peers, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, send_discovery_broadcast_with_retries, load_active_pending_targets, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, next_peer_recovery_eligible_at_ms, list_due_outgoing_peers
+from lan_p2p_core import LanP2PStorageError, assemble_chat_fragments, store_incoming_chat_fragment, load_incoming_chat_fragments, record_outgoing_fragment_ack, load_outgoing_fragment_targets_for_peer, send_outgoing_fragment_window, build_authenticated_chat_fragment_packets, send_discovery_fragment_window, max_peer_id_budget_probe, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, BoundedPacketDispatcher, list_known_peers, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, send_discovery_broadcast_with_retries, load_active_pending_targets, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, next_peer_recovery_eligible_at_ms, list_due_outgoing_peers
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.sqlite3"), "chat.py")
 SERVER2_URL = "http://127.0.0.1:8080"      # server2.py 的地址
 # ==========================================
@@ -251,11 +251,26 @@ def send_chat_v2(body, display_name, message_id):
     try:
         broadcast_bytes = encode_packet(probe, RESCUE_SECRET)
         long_message = False
+        if target_ids:
+            for peer_id in target_ids:
+                targeted = dict(probe)
+                targeted["target_peer_id"] = peer_id
+                encode_packet(targeted, RESCUE_SECRET)
+        else:
+            budget = dict(probe)
+            budget["target_peer_id"] = max_peer_id_budget_probe()
+            encode_packet(budget, RESCUE_SECRET)
     except ValueError:
         try:
-            build_authenticated_chat_fragment_packets(
-                message_id, "*", body, created, PEER_NODE_ID, "chat.py",
-                PEER_NODE_ID, RESCUE_SECRET, display_name)
+            if target_ids:
+                for peer_id in target_ids:
+                    build_authenticated_chat_fragment_packets(
+                        message_id, peer_id, body, created, PEER_NODE_ID, "chat.py",
+                        PEER_NODE_ID, RESCUE_SECRET, display_name)
+            else:
+                build_authenticated_chat_fragment_packets(
+                    message_id, max_peer_id_budget_probe(), body, created,
+                    PEER_NODE_ID, "chat.py", PEER_NODE_ID, RESCUE_SECRET, display_name)
             broadcast_bytes = None
             long_message = True
         except ValueError:
