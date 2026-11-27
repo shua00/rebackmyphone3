@@ -192,7 +192,7 @@ class LanSecondaryListenerContractTests(unittest.TestCase):
         self.assertNotIn("postDelayed", secondary)
 
         source = self.source
-        self.assertIn("stable single-listener fast path never allocates retry tasks", source)
+        self.assertIn("single-listener fast path never allocates retry tasks", source)
 
 
 if __name__ == "__main__":
