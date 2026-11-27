@@ -326,7 +326,7 @@ public class TrackingService extends Service implements LocationListener {
                         && existing.generation == candidate.generation
                         && existing.port == candidate.port
                         && existing.address.equals(candidate.address)
-                        && existing.pathFingerprint.equals(candidate.pathFingerprint)) {
+                        && java.util.Objects.equals(existing.pathFingerprint, candidate.pathFingerprint)) {
                     return true;
                 }
             }
