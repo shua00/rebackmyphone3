@@ -829,7 +829,7 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
         sent_endpoint_route = outgoing_ack_endpoint_matches(
             _CHAT_DEDUP_DB, "rescue2", message_id, sender, addr[0], addr[1])
         ack_accepted = (target == PEER_NODE_ID and envelope.get("status") == "stored"
-                        and bool(sender) and (active_route or sent_endpoint_route))
+                        and sender and (active_route or sent_endpoint_route))
         _diag_event("chat_ack_received", peer_id=sender, message_id=message_id,
                     status=envelope.get("status", "unknown"),
                     active_route=bool(active_route), sent_endpoint_route=bool(sent_endpoint_route),
