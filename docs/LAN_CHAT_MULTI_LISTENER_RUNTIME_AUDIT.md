@@ -301,3 +301,13 @@ CI 验证补充（secondary listener 代码阶段，2026-11-27）：
 - [x] 定向 nonce 被消费、挑战超时或网络路径失效时，同时清理出站归属；广播发现 nonce 仍可在其短窗口内收集同一路径的多个 peer。
 - [x] 新增 Python 静态契约覆盖 nonce 出站绑定、ACK ingress 匹配与清理边界。
 - [ ] 尚未取得本轮新 head 的 CI 结果；仍需 Android unit tests、Debug/Slim build、Python 全量测试和 Windows binding 验证。
+
+
+## 2026-11-27 批次 C：peer-wide cache 与 path-scoped route 的职责隔离
+
+- [x] `verifiedChatPeers` 仅保留兼容性成员/endpoint 提示，不再作为多路径 discovery 或 directed challenge 的存活路由证明。
+- [x] 新增 `hasFreshLanChatPeerRoute`，通过 `LanAdaptiveRouteSelector` 和 Registry 当前 binding 判断任一 Listener 是否仍有新鲜认证路由；单 Listener 仍走 Registry O(1) 查询，不启动扫描、探测或额外线程。
+- [x] `peer.hello` 的重复挑战抑制改为按实际 ingress path/socket/generation/endpoint 查找同路径认证路由；pathless legacy 仅允许在不超过一个 Listener 时使用旧 cache 提示。
+- [x] 待发送目标的 directed challenge 与 discoveryNeeded 均基于 path-scoped binding 判断，避免 STA 路由失效后被 peer-wide cache 错误抑制 AP/剩余路径重新发现。
+- [x] Python 静态契约覆盖 peer-wide cache 不得抑制 path-scoped discovery。
+- [ ] 本轮最终 CI 仍待当前 head 的 Python、Windows、Android Gradle / Debug APK / Slim Release 全部完成；以最新 Actions run 为准。
