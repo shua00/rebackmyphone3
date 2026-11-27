@@ -594,3 +594,7 @@
 - [x] 覆盖旧实例迟到清理、停止后资源附着、socket/thread identity 的单测。
 - [ ] 将 bind/receive/close/multicast lock 的完整生命周期进一步收敛到 owner；逐项覆盖 onDestroy、bind failure、thread start failure 和网络切换竞态。
 - [ ] 保持单路径只有一个 listener；完成后再进入 STA/AP 第二 Listener。
+
+
+- [x] 批次 A 单 Listener lifecycle instance 改造及组件测试；CI run 45980782340 全绿（Python 440 tests/1 skipped、Windows socket binding、Android testDebugUnitTest、Debug APK、diagnostics=false Slim Release APK）。
+- [ ] 真机验证当前单 Listener 在启动/停止/网络切换/服务销毁下的 socket/thread 生命周期；完成后再启动第二 Listener。
