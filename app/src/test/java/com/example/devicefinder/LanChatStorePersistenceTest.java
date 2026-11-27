@@ -535,4 +535,13 @@ public class LanChatStorePersistenceTest {
         } finally { c.close(); }
     }
 
+    @Test
+    public void nextOutboxExpiryTracksOnlyUnfinishedRows() {
+        long now = System.currentTimeMillis();
+        assertTrue(store.enqueue("expiry-schedule", "desktop-peer", "body", now));
+        assertEquals(now + LanChatStore.OUTBOX_MESSAGE_TTL_MS, store.getNextOutboxExpiryMs());
+        assertTrue(store.cancelPendingMessage("expiry-schedule"));
+        assertEquals(-1L, store.getNextOutboxExpiryMs());
+    }
+
 }
