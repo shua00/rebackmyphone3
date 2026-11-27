@@ -26,7 +26,7 @@ class LanSecondaryListenerContractTests(unittest.TestCase):
             "private void reconcileLanChatSecondaryListeners(",
             "private void stopSecondaryLanChatListener(",
         )
-        self.assertIn("LanNetworkPath.Kind.LOCAL_INTERFACE_CANDIDATE", reconcile)
+        self.assertIn("desired.put(path.diagnosticFingerprint(), path)", reconcile)
         self.assertIn("instance.generation != generation", reconcile)
         self.assertIn("startSecondaryLanChatListener(path, generation)", reconcile)
 
