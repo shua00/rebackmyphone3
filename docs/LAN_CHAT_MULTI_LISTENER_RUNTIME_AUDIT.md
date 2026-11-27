@@ -1,6 +1,6 @@
 # LAN Chat 多 Listener 运行时审计（2026-11-27）
 
-状态：**阻塞项审计完成；多 Listener runtime 尚未实现。** 本文记录当前代码事实与下一阶段实施门槛，避免把 Registry/Selector 的组件能力误报为运行时多路径能力。
+状态：**批次 B 的 secondary Listener 运行时代码已接入并通过 CI；批次 C 正在进行 ingress/ACK/业务分发闭环审计。** CI 不等于 OEM 热点可达或真机拓扑验收。
 
 审计基线：`feature/lan-p2p-v2-only`，commit `94d502595464282b0a0d3407dc4a88dd8cab11c1`。
 
@@ -245,3 +245,38 @@ CI 验证补充（secondary listener 代码阶段，2026-11-27）：
 - [x] commit `c1a28a0d21fb55bbb3fc3d8553fb9138388fe3b6` / run [45989057403](https://github.com/shua00/rebackmyphone3/actions/runs/45989057403)：Python 447 tests（skipped=1）、Windows socket binding、Android unit/debug/slim build 全通过；artifact `15192233835`。该构建包含 AP-only primary path 地址变化/消失时的 generation-safe rebind。
 - [x] commit `79c2d2c77b8f4546b281aa89df3cc932984b68ac` / run [45989092125](https://github.com/shua00/rebackmyphone3/actions/runs/45989092125)：Python 448 tests（skipped=1）、Windows socket binding 通过；仅测试文件变更，Android build 按路径过滤跳过。
 - [ ] CI 只验证代码/构建契约。尚未证明真实设备的热点广播覆盖、不同 OEM 的精确 bind、跨 STA/AP ACK 路由、热点 NAT/客户端隔离或三设备任意两台双向通信。
+
+
+## 2026-11-27 批次 B 收口与批次 C 启动
+
+### 批次 B 当前代码事实（取代本文早期“尚未实现第二 Listener”的历史状态）
+
+- [x] TrackingService 已按 path plan reconciliation 启动 secondary ingress；STA primary 与 secondary 各自持有独立 socket、worker、path fingerprint、generation、runtime lease。
+- [x] secondary 通过 LanSocketBinding.bindDatagramListenerSocket(path, socket, 8888) 精确地址绑定；绑定失败不 wildcard fallback，不关闭 primary。
+- [x] secondary receive loop 只分发 authenticated LAN P2P 帧；legacy FIND_ME_* 命令仍只由 primary 处理，避免双路径广播重复执行。
+- [x] ACK/fragment ACK 的异步处理参数保留接收时的 path fingerprint、socket 和 generation；ACK 接收路径先校验该三元组仍对应 Registry listener，再按 peer×path 查找认证路由。
+- [x] 多 Listener 时禁用无 path identity 的 SQLite peer-wide endpoint fallback；该兼容路径只在恰好一个 listener 时可用。
+- [x] 每条路径单独停止和 compare-and-remove；旧 worker 的 finally 不能移除同路径替代实例/lease。
+- [ ] 尚未完成：真实发送失败/ACK timeout 后接入 selector fallback；路径质量采样；OEM/AP 广播、单播与回程可达真机验证。
+
+### 批次 B CI
+
+- [x] 82c8b012b118a539ffb1bbeb01cc0a964876647c / run 45988859572：Android unit/debug/slim release、Python、Windows socket binding 均成功。
+- [x] c1a28a0d21fb55bbb3fc3d8553fb9138388fe3b6 / run 45989057403：Android unit/debug/slim release、Python、Windows socket binding 均成功。
+- [x] 79c2d2c77b8f4546b281aa89df3cc932984b68ac / run 45989092125：Python 448 tests（1 skip）、Windows socket binding 成功；测试文件变更，Android 按 path filter 跳过。
+
+### 批次 C：ingress/ACK/业务分发闭环（启动）
+
+- [x] 审计 primary/secondary 接收循环入口：两者都进入同一 handleLanRealtimePacket / handleAuthenticatedLanPacket，secondary 不执行 legacy 管理命令。
+- [x] 审计消息 ACK 回发：chat.message 与 chat.fragment 的 ACK 使用原 ingress socket 和原始来源 endpoint，不读取全局 primary socket。
+- [x] 审计 ACK 接收：peer.ack、chat.ack、chat.fragment.ack 携带 ingress path/socket/generation；chat.ack 和 fragment ACK 的最终账本更新要求当前 ingress lease 与 peer×path route 匹配；多 Listener 禁止 peer-wide legacy endpoint fallback。
+- [x] 新增 tests/test_lan_chat_ingress_ownership_contract.py，静态锁定上述 path/socket/generation 归属与 ACK 异步参数传递。
+- [ ] 待该测试 CI 通过后，将本次 source audit contract 标为通过；随后补充 peer.ack route admission、同一广播跨 STA/AP 的去重与双 Listener 并发处理测试。
+- [ ] 待审计 peer.hello 异步持久化与回包的 stale ingress 行为、消息重复到达两路径时的持久化/ACK幂等和 generation 切换边界。
+- [ ] 本批不接入路径回退或 RTT 评分；那些属于下一批的受控发送闭环，不能与 ingress 正确性混在一起。
+
+### 不得误报
+
+- 代码和 CI 已有 secondary Listener，不等于 AP 接口一定可绑定或热点网络允许双向客户端通信。
+- 当前路径质量尚无可靠的 per-peer×path RTT/失败事实；selector 只能使用认证时间与显式 preferred path。
+- PR #1 仍 Open，未合并 main；真机验收未开始。
