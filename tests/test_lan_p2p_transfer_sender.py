@@ -410,5 +410,81 @@ class TransferSenderIntegrationTests(unittest.TestCase):
                 right.close()
 
 
+    def test_corrupt_durable_receipt_is_invalidated_and_chunk_can_be_repaired(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = b"r" * 4096
+            offer = TransferOffer("sender-corrupt-receipt", "sender", "receiver",
+                "repair.bin", len(payload), hashlib.sha256(payload).hexdigest(), 1)
+            store = TransferStore(str(root / "ledger.db"), TransferLimits(chunk_size_bytes=4096))
+            files = TransferFilesystem(store, str(root / "stage"), str(root / "received"))
+            store.create_offer(offer, 1)
+            store.transition(offer.transfer_id, TransferState.ACCEPTED, 2)
+            store.transition(offer.transfer_id, TransferState.TRANSFERRING, 3)
+            descriptor = ChunkDescriptor(offer.transfer_id, 0, payload,
+                hashlib.sha256(payload).hexdigest())
+            self.assertTrue(files.write_chunk(descriptor, 4))
+            staged = files._chunk_path(files._task_dir(offer.transfer_id), 0)
+            staged.write_bytes(b"x" * len(payload))
+
+            missing, more = files.reconcile_page(offer.transfer_id, 5, 8)
+            self.assertEqual((0,), missing)
+            self.assertFalse(more)
+            self.assertIsNone(store.get_chunk_receipt(offer.transfer_id, 0))
+            self.assertEqual(TransferState.TRANSFERRING,
+                store.get_transfer(offer.transfer_id).state)
+
+            self.assertTrue(files.write_chunk(descriptor, 6))
+            self.assertEqual(((), False), files.reconcile_page(offer.transfer_id, 7, 8))
+            self.assertIsNotNone(store.get_chunk_receipt(offer.transfer_id, 0))
+
+    def test_missing_pages_progress_across_reconnects_without_skipping_or_looping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = bytes((i % 251 for i in range(130 * 4096)))
+            source = root / "large-source.bin"
+            source.write_bytes(payload)
+            offer = TransferOffer("sender-multipage", "sender", "receiver",
+                source.name, len(payload), hashlib.sha256(payload).hexdigest(), 1)
+            store = TransferStore(str(root / "ledger.db"), TransferLimits(chunk_size_bytes=4096))
+            files = TransferFilesystem(store, str(root / "stage"), str(root / "received"))
+            store.create_offer(offer, 1)
+            store.transition(offer.transfer_id, TransferState.ACCEPTED, 2)
+            store.transition(offer.transfer_id, TransferState.TRANSFERRING, 3)
+
+            remaining = None
+            for attempt in range(3):
+                server, client = socket.socketpair()
+                errors = []
+                def serve():
+                    try:
+                        serve_transfer_session(server, store, files, local_peer_id="receiver",
+                            authenticated_peer_id="sender", session_secret=self.SECRET,
+                            now_ms=lambda: 10 + attempt, max_frames=64)
+                    except Exception as exc:
+                        errors.append(exc)
+                    finally:
+                        server.close()
+                worker = threading.Thread(target=serve)
+                worker.start()
+                try:
+                    remaining = send_file_over_session(client, str(source), offer,
+                        local_peer_id="sender", remote_peer_id="receiver",
+                        session_secret=self.SECRET, chunk_size_bytes=4096,
+                        max_chunks_per_session=62)
+                finally:
+                    client.close()
+                    worker.join(timeout=10)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual([], errors)
+                if attempt < 2:
+                    self.assertTrue(remaining)
+                else:
+                    self.assertEqual((), remaining)
+
+            self.assertEqual(TransferState.COMPLETED, store.get_transfer(offer.transfer_id).state)
+            published = next((root / "received").iterdir())
+            self.assertEqual(payload, published.read_bytes())
+
 if __name__ == "__main__":
     unittest.main()
