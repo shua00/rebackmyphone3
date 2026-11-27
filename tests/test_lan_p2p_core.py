@@ -5146,6 +5146,52 @@ class LanP2PPacketSchemaTests(unittest.TestCase):
         self.assertIn("instanceof JSONArray", protocol)
         self.assertIn('"stored".equals(packet.getString("status"))', protocol)
 
+    def test_fragment_packet_types_round_trip_and_enforce_matching_bounds(self):
+        from lan_p2p_core import encode_packet, decode_packet
+        base = {"sender_peer_id": "android-a", "target_peer_id": "pc-b",
+                "message_id": "fragment-message-1"}
+        fragment = dict(base, type="chat.fragment", fragment_data="YQ==",
+                        sha256="a" * 64, fragment_index=0, fragment_count=1,
+                        total_bytes=1, created_at_ms=123)
+        fragment_ack = dict(base, type="chat.fragment.ack",
+                            fragment_index=0, status="received")
+        for packet in (fragment, fragment_ack):
+            with self.subTest(packet_type=packet["type"]):
+                self.assertEqual(packet["type"],
+                                 decode_packet(encode_packet(packet, "schema-secret"),
+                                               "schema-secret")["type"])
+
+        invalid_fragments = [
+            dict(fragment, fragment_index=1),
+            dict(fragment, fragment_count=0),
+            dict(fragment, fragment_count=1025),
+            dict(fragment, total_bytes=0),
+            dict(fragment, total_bytes=262145),
+            dict(fragment, fragment_data="x" * 401),
+            dict(fragment, sha256="A" * 64),
+            dict(fragment, sha256="a" * 63),
+        ]
+        for packet in invalid_fragments:
+            with self.subTest(packet=packet), self.assertRaises(ValueError):
+                encode_packet(packet, "schema-secret")
+        for packet in (
+            dict(fragment_ack, fragment_index=1024),
+            dict(fragment_ack, status="stored"),
+        ):
+            with self.subTest(packet=packet), self.assertRaises(ValueError):
+                encode_packet(packet, "schema-secret")
+
+    def test_android_fragment_schema_uses_the_same_required_fields_and_bounds(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        protocol = (repo_root / "app/src/main/java/com/example/devicefinder/LanP2pProtocol.java").read_text(encoding="utf-8")
+        for field in ("fragment_data", "sha256", "fragment_index", "fragment_count", "total_bytes"):
+            self.assertIn('"' + field + '"', protocol)
+        for bound in ("0, 1023", "1, 1024", "1, 262144"):
+            self.assertIn(bound, protocol)
+        self.assertIn("fragment_data").__class__
+        self.assertIn("fragment data exceeds limit", protocol)
+        self.assertIn('!"received".equals(packet.getString("status"))', protocol)
+
 
 if __name__ == "__main__":
     unittest.main()
