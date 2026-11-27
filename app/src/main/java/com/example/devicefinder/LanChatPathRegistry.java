@@ -53,8 +53,8 @@ public final class LanChatPathRegistry {
     public synchronized Listener registerListener(String path, DatagramSocket socket,
             long generation) {
         requireKey(path, "path fingerprint");
-        if (socket == null || socket.isClosed() || !socket.isBound())
-            throw new IllegalArgumentException("Listener must be open and bound");
+        if (socket == null || socket.isClosed() || !socket.isBound() || generation < 0L)
+            throw new IllegalArgumentException("Listener must be open, bound, and have a valid generation");
         Listener previous = listeners.get(path);
         if (previous != null && previous.socket != socket) {
             // A re-created listener has a new receive/send ownership epoch. Do not
@@ -89,6 +89,9 @@ public final class LanChatPathRegistry {
                 || endpoint.getPort() < 1 || endpoint.getPort() > 65535
                 || expiresAt <= verifiedAt)
             throw new IllegalArgumentException("Invalid verified LAN endpoint or lease");
+        Listener listener = listeners.get(path);
+        if (listener == null || !listener.isUsable())
+            throw new IllegalStateException("Cannot verify a peer route without its active path listener");
         Map<String, PeerRoute> peerRoutes = routes.get(peer);
         if (peerRoutes == null) { peerRoutes = new HashMap<>(); routes.put(peer, peerRoutes); }
         PeerRoute route = new PeerRoute(peer, path, endpoint, verifiedAt, expiresAt);
