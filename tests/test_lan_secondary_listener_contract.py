@@ -84,5 +84,77 @@ class LanSecondaryListenerContractTests(unittest.TestCase):
         self.assertIn("worker.interrupt()", self.source)
 
 
+    def test_secondary_to_primary_role_promotion_retires_old_owner_before_primary_claim(self):
+        reconcile = self._method(
+            "private void reconcileLanChatSecondaryListeners(",
+            "private void stopSecondaryLanChatListener(",
+        )
+        self.assertLess(
+            reconcile.index("stopSecondaryLanChatListener(instance)"),
+            reconcile.index("startSecondaryLanChatListener(path, generation)"),
+        )
+        self.assertIn("!desired.containsKey(instance.pathFingerprint)", reconcile)
+
+        primary = self._method(
+            "private void startRescueListener()",
+            "private void parseResponse(",
+        )
+        self.assertIn("lanChatListenerRuntime.installInstance(listenerInstance)", primary)
+        self.assertIn("同一路径已有 receive-loop owner", primary)
+        self.assertIn("listenerGeneration != lanSocketGeneration.get()", primary)
+
+        stop = self._method(
+            "private void stopSecondaryLanChatListener(",
+            "private boolean isCurrentSecondaryLanChatListener(",
+        )
+        self.assertLess(
+            stop.index("socket.close()"),
+            stop.index("lanChatListenerRuntime.removeInstance(instance)"),
+        )
+
+    def test_service_destroy_closes_ingress_and_retires_secondary_start_races(self):
+        destroy = self._method(
+            "public void onDestroy()",
+            "private void closeLanChatStoreAfterExecutors(",
+        )
+        self.assertLess(
+            destroy.index("serviceDestroyed = true;"),
+            destroy.index("closeLanChatIngressSocket();"),
+        )
+
+        close = self._method(
+            "private void closeLanChatIngressSocket()",
+            "private void closeLanChatStoreAfterExecutors(",
+        )
+        self.assertIn("lanChatListenerRuntime.instanceSnapshot()", close)
+        self.assertIn("stopSecondaryLanChatListener(instance)", close)
+
+        secondary = self._method(
+            "private void startSecondaryLanChatListener(",
+            "private boolean isSecondaryPathStillPlanned(",
+        )
+        self.assertIn("instance.attachThread(worker)", secondary)
+        self.assertIn("if (serviceDestroyed || generation != lanSocketGeneration.get()", secondary)
+        self.assertLess(
+            secondary.index("if (serviceDestroyed || generation != lanSocketGeneration.get()"),
+            secondary.index("worker.start()"),
+        )
+        self.assertIn("instance.isStopRequested()", secondary)
+
+    def test_primary_listener_rechecks_destroy_state_before_thread_start_and_socket_bind(self):
+        primary = self._method(
+            "private void startRescueListener()",
+            "private void releaseLanMulticastLock()",
+        )
+        self.assertIn("if (serviceDestroyed) return;", primary)
+        self.assertIn("if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;", primary)
+        self.assertIn("if (serviceDestroyed) {", primary)
+        self.assertIn("if (serviceDestroyed || listenerInstance.isStopRequested()", primary)
+        self.assertLess(
+            primary.index("if (serviceDestroyed) {", primary.index("listenerThread = new Thread")),
+            primary.index("listenerThread.start()"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
