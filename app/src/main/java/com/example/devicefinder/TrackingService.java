@@ -2585,6 +2585,11 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private String getLanProtocolNetworkScope() {
+        LanChatListenerPathPlan plan = lanChatListenerPathPlan;
+        if (plan != null
+                && plan.primary().kind == LanNetworkPath.Kind.LOCAL_INTERFACE_CANDIDATE) {
+            return buildLanProtocolNetworkScope(plan.primary().diagnosticFingerprint());
+        }
         return buildLanProtocolNetworkScope(wifiLanFingerprint);
     }
 
@@ -2706,10 +2711,10 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     /**
-     * Reconcile only explicit unrepresented local-interface candidates. A normal single
+     * Reconcile only validated non-primary paths from the current snapshot. A normal single
      * represented Wi-Fi path leaves this loop empty and creates no additional worker/socket.
-     * The primary listener remains owned by startRescueListener(); this method owns only
-     * secondary AP/local-interface receive loops.
+     * The primary listener remains owned by startRescueListener(); this method owns secondary
+     * ingress for additional represented Wi-Fi Networks and unrepresented AP candidates.
      */
     private void reconcileLanChatSecondaryListeners(LanChatListenerPathPlan plan) {
         final java.util.Map<String, LanNetworkPath> desired = new java.util.HashMap<>();
@@ -2765,8 +2770,9 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     /**
-     * Start a path-scoped authenticated-frame ingress loop for one AP/local-interface
-     * candidate. Legacy management UDP commands remain on the primary listener only.
+     * Start a path-scoped authenticated-frame ingress loop for one validated secondary path
+     * (additional represented Wi-Fi Network or unrepresented AP candidate). Legacy management
+     * UDP commands remain on the primary listener only.
      */
     private void startSecondaryLanChatListener(final LanNetworkPath path, final long generation) {
         if (path == null || serviceDestroyed
