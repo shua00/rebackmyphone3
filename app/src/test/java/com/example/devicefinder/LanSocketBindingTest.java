@@ -13,6 +13,7 @@ public class LanSocketBindingTest {
         DatagramSocket socket = new DatagramSocket(null);
         try {
             LanSocketBinding.bindDatagramListenerSocket(path, socket, 0x6A31);
+            assertTrue("listener socket must be bound after exact-address bind", socket.isBound());
             assertEquals(loopback, socket.getLocalAddress());
             assertEquals(0x6A31, socket.getLocalPort());
             assertTrue(socket.getReuseAddress());
