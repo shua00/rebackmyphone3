@@ -2906,7 +2906,6 @@ public class TrackingService extends Service implements LocationListener {
                         throw new java.net.SocketException("Secondary LAN path became stale during bind");
                     }
                     lease = lanChatListenerRuntime.register(fingerprint, socket, generation);
-                    secondaryListenerRetryAttempts.remove(fingerprint);
                 }
                 FileLogger.log(this, "CHAT", "Secondary LAN listener bound exact path="
                         + path.diagnosticFingerprint() + " port=8888");
@@ -2918,6 +2917,8 @@ public class TrackingService extends Service implements LocationListener {
                     packet.setLength(buffer.length);
                     socket.receive(packet);
                     if (!isCurrentSecondaryLanChatListener(instance, socket, lease)) break;
+                    // Reset the failure streak only after the listener proves it can receive.
+                    secondaryListenerRetryAttempts.remove(fingerprint);
                     long receivedAt = android.os.SystemClock.elapsedRealtime();
                     // Secondary ingress is intentionally authenticated P2P only. Do not run
                     // legacy FIND_ME_* commands twice when the same LAN broadcast reaches STA/AP.
