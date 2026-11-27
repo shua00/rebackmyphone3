@@ -602,3 +602,13 @@
 
 - [x] Listener 实例成为 Socket/Worker 的生命周期资源来源；重启、网络切换和 onDestroy 均先标记停止，再在锁外关闭/中断；attach 拒绝 closed Socket 与已启动 Thread。
 - [x] 最新 CI run 45981692678 全绿：Python 440 tests（1 skipped）、Windows socket binding、Android 单测、Debug APK、diagnostics=false Slim Release APK；artifact 15189847113。
+
+
+### 批次 B 进展：AP/local-interface 路径规划（尚未完成第二 Listener）
+- [x] 新增 `LanChatListenerPathPlan`：单路径严格一个 primary；STA + 一个未表示本地候选时规划 secondary；优先 Android Network primary。
+- [x] 网络路径 fingerprint 实际变化后才刷新聊天路径计划；不在单包/发送快路径枚举接口。
+- [x] Java 测试覆盖单路径、STA+AP候选、仅本地候选、稳定排序和非法输入。
+- [ ] 增加热点状态变化的按需事件触发，避免依赖接口名猜测 AP。
+- [ ] 第二聊天 Listener 真正 per-path socket/thread 生命周期接入；不能只停留在计划对象。
+- [ ] 多 Listener ingress、ACK、peer×path 独立认证与旧命令分发集成。
+- [ ] 真机确认 AP candidate 的实际角色与 exact-address bind 成功。
