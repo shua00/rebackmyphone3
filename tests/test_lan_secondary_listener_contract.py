@@ -21,13 +21,14 @@ class LanSecondaryListenerContractTests(unittest.TestCase):
         end = self.source.index(next_signature, start)
         return self.source[start:end]
 
-    def test_only_validated_local_interface_candidates_become_secondary(self):
+    def test_only_validated_path_plan_entries_become_secondary(self):
         reconcile = self._method(
             "private void reconcileLanChatSecondaryListeners(",
             "private void stopSecondaryLanChatListener(",
         )
         self.assertIn("desired.put(path.diagnosticFingerprint(), path)", reconcile)
         self.assertIn("instance.generation != generation", reconcile)
+        self.assertIn("LanChatListenerPathPlan.from(paths, preferredWifiNetwork)", self.source)
         self.assertIn("startSecondaryLanChatListener(path, generation)", reconcile)
 
     def test_secondary_listener_binds_exact_address_and_uses_path_snapshot(self):
