@@ -106,6 +106,26 @@ public final class LanChatPathRegistry {
     /** Call only after authenticated challenge/response and durable peer-route commit. */
     public synchronized PeerRoute recordVerifiedPeer(String peer, String path,
             InetSocketAddress endpoint, long verifiedAt, long expiresAt) {
+        return recordVerifiedPeerLocked(peer, path, endpoint, verifiedAt, expiresAt, null, -1L);
+    }
+
+    /**
+     * Exact-ingress admission: socket identity and generation are checked atomically with
+     * route insertion under the same monitor used by listener registration/replacement.
+     * A response received by an old socket can therefore never be stamped with a new epoch.
+     */
+    public synchronized PeerRoute recordVerifiedPeer(String peer, String path,
+            InetSocketAddress endpoint, long verifiedAt, long expiresAt,
+            DatagramSocket expectedSocket, long expectedGeneration) {
+        if (expectedSocket == null || expectedGeneration < 0L)
+            throw new IllegalArgumentException("Expected listener socket and generation are required");
+        return recordVerifiedPeerLocked(peer, path, endpoint, verifiedAt, expiresAt,
+                expectedSocket, expectedGeneration);
+    }
+
+    private PeerRoute recordVerifiedPeerLocked(String peer, String path,
+            InetSocketAddress endpoint, long verifiedAt, long expiresAt,
+            DatagramSocket expectedSocket, long expectedGeneration) {
         requireKey(peer, "peer id"); requireKey(path, "path fingerprint");
         if (endpoint == null || endpoint.isUnresolved()
                 || !(endpoint.getAddress() instanceof Inet4Address)
@@ -118,6 +138,9 @@ public final class LanChatPathRegistry {
         Listener listener = listeners.get(path);
         if (listener == null || !listener.isUsable())
             throw new IllegalStateException("Cannot verify a peer route without its active path listener");
+        if (expectedSocket != null && (listener.socket != expectedSocket
+                || listener.generation != expectedGeneration))
+            throw new IllegalStateException("Ingress listener epoch changed before peer route admission");
         Map<String, PeerRoute> peerRoutes = routes.get(peer);
         if (peerRoutes == null) { peerRoutes = new HashMap<>(); routes.put(peer, peerRoutes); }
         PeerRoute route = new PeerRoute(peer, path, endpoint, verifiedAt, expiresAt,
