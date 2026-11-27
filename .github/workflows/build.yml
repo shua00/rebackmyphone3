@@ -75,7 +75,7 @@ jobs:
           fi
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             base="${{ github.event.pull_request.base.sha }}"
-            if git diff --name-only "$base...\${{ github.sha }}" | grep -Eq '^(app/|build\\.gradle$|settings\\.gradle$|gradle\\.properties$|gradle/|gradlew$|gradlew\\.bat$|\\.github/workflows/build\\.yml$)'; then
+            if git diff --name-only "$base...${{ github.sha }}" | grep -Eq '^(app/|build\.gradle$|settings\.gradle$|gradle\.properties$|gradle/|gradlew$|gradlew\.bat$|\.github/workflows/build\.yml$)'; then
               echo "build_apk=true" >> "$GITHUB_OUTPUT"
             else
               echo "build_apk=false" >> "$GITHUB_OUTPUT"
