@@ -13,7 +13,7 @@
 - [ ] **当前 P0-A**：STA/AP 多 Listener 生命周期、socket ownership、generation 和按路径清理；三设备任意两台双向互通。
 - [x] **多路径感知前置**：服务启动时生成一次初始 LAN chat path plan；热点/AP 与 Tethering 状态广播仅在事件到达时触发一次候选快照刷新，不启动 Listener、不扫描轮询；OEM 广播不可用时 fail soft。
 - [x] **Listener 生命周期前置**：primary Listener 实例已纳入 path-keyed worker owner map；实例按身份安装/清理，避免旧 receive loop 移除同路径新实例；Java 单测覆盖双路径 owner 和 stale cleanup。
-- [ ] **多路径 secondary Listener 代码接入（待 CI/真机验证）**：已增加按已验证路径精确绑定的独立接收循环，支持额外 Android Wi-Fi Network 与未表示的 AP/local-interface candidate；只处理 authenticated P2P 帧。路径变化、generation handoff、显式重启和 Service teardown 会按实例身份停止旧 worker。普通单路径不创建额外 Listener；AP 广播/ACK、NAT/客户端隔离和三设备任意两台互通仍待真机验收。
+- [x] **多路径 secondary Listener 代码接入（CI 已通过，真机待验收）**：已增加按已验证路径精确绑定的独立接收循环，支持额外 Android Wi-Fi Network 与未表示的 AP/local-interface candidate；只处理 authenticated P2P 帧。路径变化、generation handoff、显式重启和 Service teardown 会按实例身份停止旧 worker。普通单路径不创建额外 Listener。AP 广播/ACK、NAT/客户端隔离和三设备任意两台互通仍待真机验收。
 - [x] **多 Listener 前置保护**：旧 UDP 管理命令去重提升为 TrackingService 级共享 `LanUdpCommandDeduplicator`，避免同一广播经 STA/AP 两个接收循环分别执行；仍待真实多 Listener runtime 集成验收。
 - [x] **去重并发回归保护**：Java 12 并发 ingress 单测验证同一广播仅一次接纳；Python 静态契约防止后续接收循环复制时退回局部去重表。
 - [ ] **当前 P0-A**：普通路由器两台或多台 Android/Python 设备快路径回归；不增加无关周期扫描、高频探测、每包全路径枚举或默认多路径重复发送。
