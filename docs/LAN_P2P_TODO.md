@@ -473,3 +473,9 @@
 - [x] 新增 Android loopback TCP 回归测试，覆盖相同的 Offer 与 Chunk 重放语义。
 - [x] Python 全量 CI（Run `45915399980`）通过，Android Gradle 单测及两种 APK 构建仍在执行中。
 - [ ] 后续继续覆盖断开导致 ACK 丢失后的新连接重新查询、损坏 receipt 失效后的缺片回补，以及两端真实 socket 互通；当前幂等测试不等同于跨进程/跨设备端到端验收。
+
+## 第二批次推进补充（2026-11-27）：取消清理语义对齐
+
+- [x] 发现 Python TCP `cancel` 过去只更新 SQLite 状态，没有像 Android 一样清理私有 staging 文件；修正为先持久化 `CANCELLED`，再清理 staging，最后发送 cancel ACK。重复取消仍按终态响应且清理可幂等重试。
+- [x] 新增 Python 回归测试，确认 ACK 返回后 staging 占用归零且任务状态为 `CANCELLED`（Run `45915548543` 全部通过）。
+- [x] 新增 Android 对应 loopback TCP 回归测试；当前最新 Android CI Run `45915577083` 正在验证。
