@@ -410,6 +410,26 @@ public class TrackingService extends Service implements LocationListener {
             new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CountDownLatch> pendingPeerChallenges =
             new java.util.concurrent.ConcurrentHashMap<>();
+    // A challenge nonce is valid only on the exact listener path/socket epoch that sent it.
+    private static final class PendingPeerChallengeIngress {
+        final String pathFingerprint;
+        final DatagramSocket socket;
+        final long generation;
+
+        PendingPeerChallengeIngress(String pathFingerprint, DatagramSocket socket, long generation) {
+            this.pathFingerprint = pathFingerprint;
+            this.socket = socket;
+            this.generation = generation;
+        }
+
+        boolean matches(String path, DatagramSocket ingressSocket, long ingressGeneration) {
+            return pathFingerprint != null && pathFingerprint.equals(path)
+                    && socket == ingressSocket && generation == ingressGeneration;
+        }
+    }
+
+    private final java.util.concurrent.ConcurrentHashMap<String, PendingPeerChallengeIngress>
+            pendingPeerChallengeIngress = new java.util.concurrent.ConcurrentHashMap<>();
     // Directed challenges are bound to the peer identity and exact source endpoint.
     // Broadcast discovery challenges intentionally leave both expectations unset.
     private final java.util.concurrent.ConcurrentHashMap<String, String> pendingPeerChallengeExpectedIds =
@@ -479,6 +499,7 @@ public class TrackingService extends Service implements LocationListener {
             verifiedChatPeerRouteVersions.clear();
         }
         pendingPeerChallenges.clear();
+        pendingPeerChallengeIngress.clear();
         pendingPeerChallengeExpectedIds.clear();
         pendingPeerChallengeExpectedEndpoints.clear();
         pendingPeerChallengeDispatches.clear();
@@ -2927,6 +2948,10 @@ public class TrackingService extends Service implements LocationListener {
         final String nonce = java.util.UUID.randomUUID().toString();
         final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
         pendingPeerChallenges.put(nonce, latch);
+        if (!registerPendingPeerChallengeIngress(nonce, socket)) {
+            clearPendingPeerChallenge(nonce);
+            return;
+        }
         if (!scheduleLanChatTask("secondary-peer-discovery-timeout-" + nonce,
                 () -> clearPendingPeerChallenge(nonce), LAN_PEER_CHALLENGE_TIMEOUT_MS)) {
             clearPendingPeerChallenge(nonce);
@@ -6620,6 +6645,11 @@ public class TrackingService extends Service implements LocationListener {
             String nonce = java.util.UUID.randomUUID().toString();
             java.util.concurrent.CountDownLatch peerLatch = new java.util.concurrent.CountDownLatch(1);
             pendingPeerChallenges.put(nonce, peerLatch);
+            if (!registerPendingPeerChallengeIngress(nonce, socket)) {
+                clearPendingPeerChallenge(nonce);
+                peerDiscoveryInFlight.set(false);
+                lastPeerDiscoveryAt = 0L;
+            } else {
             scheduleLanChatTask("peer-discovery-timeout", () -> {
                 if (pendingPeerChallenges.get(nonce) == peerLatch) {
                     clearPendingPeerChallenge(nonce);
@@ -6681,6 +6711,7 @@ public class TrackingService extends Service implements LocationListener {
                 peerDiscoveryInFlight.set(false);
                 lastPeerDiscoveryAt = 0L;
                 FileLogger.log(this, "CHAT", "P2P discovery queue full; retry on next send");
+            }
             }
         }
         routeProbeMs = Math.max(0L, android.os.SystemClock.elapsedRealtime()
@@ -7124,9 +7155,22 @@ public class TrackingService extends Service implements LocationListener {
                 expectedPeerId, new java.net.InetSocketAddress(address, port));
     }
 
+    private boolean registerPendingPeerChallengeIngress(String nonce, DatagramSocket socket) {
+        if (nonce == null || nonce.isEmpty() || socket == null || socket.isClosed()) return false;
+        for (LanChatListenerRuntime.Lease lease : lanChatListenerRuntime.snapshot()) {
+            if (lease != null && lease.socket == socket && lanChatListenerRuntime.isCurrent(lease)) {
+                pendingPeerChallengeIngress.put(nonce, new PendingPeerChallengeIngress(
+                        lease.pathFingerprint, socket, lease.generation));
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void clearPendingPeerChallenge(String nonce) {
         if (nonce == null || nonce.isEmpty()) return;
         pendingPeerChallenges.remove(nonce);
+        pendingPeerChallengeIngress.remove(nonce);
         pendingPeerChallengeExpectedIds.remove(nonce);
         pendingPeerChallengeExpectedEndpoints.remove(nonce);
     }
@@ -7142,6 +7186,10 @@ public class TrackingService extends Service implements LocationListener {
         java.util.concurrent.CountDownLatch challengeLatch =
                 new java.util.concurrent.CountDownLatch(1);
         pendingPeerChallenges.put(nonce, challengeLatch);
+        if (!registerPendingPeerChallengeIngress(nonce, socket)) {
+            clearPendingPeerChallenge(nonce);
+            return;
+        }
         if (expectedPeerId != null && expectedEndpoint != null) {
             pendingPeerChallengeExpectedIds.put(nonce, expectedPeerId);
             pendingPeerChallengeExpectedEndpoints.put(nonce, expectedEndpoint);
@@ -7318,6 +7366,11 @@ public class TrackingService extends Service implements LocationListener {
                 if (ackIngressPath == null || ackIngressGeneration < 0L) return true;
                 String nonce = envelope.optString("reply_nonce", "");
                 java.util.concurrent.CountDownLatch latch = pendingPeerChallenges.get(nonce);
+                PendingPeerChallengeIngress challengeIngress = pendingPeerChallengeIngress.get(nonce);
+                if (challengeIngress == null
+                        || !challengeIngress.matches(ackIngressPath, socket, ackIngressGeneration)
+                        || !isCurrentLanChatIngress(challengeIngress.pathFingerprint,
+                                challengeIngress.socket, challengeIngress.generation)) return true;
                 int port = packet.getPort();
                 final java.net.InetAddress peerAddress = packet.getAddress();
                 String expectedPeerId = pendingPeerChallengeExpectedIds.get(nonce);
@@ -7336,6 +7389,7 @@ public class TrackingService extends Service implements LocationListener {
                     // so every peer in the bounded discovery window can be collected.
                     if (expectedPeerId != null) {
                         if (!pendingPeerChallenges.remove(nonce, latch)) return true;
+                        pendingPeerChallengeIngress.remove(nonce, challengeIngress);
                         pendingPeerChallengeExpectedIds.remove(nonce);
                         pendingPeerChallengeExpectedEndpoints.remove(nonce);
                     }
