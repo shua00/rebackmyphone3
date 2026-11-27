@@ -4249,7 +4249,7 @@ class AndroidFixedTargetImmediateDispatchTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
         send = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
-        self.assertIn("getFreshPeerRouteBinding(", send)
+        self.assertIn("LanAdaptiveRouteSelector.selectPrimaryBinding(", send)
         self.assertIn("dispatchBindings.put(target.peerId, liveBinding)", send)
         self.assertIn("dispatchEndpoints.put(target.peerId, liveBinding.route.endpoint)", send)
         self.assertIn("target.endpointIp", send)
@@ -4724,9 +4724,9 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         self.assertLess(resolve, lock)
         self.assertIn("preparedCachedEndpoints.put(target.peerId", send)
         self.assertIn("preparedCachedEndpoints.get(target.peerId)", internal)
-        self.assertIn("getFreshPeerRouteBinding(", internal)
+        self.assertIn("LanAdaptiveRouteSelector.selectPrimaryBinding(", internal)
         self.assertIn("if (activeChatListenerCount == 1)", internal)
-        self.assertLess(internal.index("getFreshPeerRouteBinding("),
+        self.assertLess(internal.index("LanAdaptiveRouteSelector.selectPrimaryBinding("),
                         internal.index("preparedCachedEndpoints.get(target.peerId)"))
         self.assertNotIn("InetAddress.getByName(target.endpointIp)", internal)
         self.assertIn("preLockEndpointResolveMs=", internal)
