@@ -52,6 +52,22 @@ class LanTransferDiscoveryIsolationTests(unittest.TestCase):
         self.assertIn("private void closeLanTransferPairingControlHostLocked()", service)
         self.assertNotIn("lanTransferPairingControlFingerprint", service)
 
+    def test_file_sender_uses_all_fresh_endpoints_on_their_exact_active_paths(self):
+        service = self.read("LanTransferSenderService.java")
+        worker = self.read("LanTransferSenderWorker.java")
+        self.assertIn("LanTransferPeerDirectory.findCurrentAll", service)
+        self.assertIn("candidate.networkFingerprint", service)
+        self.assertIn("currentLanNetworkPaths()", service)
+        self.assertIn("LanTransferPathSet.select(wifi,localCandidates,excludedInterfaces)", service)
+        self.assertIn("TRANSPORT_CELLULAR", service)
+        self.assertIn("TRANSPORT_VPN", service)
+        self.assertIn("currentLanNetworkPaths()", worker)
+        self.assertIn("endpoint.networkFingerprint.equals(path.diagnosticFingerprint())", worker)
+        self.assertIn("sendOfferAcrossCurrentPaths()", worker)
+        self.assertIn("connectAndSendAcrossCurrentPaths()", worker)
+        self.assertIn("bounded.size() < 4", worker)
+        self.assertIn("No active endpoint/path pair", worker)
+
     def test_tracking_service_owns_discovery_lifecycle_and_feature_gate(self):
         service = self.read("TrackingService.java")
         self.assertIn("refreshLanTransferDiscovery(reason);", service)
