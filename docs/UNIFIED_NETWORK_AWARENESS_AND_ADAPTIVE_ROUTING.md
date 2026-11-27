@@ -94,8 +94,9 @@
 
 ### P0-A：架构契约与当前 IPv4 基础（现在）
 - [x] 建立统一网络感知与自适应路由架构原则。
-- [ ] 完成 LAN 聊天发送端从 peer-wide endpoint 迁移到 path-scoped RouteBinding。
-- [ ] 多 listener 生命周期、generation、socket ownership 与失效清理按路径隔离。
+- [x] LAN 聊天发送端已使用 path-scoped RouteBinding；单 Listener 快路径和 binding 复核已接入。
+- [x] 新增 `LanChatListenerRuntime` path-keyed lease owner，并将当前单 Wi-Fi Listener 的注册/注销接入；该步骤只统一现有单 Listener 的 lease 生命周期。
+- [ ] 将接收线程、socket 发布/关闭、generation 和 Network path snapshot 全部迁移为真正的 per-path listener instances；STA/AP 并行 Listener 仍未完成。
 - [ ] STA/AP 双路径分别认证、双向验证；三台设备任意两台双向通信。
 - [ ] 普通路由器多 peer 快路径回归，不引入常驻扫描/探测或冗余 fan-out。
 
