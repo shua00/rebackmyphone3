@@ -293,6 +293,33 @@ public class TrackingService extends Service implements LocationListener {
     private final java.util.Set<String> pendingLanChatReceives =
             java.util.Collections.newSetFromMap(
                     new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+    // A single durable inbox commit may satisfy duplicate deliveries received on several paths.
+    // Keep each ingress socket/path lease so every still-current path can receive its own ACK.
+    private static final class PendingLanChatAckTarget {
+        final DatagramSocket socket;
+        final java.net.InetAddress address;
+        final int port;
+        final String pathFingerprint;
+        final long generation;
+
+        PendingLanChatAckTarget(DatagramSocket socket, java.net.InetAddress address, int port,
+                String pathFingerprint, long generation) {
+            this.socket = socket;
+            this.address = address;
+            this.port = port;
+            this.pathFingerprint = pathFingerprint;
+            this.generation = generation;
+        }
+    }
+
+    private static final class PendingLanChatReceive {
+        final java.util.List<PendingLanChatAckTarget> ackTargets = new java.util.ArrayList<>();
+        boolean completed;
+        boolean stored;
+    }
+
+    private final java.util.concurrent.ConcurrentHashMap<String, PendingLanChatReceive>
+            pendingLanChatV2Receives = new java.util.concurrent.ConcurrentHashMap<>();
     // LAN 对讲先持久化消息正文与消息 ID，再发 ACK；防止进程在 ACK 后、历史写入前退出。
     private final Object lanChatReceiveLock = new Object();
     private static final String PREF_LAN_CHAT_RECEIVED_IDS = "lan_chat_received_message_ids";
@@ -7455,13 +7482,27 @@ public class TrackingService extends Service implements LocationListener {
                         || messageId.isEmpty()
                         || !(targetId.equals("*") || targetId.equals(getUniqueDeviceId()))) return true;
                 String receiveKey = senderId + ":" + messageId;
-                if (!pendingLanChatReceives.add(receiveKey)) {
-                    // A copy of this message is already being durably committed. Do not
-                    // enqueue duplicate work; the in-flight copy will ACK after persistence.
+                final PendingLanChatAckTarget ackTarget = new PendingLanChatAckTarget(
+                        socket, packet.getAddress(), packet.getPort(),
+                        listenerPathFingerprint, listenerGeneration);
+                final PendingLanChatReceive candidate = new PendingLanChatReceive();
+                PendingLanChatReceive receive = pendingLanChatV2Receives.putIfAbsent(
+                        receiveKey, candidate);
+                final boolean ownsReceive = receive == null;
+                if (ownsReceive) receive = candidate;
+                final PendingLanChatReceive pendingReceive = receive;
+                boolean ackAlreadyCommitted;
+                synchronized (pendingReceive) {
+                    pendingReceive.ackTargets.add(ackTarget);
+                    ackAlreadyCommitted = pendingReceive.completed && pendingReceive.stored;
+                }
+                if (!ownsReceive) {
+                    // If the durable commit completed while this duplicate was arriving,
+                    // ACK this ingress now; otherwise the owning worker will ACK it.
+                    if (ackAlreadyCommitted) sendLanChatReceiveAck(
+                            ackTarget, senderId, messageId);
                     return true;
                 }
-                final java.net.InetAddress ackAddress = packet.getAddress();
-                final int ackPort = packet.getPort();
                 try {
                     lanChatIoExecutor.execute(() -> {
                         long dispatchQueueMs = android.os.SystemClock.elapsedRealtime()
@@ -7477,24 +7518,33 @@ public class TrackingService extends Service implements LocationListener {
                                         + " durableTotalMs=" + receiveTotalMs
                                         + " stored=" + stored);
                             }
+                            java.util.List<PendingLanChatAckTarget> ackTargets;
+                            synchronized (pendingReceive) {
+                                pendingReceive.stored = stored;
+                                pendingReceive.completed = true;
+                                ackTargets = new java.util.ArrayList<>(pendingReceive.ackTargets);
+                            }
                             if (stored) {
-                                boolean ackSent = sendAuthenticatedChatAck(
-                                        socket, ackAddress, ackPort, senderId, messageId);
+                                int ackCount = 0;
+                                for (PendingLanChatAckTarget target : ackTargets) {
+                                    if (sendLanChatReceiveAck(target, senderId, messageId)) ackCount++;
+                                }
                                 // The SQLite inbox commit is the delivery boundary. Project
-                                // into SharedPreferences/UI only after the ACK has been dispatched.
+                                // into SharedPreferences/UI only after ACK dispatch was attempted.
                                 scheduleLanChatInboxProjection();
                                 FileLogger.log(this, "CHAT", "P2P RX durable message=" + messageId
-                                        + " sender=" + senderId + " persisted=true ackSent=" + ackSent);
+                                        + " sender=" + senderId + " persisted=true ackPaths="
+                                        + ackCount + "/" + ackTargets.size());
                             } else {
                                 FileLogger.log(this, "CHAT", "P2P RX message=" + messageId
                                         + " sender=" + senderId + " persisted=false ackSent=false");
                             }
                         } finally {
-                            pendingLanChatReceives.remove(receiveKey);
+                            pendingLanChatV2Receives.remove(receiveKey, pendingReceive);
                         }
                     });
                 } catch (java.util.concurrent.RejectedExecutionException rejected) {
-                    pendingLanChatReceives.remove(receiveKey);
+                    pendingLanChatV2Receives.remove(receiveKey, pendingReceive);
                 }
                 return true;
             }
@@ -7502,6 +7552,17 @@ public class TrackingService extends Service implements LocationListener {
             FileLogger.logD("UDP", "authenticated LAN packet rejected: " + e.getClass().getSimpleName());
         }
         return true;
+    }
+
+    private boolean sendLanChatReceiveAck(PendingLanChatAckTarget target,
+                                          String senderPeerId, String messageId) {
+        if (target == null || target.socket == null || target.socket.isClosed()
+                || target.address == null) return false;
+        if (target.pathFingerprint != null && !target.pathFingerprint.isEmpty()
+                && !isCurrentLanChatIngress(target.pathFingerprint, target.socket,
+                        target.generation)) return false;
+        return sendAuthenticatedChatAck(target.socket, target.address, target.port,
+                senderPeerId, messageId);
     }
 
     private boolean isCurrentLanChatIngress(String path, DatagramSocket socket, long generation) {
