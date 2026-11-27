@@ -110,4 +110,42 @@ public class LanTransferPeerDirectoryTest {
         assertEquals(LanTransferPeerDirectory.SOURCE_FILE_DISCOVERY,
                 LanTransferPeerDirectory.loadCurrent(context,NOW+1000).get(0).source);
     }
+
+    @Test public void onePeerCanRetainEndpointsOnStaAndHotspotPaths() {
+        LanTransferPeerDirectory.activateNetworks(context,
+                java.util.Arrays.asList("wifi:sta", "ap:hotspot"));
+        LanTransferPeerDirectory.recordFileDiscoveryCandidate(context, "peer-multi",
+                "192.168.1.20", 38471, 38472, "wifi:sta", NOW);
+        LanTransferPeerDirectory.recordFileDiscoveryCandidate(context, "peer-multi",
+                "192.168.43.20", 38471, 38472, "ap:hotspot", NOW + 10);
+        java.util.List<LanTransferPeerDirectory.Candidate> endpoints =
+                LanTransferPeerDirectory.findCurrentAll(context, "peer-multi", NOW + 20);
+        assertEquals(2, endpoints.size());
+        assertEquals(2, LanTransferPeerDirectory.loadCurrentAll(context, NOW + 20).size());
+        assertEquals(1, new java.util.HashSet<String>() {{
+            for (LanTransferPeerDirectory.Candidate endpoint : endpoints) add(endpoint.peerId);
+        }}.size());
+    }
+
+    @Test public void removingOnePathDoesNotRevokeOtherPathEndpoint() {
+        LanTransferPeerDirectory.activateNetworks(context,
+                java.util.Arrays.asList("wifi:sta", "ap:hotspot"));
+        LanTransferPeerDirectory.recordFileDiscoveryCandidate(context, "peer-multi",
+                "192.168.1.20", 38471, "wifi:sta", NOW);
+        LanTransferPeerDirectory.recordFileDiscoveryCandidate(context, "peer-multi",
+                "192.168.43.20", 38471, "ap:hotspot", NOW);
+        LanTransferPeerDirectory.deactivateNetwork(context, "ap:hotspot");
+        java.util.List<LanTransferPeerDirectory.Candidate> endpoints =
+                LanTransferPeerDirectory.findCurrentAll(context, "peer-multi", NOW + 1);
+        assertEquals(1, endpoints.size());
+        assertEquals("wifi:sta", endpoints.get(0).networkFingerprint);
+    }
+
+    @Test public void samePathCanRetainDistinctEndpointsForOnePeer() {
+        LanTransferPeerDirectory.recordFileDiscoveryCandidate(context, "peer-multi",
+                "192.168.1.20", 38471, "wifi:test", NOW);
+        LanTransferPeerDirectory.recordFileDiscoveryCandidate(context, "peer-multi",
+                "192.168.1.21", 38471, "wifi:test", NOW + 1);
+        assertEquals(2, LanTransferPeerDirectory.findCurrentAll(context, "peer-multi", NOW + 2).size());
+    }
 }
