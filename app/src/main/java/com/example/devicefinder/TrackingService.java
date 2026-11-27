@@ -6330,8 +6330,8 @@ public class TrackingService extends Service implements LocationListener {
             // The common single-path case uses a direct O(1) peer+path lookup: no route-list
             // allocation, cross-interface scan, or peer-wide endpoint authorization.
             LanChatPathRegistry.RouteBinding liveBinding =
-                    lanChatPathRegistry.getFreshPeerRouteBinding(
-                            target.peerId, preferredChatPath, routeLookupNow);
+                    LanAdaptiveRouteSelector.selectPrimaryBinding(
+                            lanChatPathRegistry, target.peerId, preferredChatPath, routeLookupNow);
             if (liveBinding != null && lanChatPathRegistry.isCurrentBinding(liveBinding)) {
                 dispatchBindings.put(target.peerId, liveBinding);
                 dispatchEndpoints.put(target.peerId, liveBinding.route.endpoint);
