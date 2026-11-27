@@ -44,6 +44,22 @@ public final class LanChatPathRegistry {
         }
     }
 
+    /** Immutable route + exact listener epoch captured under the registry lock. */
+    public static final class RouteBinding {
+        public final PeerRoute route;
+        public final Listener listener;
+        private RouteBinding(PeerRoute route, Listener listener) {
+            this.route = route;
+            this.listener = listener;
+        }
+        public boolean isCurrentAndUsable() {
+            return listener != null && listener.isUsable()
+                    && route != null
+                    && route.pathFingerprint.equals(listener.pathFingerprint)
+                    && route.listenerGeneration == listener.generation;
+        }
+    }
+
     private final Map<String, Listener> listeners = new HashMap<>();
     private final Map<String, Map<String, PeerRoute>> routes = new HashMap<>();
 
@@ -110,32 +126,47 @@ public final class LanChatPathRegistry {
         return route;
     }
 
-    /** Fresh routes are returned newest-first, but only while their own listener is active. */
-    public synchronized List<PeerRoute> getFreshPeerRoutes(String peer, long now) {
+    /**
+     * Capture each fresh authenticated route together with the exact listener/socket epoch.
+     * This is the preferred send-side API: callers must not re-resolve a listener by path
+     * after obtaining a route, because a listener replacement could otherwise cross epochs.
+     */
+    public synchronized List<RouteBinding> getFreshPeerRouteBindings(String peer, long now) {
         Map<String, PeerRoute> peerRoutes = routes.get(peer);
         if (peerRoutes == null) return Collections.emptyList();
-        List<PeerRoute> result = new ArrayList<>();
+        List<RouteBinding> result = new ArrayList<>();
         Iterator<PeerRoute> iterator = peerRoutes.values().iterator();
         while (iterator.hasNext()) {
             PeerRoute route = iterator.next();
-            if (now >= route.expiresAtMs) iterator.remove();
-            else {
-                Listener listener = listeners.get(route.pathFingerprint);
-                if (listener == null || !listener.isUsable()
-                        || listener.generation != route.listenerGeneration) {
-                    iterator.remove();
-                } else {
-                    result.add(route);
-                }
+            if (now >= route.expiresAtMs) {
+                iterator.remove();
+                continue;
+            }
+            Listener listener = listeners.get(route.pathFingerprint);
+            if (listener == null || !listener.isUsable()
+                    || listener.generation != route.listenerGeneration) {
+                iterator.remove();
+            } else {
+                result.add(new RouteBinding(route, listener));
             }
         }
         if (peerRoutes.isEmpty()) routes.remove(peer);
-        Collections.sort(result, new Comparator<PeerRoute>() {
-            @Override public int compare(PeerRoute a, PeerRoute b) {
-                int newest = Long.compare(b.verifiedAtMs, a.verifiedAtMs);
-                return newest != 0 ? newest : a.pathFingerprint.compareTo(b.pathFingerprint);
+        Collections.sort(result, new Comparator<RouteBinding>() {
+            @Override public int compare(RouteBinding a, RouteBinding b) {
+                int newest = Long.compare(b.route.verifiedAtMs, a.route.verifiedAtMs);
+                return newest != 0 ? newest
+                        : a.route.pathFingerprint.compareTo(b.route.pathFingerprint);
             }
         });
+        return Collections.unmodifiableList(result);
+    }
+
+    /** Compatibility view for callers that only need endpoint metadata. */
+    public synchronized List<PeerRoute> getFreshPeerRoutes(String peer, long now) {
+        List<RouteBinding> bindings = getFreshPeerRouteBindings(peer, now);
+        if (bindings.isEmpty()) return Collections.emptyList();
+        List<PeerRoute> result = new ArrayList<>(bindings.size());
+        for (RouteBinding binding : bindings) result.add(binding.route);
         return Collections.unmodifiableList(result);
     }
 
