@@ -261,7 +261,7 @@ public class LanChatPathRegistryTest {
             InetSocketAddress apEndpoint = endpoint("192.168.43.2");
             registry.registerListener(s, sta, 61);
             registry.registerListener(a, ap, 72);
-            registry.recordVerifiedPeer("peer", s, staEndpoint, NOW, NOW + 200);
+            registry.recordVerifiedPeer("peer", s, staEndpoint, NOW, NOW + 100);
             registry.recordVerifiedPeer("peer", a, apEndpoint, NOW, NOW + 100);
 
             LanChatPathRegistry.RouteBinding staBinding =
@@ -314,7 +314,7 @@ public class LanChatPathRegistryTest {
             registry.registerListener(a, ap, 92);
             InetSocketAddress staEndpoint = endpoint("192.168.1.31");
             InetSocketAddress apEndpoint = endpoint("192.168.43.2");
-            registry.recordVerifiedPeer("peer", s, staEndpoint, NOW, NOW + 100);
+            registry.recordVerifiedPeer("peer", s, staEndpoint, NOW, NOW + 200);
             registry.recordVerifiedPeer("peer", a, apEndpoint, NOW, NOW + 100);
 
             LanChatPathRegistry.RouteBinding preferred =
