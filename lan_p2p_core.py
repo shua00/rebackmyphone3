@@ -1073,7 +1073,11 @@ def send_outgoing_fragment_window(sock, db_path, sender_scope, message_id, peer_
         return 0
     first_missing = bitmap.find("0")
     if first_missing < 0:
-        indices = [len(packets) - 1]  # one completion probe; receiver suppresses duplicate fragment ACKs
+        # Completion probes are recovery traffic, not ACK-driven window advancement.
+        # Require the same durable retry admission as any other recovery resend.
+        if not mark_attempt:
+            return 0
+        indices = [len(packets) - 1]  # receiver suppresses duplicate fragment ACKs
     else:
         if not mark_attempt and first_missing % 8 != 0:
             return 0  # ACK-driven advancement waits for the current flight to complete
