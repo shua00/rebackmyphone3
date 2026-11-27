@@ -5775,7 +5775,7 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
         self.assertEqual(1, send_outgoing_fragment_window(
             sock, db_path, "rescue2", "tx-window", "peer-b", body, created,
             endpoint, "peer-a", "rescue2", "peer-a", "shared-secret",
-            mark_attempt=True, allow_fast_retry=True))
+            mark_attempt=False))
         self.assertEqual(before_probe + 1, len(sock.sent))
         self.assertEqual(len(bitmap) - 1,
                          decode_packet(sock.sent[-1][0], "shared-secret")["fragment_index"])
@@ -5822,14 +5822,14 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
                 ("stored", "duplicate"))
         self.assertEqual(len(fragments) - 1, len(load_incoming_chat_fragments(
             db_path, "rescue2", "peer-a", "rx-long-1", now_ms=1001)))
-        self.assertEqual("complete", store_incoming_chat_fragment(
+        self.assertEqual("completed", store_incoming_chat_fragment(
             db_path, "rescue2", "peer-a", order[-1], now_ms=1002))
         cached = load_incoming_chat_fragments(
             db_path, "rescue2", "peer-a", "rx-long-1", now_ms=1003)
         self.assertEqual(len(fragments), len(cached))
         self.assertEqual(body, assemble_chat_fragments(cached))
         # Completed rows are retained briefly so a duplicate tail can solicit a final ACK again.
-        self.assertEqual("complete", store_incoming_chat_fragment(
+        self.assertEqual("complete_duplicate", store_incoming_chat_fragment(
             db_path, "rescue2", "peer-a", order[-1], now_ms=1004))
 
     def test_python_incoming_fragment_store_rejects_metadata_drift_and_expires_sessions(self):
