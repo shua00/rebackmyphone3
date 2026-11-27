@@ -6559,7 +6559,7 @@ public class TrackingService extends Service implements LocationListener {
         for (LanChatStore.Target target : savedTargets) {
             if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
             if (target == null || target.peerId == null || "acked".equals(target.status)
-                    || verifiedChatPeers.containsKey(target.peerId)
+                    || hasFreshLanChatPeerRoute(target.peerId)
                     || target.endpointIp == null || target.endpointIp.isEmpty()
                     || !(target.endpointPort == 8888 || target.endpointPort == 8887
                          || target.endpointPort == 8889 || target.endpointPort == 8890)) {
@@ -6578,7 +6578,7 @@ public class TrackingService extends Service implements LocationListener {
                     try {
                         long queueMs = android.os.SystemClock.elapsedRealtime() - challengeQueuedAt;
                         if (serviceDestroyed || !isCurrentLanChatSocket(socket, socketGeneration)
-                                || verifiedChatPeers.containsKey(challengePeerId)) return;
+                                || hasFreshLanChatPeerRoute(challengePeerId)) return;
                         java.net.InetAddress savedAddress = java.net.InetAddress.getByName(challengeIp);
                         if (!(savedAddress instanceof java.net.Inet4Address)
                                 || !savedAddress.isSiteLocalAddress()
@@ -6620,7 +6620,7 @@ public class TrackingService extends Service implements LocationListener {
                 if (target == null || target.peerId == null || "acked".equals(target.status)) continue;
                 // A missing route needs discovery immediately; an unacknowledged prior
                 // attempt also needs a route refresh in case the peer changed IP silently.
-                if (!verifiedChatPeers.containsKey(target.peerId) || target.attemptCount > 0) {
+                if (!hasFreshLanChatPeerRoute(target.peerId) || target.attemptCount > 0) {
                     discoveryNeeded = true;
                     break;
                 }
@@ -7344,10 +7344,19 @@ public class TrackingService extends Service implements LocationListener {
                             // existing sender to rediscover this device and resume its outbox.
                             // challenge_only prevents challenge ping-pong.
                             if (!challengeOnly) {
-                                java.net.InetSocketAddress verified = verifiedChatPeers.get(senderId);
-                                boolean sameRoute = verified != null
-                                        && verified.getAddress().equals(peerAddress)
-                                        && verified.getPort() == sourcePort;
+                                boolean sameRoute = false;
+                                if (helloIngressPath != null && helloIngressGeneration >= 0L) {
+                                    sameRoute = lanChatPathRegistry.findCurrentPeerRouteBinding(
+                                            senderId, helloIngressPath, socket, helloIngressGeneration,
+                                            new java.net.InetSocketAddress(peerAddress, sourcePort),
+                                            android.os.SystemClock.elapsedRealtime()) != null;
+                                } else if (lanChatPathRegistry.listenerCount() <= 1) {
+                                    // Preserve the path-less legacy bridge only for one listener.
+                                    java.net.InetSocketAddress verified = verifiedChatPeers.get(senderId);
+                                    sameRoute = verified != null
+                                            && verified.getAddress().equals(peerAddress)
+                                            && verified.getPort() == sourcePort;
+                                }
                                 if (!sameRoute) sendDirectedPeerChallenge(socket, senderId, peerAddress, sourcePort);
                             }
                         } catch (Exception persistOrSendError) {
@@ -7636,6 +7645,20 @@ public class TrackingService extends Service implements LocationListener {
         return listener != null && listener.socket == socket
                 && listener.generation == generation
                 && path.equals(listener.pathFingerprint) && listener.isUsable();
+    }
+
+    /**
+     * Peer-wide verifiedChatPeers is only a compatibility/member cache. A live route must
+     * exist in the path-scoped registry for at least one current listener before it may
+     * suppress discovery or a directed challenge.
+     */
+    private boolean hasFreshLanChatPeerRoute(String peerId) {
+        if (peerId == null || peerId.trim().isEmpty()) return false;
+        long now = android.os.SystemClock.elapsedRealtime();
+        LanChatPathRegistry.RouteBinding binding =
+                LanAdaptiveRouteSelector.selectPrimaryBinding(
+                        lanChatPathRegistry, peerId, rescueSocketPathFingerprint, now);
+        return binding != null && lanChatPathRegistry.isCurrentBinding(binding);
     }
 
     private boolean isCurrentLanChatSendBinding(LanChatPathRegistry.RouteBinding binding,
