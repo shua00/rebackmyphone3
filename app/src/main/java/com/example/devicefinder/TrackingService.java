@@ -8756,9 +8756,13 @@ public class TrackingService extends Service implements LocationListener {
                             }
                         }
                     }
-                    lanChatListenerRuntime.removeInstance(listenerInstance);
+                    // Release the UDP port before relinquishing path ownership. Otherwise a
+                    // concurrent restart can claim this path while the old socket is still
+                    // bound, lose its bind with EADDRINUSE, and unnecessarily enter backoff.
                     if (!rescueSocket.isClosed()) rescueSocket.close();
+                    lanChatListenerRuntime.removeInstance(listenerInstance);
                 } else {
+                    // No socket was acquired, so there is no bound port to release first.
                     lanChatListenerRuntime.removeInstance(listenerInstance);
                 }
                 final boolean networkGenerationChanged;
