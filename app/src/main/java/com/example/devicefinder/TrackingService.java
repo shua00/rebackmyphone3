@@ -2373,6 +2373,61 @@ public class TrackingService extends Service implements LocationListener {
         return (java.net.Inet4Address) java.net.InetAddress.getByAddress(bytes);
     }
 
+    /**
+     * Enumerate every independently represented Wi-Fi Network plus one unrepresented local
+     * AP interface. Unlike selectLanTransferPath(), this snapshot does not prefer the default
+     * route: STA and hotspot AP are concurrent local paths, not mutually exclusive choices.
+     */
+    private LanTransferPathSet currentLanTransferPathSet(ConnectivityManager cm)
+            throws java.io.IOException {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M)
+            throw new java.io.IOException("LAN socket binding requires API 23+");
+        if (cm == null) throw new java.io.IOException("ConnectivityManager unavailable");
+        List<LanNetworkPath> wifiPaths = new ArrayList<>();
+        boolean incomplete = false;
+        try {
+            for (Network network : cm.getAllNetworks()) {
+                NetworkCapabilities capabilities = cm.getNetworkCapabilities(network);
+                if (capabilities == null) {
+                    incomplete = true;
+                    continue;
+                }
+                if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue;
+                LinkProperties links = cm.getLinkProperties(network);
+                if (links == null || links.getInterfaceName() == null
+                        || links.getInterfaceName().isEmpty() || links.getLinkAddresses() == null) {
+                    incomplete = true;
+                    continue;
+                }
+                boolean foundIpv4 = false;
+                for (LinkAddress item : links.getLinkAddresses()) {
+                    if (item == null || !(item.getAddress() instanceof java.net.Inet4Address)) continue;
+                    java.net.Inet4Address address = (java.net.Inet4Address) item.getAddress();
+                    int prefix = item.getPrefixLength();
+                    if (!LanNetworkPath.isUsableLanIpv4(address) || prefix < 1 || prefix > 32) continue;
+                    wifiPaths.add(LanNetworkPath.fromAndroidNetwork(network,
+                            links.getInterfaceName(), address, prefix,
+                            computeLanBroadcastAddress(address, prefix)));
+                    foundIpv4 = true;
+                }
+                if (!foundIpv4) incomplete = true;
+            }
+            // An incomplete Wi-Fi snapshot could conceal another active STA path. Do not
+            // publish a partial path set that might revoke a still-live endpoint.
+            if (incomplete && wifiPaths.isEmpty())
+                throw new java.io.IOException("No complete Wi-Fi Network path snapshot");
+            List<LanNetworkPath> localCandidates = enumerateUnrepresentedLanCandidates(cm);
+            java.util.Set<String> excludedInterfaces = new java.util.HashSet<>();
+            // The enumerator already excludes cellular/VPN interfaces. The path-set selector
+            // additionally removes interfaces/addresses represented by Wi-Fi Networks.
+            return LanTransferPathSet.select(wifiPaths, localCandidates, excludedInterfaces);
+        } catch (java.io.IOException failure) {
+            throw failure;
+        } catch (Exception failure) {
+            throw new java.io.IOException("Unable to enumerate concurrent LAN paths", failure);
+        }
+    }
+
     private LanNetworkPath selectLanTransferPath(ConnectivityManager cm) throws java.io.IOException {
         Network selected = selectWifiLanNetwork(cm);
         if (selected != null) {
