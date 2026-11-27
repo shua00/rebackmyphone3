@@ -174,5 +174,25 @@ class LanSecondaryListenerContractTests(unittest.TestCase):
         self.assertNotIn("postDelayed", finally_block[reconcile_index:reconcile_index + 300])
 
 
+    def test_secondary_listener_unexpected_failure_uses_path_scoped_bounded_backoff(self):
+        secondary = self._method(
+            "private void startSecondaryLanChatListener(",
+            "private boolean isSecondaryPathStillPlanned(",
+        )
+        self.assertIn("secondaryListenerRetryAttempts.remove(fingerprint)", secondary)
+        self.assertIn("!instance.isStopRequested() && !serviceDestroyed", secondary)
+        self.assertIn("generation == lanSocketGeneration.get()", secondary)
+        self.assertIn("isSecondaryPathStillPlanned(fingerprint)", secondary)
+        self.assertIn("attempts.incrementAndGet()", secondary)
+        self.assertIn("Math.min(300_000L, 5_000L * Math.pow(3", secondary)
+        self.assertIn('"secondary-listener-retry-" + fingerprint', secondary)
+        self.assertIn("lanChatListenerRuntime.getInstance(fingerprint) == null", secondary)
+        self.assertIn("startSecondaryLanChatListener(path, generation)", secondary)
+        self.assertNotIn("postDelayed", secondary)
+
+        source = self.source
+        self.assertIn("stable single-listener fast path never allocates retry tasks", source)
+
+
 if __name__ == "__main__":
     unittest.main()
