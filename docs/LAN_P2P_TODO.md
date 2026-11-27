@@ -484,4 +484,15 @@
 ## 第二批次推进补充（2026-11-27）：ACK 未被发送端观察后的跨连接恢复
 
 - [x] 新增 Python 与 Android 回归场景：接收端已持久化 Chunk 并发送 ACK，但发送端主动关闭连接且不读取 ACK；随后建立新 TCP 会话，重新查询 Missing 页面，必须以 durable receipt 为准跳过已落盘分片并完成剩余分片。
-- [ ] 两端新增测试等待 CI 验证；该测试覆盖应用层未观察到 ACK 的断线恢复路径，不模拟物理网络设备丢包或 Wi-Fi/AP 切换。
+- [x] Python 全量 CI（Run `45915852728`，414 tests）通过；Android ACK 丢失恢复 CI（Run `45915890221`）的 `validate-python`、`detect-android-changes`、`build` 三个 job 全部 success。该测试覆盖应用层未观察到 ACK 的断线恢复路径，不模拟物理网络设备丢包或 Wi-Fi/AP 切换。
+
+## 第二批次推进补充（2026-11-27）：损坏 receipt、多页 Missing 与终态重放
+
+- [x] 新增 Python 损坏 staging chunk 回归测试：receipt 已存在但文件字节被篡改时，`reconcile_page` 必须删除无效 receipt、重新报告缺片；重新发送正确 Chunk 后 receipt 恢复有效。
+- [x] 新增 Android 对应回归测试：修改 `payload.part` 已落盘字节后，`reconcilePage` 必须失效对应 receipt、回到可补传状态；正确 Chunk 可重新落盘并生成 durable receipt。
+- [x] 新增 Python 130-chunk 多页恢复测试：按每连接 62 个 chunk 的预算，跨三条认证 TCP 连接依次处理 62/62/6 个 chunk，验证 Missing 页持续前进、无重复死循环、最终 SHA-256 与发布文件完全一致。
+- [x] 新增 Android 对应 130-chunk/三次认证重连测试，验证同一多页语义和最终文件内容。
+- [x] 新增 Python 与 Android 终态重放测试：已完成任务重复 `complete` 返回 completed；随后重放 `cancel` 仍返回 completed，不能回退状态或删除已发布文件。
+- [ ] 上述新增 Python/Android 回归测试已提交，等待本批 CI；不能以提交成功代替测试通过。
+- [ ] 多页协议当前采用“每次连接从 Missing 起点重新查询、发送本连接首批缺片、Complete 再返回下一批缺片”的有界推进方式；`more` 是提示后面仍有缺片，不代表客户端必须在同一连接无限翻页。跨连接测试用于证明该约定无漏片/死循环。
+- [ ] Android↔Python 运行时真实跨语言 TCP 互通仍是独立验收项：当前 golden vectors、双方本地 loopback 和跨连接语义测试尚不能替代 JVM Android 客户端与 Python 服务端（及反向）的真实 socket 互通。
