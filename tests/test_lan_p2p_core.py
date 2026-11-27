@@ -5874,6 +5874,42 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
 
 
 class LongChatReceiveAndRescueDiagnosticsTests(unittest.TestCase):
+    def test_all_python_chat_endpoints_receive_and_send_durable_long_messages(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        core = (repo_root / "lan_p2p_core.py").read_text(encoding="utf-8")
+        self.assertIn("fragment_count INTEGER NOT NULL DEFAULT 0", core)
+        self.assertIn("fragment_ack_bitmap TEXT NOT NULL DEFAULT ''", core)
+        self.assertIn("MAX_CHAT_FRAGMENT_SESSIONS = 32", core)
+        self.assertIn("MAX_CHAT_FRAGMENT_CACHE_CHARS = 2 * 1024 * 1024", core)
+        self.assertIn('packet_type in ("chat.ack", "chat.fragment.ack")', core)
+        for filename in ("rescue2.py", "chat.py", "server2.py"):
+            with self.subTest(service=filename):
+                source = (repo_root / filename).read_text(encoding="utf-8")
+                start = source.index("def _handle_authenticated_v2_packet(")
+                end = source.find("\\ndef ", start + 5)
+                handler = source[start:end if end >= 0 else len(source)]
+                receive = handler[handler.index('if packet_type == "chat.fragment":'):]
+                self.assertLess(receive.index("store_incoming_chat_fragment("),
+                                receive.index("sock.sendto(encode_packet(fragment_ack"))
+                self.assertLess(receive.index("sock.sendto(encode_packet(fragment_ack"),
+                                receive.index("assemble_chat_fragments("))
+                self.assertLess(receive.index("assemble_chat_fragments("),
+                                receive.index("_claim_chat_message("))
+                self.assertLess(receive.index("_claim_chat_message("),
+                                receive.index("sock.sendto(encode_packet(final_ack"))
+                ack = handler[handler.index('if packet_type == "chat.fragment.ack":'):
+                              handler.index('if packet_type == "chat.ack":')]
+                self.assertIn("record_outgoing_fragment_ack(", ack)
+                self.assertIn("_V2_FRAGMENT_WINDOW_PEERS.add(sender)", ack)
+                self.assertIn("def _advance_v2_fragment_windows(", source)
+                self.assertIn("send_outgoing_fragment_window(", source)
+                self.assertIn("send_discovery_fragment_window(", source)
+        server = (repo_root / "server2.py").read_text(encoding="utf-8")
+        self.assertIn("load_outgoing_message(CHAT_DEDUP_DB, \"server2\", message_id)", server)
+        self.assertIn('packet["_outbox_long"] = True', server)
+        chat = (repo_root / "chat.py").read_text(encoding="utf-8")
+        self.assertIn("build_authenticated_chat_fragment_packets(", chat)
+
     def test_android_fragment_receive_persists_then_assembles_then_final_acks(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
