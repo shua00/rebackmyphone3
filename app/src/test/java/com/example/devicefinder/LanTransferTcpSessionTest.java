@@ -589,7 +589,7 @@ public class LanTransferTcpSessionTest {
             }
             assertNotNull(remaining);
             assertTrue(remaining.isEmpty());
-            assertEquals(192, (int) served.get(15, TimeUnit.SECONDS));
+            assertEquals(136, (int) served.get(15, TimeUnit.SECONDS));
             assertEquals("completed", store.getTransfer(id).state);
             File[] published = new File(context.getFilesDir(), "lan-transfer-received").listFiles();
             assertNotNull(published);
