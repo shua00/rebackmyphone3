@@ -6319,19 +6319,32 @@ public class TrackingService extends Service implements LocationListener {
         routeProbeMs = Math.max(0L, android.os.SystemClock.elapsedRealtime()
                 - routeProbeStartedAt);
         java.util.Map<String, java.net.InetSocketAddress> dispatchEndpoints = new java.util.HashMap<>();
+        java.util.Map<String, LanChatPathRegistry.RouteBinding> dispatchBindings =
+                new java.util.HashMap<>();
         java.util.Set<String> verifiedRoutePeerIds = new java.util.HashSet<>();
+        final int activeChatListenerCount = lanChatPathRegistry.listenerCount();
+        final String preferredChatPath = rescueSocketPathFingerprint;
+        final long routeLookupNow = android.os.SystemClock.elapsedRealtime();
         for (LanChatStore.Target target : savedTargets) {
             if (target == null || target.peerId == null || "acked".equals(target.status)) continue;
-            java.net.InetSocketAddress liveRoute = verifiedChatPeers.get(target.peerId);
-            if (liveRoute != null) {
-                dispatchEndpoints.put(target.peerId, liveRoute);
+            // The common single-path case uses a direct O(1) peer+path lookup: no route-list
+            // allocation, cross-interface scan, or peer-wide endpoint authorization.
+            LanChatPathRegistry.RouteBinding liveBinding =
+                    lanChatPathRegistry.getFreshPeerRouteBinding(
+                            target.peerId, preferredChatPath, routeLookupNow);
+            if (liveBinding != null && lanChatPathRegistry.isCurrentBinding(liveBinding)) {
+                dispatchBindings.put(target.peerId, liveBinding);
+                dispatchEndpoints.put(target.peerId, liveBinding.route.endpoint);
                 verifiedRoutePeerIds.add(target.peerId);
                 continue;
             }
-            // The durable endpoint was validated before FIFO admission. The stable
-            // target_peer_id still binds the packet to its intended recipient.
-            java.net.InetSocketAddress cachedRoute = preparedCachedEndpoints.get(target.peerId);
-            if (cachedRoute != null) dispatchEndpoints.put(target.peerId, cachedRoute);
+            // The legacy SQLite endpoint has no path identity. It remains a compatibility
+            // candidate only while exactly one chat listener exists; it is never allowed
+            // to authorize a send in a multi-listener topology.
+            if (activeChatListenerCount == 1) {
+                java.net.InetSocketAddress cachedRoute = preparedCachedEndpoints.get(target.peerId);
+                if (cachedRoute != null) dispatchEndpoints.put(target.peerId, cachedRoute);
+            }
         }
         java.util.Set<String> awaitingPeerIds = java.util.Collections.newSetFromMap(
                 new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
@@ -6422,7 +6435,9 @@ public class TrackingService extends Service implements LocationListener {
                 for (int attempt = 1; attempt <= 1 && ack.getCount() > 0; attempt++) {
                     if (socket.isClosed()) break;
                     for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
-                        if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
+                        LanChatPathRegistry.RouteBinding routeBinding = dispatchBindings.get(peerId);
+                        DatagramSocket peerSocket = routeBinding == null ? socket : routeBinding.listener.socket;
+                        if (!isCurrentLanChatSendBinding(routeBinding, socket, socketGeneration)) continue;
                         java.net.InetSocketAddress peer = dispatchEndpoints.get(peerId);
                         if (peer == null) continue;
                         try {
@@ -6451,6 +6466,10 @@ public class TrackingService extends Service implements LocationListener {
                             // may authorize a delayed chat.ack / chat.fragment.ack.
                             // Persist the exact endpoint before UDP dispatch and revalidate the
                             // immutable recipient snapshot immediately before any datagram.
+                            if (!isCurrentLanChatSendBinding(routeBinding, socket, socketGeneration)) {
+                                FileLogger.logD("CHAT", "P2P route binding expired before dispatch peer=" + peerId);
+                                continue;
+                            }
                             long targetAttemptDbStartedAt = android.os.SystemClock.elapsedRealtime();
                             boolean targetAttemptAllowed;
                             try {
@@ -6468,8 +6487,10 @@ public class TrackingService extends Service implements LocationListener {
                             if (peerData != null) {
                                 DatagramPacket p = new DatagramPacket(peerData, peerData.length,
                                         peer.getAddress(), peer.getPort());
+                                if (!isCurrentLanChatSendBinding(routeBinding, socket, socketGeneration))
+                                    throw new java.net.SocketException("stale LAN route binding");
                                 hadUdpDispatchAttempt.set(true);
-                                sendLanUdpPacket(socket, p, verifiedRoutePeerIds.contains(peerId)
+                                sendLanUdpPacket(peerSocket, p, verifiedRoutePeerIds.contains(peerId)
                                         ? "CHAT_UNICAST_VERIFIED" : "CHAT_UNICAST_CACHED_ENDPOINT");
                                 dispatchedAny = true;
                             } else {
@@ -6494,13 +6515,13 @@ public class TrackingService extends Service implements LocationListener {
                                 // skipped; when all are ACKed, resend the final fragment as a
                                 // completion probe until the whole-message chat.ack arrives.
                                 for (int i = windowStart; i < windowEnd; i++) {
-                                    if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
+                                    if (!isCurrentLanChatSendBinding(routeBinding, socket, socketGeneration)) break;
                                     if (bitmap.charAt(i) == '1') continue;
                                     byte[] fragmentPacket = peerFragments.get(i);
                                     DatagramPacket p = new DatagramPacket(fragmentPacket,
                                             fragmentPacket.length, peer.getAddress(), peer.getPort());
                                     hadUdpDispatchAttempt.set(true);
-                                    sendLanUdpPacket(socket, p, verifiedRoutePeerIds.contains(peerId)
+                                    sendLanUdpPacket(peerSocket, p, verifiedRoutePeerIds.contains(peerId)
                                             ? "CHAT_FRAGMENT_UNICAST_VERIFIED"
                                             : "CHAT_FRAGMENT_UNICAST_CACHED_ENDPOINT");
                                     dispatchedAny = true;
@@ -6509,8 +6530,10 @@ public class TrackingService extends Service implements LocationListener {
                                     byte[] finalProbe = peerFragments.get(peerFragments.size() - 1);
                                     DatagramPacket p = new DatagramPacket(finalProbe, finalProbe.length,
                                             peer.getAddress(), peer.getPort());
+                                    if (!isCurrentLanChatSendBinding(routeBinding, socket, socketGeneration))
+                                        throw new java.net.SocketException("stale LAN route binding");
                                     hadUdpDispatchAttempt.set(true);
-                                    sendLanUdpPacket(socket, p, "CHAT_FRAGMENT_COMPLETION_PROBE");
+                                    sendLanUdpPacket(peerSocket, p, "CHAT_FRAGMENT_COMPLETION_PROBE");
                                     dispatchedAny = true;
                                 }
                                 FileLogger.logD("CHAT", "P2P fragment window message=" + messageId
@@ -7119,6 +7142,16 @@ public class TrackingService extends Service implements LocationListener {
         return listener != null && listener.socket == socket
                 && listener.generation == generation
                 && path.equals(listener.pathFingerprint) && listener.isUsable();
+    }
+
+    private boolean isCurrentLanChatSendBinding(LanChatPathRegistry.RouteBinding binding,
+            DatagramSocket fallbackSocket, long fallbackGeneration) {
+        if (binding != null) {
+            return binding.isCurrentAndUsable() && lanChatPathRegistry.isCurrentBinding(binding);
+        }
+        // Path-less persisted endpoints are a temporary legacy bridge for exactly one listener.
+        return lanChatPathRegistry.listenerCount() == 1
+                && isCurrentLanChatSocket(fallbackSocket, fallbackGeneration);
     }
 
     /**
