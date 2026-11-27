@@ -642,10 +642,10 @@
 
 - [x] Android→Android 代码路径已支持长消息分片：短消息保留原单包快路径；超限消息按 300 raw-byte 分片，单个认证 UDP 数据报仍不超过 1200 bytes；同一 messageId 绑定整条消息 SHA-256。
 - [x] Android 固定收件人有持久化分片 ACK 位图和最多 8 片的选择性窗口；接收端分片缓存有 TTL/数量/总容量上限，先持久化分片、再回分片 ACK，完整组装并写入 Inbox 后才回最终 chat.ack。
-- [x] Python `lan_p2p_core.py` 已有分片编码/组装 helper 和边界测试；这只证明 helper/packet schema，不代表 Rescue2 服务已经接入。
-- [ ] **Rescue2 发送端仍未接入分片**：当前 `rescue2.py::send_chat_v2()` 仍先调用 `encode_packet(chat.message)`；超过单包限制会在写入 Outbox 前直接拒绝。
-- [ ] **Python 接收端仍未接入分片重组**：当前 `rescue2.py` 和 `chat.py` 的 authenticated packet handler 未处理 `chat.fragment` / `chat.fragment.ack`；收到此类包会在类型分支处被忽略。
-- [ ] 补齐 Rescue2/Python 与 Android 的双向长消息协议接入：同一 messageId、字节级 SHA-256、1200-byte 数据报限制、分片 ACK/有界窗口、持久化接收缓存、乱序/重复/缺片处理、最终 Inbox ACK、TTL 与容量限制；短消息继续走单包快路径。
-- [ ] 增加 Rescue2→Android、Android→Rescue2、Python peer↔Python peer 的真实 UDP socket 双向测试，覆盖长 UTF-8/emoji、乱序、丢片、重复片/ACK、进程重启和最终送达；helper 单测和静态源码契约不能替代端到端验证。
-- 结论：Android 端长消息实现已有代码与组件测试；Rescue2/Python 跨端长消息仍未闭环。不能将“Android 已分片”表述为“所有对讲端均支持长消息”。
+- [x] Python `lan_p2p_core.py` 补齐持久化接收分片会话：30 分钟 TTL、32 会话、2 MiB 缓存上限、乱序/重复片与元数据冲突校验；完整分片组装后才进入服务端 Inbox。
+- [x] Python Outbox target 增加持久化 fragment ACK bitmap；发送端按最多 8 片窗口推进，窗口推进不消耗整条消息的 retry attempt；缺片按既有有限重试预算重发。
+- [x] `rescue2.py`、`chat.py`、`server2.py` 均已接入长消息首次发送、接收重组、fragment ACK、窗口推进和恢复补发；短消息继续保留 `chat.message` 单包快路径。
+- [x] Python 完成分片缓存/ACK 位图/广播目标 admission/消息级端点重试测试，并增加真实 UDP socket 长消息分片往返测试（Python core sender↔receiver）。
+- [ ] **端到端验收仍未完成**：Android↔Rescue2、Android↔chat.py/server2 及 Python peer↔Python peer 的真实服务进程/设备双向测试，覆盖乱序、丢片、重复片/ACK、进程重启和最终送达；core UDP 测试与静态源码契约不能替代端到端验证。
+- 结论：Android 与 Python 三个服务端点的长消息代码路径均已接入；Python core UDP 往返测试通过，但真实 Android↔Python 互通和多服务部署验收仍待完成，不能提前宣称所有对讲端真机长消息已通过。
 
