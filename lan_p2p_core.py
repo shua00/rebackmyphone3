@@ -478,6 +478,8 @@ def persist_outgoing_message(db_path, sender_scope, sender_peer_id, message_id,
             last_sent_endpoint TEXT NOT NULL DEFAULT '',
             last_error TEXT NOT NULL DEFAULT '',
             last_recovery_at_ms INTEGER NOT NULL DEFAULT 0,
+            fragment_count INTEGER NOT NULL DEFAULT 0,
+            fragment_ack_bitmap TEXT NOT NULL DEFAULT '',
             PRIMARY KEY(message_id, peer_id)
         )""")
         target_columns = {row[1] for row in conn.execute("PRAGMA table_info(lan_outbox_targets)")}
@@ -486,6 +488,10 @@ def persist_outgoing_message(db_path, sender_scope, sender_peer_id, message_id,
         for column in ("last_attempt_endpoint", "last_sent_endpoint"):
             if column not in target_columns:
                 conn.execute("ALTER TABLE lan_outbox_targets ADD COLUMN " + column + " TEXT NOT NULL DEFAULT ''")
+        if "fragment_count" not in target_columns:
+            conn.execute("ALTER TABLE lan_outbox_targets ADD COLUMN fragment_count INTEGER NOT NULL DEFAULT 0")
+        if "fragment_ack_bitmap" not in target_columns:
+            conn.execute("ALTER TABLE lan_outbox_targets ADD COLUMN fragment_ack_bitmap TEXT NOT NULL DEFAULT ''")
         conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
             "SELECT sender_scope,sender_peer_id,body FROM lan_outbox WHERE message_id=?",
@@ -548,6 +554,8 @@ def ensure_outbox_retry_schema(db_path):
             last_sent_endpoint TEXT NOT NULL DEFAULT '',
             last_error TEXT NOT NULL DEFAULT '',
             last_recovery_at_ms INTEGER NOT NULL DEFAULT 0,
+            fragment_count INTEGER NOT NULL DEFAULT 0,
+            fragment_ack_bitmap TEXT NOT NULL DEFAULT '',
             PRIMARY KEY(message_id, peer_id))""")
         columns = {row[1] for row in conn.execute("PRAGMA table_info(lan_outbox_targets)")}
         migrations = {
@@ -560,6 +568,8 @@ def ensure_outbox_retry_schema(db_path):
             "last_sent_endpoint": "TEXT NOT NULL DEFAULT ''",
             "last_error": "TEXT NOT NULL DEFAULT ''",
             "last_recovery_at_ms": "INTEGER NOT NULL DEFAULT 0",
+            "fragment_count": "INTEGER NOT NULL DEFAULT 0",
+            "fragment_ack_bitmap": "TEXT NOT NULL DEFAULT ''",
         }
         for column, declaration in migrations.items():
             if column not in columns:
