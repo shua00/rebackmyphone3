@@ -509,3 +509,12 @@
 - [x] 两条跨语言方向使用测试专用 PSK，不依赖聊天密钥或生产设备凭据；仅 Linux CI 执行子进程互通测试，避免将 Python 可执行文件要求强加给 Windows/macOS 开发环境。
 - [x] CI Run `45920419820`：Python 全量 418 tests；Android `testDebugUnitTest`、诊断 Debug APK、slim Release APK 均通过。
 - [ ] 该项验证的是 JVM/Robolectric Android 实现与 Python 运行时在同一主机上的真实 TCP 协议互通，不等同于实体 Android 手机经 Wi-Fi/AP 的真机网络验收；后者仍需双机/热点场景验收。
+
+## 第四批次并行推进（2026-11-27）：Android 热点 AP 本地接口路径
+
+- [x] 修正 AP 本地接口候选只能发现、不能承载服务的问题：`LanSocketBinding.validateServerSocketAddress` 允许 `LOCAL_INTERFACE_CANDIDATE` 绑定到其精确本地地址；文件 TCP Listener 与配对控制 Host 因而可在 AP 地址上创建 ServerSocket。
+- [x] AP 候选上的 TCP/配对客户端连接改为绑定候选本地源地址；上层仍必须先验证目标 IPv4 属于所选接口子网。Android `Network` 对象存在时继续使用 `Network.bindSocket`，不改变普通 Wi-Fi 路径。
+- [x] AP 候选 UDP 发现：接收端 wildcard 绑定固定发现端口并按所选接口子网过滤来源；发送端绑定候选源地址后发送显式广播地址。候选仍只是发现提示，TCP 双向 PSK 认证仍是唯一身份依据。
+- [x] 新增 Robolectric 回归覆盖：未知 OEM AP 接口名、候选源地址绑定、ServerSocket 精确地址校验、AP 候选可构造发现服务、发现来源必须处于所选子网；配对控制候选路径测试已同步更新。
+- [x] CI Run `45921608216`：Python 全量 418 tests、Android `testDebugUnitTest`、诊断 Debug APK、slim Release APK 全部通过。
+- [ ] 重要限制：Android 对无 `Network` 的 AP 候选使用源地址绑定，不等同于底层 `SO_BINDTODEVICE` 或 `Network.bindSocket`；同网段直连依赖内核对已连接子网的路由选择。仍须在真实 Android 热点主机/客户端设备上验证 OEM 接口、广播接收、配对回连及双向文件传输；若设备 VPN/厂商网络栈阻断源地址路由，应明确失败，不能回退蜂窝。
