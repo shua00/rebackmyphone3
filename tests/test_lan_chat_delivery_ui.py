@@ -23,6 +23,8 @@ class LanChatDeliveryUiTests(unittest.TestCase):
         self.assertIn("managePendingOutboxMessages", activity)
         self.assertIn("确认取消", activity)
         self.assertIn("cancelPendingMessage", activity)
+        self.assertIn("clearTerminalOutboxRecords", activity)
+        self.assertIn("清理已结束记录", activity)
         self.assertIn("expireOutboxMessages", activity)
 
     def test_chat_ui_distinguishes_delivery_states_without_read_receipts(self):
