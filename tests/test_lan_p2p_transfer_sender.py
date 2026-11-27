@@ -177,6 +177,60 @@ class TransferSenderIntegrationTests(unittest.TestCase):
             published = next((root / "received").iterdir())
             self.assertEqual(payload, published.read_bytes())
 
+    def test_replayed_offer_and_chunk_are_acknowledged_idempotently(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = b"duplicate-safe"
+            offer = TransferOffer("sender-replay", "sender", "receiver", "replay.bin",
+                len(payload), hashlib.sha256(payload).hexdigest(), 1, "application/octet-stream")
+            store = TransferStore(str(root / "ledger.db"), TransferLimits(chunk_size_bytes=4096))
+            files = TransferFilesystem(store, str(root / "stage"), str(root / "received"))
+            store.create_offer(offer, 1)
+            store.transition(offer.transfer_id, TransferState.ACCEPTED, 2)
+            store.transition(offer.transfer_id, TransferState.TRANSFERRING, 3)
+            server, client = socket.socketpair()
+            errors = []
+            def serve():
+                try:
+                    serve_transfer_session(server, store, files, local_peer_id="receiver",
+                        authenticated_peer_id="sender", session_secret=self.SECRET,
+                        now_ms=lambda: 1000, max_frames=3)
+                except Exception as exc:
+                    errors.append(exc)
+                finally:
+                    server.close()
+            worker = threading.Thread(target=serve)
+            worker.start()
+            try:
+                metadata = {"filename": offer.filename, "size_bytes": offer.size_bytes,
+                    "sha256": offer.sha256, "created_at_ms": offer.created_at_ms,
+                    "mime_type": offer.mime_type, "chunk_size_bytes": 4096}
+                send_frame(client, TransferFrame("offer", offer.transfer_id,
+                    "sender", "receiver", metadata=metadata), self.SECRET)
+                offer_ack = recv_frame(client, self.SECRET,
+                    expected_sender_peer_id="receiver", expected_target_peer_id="sender")
+                self.assertEqual("offer_ack", offer_ack.kind)
+                self.assertFalse(offer_ack.metadata["new_offer"])
+                self.assertEqual("transferring", offer_ack.metadata["state"])
+
+                chunk = TransferFrame("chunk", offer.transfer_id, "sender", "receiver",
+                    index=0, payload=payload)
+                send_frame(client, chunk, self.SECRET)
+                first_ack = recv_frame(client, self.SECRET,
+                    expected_sender_peer_id="receiver", expected_target_peer_id="sender")
+                self.assertEqual({"index": 0, "new_receipt": True}, first_ack.metadata)
+                send_frame(client, chunk, self.SECRET)
+                replay_ack = recv_frame(client, self.SECRET,
+                    expected_sender_peer_id="receiver", expected_target_peer_id="sender")
+                self.assertEqual({"index": 0, "new_receipt": False}, replay_ack.metadata)
+            finally:
+                client.close()
+                worker.join(timeout=3)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual([], errors)
+            self.assertEqual(1, len(store.load_chunk_receipts(offer.transfer_id)))
+            self.assertEqual(TransferState.TRANSFERRING, store.get_transfer(offer.transfer_id).state)
+
     def test_complete_request_recovers_receiver_left_in_verifying_state(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
