@@ -178,6 +178,9 @@ public class TrackingService extends Service implements LocationListener {
     // Runtime ownership registry; currently mirrors the selected Wi-Fi listener only.
     // It is deliberately dormant when no usable LAN fingerprint/listener exists.
     private final LanChatPathRegistry lanChatPathRegistry = new LanChatPathRegistry();
+    // Path-keyed lease owner; no worker/timer is created by this registry wrapper.
+    private final LanChatListenerRuntime lanChatListenerRuntime =
+            new LanChatListenerRuntime(lanChatPathRegistry);
     private volatile String rescueSocketPathFingerprint;
     // Exact Network that owns the currently published UDP listener socket.
     private volatile Network lanChatBoundWifiNetwork;
@@ -7921,6 +7924,7 @@ public class TrackingService extends Service implements LocationListener {
 
         Thread listenerThread = new Thread(() -> {
             DatagramSocket rescueSocket = null;
+            LanChatListenerRuntime.Lease listenerLease = null;
             try {
                 // Thread.start() may race onDestroy() after the owner reference is published.
                 // Exit before opening/binding a socket when teardown already won that race.
@@ -7943,7 +7947,7 @@ public class TrackingService extends Service implements LocationListener {
                             && !"NO_WIFI".equals(listenerPathFingerprint)
                             && !"ERROR".equals(listenerPathFingerprint)
                             && !"UNAVAILABLE".equals(listenerPathFingerprint)) {
-                        lanChatPathRegistry.registerListener(
+                        listenerLease = lanChatListenerRuntime.register(
                                 listenerPathFingerprint, rescueSocket, listenerGeneration);
                         rescueSocketPathFingerprint = listenerPathFingerprint;
                     } else {
@@ -8221,7 +8225,10 @@ public class TrackingService extends Service implements LocationListener {
                     // thread must never read/clear the replacement listener's path field.
                     String ownedPath = listenerPathFingerprint;
                     if (ownedPath != null && !ownedPath.isEmpty()) {
-                        lanChatPathRegistry.removeListener(ownedPath, rescueSocket, listenerGeneration);
+                        if (listenerLease != null
+                                && ownedPath.equals(listenerLease.pathFingerprint)) {
+                            lanChatListenerRuntime.remove(listenerLease);
+                        }
                         synchronized (rescueLock) {
                             if (rescueSocketRef == rescueSocket
                                     && ownedPath.equals(rescueSocketPathFingerprint)) {
