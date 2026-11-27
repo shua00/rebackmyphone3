@@ -2053,7 +2053,7 @@ class LanP2PCoreTests(unittest.TestCase):
         )
         attempt_pos = send_method.index("targetAttemptAllowed = store != null")
         skip_pos = send_method.index("continue;", attempt_pos)
-        udp_pos = send_method.index("sendLanUdpPacket(socket, p, verifiedRoutePeerIds.contains(peerId)")
+        udp_pos = send_method.index("sendLanUdpPacket(peerSocket, p, verifiedRoutePeerIds.contains(peerId)")
         endpoint_pos = send_method.index("lanChatPeerExecutor.execute(", udp_pos)
         self.assertNotIn("lanChatControlExecutor.execute(", send_method)
         self.assertLess(attempt_pos, skip_pos)
@@ -4249,9 +4249,13 @@ class AndroidFixedTargetImmediateDispatchTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
         send = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
-        self.assertIn("verifiedChatPeers.get(target.peerId)", send)
-        self.assertIn("dispatchEndpoints.put(target.peerId", send)
+        self.assertIn("getFreshPeerRouteBinding(", send)
+        self.assertIn("dispatchBindings.put(target.peerId, liveBinding)", send)
+        self.assertIn("dispatchEndpoints.put(target.peerId, liveBinding.route.endpoint)", send)
         self.assertIn("target.endpointIp", send)
+        self.assertIn("activeChatListenerCount == 1", send)
+        self.assertIn("preparedCachedEndpoints.get(target.peerId)", send)
+        self.assertNotIn("verifiedChatPeers.get(target.peerId)", send)
         self.assertIn("store.markAttempt(messageId, peerId, attemptedEndpoint", send)
         self.assertIn("CHAT_UNICAST_CACHED_ENDPOINT", send)
 
@@ -4331,7 +4335,7 @@ class AndroidLanInstantRouteRecoveryTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
         send = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
-        udp = send.index("sendLanUdpPacket(socket, p, verifiedRoutePeerIds.contains(peerId)")
+        udp = send.index("sendLanUdpPacket(peerSocket, p, verifiedRoutePeerIds.contains(peerId)")
         persist = send.index("lanChatPeerExecutor.execute(", udp)
         self.assertLess(udp, persist)
         self.assertNotIn("lanChatControlExecutor.execute(", send)
