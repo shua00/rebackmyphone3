@@ -201,4 +201,53 @@ public class LanChatPathRegistryTest {
         } finally { routerLan.close(); }
     }
 
+    @Test public void routeBindingCapturesExactPathListenerAndGeneration() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket sta = socket(), ap = socket();
+        try {
+            String s = "sta|wlan0|192.168.1.20/24", a = "ap|ap0|192.168.43.1/24";
+            registry.registerListener(s, sta, 31);
+            registry.registerListener(a, ap, 47);
+            registry.recordVerifiedPeer("peer", s, endpoint("192.168.1.31"), NOW, NOW + 100);
+            registry.recordVerifiedPeer("peer", a, endpoint("192.168.43.2"), NOW + 1, NOW + 101);
+
+            List<LanChatPathRegistry.RouteBinding> bindings =
+                    registry.getFreshPeerRouteBindings("peer", NOW + 2);
+            assertEquals(2, bindings.size());
+            for (LanChatPathRegistry.RouteBinding binding : bindings) {
+                assertTrue(binding.isCurrentAndUsable());
+                if (s.equals(binding.route.pathFingerprint)) {
+                    assertSame(sta, binding.listener.socket);
+                    assertEquals(31L, binding.listener.generation);
+                } else {
+                    assertEquals(a, binding.route.pathFingerprint);
+                    assertSame(ap, binding.listener.socket);
+                    assertEquals(47L, binding.listener.generation);
+                }
+                assertEquals(binding.route.listenerGeneration, binding.listener.generation);
+            }
+        } finally { sta.close(); ap.close(); }
+    }
+
+    @Test public void routeBindingIsInvalidatedWhenItsListenerEpochIsReplaced() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket old = socket(), replacement = socket();
+        try {
+            String path = "sta|wlan0|192.168.1.20/24";
+            registry.registerListener(path, old, 51);
+            registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.31"), NOW, NOW + 100);
+            List<LanChatPathRegistry.RouteBinding> before =
+                    registry.getFreshPeerRouteBindings("peer", NOW + 1);
+            assertEquals(1, before.size());
+            assertSame(old, before.get(0).listener.socket);
+
+            registry.registerListener(path, replacement, 52);
+            assertTrue(registry.getFreshPeerRouteBindings("peer", NOW + 2).isEmpty());
+            // A previously captured binding remains tied to the old epoch; it must never
+            // silently become a binding to the replacement listener.
+            assertSame(old, before.get(0).listener.socket);
+            assertEquals(51L, before.get(0).listener.generation);
+        } finally { old.close(); replacement.close(); }
+    }
+
 }
