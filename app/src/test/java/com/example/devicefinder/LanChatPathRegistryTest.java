@@ -44,6 +44,23 @@ public class LanChatPathRegistryTest {
         } finally { old.close(); current.close(); }
     }
 
+    @Test public void advancingGenerationOnSameSocketInvalidatesOldRoutes() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket listener = socket();
+        try {
+            String path = "sta|wlan0|192.168.1.20/24";
+            registry.registerListener(path, listener, 1);
+            registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.31"), NOW, NOW + 100);
+            registry.registerListener(path, listener, 2);
+            assertTrue(registry.getFreshPeerRoutes("peer", NOW + 1).isEmpty());
+            registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.32"), NOW + 2, NOW + 102);
+            List<LanChatPathRegistry.PeerRoute> routes =
+                    registry.getFreshPeerRoutes("peer", NOW + 3);
+            assertEquals(1, routes.size());
+            assertEquals(2L, routes.get(0).listenerGeneration);
+        } finally { listener.close(); }
+    }
+
     @Test public void replacingListenerInvalidatesRoutesFromPreviousSocketEpoch() throws Exception {
         LanChatPathRegistry registry = new LanChatPathRegistry();
         DatagramSocket old = socket(), replacement = socket();
