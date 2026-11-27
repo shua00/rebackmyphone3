@@ -177,20 +177,37 @@ public final class LanTransferSenderService extends Service {
             store=new LanTransferStore(this);
             LanTransferSenderWorker.NetworkProvider pathProvider = new LanTransferSenderWorker.NetworkProvider() {
                 @Override public Network currentWifiNetwork() throws java.io.IOException {
-                    LanNetworkPath path = selectLanNetworkPath();
-                    return path == null ? null : path.network;
+                    for (LanNetworkPath path : currentLanNetworkPaths())
+                        if (path.network != null) return path.network;
+                    return null;
                 }
                 @Override public LanNetworkPath currentLanNetworkPath() throws java.io.IOException {
-                    return selectLanNetworkPath();
+                    List<LanNetworkPath> paths = currentLanNetworkPaths();
+                    return paths.isEmpty() ? null : paths.get(0);
+                }
+                @Override public List<LanNetworkPath> currentLanNetworkPaths() throws java.io.IOException {
+                    return LanTransferSenderService.this.currentLanNetworkPaths();
                 }
             };
             LanTransferSenderWorker worker=new LanTransferSenderWorker(store,credentials,pathProvider,
-                source,offer,local,()->{
-                    LanTransferPeerDirectory.Candidate candidate = LanTransferPeerDirectory.findCurrent(
-                            getApplicationContext(), offer.targetPeerId, System.currentTimeMillis());
-                    if (candidate == null || !candidate.isConnectable())
-                        throw new java.io.IOException("Trusted peer has no fresh endpoint on current Wi-Fi");
-                    return new LanTransferSenderWorker.Endpoint(candidate.host, candidate.port);
+                source,offer,local,new LanTransferSenderWorker.EndpointProvider() {
+                    @Override public LanTransferSenderWorker.Endpoint currentEndpoint() throws java.io.IOException {
+                        List<LanTransferSenderWorker.Endpoint> all = currentEndpoints();
+                        if (all.isEmpty()) throw new java.io.IOException("No fresh trusted-peer endpoint");
+                        return all.get(0);
+                    }
+                    @Override public List<LanTransferSenderWorker.Endpoint> currentEndpoints() throws java.io.IOException {
+                        List<LanTransferSenderWorker.Endpoint> all = new ArrayList<>();
+                        for (LanTransferPeerDirectory.Candidate candidate :
+                                LanTransferPeerDirectory.findCurrentAll(getApplicationContext(),
+                                        offer.targetPeerId, System.currentTimeMillis())) {
+                            if (candidate.isConnectable() && all.size() < 4)
+                                all.add(new LanTransferSenderWorker.Endpoint(candidate.host,
+                                        candidate.port, candidate.networkFingerprint));
+                        }
+                        if (all.isEmpty()) throw new java.io.IOException("Trusted peer has no fresh endpoint on active LAN paths");
+                        return all;
+                    }
                 },LanTransferStore.DEFAULT_CHUNK_SIZE,
                 LanTransferSenderWorker.DEFAULT_MAX_TRANSFER_SESSIONS,LanTransferSenderWorker.DEFAULT_OFFER_WAIT_MS,
                 new LanTransferSenderWorker.Listener() {
@@ -260,26 +277,46 @@ public final class LanTransferSenderService extends Service {
     }
 
 
-    private LanNetworkPath selectLanNetworkPath() throws java.io.IOException {
-        Network network = selectWifiNetwork();
-        if (network == null) return null;
+    /** Enumerate every usable STA Network plus one unrepresented AP interface candidate. */
+    private List<LanNetworkPath> currentLanNetworkPaths() throws java.io.IOException {
         ConnectivityManager cm=(ConnectivityManager)getSystemService(Context.CONNECTIVITY_SERVICE);
-        if (cm == null) throw new java.io.IOException("ConnectivityManager unavailable");
-        LinkProperties properties = cm.getLinkProperties(network);
-        if (properties == null || properties.getInterfaceName() == null
-                || properties.getInterfaceName().isEmpty())
-            throw new java.io.IOException("Selected Wi-Fi LinkProperties are incomplete");
-        for (LinkAddress linkAddress : properties.getLinkAddresses()) {
-            if (!(linkAddress.getAddress() instanceof Inet4Address)) continue;
-            Inet4Address local = (Inet4Address) linkAddress.getAddress();
-            if (!LanNetworkPath.isUsableLanIpv4(local)) continue;
-            int prefix = linkAddress.getPrefixLength();
-            if (prefix < 1 || prefix > 32) continue;
-            Inet4Address broadcast = LanTransferIpv4Subnet.directedBroadcast(local, prefix);
-            return LanNetworkPath.fromAndroidNetwork(network, properties.getInterfaceName(),
-                    local, prefix, broadcast);
-        }
-        throw new java.io.IOException("Selected Wi-Fi network has no usable IPv4 LAN address");
+        if(cm==null) throw new java.io.IOException("ConnectivityManager unavailable");
+        List<LanNetworkPath> wifi=new ArrayList<>();
+        List<LanNetworkPath> localCandidates;
+        java.util.Set<String> excludedInterfaces=new java.util.HashSet<>();
+        boolean incomplete=false;
+        try {
+            for(Network network:cm.getAllNetworks()) {
+                NetworkCapabilities caps=cm.getNetworkCapabilities(network);
+                if(caps==null) { incomplete=true; continue; }
+                LinkProperties links=cm.getLinkProperties(network);
+                if(caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+                        || caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                    if(links!=null && links.getInterfaceName()!=null)
+                        excludedInterfaces.add(links.getInterfaceName());
+                    continue;
+                }
+                if(!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue;
+                if(links==null || links.getInterfaceName()==null || links.getInterfaceName().isEmpty()
+                        || links.getLinkAddresses()==null) { incomplete=true; continue; }
+                boolean found=false;
+                for(LinkAddress item:links.getLinkAddresses()) {
+                    if(!(item.getAddress() instanceof Inet4Address)) continue;
+                    Inet4Address address=(Inet4Address)item.getAddress();
+                    int prefix=item.getPrefixLength();
+                    if(!LanNetworkPath.isUsableLanIpv4(address)||prefix<1||prefix>32) continue;
+                    wifi.add(LanNetworkPath.fromAndroidNetwork(network,links.getInterfaceName(),
+                            address,prefix,LanTransferIpv4Subnet.directedBroadcast(address,prefix)));
+                    found=true;
+                }
+                if(!found) incomplete=true;
+            }
+            if(incomplete) throw new java.io.IOException("Incomplete Wi-Fi Network snapshot; refusing partial path set");
+            localCandidates=LanNetworkPath.enumerateLocalInterfaceCandidates();
+            LanTransferPathSet selected=LanTransferPathSet.select(wifi,localCandidates,excludedInterfaces);
+            return selected.paths();
+        } catch(java.io.IOException failure) { throw failure; }
+        catch(Exception failure) { throw new java.io.IOException("Unable to enumerate active LAN paths",failure); }
     }
 
     private Network selectWifiNetwork() throws java.io.IOException {
