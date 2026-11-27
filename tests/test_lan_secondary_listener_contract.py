@@ -51,6 +51,18 @@ class LanSecondaryListenerContractTests(unittest.TestCase):
         self.assertNotIn("new String(packet.getData()", start)
         self.assertNotIn('message.startsWith("FIND_ME_', start)
 
+    def test_ap_only_primary_uses_exact_bind_and_rebinds_on_address_change(self):
+        start = self._method(
+            "private void startRescueListener()",
+            "private void parseResponse(",
+        )
+        self.assertIn("primaryIsLocalCandidate", start)
+        self.assertIn("LanSocketBinding.bindDatagramListenerSocket(", start)
+        self.assertIn("plannedPrimaryPath, rescueSocket, 8888", start)
+        self.assertIn("if (!rescueSocket.isBound() && !primaryIsLocalCandidate)", start)
+        self.assertIn("needsLocalPrimaryListenerRebind(plan)", self.source)
+        self.assertIn("requestRescueListenerRestart(\"local-primary-path-change:", self.source)
+
     def test_secondary_hello_uses_candidate_broadcast_and_bounded_nonce(self):
         hello = self._method(
             "private void sendSecondaryPathPeerHello(",
