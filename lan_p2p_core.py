@@ -860,6 +860,170 @@ def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10):
             _safe_close(conn)
 
 
+def initialize_outgoing_fragment_progress(db_path, message_id, peer_id, fragment_count):
+    """Create a durable zeroed selective-ACK bitmap for one fixed recipient."""
+    if (not db_path or not message_id or not is_valid_peer_id(peer_id)
+            or type(fragment_count) is not int
+            or not 1 <= fragment_count <= MAX_CHAT_MESSAGE_FRAGMENTS):
+        return False
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        ensure_outbox_retry_schema(db_path)
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("""SELECT fragment_count,fragment_ack_bitmap,status
+            FROM lan_outbox_targets WHERE message_id=? AND peer_id=?""",
+            (message_id, peer_id)).fetchone()
+        if row is None:
+            _safe_rollback(conn)
+            return False
+        existing_count, bitmap, status = int(row[0] or 0), row[1] or "", row[2]
+        if status == "acked":
+            conn.commit()
+            return True
+        if existing_count not in (0, fragment_count):
+            _safe_rollback(conn)
+            return False
+        if existing_count == fragment_count and len(bitmap) == fragment_count:
+            conn.commit()
+            return True
+        conn.execute("""UPDATE lan_outbox_targets
+            SET fragment_count=?,fragment_ack_bitmap=?
+            WHERE message_id=? AND peer_id=? AND status!='acked'""",
+            (fragment_count, "0" * fragment_count, message_id, peer_id))
+        conn.commit()
+        return True
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        raise LanP2PStorageError("failed to initialize outgoing fragment ACK bitmap") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def record_outgoing_fragment_ack(db_path, sender_scope, message_id, peer_id,
+                                 fragment_index, endpoint_ip, endpoint_port,
+                                 now_ms=None):
+    """Persist a verified fragment ACK; only the first broadcast flight may admit a new peer."""
+    if (not db_path or not sender_scope or not message_id or not is_valid_peer_id(peer_id)
+            or type(fragment_index) is not int or not 0 <= fragment_index < MAX_CHAT_MESSAGE_FRAGMENTS
+            or not endpoint_ip or type(endpoint_port) is not int or not 1 <= endpoint_port <= 65535):
+        return None
+    now = int(now_ms if now_ms is not None else time.time() * 1000)
+    endpoint = str(endpoint_ip) + ":" + str(endpoint_port)
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        ensure_outbox_retry_schema(db_path)
+        conn.execute("BEGIN IMMEDIATE")
+        message = conn.execute("""SELECT body,state,delivery_deadline_ms
+            FROM lan_outbox WHERE sender_scope=? AND message_id=?""",
+            (sender_scope, message_id)).fetchone()
+        if message is None:
+            _safe_rollback(conn)
+            return None
+        body, state, deadline = message
+        raw_size = len(str(body).encode("utf-8", errors="strict"))
+        count = (raw_size + CHAT_FRAGMENT_RAW_BYTES - 1) // CHAT_FRAGMENT_RAW_BYTES
+        if not 2 <= count <= MAX_CHAT_MESSAGE_FRAGMENTS or fragment_index >= count:
+            _safe_rollback(conn)
+            return None
+        target = conn.execute("""SELECT fragment_count,fragment_ack_bitmap,status
+            FROM lan_outbox_targets WHERE message_id=? AND peer_id=?""",
+            (message_id, peer_id)).fetchone()
+        if target is None:
+            # Unknown broadcast recipients may join only on the first bounded 8-fragment flight.
+            if state != "discovery_pending" or not deadline or now >= int(deadline) or fragment_index >= 8:
+                _safe_rollback(conn)
+                return None
+            conn.execute("""INSERT INTO lan_outbox_targets
+                (message_id,peer_id,status,last_ack_at,last_endpoint,last_attempt_endpoint,
+                 last_sent_endpoint,fragment_count,fragment_ack_bitmap)
+                VALUES(?,?,'sent',?,?,?,?,?,?)""",
+                (message_id, peer_id, now, endpoint, endpoint, endpoint, count, "0" * count))
+            target = (count, "0" * count, "sent")
+        existing_count, bitmap, status = int(target[0] or 0), target[1] or "", target[2]
+        if status == "acked":
+            conn.commit()
+            return bitmap if len(bitmap) == count else "1" * count
+        if existing_count not in (0, count):
+            _safe_rollback(conn)
+            return None
+        if existing_count == 0:
+            bitmap = "0" * count
+        if len(bitmap) != count or any(ch not in "01" for ch in bitmap):
+            _safe_rollback(conn)
+            return None
+        updated = bitmap[:fragment_index] + "1" + bitmap[fragment_index + 1:]
+        conn.execute("""UPDATE lan_outbox_targets SET fragment_count=?,fragment_ack_bitmap=?,
+            last_ack_at=?,last_endpoint=?,last_sent_endpoint=?
+            WHERE message_id=? AND peer_id=? AND status!='acked'""",
+            (count, updated, now, endpoint, endpoint, message_id, peer_id))
+        conn.commit()
+        return updated
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        raise LanP2PStorageError("failed to persist outgoing fragment ACK") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def load_outgoing_fragment_ack_bitmap(db_path, message_id, peer_id):
+    """Return the durable selective-ACK bitmap, or None for a short/uninitialized target."""
+    if not db_path or not message_id or not peer_id:
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        row = conn.execute("""SELECT fragment_count,fragment_ack_bitmap
+            FROM lan_outbox_targets WHERE message_id=? AND peer_id=?""",
+            (message_id, peer_id)).fetchone()
+        if row is None:
+            return None
+        count, bitmap = int(row[0] or 0), row[1] or ""
+        return bitmap if 1 <= count <= MAX_CHAT_MESSAGE_FRAGMENTS and len(bitmap) == count else None
+    except Exception as exc:
+        raise LanP2PStorageError("failed to read outgoing fragment ACK bitmap") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def load_outgoing_fragment_targets_for_peer(db_path, sender_scope, peer_id, limit=50):
+    """Load persisted long-message recipients for ACK-driven window advancement."""
+    if not db_path or not sender_scope or not peer_id:
+        return []
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        rows = conn.execute("""SELECT o.message_id,o.body,o.created_at_ms,
+                    t.fragment_count,t.fragment_ack_bitmap,p.endpoint_ip,p.endpoint_port
+            FROM lan_outbox o JOIN lan_outbox_targets t ON t.message_id=o.message_id
+            LEFT JOIN lan_peers p ON p.receiver_scope=? AND p.peer_id=t.peer_id
+            WHERE o.sender_scope=? AND t.peer_id=? AND t.status!='acked'
+              AND t.fragment_count>1
+              AND o.state NOT IN ('delivered','expired','waiting_peers')
+            ORDER BY o.created_at_ms LIMIT ?""",
+            (sender_scope, sender_scope, peer_id, max(1, min(100, int(limit))))).fetchall()
+        return [{
+            "message_id": row[0], "body": row[1], "created_at_ms": int(row[2]),
+            "fragment_count": int(row[3]), "fragment_ack_bitmap": row[4] or "",
+            "endpoint_ip": row[5] or "", "endpoint_port": int(row[6] or 0),
+        } for row in rows]
+    except Exception as exc:
+        raise LanP2PStorageError("failed to load outgoing fragment targets") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
 def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_port,
                          allow_fast_retry=True):
     """Persist a send attempt before network I/O; this is not ACK evidence.
