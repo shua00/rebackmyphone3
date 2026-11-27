@@ -434,33 +434,87 @@ public class LanChatStorePersistenceTest {
 
     @Test
     public void pendingOutboxCapacityCountsWaitingPeersAndReleasesDeliveredRows() {
+        long base = System.currentTimeMillis();
         for (int i = 0; i < LanChatStore.MAX_PENDING_MESSAGES; i++) {
             assertTrue("enqueue " + i, store.enqueue(
-                    "capacity-" + i, "desktop-peer", "x", 1000L + i));
+                    "capacity-" + i, "desktop-peer", "x", base + i));
         }
-        assertFalse(store.enqueue("capacity-overflow", "desktop-peer", "x", 2000L));
+        assertFalse(store.enqueue("capacity-overflow", "desktop-peer", "x", base + 1000L));
 
         SQLiteDatabase db = store.getWritableDatabase();
         db.execSQL("UPDATE lan_outbox SET state='waiting_peers' WHERE message_id=?",
                 new Object[]{"capacity-0"});
         assertFalse("waiting_peers must continue to consume capacity",
-                store.enqueue("capacity-still-full", "desktop-peer", "x", 2001L));
+                store.enqueue("capacity-still-full", "desktop-peer", "x", base + 1001L));
 
         db.execSQL("UPDATE lan_outbox SET state='delivered' WHERE message_id=?",
                 new Object[]{"capacity-1"});
         assertTrue("terminal delivered row must release pending capacity",
-                store.enqueue("capacity-after-delivery", "desktop-peer", "x", 2002L));
+                store.enqueue("capacity-after-delivery", "desktop-peer", "x", base + 1002L));
     }
 
     @Test
     public void pendingOutboxEnforcesAggregateUtf8BodyBudget() {
+        long base = System.currentTimeMillis();
         int halfBudget = (int) (LanChatStore.MAX_PENDING_BODY_BYTES / 2L);
         char[] chars = new char[halfBudget];
         java.util.Arrays.fill(chars, 'x');
         String halfBudgetBody = new String(chars);
-        assertTrue(store.enqueue("byte-budget-a", "desktop-peer", halfBudgetBody, 1000L));
-        assertTrue(store.enqueue("byte-budget-b", "desktop-peer", halfBudgetBody, 1001L));
-        assertFalse(store.enqueue("byte-budget-overflow", "desktop-peer", "x", 1002L));
+        assertTrue(store.enqueue("byte-budget-a", "desktop-peer", halfBudgetBody, base));
+        assertTrue(store.enqueue("byte-budget-b", "desktop-peer", halfBudgetBody, base + 1L));
+        assertFalse(store.enqueue("byte-budget-overflow", "desktop-peer", "x", base + 2L));
+    }
+
+    @Test
+    public void outboxTtlExpiresWithoutDeletingHistory() {
+        long now = System.currentTimeMillis();
+        assertTrue(store.enqueue("ttl-expired", "desktop-peer", "old body",
+                now - LanChatStore.OUTBOX_MESSAGE_TTL_MS - 1L));
+        assertEquals(1, store.expireOutboxMessages(now));
+        Cursor c = store.getReadableDatabase().rawQuery(
+                "SELECT state,terminal_reason FROM lan_outbox WHERE message_id=?",
+                new String[]{"ttl-expired"});
+        try {
+            assertTrue(c.moveToFirst());
+            assertEquals("expired", c.getString(0));
+            assertEquals("ttl", c.getString(1));
+        } finally { c.close(); }
+        assertEquals(1, store.loadRecentDeliverySummaries(10).size());
+    }
+
+    @Test
+    public void userCancellationStopsRetryButRetainsMessageRecord() {
+        long now = System.currentTimeMillis();
+        assertTrue(store.enqueue("cancel-pending", "desktop-peer", "body", now));
+        assertTrue(store.cancelPendingMessage("cancel-pending"));
+        assertFalse(store.cancelPendingMessage("cancel-pending"));
+        Cursor c = store.getReadableDatabase().rawQuery(
+                "SELECT state,terminal_reason FROM lan_outbox WHERE message_id=?",
+                new String[]{"cancel-pending"});
+        try {
+            assertTrue(c.moveToFirst());
+            assertEquals("expired", c.getString(0));
+            assertEquals("cancelled", c.getString(1));
+        } finally { c.close(); }
+    }
+
+    @Test
+    public void lateAckCanCompleteMessageAfterTtlExpiry() {
+        long now = System.currentTimeMillis();
+        assertTrue(store.enqueue("late-ack-expired", "desktop-peer", "body", now));
+        SQLiteDatabase db = store.getWritableDatabase();
+        db.execSQL("INSERT INTO lan_outbox_targets(message_id,peer_id,status) VALUES(?,?,'pending')",
+                new Object[]{"late-ack-expired", "android-peer"});
+        db.execSQL("UPDATE lan_outbox SET state='expired',terminal_reason='ttl' WHERE message_id=?",
+                new Object[]{"late-ack-expired"});
+        assertTrue(store.acknowledge("late-ack-expired", "android-peer"));
+        Cursor c = db.rawQuery("SELECT state,terminal_reason FROM lan_outbox WHERE message_id=?",
+                new String[]{"late-ack-expired"});
+        try {
+            assertTrue(c.moveToFirst());
+            assertEquals("delivered", c.getString(0));
+            assertEquals("", c.getString(1));
+        } finally { c.close(); }
     }
 
 }
