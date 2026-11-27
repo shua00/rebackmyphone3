@@ -224,6 +224,17 @@ class TransferFilesystem:
                          and receipt["payload_size"] == len(payload)
                          and receipt["chunk_sha256"] == hashlib.sha256(payload).hexdigest())
                 if not valid:
+                    # A missing receipt alone is insufficient: write_chunk refuses to
+                    # overwrite an existing conflicting staged entry. Remove only this
+                    # deterministic entry (unlink never follows a symlink), then durably
+                    # record the receipt invalidation so a retransmitted chunk can repair it.
+                    chunk_path = self._chunk_path(task_dir, index)
+                    try:
+                        chunk_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        self._fsync_dir(task_dir)
                     self.store.remove_chunk_receipt(transfer_id, index, now_ms)
                     missing.append(index)
                 candidate += 1
