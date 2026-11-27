@@ -759,6 +759,10 @@ public class TrackingService extends Service implements LocationListener {
             });
     private final java.util.concurrent.atomic.AtomicBoolean rescueListenerRetryScheduled =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+    // Failure backoff exists only for already-planned secondary paths; the stable
+    // single-listener fast path never allocates retry tasks or per-path counters.
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>
+            secondaryListenerRetryAttempts = new java.util.concurrent.ConcurrentHashMap<>();
 
     private boolean scheduleLanChatTask(String taskName, Runnable task, long delayMs) {
         if (serviceDestroyed || task == null) return false;
@@ -2899,6 +2903,7 @@ public class TrackingService extends Service implements LocationListener {
                         throw new java.net.SocketException("Secondary LAN path became stale during bind");
                     }
                     lease = lanChatListenerRuntime.register(fingerprint, socket, generation);
+                    secondaryListenerRetryAttempts.remove(fingerprint);
                 }
                 FileLogger.log(this, "CHAT", "Secondary LAN listener bound exact path="
                         + path.diagnosticFingerprint() + " port=8888");
@@ -2927,6 +2932,25 @@ public class TrackingService extends Service implements LocationListener {
                 }
                 if (lease != null) lanChatListenerRuntime.remove(lease);
                 lanChatListenerRuntime.removeInstance(instance);
+                // Retry only an unexpected failure of a path that is still secondary.
+                // Intentional topology handoff and Service teardown must stay quiet.
+                if (!instance.isStopRequested() && !serviceDestroyed
+                        && generation == lanSocketGeneration.get()
+                        && isSecondaryPathStillPlanned(fingerprint)) {
+                    java.util.concurrent.atomic.AtomicInteger attempts =
+                            secondaryListenerRetryAttempts.computeIfAbsent(
+                                    fingerprint, ignored -> new java.util.concurrent.atomic.AtomicInteger());
+                    int attempt = attempts.incrementAndGet();
+                    long retryDelayMs = (long) Math.min(
+                            300_000L, 5_000L * Math.pow(3, Math.min(attempt - 1, 4)));
+                    scheduleLanChatTask("secondary-listener-retry-" + fingerprint, () -> {
+                        if (!serviceDestroyed && generation == lanSocketGeneration.get()
+                                && isSecondaryPathStillPlanned(fingerprint)
+                                && lanChatListenerRuntime.getInstance(fingerprint) == null) {
+                            startSecondaryLanChatListener(path, generation);
+                        }
+                    }, retryDelayMs);
+                }
             }
         }, "LAN-UDP-Secondary-" + serviceInstanceId);
         if (!instance.attachThread(worker)) {
