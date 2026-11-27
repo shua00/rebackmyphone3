@@ -6846,7 +6846,8 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private boolean handleAuthenticatedLanPacket(DatagramSocket socket, DatagramPacket packet,
-                                                   JSONObject envelope, long packetReceivedAtElapsedMs) {
+                                                   JSONObject envelope, long packetReceivedAtElapsedMs,
+                                                   String listenerPathFingerprint, long listenerGeneration) {
         try {
             String type = envelope.optString("type", "");
             String senderId = envelope.optString("sender_peer_id", "");
@@ -6854,16 +6855,20 @@ public class TrackingService extends Service implements LocationListener {
             long now = System.currentTimeMillis();
             // Only ACK frames need an ingress ownership snapshot. Keep ordinary chat,
             // fragments, and peer-control packets off this additional Registry lookup.
-            final String ingressPathFingerprint =
-                    ("peer.ack".equals(type) || "chat.ack".equals(type)
-                            || "chat.fragment.ack".equals(type))
-                            ? rescueSocketPathFingerprint : null;
-            final LanChatPathRegistry.Listener ingressListener = ingressPathFingerprint == null
-                    ? null : lanChatPathRegistry.getListener(ingressPathFingerprint);
-            final String ackIngressPath = ingressListener != null && ingressListener.socket == socket
-                    && ingressListener.pathFingerprint.equals(ingressPathFingerprint)
-                    && ingressListener.isUsable() ? ingressPathFingerprint : null;
-            final long ackIngressGeneration = ackIngressPath == null ? -1L : ingressListener.generation;
+            // The receive loop passes its immutable path/generation snapshot. Never consult
+            // rescueSocketPathFingerprint here: that field belongs to the legacy single-listener
+            // publication slot and would misattribute packets once STA/AP listeners coexist.
+            final boolean isAckFrame = "peer.ack".equals(type) || "chat.ack".equals(type)
+                    || "chat.fragment.ack".equals(type);
+            final LanChatPathRegistry.Listener ingressListener = isAckFrame
+                    && listenerPathFingerprint != null
+                    ? lanChatPathRegistry.getListener(listenerPathFingerprint) : null;
+            final String ackIngressPath = ingressListener != null
+                    && ingressListener.socket == socket
+                    && ingressListener.generation == listenerGeneration
+                    && ingressListener.pathFingerprint.equals(listenerPathFingerprint)
+                    && ingressListener.isUsable() ? listenerPathFingerprint : null;
+            final long ackIngressGeneration = ackIngressPath == null ? -1L : listenerGeneration;
             if ("peer.hello".equals(type)) {
                 int sourcePort = packet.getPort();
                 if (senderId.isEmpty() || senderId.equals(getUniqueDeviceId())
@@ -7609,7 +7614,8 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private boolean handleLanRealtimePacket(DatagramSocket socket, DatagramPacket packet,
-                                              long packetReceivedAtElapsedMs) {
+                                              long packetReceivedAtElapsedMs,
+                                              String listenerPathFingerprint, long listenerGeneration) {
         try {
             byte[] data = packet == null ? null : packet.getData();
             int offset = packet == null ? 0 : packet.getOffset();
@@ -7619,7 +7625,8 @@ public class TrackingService extends Service implements LocationListener {
                 try {
                     JSONObject envelope = LanP2pProtocol.decode(
                             data, offset, length, RESCUE_SECRET);
-                    return handleAuthenticatedLanPacket(socket, packet, envelope, packetReceivedAtElapsedMs);
+                    return handleAuthenticatedLanPacket(socket, packet, envelope,
+                            packetReceivedAtElapsedMs, listenerPathFingerprint, listenerGeneration);
                 } catch (Exception invalid) {
                     FileLogger.logD("UDP", "invalid authenticated LAN JSON frame: "
                             + invalid.getClass().getSimpleName());
@@ -7980,7 +7987,8 @@ public class TrackingService extends Service implements LocationListener {
                     long udpReceiveElapsedMs = android.os.SystemClock.elapsedRealtime();
                     // Parse authenticated v2 frames from the original datagram bytes before
                     // any legacy String decoding can replace malformed UTF-8 sequences.
-                    if (handleLanRealtimePacket(rescueSocket, packet, udpReceiveElapsedMs)) {
+                    if (handleLanRealtimePacket(rescueSocket, packet, udpReceiveElapsedMs,
+                            listenerPathFingerprint, listenerGeneration)) {
                         continue;
                     }
                     // The service can be destroyed while authenticated-frame dispatch is
