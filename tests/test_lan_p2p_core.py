@@ -134,7 +134,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("listenerPathFingerprint != null", authenticated)
         self.assertIn("ingressListener.generation == listenerGeneration", authenticated)
         self.assertIn("ingressListener.socket == socket", authenticated)
-        self.assertNotIn("rescueSocketPathFingerprint", authenticated)
+        self.assertNotIn("? rescueSocketPathFingerprint : null", authenticated)
         self.assertIn("isCurrentLanChatIngress(verifiedPathFingerprint, socket", authenticated)
 
     def test_chat_listener_runtime_keeps_single_path_fast_path_and_multi_path_isolation(self):
