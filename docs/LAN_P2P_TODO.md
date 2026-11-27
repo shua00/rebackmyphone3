@@ -536,5 +536,5 @@
 - [x] 复核发现宿主首次启动时若 Wi-Fi/AP 尚未就绪，原实现会直接退出，无法等候网络恢复。宿主现对初始绑定失败按刷新周期重试；Service 对失败的初始 runtime 执行关闭和清理，后续重试不遗留半启动实例。
 - [ ] 新增启动竞态回归测试：第一次启动因接口未就绪失败，第二次启动恢复成功，之后正常刷新并在退出时关闭服务；不启用 wildcard 或其他网络回退。首次 CI Run `45927045464` 发现测试文件续行语法错误，已修正为括号式 with 语句；Run `45927106157` 进一步发现测试 Event mock 缺少 `is_set()` 状态接口，已补齐并等待重跑。
 - [ ] Windows ACL 和 Linux/Windows 真实网卡出口行为仍需对应平台实机验收；当前模拟套件不代表操作系统实测。
-- [ ] Windows runner 专项校验已加入，但 Run `45927301170` 暴露 `socket.if_nameindex()` 在 Windows 返回 `(index, name)`，已修正；Run `45927347164` 进一步验证生产子网校验正确拒绝 remote==local，loopback 测试已改用 `127.0.0.1` 源地址连接 `127.0.0.2`，等待重跑。真实 loopback TCP + `IP_UNICAST_IF` 验证通过后，再将此项标记完成；它仍不替代多网卡物理 LAN 出口验收。
+- [x] Windows runner 专项校验通过（Run `45927389104`）：Windows 真实 loopback TCP socket 通过 `IP_UNICAST_IF` 绑定指定接口，并成功从 `127.0.0.1` 连接 `127.0.0.2`；Windows socket binding 专项 10 项通过。测试过程中发现并修正 `socket.if_nameindex()` 在 Windows 返回 `(index, name)` 的平台差异。该结果验证 Windows API 参数/字节序与本机 loopback 连接，不替代多网卡物理 LAN 出口验收。
 - [x] 启动等待网络就绪修正代码提交 `9b2121649a8ad9803445382d66d5af0d8ffbf037`，测试夹具修正后 Run `45927181959` 全部通过：Python 全量 `424 tests`，Android 变更检测通过；Android build 按条件跳过。
