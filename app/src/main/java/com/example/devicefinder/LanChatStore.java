@@ -736,6 +736,21 @@ public final class LanChatStore extends SQLiteOpenHelper {
         }
     }
 
+    /** Earliest pending-message TTL deadline, or -1 when no unexpired Outbox rows remain. */
+    public long getNextOutboxExpiryMs() {
+        Cursor c = null;
+        try {
+            c = getReadableDatabase().rawQuery(
+                    "SELECT MIN(expires_at_ms) FROM lan_outbox "
+                            + "WHERE state NOT IN ('delivered','expired') AND expires_at_ms>0",
+                    null);
+            if (!c.moveToFirst() || c.isNull(0)) return -1L;
+            return c.getLong(0);
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
     /** User cancellation stops future sends but retains the row and ACK history. */
     public boolean cancelPendingMessage(String messageId) {
         if (messageId == null || messageId.isEmpty()) return false;
