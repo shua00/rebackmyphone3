@@ -341,7 +341,7 @@ public class TrackingService extends Service implements LocationListener {
     // LAN 对讲先持久化消息正文与消息 ID，再发 ACK；防止进程在 ACK 后、历史写入前退出。
     private final Object lanChatReceiveLock = new Object();
     private static final String PREF_LAN_CHAT_RECEIVED_IDS = "lan_chat_received_message_ids";
-    // 本地 LAN 聊天待确认队列：SharedPreferences 同步 commit，最多保留 50 条。
+    // 本地 LAN 聊天待确认队列：持久化 Outbox 最多 200 条、正文合计 8 MiB。
     private static final String PREF_LAN_CHAT_QUEUE = "lan_p2p_pending_messages";
     private static final int LAN_CHAT_QUEUE_MAX = LanChatRetryPolicy.MAX_PENDING_MESSAGES;
     private static final long LAN_CHAT_DISCOVERY_WINDOW_MS = LanChatRetryPolicy.FIRST_DISCOVERY_WINDOW_MS;
