@@ -223,6 +223,88 @@ public class LanTransferTcpSessionTest {
     }
 
     @Test
+    public void reconnectAfterUnobservedChunkAckRequeriesDurableReceipts() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        context.deleteDatabase("lan_p2p_transfer.db");
+        deleteTree(new File(context.getFilesDir(), "lan-transfer-staging"));
+        deleteTree(new File(context.getFilesDir(), "lan-transfer-received"));
+        byte[] payload = new byte[4096 + 17];
+        for (int i = 0; i < payload.length; i++) payload[i] = (byte) (i * 31);
+        File source = new File(context.getCacheDir(), "lan-transfer-lost-ack.bin");
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(source)) { out.write(payload); }
+        LanTransferStore store = new LanTransferStore(context);
+        String id = "session-lost-ack-recovery";
+        LanTransferStore.Offer offer = new LanTransferStore.Offer(id, "sender", "receiver",
+                "lost-ack.bin", payload.length, sha(payload), 1L, "application/octet-stream");
+        store.createOffer(offer, 1L, 4096);
+        store.transition(id, "accepted", 2L);
+        store.transition(id, "transferring", 3L);
+        LanTransferFilesystem filesystem = new LanTransferFilesystem(context, store,
+                LanTransferFilesystem.DEFAULT_STAGING_QUOTA_BYTES, fileOps());
+
+        ServerSocket firstListener = new ServerSocket(0);
+        ExecutorService firstExecutor = Executors.newSingleThreadExecutor();
+        try {
+            LanTransferTcpSession firstSession = new LanTransferTcpSession(context, store, filesystem,
+                    "receiver", SECRET, "sender"::equals, () -> 10L, 2, 1024 * 1024, 3000);
+            Future<Integer> firstServed = firstExecutor.submit(() -> {
+                try (Socket accepted = firstListener.accept()) { return firstSession.serve(accepted); }
+                catch (java.io.IOException ackMayBeUnobserved) { return -1; }
+            });
+            try (Socket client = new Socket("127.0.0.1", firstListener.getLocalPort())) {
+                client.setSoTimeout(3000);
+                LanTransferAuthenticator.AuthenticatedPeer peer =
+                        LanTransferAuthenticator.authenticateClient(client, "sender", "receiver", SECRET);
+                JSONObject request = new JSONObject().put("limit", 62);
+                LanTransferFrameCodec.send(client, new LanTransferFrameCodec.Frame(
+                        "missing", id, "sender", "receiver", null, new byte[0], request),
+                        peer.sessionKey, 1024 * 1024);
+                LanTransferFrameCodec.Frame missing = LanTransferFrameCodec.receive(client,
+                        peer.sessionKey, 1024 * 1024, "receiver", "sender");
+                assertEquals(2, missing.metadata.getJSONArray("indexes").length());
+                byte[] firstChunk = java.util.Arrays.copyOfRange(payload, 0, 4096);
+                LanTransferFrameCodec.send(client, new LanTransferFrameCodec.Frame(
+                        "chunk", id, "sender", "receiver", 0, firstChunk, null),
+                        peer.sessionKey, 1024 * 1024);
+                // Deliberately close without reading the chunk ACK.
+            }
+            assertTrue(firstServed.get(4, TimeUnit.SECONDS) == 2
+                    || firstServed.get(4, TimeUnit.SECONDS) == -1);
+            assertNotNull(store.getChunkReceipt(id, 0));
+        } finally {
+            firstListener.close();
+            firstExecutor.shutdownNow();
+        }
+
+        ServerSocket secondListener = new ServerSocket(0);
+        ExecutorService secondExecutor = Executors.newSingleThreadExecutor();
+        try {
+            LanTransferTcpSession secondSession = new LanTransferTcpSession(context, store, filesystem,
+                    "receiver", SECRET, "sender"::equals, () -> 11L, 3, 1024 * 1024, 3000);
+            Future<Integer> secondServed = secondExecutor.submit(() -> {
+                try (Socket accepted = secondListener.accept()) { return secondSession.serve(accepted); }
+            });
+            try (Socket client = new Socket("127.0.0.1", secondListener.getLocalPort())) {
+                java.util.List<Integer> remaining = LanTransferTcpClient.sendFile(client, source,
+                        offer, "sender", "receiver", SECRET, 4096,
+                        LanTransferTcpClient.DEFAULT_CHUNKS_PER_SESSION, 1024 * 1024, null);
+                assertTrue(remaining.isEmpty());
+            }
+            assertEquals(3, (int) secondServed.get(4, TimeUnit.SECONDS));
+            assertEquals("completed", store.getTransfer(id).state);
+            File[] published = new File(context.getFilesDir(), "lan-transfer-received").listFiles();
+            assertNotNull(published);
+            assertEquals(1, published.length);
+            assertArrayEquals(payload, Files.readAllBytes(published[0].toPath()));
+        } finally {
+            secondListener.close();
+            secondExecutor.shutdownNow();
+            store.closeStore();
+            source.delete();
+        }
+    }
+
+    @Test
     public void cancelAcknowledgementFollowsStagingCleanup() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         context.deleteDatabase("lan_p2p_transfer.db");
