@@ -2347,8 +2347,9 @@ public class TrackingService extends Service implements LocationListener {
 
     private static java.net.Inet4Address computeLanBroadcastAddress(
             java.net.Inet4Address address, int prefix) throws java.io.IOException {
-        if (address == null || prefix < 1 || prefix > 30)
-            throw new java.io.IOException("LAN broadcast requires an IPv4 subnet prefix between /1 and /30");
+        if (address == null || prefix < 1 || prefix > 32)
+            throw new java.io.IOException("LAN broadcast requires a valid IPv4 prefix");
+        if (prefix > 30) return null;
         byte[] raw = address.getAddress();
         int value = ((raw[0] & 255) << 24) | ((raw[1] & 255) << 16)
                 | ((raw[2] & 255) << 8) | (raw[3] & 255);
