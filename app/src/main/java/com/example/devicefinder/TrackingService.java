@@ -313,9 +313,27 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private static final class PendingLanChatReceive {
+        static final int MAX_ACK_TARGETS = 8;
         final java.util.List<PendingLanChatAckTarget> ackTargets = new java.util.ArrayList<>();
         boolean completed;
         boolean stored;
+
+        /** Caller holds this receive object's monitor. */
+        boolean addAckTarget(PendingLanChatAckTarget candidate) {
+            if (completed || candidate == null) return false;
+            for (PendingLanChatAckTarget existing : ackTargets) {
+                if (existing.socket == candidate.socket
+                        && existing.generation == candidate.generation
+                        && existing.port == candidate.port
+                        && existing.address.equals(candidate.address)
+                        && existing.pathFingerprint.equals(candidate.pathFingerprint)) {
+                    return true;
+                }
+            }
+            if (ackTargets.size() >= MAX_ACK_TARGETS) return false;
+            ackTargets.add(candidate);
+            return true;
+        }
     }
 
     private final java.util.concurrent.ConcurrentHashMap<String, PendingLanChatReceive>
@@ -7566,8 +7584,8 @@ public class TrackingService extends Service implements LocationListener {
                 final PendingLanChatReceive pendingReceive = receive;
                 boolean ackAlreadyCommitted;
                 synchronized (pendingReceive) {
-                    pendingReceive.ackTargets.add(ackTarget);
                     ackAlreadyCommitted = pendingReceive.completed && pendingReceive.stored;
+                    if (!pendingReceive.completed) pendingReceive.addAckTarget(ackTarget);
                 }
                 if (!ownsReceive) {
                     // If the durable commit completed while this duplicate was arriving,
