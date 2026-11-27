@@ -38,7 +38,12 @@ class LanSecondaryListenerContractTests(unittest.TestCase):
         self.assertIn("LanSocketBinding.bindDatagramListenerSocket(path, socket, 8888)", start)
         self.assertIn("lanChatListenerRuntime.register(fingerprint, socket, generation)", start)
         self.assertIn("handleLanRealtimePacket(socket, packet, receivedAt, fingerprint, generation)", start)
-        self.assertIn("instance.generation == lanSocketGeneration.get()", start)
+        self.assertIn("generation != lanSocketGeneration.get()", start)
+        current = self._method(
+            "private boolean isCurrentSecondaryLanChatListener(",
+            "private void startSecondaryLanChatListener(",
+        )
+        self.assertIn("instance.generation == lanSocketGeneration.get()", current)
         self.assertNotIn("new InetSocketAddress(8888)", start)
         self.assertNotIn("socket.bind(new InetSocketAddress(8888))", start)
         self.assertNotIn("new String(packet.getData()", start)
