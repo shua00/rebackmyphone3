@@ -16,6 +16,7 @@ public final class LanTransferPeerDirectory {
     private static final String PREFS = "lan_transfer_peer_directory_v1";
     private static final String KEY_ENTRIES = "entries_v1";
     private static final String KEY_CURRENT_NETWORK = "current_network";
+    private static final String KEY_ACTIVE_NETWORKS = "active_networks_v1";
     private static final Object LOCK = new Object();
     public static final String SOURCE_FILE_DISCOVERY = "file_discovery";
     public static final String SOURCE_CHAT_HINT = "chat_hint";
@@ -39,8 +40,29 @@ public final class LanTransferPeerDirectory {
         if (context == null || !validFingerprint(fingerprint))
             throw new IllegalArgumentException("Invalid current LAN fingerprint");
         synchronized (LOCK) {
-            context.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                    .edit().putString(KEY_CURRENT_NETWORK, fingerprint).commit();
+            java.util.Set<String> active = readActiveNetworks(context);
+            active.add(fingerprint);
+            persistActiveNetworks(context, active);
+        }
+    }
+    /** Replace the active path set atomically; each fingerprint remains an independent endpoint scope. */
+    public static void activateNetworks(Context context, java.util.Collection<String> fingerprints) {
+        if (context == null || fingerprints == null || fingerprints.isEmpty())
+            throw new IllegalArgumentException("At least one active LAN fingerprint is required");
+        java.util.Set<String> active = new java.util.LinkedHashSet<>();
+        for (String fingerprint : fingerprints) {
+            if (!validFingerprint(fingerprint)) throw new IllegalArgumentException("Invalid LAN fingerprint");
+            active.add(fingerprint);
+        }
+        synchronized (LOCK) { persistActiveNetworks(context, active); }
+    }
+    /** Deactivate one path without hiding endpoints discovered over other live paths. */
+    public static void deactivateNetwork(Context context, String fingerprint) {
+        if (context == null || !validFingerprint(fingerprint)) return;
+        synchronized (LOCK) {
+            java.util.Set<String> active = readActiveNetworks(context);
+            active.remove(fingerprint);
+            persistActiveNetworks(context, active);
         }
     }
     /** Hide every cached endpoint when no Wi-Fi LAN is currently selected. */
@@ -48,13 +70,38 @@ public final class LanTransferPeerDirectory {
         if (context == null) return;
         synchronized (LOCK) {
             context.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                    .edit().remove(KEY_CURRENT_NETWORK).commit();
+                    .edit().remove(KEY_CURRENT_NETWORK).remove(KEY_ACTIVE_NETWORKS).commit();
         }
     }
     public static String getCurrentNetwork(Context context) {
         if (context == null) return null;
-        return context.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .getString(KEY_CURRENT_NETWORK, null);
+        java.util.Set<String> active = readActiveNetworks(context);
+        return active.size() == 1 ? active.iterator().next() : null;
+    }
+    public static java.util.Set<String> getActiveNetworks(Context context) {
+        if (context == null) return Collections.emptySet();
+        synchronized (LOCK) { return Collections.unmodifiableSet(readActiveNetworks(context)); }
+    }
+    private static java.util.Set<String> readActiveNetworks(Context context) {
+        android.content.SharedPreferences prefs = context.getApplicationContext()
+                .getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        java.util.Set<String> active = new java.util.LinkedHashSet<>(
+                prefs.getStringSet(KEY_ACTIVE_NETWORKS, Collections.emptySet()));
+        String legacy = prefs.getString(KEY_CURRENT_NETWORK, null);
+        if (active.isEmpty() && validFingerprint(legacy)) active.add(legacy);
+        return active;
+    }
+    private static void persistActiveNetworks(Context context, java.util.Set<String> active) {
+        android.content.SharedPreferences prefs = context.getApplicationContext()
+                .getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        android.content.SharedPreferences.Editor editor = prefs.edit();
+        if (active.isEmpty()) editor.remove(KEY_ACTIVE_NETWORKS).remove(KEY_CURRENT_NETWORK);
+        else {
+            editor.putStringSet(KEY_ACTIVE_NETWORKS, new java.util.HashSet<>(active));
+            if (active.size() == 1) editor.putString(KEY_CURRENT_NETWORK, active.iterator().next());
+            else editor.remove(KEY_CURRENT_NETWORK);
+        }
+        if (!editor.commit()) throw new IllegalStateException("Unable to persist active LAN paths");
     }
     public static void recordFileDiscoveryCandidate(Context c, String id, String host, int port,
             String network, long now) {
@@ -84,7 +131,8 @@ public final class LanTransferPeerDirectory {
             // Maintain a separate lease per source and peer. Chat cannot evict file discovery.
             for (int i=next.size()-1;i>=0;i--) {
                 Candidate old=next.get(i);
-                if (old.peerId.equals(id) && old.networkFingerprint.equals(network)
+                if (old.peerId.equals(id) && old.host.equals(host) && old.port == port
+                        && old.pairingPort == pairingPort && old.networkFingerprint.equals(network)
                         && old.source.equals(source)) next.remove(i);
             }
             next.add(new Candidate(id,host,port,pairingPort,network,source,now));
@@ -94,6 +142,46 @@ public final class LanTransferPeerDirectory {
             persist(context,next);
         }
     }
+    /** Return every fresh endpoint for one identity across all currently active paths. */
+    public static List<Candidate> findCurrentAll(Context c, String id, long now) {
+        if (c == null || !validPeerId(id) || now <= 0L) return Collections.emptyList();
+        java.util.Set<String> active = getActiveNetworks(c);
+        if (active.isEmpty()) return Collections.emptyList();
+        synchronized (LOCK) {
+            Map<String, Candidate> endpoints = new LinkedHashMap<>();
+            for (Candidate item : read(c)) {
+                if (!item.peerId.equals(id) || !active.contains(item.networkFingerprint) || !fresh(item, now)) continue;
+                String key = item.networkFingerprint + "\\u0000" + item.host + ":" + item.port + ":" + item.pairingPort;
+                Candidate old = endpoints.get(key);
+                if (old == null || (SOURCE_CHAT_HINT.equals(old.source) && SOURCE_FILE_DISCOVERY.equals(item.source))
+                        || (old.source.equals(item.source) && item.lastSeenAtMs > old.lastSeenAtMs)) endpoints.put(key, item);
+            }
+            List<Candidate> result = new ArrayList<>(endpoints.values());
+            Collections.sort(result, (a,b) -> Long.compare(b.lastSeenAtMs, a.lastSeenAtMs));
+            return Collections.unmodifiableList(result);
+        }
+    }
+    /** All fresh endpoints; multiple paths never create duplicate peer identities in the UI API. */
+    public static List<Candidate> loadCurrentAll(Context c, long now) {
+        if (c == null || now <= 0L) return Collections.emptyList();
+        java.util.Set<String> active = getActiveNetworks(c);
+        if (active.isEmpty()) return Collections.emptyList();
+        synchronized (LOCK) {
+            Map<String, Candidate> endpoints = new LinkedHashMap<>();
+            for (Candidate item : read(c)) {
+                if (!active.contains(item.networkFingerprint) || !fresh(item, now)) continue;
+                String key = item.peerId + "\\u0000" + item.networkFingerprint + "\\u0000"
+                        + item.host + ":" + item.port + ":" + item.pairingPort;
+                Candidate old = endpoints.get(key);
+                if (old == null || (SOURCE_CHAT_HINT.equals(old.source) && SOURCE_FILE_DISCOVERY.equals(item.source))
+                        || (old.source.equals(item.source) && item.lastSeenAtMs > old.lastSeenAtMs)) endpoints.put(key, item);
+            }
+            List<Candidate> result = new ArrayList<>(endpoints.values());
+            Collections.sort(result, (a,b) -> Long.compare(b.lastSeenAtMs, a.lastSeenAtMs));
+            return Collections.unmodifiableList(result);
+        }
+    }
+
     public static Candidate findCurrent(Context c, String id, long now) {
         String network=getCurrentNetwork(c);
         if(c==null || !validPeerId(id) || !validFingerprint(network) || now<=0L) return null;
