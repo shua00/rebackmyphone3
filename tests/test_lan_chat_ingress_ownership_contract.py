@@ -97,6 +97,29 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
         self.assertIn("findCurrentPeerRouteBinding(senderId, ingressPath,", fragment)
         self.assertIn("lanChatPathRegistry.listenerCount() == 1", fragment)
 
+    def test_peer_challenge_nonce_is_bound_to_egress_listener_epoch(self):
+        self.assertIn("pendingPeerChallengeIngress", self.source)
+        self.assertIn("registerPendingPeerChallengeIngress(nonce, socket)", self.source)
+        self.assertIn("lease.socket == socket && lanChatListenerRuntime.isCurrent(lease)", self.source)
+        self.assertIn("challengeIngress.matches(ackIngressPath, socket, ackIngressGeneration)", self.source)
+        self.assertIn("pendingPeerChallengeIngress.clear()", self.source)
+        clear = self._method(
+            "private void clearPendingPeerChallenge(",
+            "private void sendPeerHello(",
+        )
+        self.assertIn("pendingPeerChallengeIngress.remove(nonce)", clear)
+        peer_ack = self._method(
+            'if ("peer.ack".equals(type))',
+            'if ("chat.ack".equals(type))',
+        )
+        self.assertLess(
+            peer_ack.index("challengeIngress.matches(ackIngressPath, socket, ackIngressGeneration)"),
+            peer_ack.index("store.upsertPeer("),
+        )
+        self.assertIn(
+            "pendingPeerChallengeIngress.remove(nonce, challengeIngress)", peer_ack
+        )
+
     def test_peer_ack_route_admission_is_atomic_with_listener_epoch(self):
         registry = (
             ROOT / "app/src/main/java/com/example/devicefinder/LanChatPathRegistry.java"
