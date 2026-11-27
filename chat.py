@@ -634,10 +634,11 @@ def _handle_authenticated_v2_packet(envelope, sock, addr):
                         "sender_peer_type": "chat.py", "service_id": PEER_NODE_ID,
                         "target_peer_id": sender, "message_id": message_id,
                         "fragment_index": fragment_index, "status": "received"}
-        try:
-            sock.sendto(encode_packet(fragment_ack, RESCUE_SECRET), addr)
-        except OSError:
-            return
+        if stored != "complete_duplicate":
+            try:
+                sock.sendto(encode_packet(fragment_ack, RESCUE_SECRET), addr)
+            except OSError:
+                return
         cached = load_incoming_chat_fragments(CHAT_DB, "chat.py", sender, message_id)
         if not cached or len(cached) != int(envelope.get("fragment_count", -1)):
             return
