@@ -432,4 +432,35 @@ public class LanChatStorePersistenceTest {
         assertEquals(0, store.loadTargets("broadcast-fragment-bounds").size());
     }
 
+    @Test
+    public void pendingOutboxCapacityCountsWaitingPeersAndReleasesDeliveredRows() {
+        for (int i = 0; i < LanChatStore.MAX_PENDING_MESSAGES; i++) {
+            assertTrue("enqueue " + i, store.enqueue(
+                    "capacity-" + i, "desktop-peer", "x", 1000L + i));
+        }
+        assertFalse(store.enqueue("capacity-overflow", "desktop-peer", "x", 2000L));
+
+        SQLiteDatabase db = store.getWritableDatabase();
+        db.execSQL("UPDATE lan_outbox SET state='waiting_peers' WHERE message_id=?",
+                new Object[]{"capacity-0"});
+        assertFalse("waiting_peers must continue to consume capacity",
+                store.enqueue("capacity-still-full", "desktop-peer", "x", 2001L));
+
+        db.execSQL("UPDATE lan_outbox SET state='delivered' WHERE message_id=?",
+                new Object[]{"capacity-1"});
+        assertTrue("terminal delivered row must release pending capacity",
+                store.enqueue("capacity-after-delivery", "desktop-peer", "x", 2002L));
+    }
+
+    @Test
+    public void pendingOutboxEnforcesAggregateUtf8BodyBudget() {
+        int halfBudget = (int) (LanChatStore.MAX_PENDING_BODY_BYTES / 2L);
+        char[] chars = new char[halfBudget];
+        java.util.Arrays.fill(chars, 'x');
+        String halfBudgetBody = new String(chars);
+        assertTrue(store.enqueue("byte-budget-a", "desktop-peer", halfBudgetBody, 1000L));
+        assertTrue(store.enqueue("byte-budget-b", "desktop-peer", halfBudgetBody, 1001L));
+        assertFalse(store.enqueue("byte-budget-overflow", "desktop-peer", "x", 1002L));
+    }
+
 }
