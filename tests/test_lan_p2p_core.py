@@ -1580,7 +1580,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("synchronized (lanChatReceiveLock)", tracking_source[tracking_source.index("private void saveChatToHistory("):tracking_source.index("private void syncMessageToServer(")])
         self.assertNotIn("receivedChatMessageIds", tracking_source)
         self.assertIn("P2P RX durable message=", tracking_source)
-        self.assertIn("persisted=true ackSent=", tracking_source)
+        self.assertIn("persisted=true ackPaths=", tracking_source)
         self.assertIn("persisted=false ackSent=false", tracking_source)
         ack_start = tracking_source.index("private boolean sendAuthenticatedChatAck(")
         ack_end = tracking_source.index("private boolean handleLanRealtimePacket(", ack_start)
@@ -1613,7 +1613,7 @@ class LanP2PCoreTests(unittest.TestCase):
         packet_end = source.index("\n        } catch (Exception e)", packet_start)
         packet_handler = source[packet_start:packet_end]
         persist_call = packet_handler.index("persistIncomingLanChat(")
-        ack_call = packet_handler.index("sendAuthenticatedChatAck(")
+        ack_call = packet_handler.index("sendLanChatReceiveAck(")
         self.assertLess(persist_call, ack_call)
         self.assertIn("if (stored)", packet_handler)
         self.assertIn('persisted=false ackSent=false', packet_handler)
@@ -1637,23 +1637,26 @@ class LanP2PCoreTests(unittest.TestCase):
         end = source.index("\n        } catch (Exception e)", start)
         handler = source[start:end]
 
-        duplicate_guard = handler.index("if (!pendingLanChatReceives.add(receiveKey))")
-        claim = handler.index("pendingLanChatReceives.add(receiveKey)", duplicate_guard)
-        dispatch = handler.index("lanChatIoExecutor.execute", duplicate_guard)
+        claim = handler.index("pendingLanChatV2Receives.putIfAbsent(")
+        ack_target = handler.index("pendingReceive.ackTargets.add(ackTarget)", claim)
+        duplicate_branch = handler.index("if (!ownsReceive)", ack_target)
+        dispatch = handler.index("lanChatIoExecutor.execute", duplicate_branch)
         persist = handler.index("persistIncomingLanChat(", dispatch)
-        ack = handler.index("sendAuthenticatedChatAck(", persist)
-        cleanup = handler.index("pendingLanChatReceives.remove(receiveKey)", persist)
+        ack = handler.index("sendLanChatReceiveAck(", persist)
+        cleanup = handler.index("pendingLanChatV2Receives.remove(receiveKey, pendingReceive)", persist)
         rejected = handler.index("catch (java.util.concurrent.RejectedExecutionException", cleanup)
-        rejected_cleanup = handler.index("pendingLanChatReceives.remove(receiveKey)", rejected)
+        rejected_cleanup = handler.index("pendingLanChatV2Receives.remove(receiveKey, pendingReceive)", rejected)
 
-        self.assertLess(duplicate_guard, claim)
-        self.assertLess(claim, dispatch)
+        self.assertLess(claim, ack_target)
+        self.assertLess(ack_target, duplicate_branch)
+        self.assertLess(duplicate_branch, dispatch)
         self.assertLess(dispatch, persist)
         self.assertLess(persist, ack)
         self.assertLess(ack, cleanup)
         self.assertLess(rejected, rejected_cleanup)
-        self.assertIn("return true", handler[duplicate_guard:dispatch])
+        self.assertIn("return true", handler[duplicate_branch:dispatch])
         self.assertIn("if (stored)", handler[persist:cleanup])
+        self.assertIn("new java.util.ArrayList<>(pendingReceive.ackTargets)", handler[persist:cleanup])
 
 
     def test_android_discovery_ack_store_rejects_empty_peer_identity(self):
@@ -4437,7 +4440,7 @@ class AndroidLanInboxProjectionRecoveryTests(unittest.TestCase):
         handler = source[source.index('if ("chat.message".equals(type))'):
                          source.index("\n        } catch (Exception e)", source.index('if ("chat.message".equals(type))'))]
         persist = handler.index("persistIncomingLanChat(")
-        ack = handler.index("sendAuthenticatedChatAck(", persist)
+        ack = handler.index("sendLanChatReceiveAck(", persist)
         projection = handler.index("scheduleLanChatInboxProjection()", ack)
         self.assertLess(persist, ack)
         self.assertLess(ack, projection)
