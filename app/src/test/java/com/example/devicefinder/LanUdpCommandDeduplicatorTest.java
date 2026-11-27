@@ -34,4 +34,34 @@ public class LanUdpCommandDeduplicatorTest {
         }
         assertTrue(dedup.size() <= 50);
     }
+
+    @Test public void concurrentIngressPathsAdmitOnlyOneCopy() throws Exception {
+        final LanUdpCommandDeduplicator shared = new LanUdpCommandDeduplicator();
+        final java.util.concurrent.CountDownLatch ready =
+                new java.util.concurrent.CountDownLatch(12);
+        final java.util.concurrent.CountDownLatch start =
+                new java.util.concurrent.CountDownLatch(1);
+        final java.util.concurrent.atomic.AtomicInteger accepted =
+                new java.util.concurrent.atomic.AtomicInteger();
+        Thread[] workers = new Thread[12];
+        for (int i = 0; i < workers.length; i++) {
+            workers[i] = new Thread(() -> {
+                ready.countDown();
+                try {
+                    start.await();
+                    if (shared.shouldAccept("same-broadcast", 5000L)) {
+                        accepted.incrementAndGet();
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }, "udp-dedup-test-" + i);
+            workers[i].start();
+        }
+        ready.await();
+        start.countDown();
+        for (Thread worker : workers) worker.join(2000L);
+        assertEquals(1, accepted.get());
+        assertEquals(1, shared.size());
+    }
 }
