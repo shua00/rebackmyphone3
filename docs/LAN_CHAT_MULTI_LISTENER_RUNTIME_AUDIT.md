@@ -94,6 +94,16 @@
 - 不得宣称动态路径质量评分已完成。
 - 不得以接口枚举、bind 成功或单向收包替代三设备任意两台双向真机验收。
 
-## 5. 本批结论
+## 5. 2026-11-27 后续批次进展
+
+- [x] 新增 `LanChatListenerRuntime`，用 path-keyed immutable lease 统一 Registry 注册、generation 所有权和 compare-and-remove；不创建 worker/timer，也不关闭 socket。
+- [x] 现有单 Wi-Fi Listener 的注册/注销已接入该 owner，保持单 Listener 的 socket/thread 资源模型。
+- [x] ACK ingress 从 receive loop 显式传递 path fingerprint 与 listener generation；异步 ACK/peer.ack 继续使用该捕获快照，避免未来多 Listener 时读取全局单 Listener path 字段而串线。
+- [x] 增加 runtime lease 和 ACK ingress 静态契约测试。
+- [ ] 尚未把每条 path 的 socket、receive loop、thread、Network snapshot、停止/替换生命周期全部迁入 owner；因此当前仍不是多 Listener runtime。
+- [ ] 尚未接入精确地址绑定到聊天 Listener；当前单 Listener仍使用原有 Wi-Fi bind 流程。
+- [ ] 尚未实现 per-peer×path 真实 RTT/失败采样和发送失败后的备用路径回退。
+
+## 6. 本批结论
 
 本批完成运行时阻塞点审计并形成可执行实施顺序。下一批应先把现有单 Listener 安全迁移到 path-keyed owner，再逐步引入第二条 Listener；不应一次性并行修改 TrackingService 的 socket 生命周期、ACK ingress 和发送重试，以免扩大竞态面。
