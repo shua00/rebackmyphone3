@@ -109,6 +109,37 @@ class LanSocketBindingTests(unittest.TestCase):
                                 platform="linux", socket_module=FakeSocketModule)
         self.assertIsNone(sock.bound)
 
+    def test_linux_binding_permission_error_variants_never_bind_source_only(self):
+        for error in (PermissionError("denied"), OSError(1, "operation not permitted"),
+                      OSError(13, "permission denied"), OSError(95, "operation unsupported")):
+            class DeniedSocket(FakeSocket):
+                def setsockopt(self, level, option, value):
+                    raise error
+            sock = DeniedSocket()
+            with self.subTest(error=repr(error)):
+                with self.assertRaises(OSError):
+                    bind_socket_to_path(sock, self.path, remote_address="192.168.40.9",
+                        platform="linux", socket_module=FakeSocketModule)
+                self.assertIsNone(sock.bound)
+
+    def test_linux_missing_bind_option_fails_before_source_bind(self):
+        class NoBindOptionModule(FakeSocketModule):
+            SO_BINDTODEVICE = None
+        sock = FakeSocket()
+        with self.assertRaisesRegex(OSError, "SO_BINDTODEVICE is unavailable"):
+            bind_socket_to_path(sock, self.path, platform="linux",
+                                socket_module=NoBindOptionModule)
+        self.assertIsNone(sock.bound)
+
+    def test_source_bind_failure_does_not_report_a_usable_binding(self):
+        class SourceBindDeniedSocket(FakeSocket):
+            def bind(self, address):
+                raise OSError(99, "cannot assign requested address")
+        sock = SourceBindDeniedSocket()
+        with self.assertRaisesRegex(OSError, "cannot assign requested address"):
+            bind_socket_to_path(sock, self.path, platform="linux",
+                                socket_module=FakeSocketModule)
+
     def test_windows_interface_binding_failure_does_not_fall_back(self):
         class DeniedSocket(FakeSocket):
             def setsockopt(self, level, option, value):
