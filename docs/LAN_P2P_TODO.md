@@ -12,6 +12,7 @@
 - [ ] **当前 P0-A（下一阶段）**：将显式发送失败/ACK 超时与备用 RouteBinding 回退闭环；每次切换必须重新校验 binding、记录具体 path failure，避免对同一消息重复执行或无限重试。
 - [ ] **当前 P0-A**：STA/AP 多 Listener 生命周期、socket ownership、generation 和按路径清理；三设备任意两台双向互通。
 - [x] **多 Listener 前置保护**：旧 UDP 管理命令去重提升为 TrackingService 级共享 `LanUdpCommandDeduplicator`，避免同一广播经 STA/AP 两个接收循环分别执行；仍待真实多 Listener runtime 集成验收。
+- [x] **去重并发回归保护**：Java 12 并发 ingress 单测验证同一广播仅一次接纳；Python 静态契约防止后续接收循环复制时退回局部去重表。
 - [ ] **当前 P0-A**：普通路由器两台或多台 Android/Python 设备快路径回归；不增加无关周期扫描、高频探测、每包全路径枚举或默认多路径重复发送。
 - [ ] **P0-B**：沉淀 Android/Python 对齐的 path state、route lease、failure reason、route decision 语义及可复用接口。
 - [ ] **P0-C（LAN P2P v2 真机验收后排期）**：Rescue2/Server2 复用感知结果，LAN 内优先 UDP 即时指令，LAN 外或 LAN route 不可用时走 HTTP；以 commandId 幂等、TTL、接收/执行状态和结果回传防止重复执行。
@@ -27,6 +28,17 @@
 - [ ] 将实际 receive thread/socket 发布、关闭、generation 以及路径变更协调全部迁移到 per-path owner；当前 `TrackingService` 仍只有一个实际聊天接收循环。
 - [x] 明确实施门槛与分阶段顺序，详见 [LAN_CHAT_MULTI_LISTENER_RUNTIME_AUDIT.md](LAN_CHAT_MULTI_LISTENER_RUNTIME_AUDIT.md)。
 - [ ] 下一步：先将现有单 Wi-Fi Listener 迁移到 path-keyed owner，保持单路径仍仅一个 Listener；通过生命周期/竞态测试后，再接入第二条 STA/AP path。
+
+
+## 到首次真机验收的剩余批次（估算）
+
+> 当前代码状态预计还需 **4 个实施批次**进入受控真机验收，另预留 1 个按需修复批次。详细阶段和验收顺序见 `LAN_CHAT_MULTI_LISTENER_RUNTIME_AUDIT.md` 第 10 节。进入真机测试不等于拓扑验收通过。
+
+1. 单 Listener socket/thread/path/generation 生命周期对象化并迁移现有 STA Listener。
+2. AP/local-interface 可靠识别、精确绑定和第二 Listener 接入。
+3. 多 Listener ingress/ACK/peer control、共享旧命令分发、peer×path 独立认证闭环。
+4. 有界备用路径回退、真实质量事实采样最小闭环、普通单路径性能回归和真机测试包准备。
+5. 条件预留：根据不同 ROM/热点行为/网络切换真机结果修复。
 
 ## 当前阶段总纲：四级优先级（2026-11-27 调整）
 
