@@ -842,7 +842,7 @@ public class LanTransferTcpSessionTest {
             python = startPythonIntegration(script, repositoryRoot(),
                     Integer.toString(listener.getLocalPort()), "", source.getAbsolutePath());
             assertTrue(finishPythonIntegration(python).contains("PYTHON_TO_ANDROID_TCP_OK"));
-            assertEquals(3, (int) served.get(10, TimeUnit.SECONDS));
+            assertEquals(5, (int) served.get(10, TimeUnit.SECONDS));
             assertEquals("completed", store.getTransfer(transferId).state);
             File[] published = new File(context.getFilesDir(), "lan-transfer-received").listFiles();
             assertNotNull(published);
