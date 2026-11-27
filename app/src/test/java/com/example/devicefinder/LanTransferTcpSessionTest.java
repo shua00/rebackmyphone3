@@ -223,6 +223,54 @@ public class LanTransferTcpSessionTest {
     }
 
     @Test
+    public void cancelAcknowledgementFollowsStagingCleanup() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        context.deleteDatabase("lan_p2p_transfer.db");
+        deleteTree(new File(context.getFilesDir(), "lan-transfer-staging"));
+        deleteTree(new File(context.getFilesDir(), "lan-transfer-received"));
+        LanTransferStore store = new LanTransferStore(context);
+        String id = "session-cancel-cleanup";
+        store.createOffer(new LanTransferStore.Offer(id, "sender", "receiver",
+                "cancel.bin", PAYLOAD.length, sha(PAYLOAD), 1L, "text/plain"),
+                1L, LanTransferStore.DEFAULT_CHUNK_SIZE);
+        store.transition(id, "accepted", 2L);
+        store.transition(id, "transferring", 3L);
+        LanTransferFilesystem filesystem = new LanTransferFilesystem(context, store,
+                LanTransferFilesystem.DEFAULT_STAGING_QUOTA_BYTES, fileOps());
+        filesystem.writeChunk(id, 0, PAYLOAD, 4L);
+        File stagingTask = new File(context.getFilesDir(), "lan-transfer-staging/" + id);
+        assertTrue(stagingTask.exists());
+        LanTransferTcpSession session = new LanTransferTcpSession(context, store, filesystem,
+                "receiver", SECRET, "sender"::equals, () -> 10L, 1, 1024 * 1024, 3000);
+        ServerSocket listener = new ServerSocket(0);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<Integer> served = executor.submit(() -> {
+                try (Socket accepted = listener.accept()) { return session.serve(accepted); }
+            });
+            try (Socket client = new Socket("127.0.0.1", listener.getLocalPort())) {
+                client.setSoTimeout(3000);
+                LanTransferAuthenticator.AuthenticatedPeer peer =
+                        LanTransferAuthenticator.authenticateClient(client, "sender", "receiver", SECRET);
+                LanTransferFrameCodec.send(client, new LanTransferFrameCodec.Frame(
+                        "cancel", id, "sender", "receiver", null, new byte[0], null),
+                        peer.sessionKey, 1024 * 1024);
+                LanTransferFrameCodec.Frame response = LanTransferFrameCodec.receive(client,
+                        peer.sessionKey, 1024 * 1024, "receiver", "sender");
+                assertEquals("cancel", response.kind);
+                assertEquals("cancelled", response.metadata.getString("state"));
+            }
+            assertEquals(1, (int) served.get(4, TimeUnit.SECONDS));
+            assertEquals("cancelled", store.getTransfer(id).state);
+            assertFalse(stagingTask.exists());
+        } finally {
+            listener.close();
+            executor.shutdownNow();
+            store.closeStore();
+        }
+    }
+
+    @Test
     public void replayedOfferAndChunkAreAcknowledgedIdempotently() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         context.deleteDatabase("lan_p2p_transfer.db");
