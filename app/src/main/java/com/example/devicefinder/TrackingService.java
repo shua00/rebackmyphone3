@@ -7176,10 +7176,13 @@ public class TrackingService extends Service implements LocationListener {
                             new java.net.InetSocketAddress(sourceAddress, sourcePort),
                             android.os.SystemClock.elapsedRealtime());
             boolean routeMatches = routeBinding != null;
-            boolean persistedMatch = store.matchesExpectedAckEndpoint(
-                    messageId, peerId, sourceAddress.getHostAddress(), sourcePort);
-            boolean attemptedMatch = store.matchesAttemptedAckEndpoint(
-                    messageId, peerId, sourceAddress.getHostAddress(), sourcePort);
+            boolean allowLegacyEndpointFallback = lanChatPathRegistry.listenerCount() == 1;
+            boolean persistedMatch = allowLegacyEndpointFallback
+                    && store.matchesExpectedAckEndpoint(
+                            messageId, peerId, sourceAddress.getHostAddress(), sourcePort);
+            boolean attemptedMatch = allowLegacyEndpointFallback
+                    && store.matchesAttemptedAckEndpoint(
+                            messageId, peerId, sourceAddress.getHostAddress(), sourcePort);
             if (!routeMatches && !persistedMatch && !attemptedMatch) return;
 
             LanChatStore.PendingMessage pending = null;
@@ -7262,12 +7265,18 @@ public class TrackingService extends Service implements LocationListener {
                         new java.net.InetSocketAddress(sourceAddress, sourcePort),
                         android.os.SystemClock.elapsedRealtime());
         boolean routeMatches = routeBinding != null;
-        boolean persistedEndpointMatch = !routeMatches && store.matchesExpectedAckEndpoint(
-                messageId, senderId, sourceAddress.getHostAddress(), sourcePort);
+        // The legacy SQLite endpoint ledger has no path key. Keep it only while exactly
+        // one listener exists; once multiple ingress paths are active, require a path-bound
+        // Registry route instead of allowing a peer-wide endpoint to authorize another path.
+        boolean allowLegacyEndpointFallback = lanChatPathRegistry.listenerCount() == 1;
+        boolean persistedEndpointMatch = !routeMatches && allowLegacyEndpointFallback
+                && store.matchesExpectedAckEndpoint(
+                        messageId, senderId, sourceAddress.getHostAddress(), sourcePort);
         boolean attemptedEndpointPending = !routeMatches && !persistedEndpointMatch
-                && store.matchesAttemptedAckEndpoint(messageId, senderId,
+                && allowLegacyEndpointFallback && store.matchesAttemptedAckEndpoint(messageId, senderId,
                         sourceAddress.getHostAddress(), sourcePort);
-        if (!persistedEndpointMatch && !attemptedEndpointPending && allowEndpointGrace) {
+        if (!routeMatches && !persistedEndpointMatch && !attemptedEndpointPending
+                && allowEndpointGrace) {
             // A broadcast recipient has no fixed target row yet. Its first authenticated
             // ACK may create a bounded, message-only target, never a trusted lan_peers row.
             persistedEndpointMatch = store.admitBroadcastFragmentAckTarget(
@@ -7334,7 +7343,10 @@ public class TrackingService extends Service implements LocationListener {
         // A live authenticated route already proves this exact sender endpoint. Avoid a
         // redundant SQLite endpoint lookup on the common ACK fast path; do not label the
         // skipped persisted check as a match in diagnostics.
-        boolean persistedEndpointMatch = !routeMatches
+        // The legacy SQLite endpoint ledger is peer-wide, not path-scoped. It is a
+        // compatibility fallback only while this process owns exactly one LAN listener.
+        boolean allowLegacyEndpointFallback = lanChatPathRegistry.listenerCount() == 1;
+        boolean persistedEndpointMatch = !routeMatches && allowLegacyEndpointFallback
                 && store.matchesExpectedAckEndpoint(messageId, senderId,
                         sourceAddress.getHostAddress(), sourcePort);
         boolean attemptedEndpointPending = false;
@@ -7344,8 +7356,9 @@ public class TrackingService extends Service implements LocationListener {
         // never accepted as proof because DatagramSocket.send() may still fail.
         if (!routeMatches && !persistedEndpointMatch) {
             try {
-                attemptedEndpointPending = store.matchesAttemptedAckEndpoint(messageId, senderId,
-                        sourceAddress.getHostAddress(), sourcePort);
+                attemptedEndpointPending = allowLegacyEndpointFallback
+                        && store.matchesAttemptedAckEndpoint(messageId, senderId,
+                                sourceAddress.getHostAddress(), sourcePort);
                 if (!attemptedEndpointPending) {
                     discoveryAck = store.isDiscoveryPending(messageId);
                 }
