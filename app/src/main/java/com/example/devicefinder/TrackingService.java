@@ -6830,6 +6830,7 @@ public class TrackingService extends Service implements LocationListener {
             LanChatPathRegistry.Listener ingressListener = ingressPathFingerprint == null
                     ? null : lanChatPathRegistry.getListener(ingressPathFingerprint);
             final String ackIngressPath = ingressListener != null && ingressListener.socket == socket
+                    && ingressListener.generation == lanSocketGeneration.get()
                     && ingressListener.isUsable() ? ingressPathFingerprint : null;
             final long ackIngressGeneration = ackIngressPath == null ? -1L : ingressListener.generation;
             if ("peer.hello".equals(type)) {
@@ -7111,7 +7112,8 @@ public class TrackingService extends Service implements LocationListener {
                 || socket.isClosed()) return false;
         LanChatPathRegistry.Listener listener = lanChatPathRegistry.getListener(path);
         return listener != null && listener.socket == socket
-                && listener.generation == generation && listener.isUsable();
+                && listener.generation == generation
+                && generation == lanSocketGeneration.get() && listener.isUsable();
     }
 
     /**
