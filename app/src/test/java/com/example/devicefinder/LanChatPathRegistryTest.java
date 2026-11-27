@@ -85,8 +85,13 @@ public class LanChatPathRegistryTest {
             registry.registerListener(path, replacement, 71);
             try {
                 registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.31"),
-                        NOW, NOW + 100, old, 70);
-                fail("stale ingress must not be promoted into replacement generation");
+                        NOW, NOW + 100, old, 71);
+                fail("socket identity mismatch must not be promoted");
+            } catch (IllegalStateException expected) { }
+            try {
+                registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.31"),
+                        NOW, NOW + 100, replacement, 70);
+                fail("generation mismatch must not be promoted");
             } catch (IllegalStateException expected) { }
             assertTrue(registry.getFreshPeerRoutes("peer", NOW + 1).isEmpty());
             registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.32"),
