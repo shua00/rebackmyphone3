@@ -154,7 +154,7 @@ class TransferServiceTests(unittest.TestCase):
         try:
             record = restarted.store.get_transfer(offer.transfer_id)
             self.assertEqual(TransferState.TRANSFERRING, record.state)
-            self.assertEqual((), restarted.filesystem.reconcile(offer.transfer_id, 105))
+            self.assertEqual((1,), restarted.filesystem.reconcile(offer.transfer_id, 105))
             self.assertEqual((1,), restarted.store.missing_chunks(offer.transfer_id))
             self.assertEqual(("android-peer-1",), restarted.credentials.trusted_peer_ids)
             restarted.start()
