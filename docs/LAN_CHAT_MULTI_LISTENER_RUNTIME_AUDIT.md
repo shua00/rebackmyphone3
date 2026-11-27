@@ -146,3 +146,13 @@
 5. **预留批次 E（条件触发）**——修复真机暴露的 ROM、热点客户端隔离、接口权限、网络切换或端口行为差异；不把它预先计入正常路径。
 
 真机验收按风险递进：普通路由器双 Android → 热点主机与一个客户端 → 热点主机、STA 客户端、路由器客户端三设备三组两两双向 → Android/Python 互通与网络切换。每一步独立记录，不以 CI 代替。
+
+
+## 2026-11-27 批次 A 进展：单 Listener 生命周期实例化
+
+- 新增 `LanChatListenerInstance`：以不可变 path fingerprint + generation 标识一个接收实例，明确登记其唯一 socket/thread；不自行创建线程、socket、timer 或探测任务。
+- `TrackingService.startRescueListener()` 先创建实例，再将实际创建的 DatagramSocket 和 listener Thread 附着到实例；socket 发布前复核 active instance、socket identity 与 generation。
+- 网络路径替换时先对旧实例执行 stop-request，再在锁外关闭 socket；旧 receive loop 的 finally 仍需同时匹配当前 thread、instance identity 和 socket identity，不能清理替换后的实例。
+- 单 Listener 仍只有原有一个接收线程和一个 socket；本批没有启动第二 Listener，也没有改变 UDP 8888 绑定策略、ACK ingress snapshot、消息/文件传输协议。
+- 新增 `LanChatListenerInstanceTest`，覆盖唯一资源附着、停止后禁止迟到资源附着、旧 generation 不能冒充替换实例；更新 Python 静态契约测试。
+- **范围说明**：这是把现有单 Listener 的身份/资源所有权显式化，不等于完成完整 manager 化；socket bind/receive/close 和 multicast lock 仍由 TrackingService 控制，后续批次再逐步把状态迁入 owner，并审查 onDestroy/网络切换/启动失败的所有退出路径。
