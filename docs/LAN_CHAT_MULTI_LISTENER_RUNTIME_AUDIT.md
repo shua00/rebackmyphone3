@@ -356,6 +356,7 @@ Scope: diagnostics emitted by the Rescue2 Python process itself. This is separat
 - Added scan lifecycle events: scan id, local interface/network counts, ARP/full-subnet fallback outcome, discovered count and elapsed time.
 - Added v2 peer lifecycle events: HELLO receipt/rejection, HELLO persistence and ACK send outcomes, challenge verification result.
 - Added chat lifecycle events: send request/persistence/queue outcome, inbound persistence/dedup outcome, ACK send/receive/acceptance/persistence, and recovery replay stages correlated by message id.
+- ACK acceptance retains the existing target-peer and verified-endpoint guard; diagnostics observe its result without widening authorization.
 - Added recovery worker/schema/ledger failure events and exception tracebacks for actionable failure paths.
 - Existing UDP ingress/rejection/dispatch-queue/listener lifecycle diagnostics are retained.
 - Log fields continue to exclude message bodies, packet payloads, credentials, tokens and secrets. No protocol changes, additional periodic probes, or new background workers are introduced by diagnostics.
