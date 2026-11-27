@@ -326,3 +326,11 @@ CI 验证补充（secondary listener 代码阶段，2026-11-27）：
 - [ ] 当前未接入发送失败/ACK timeout 的 selector fallback 和 per-peer×path 质量评分；不提前把 Listener 恢复能力当作端到端发送回退完成。
 
 PR #1 仍 Open，未合并 main；本轮完成的是代码和 CI 层面的批次 C 生命周期收口补充，不代表真机验收完成。
+
+
+## 2026-11-27 批次 C：Service teardown ingress invalidation
+
+- [x] `isCurrentLanChatIngress(path, socket, generation)` 现在先检查 `serviceDestroyed`，再检查 Registry Listener、Socket identity、generation 和可用状态。Service 一旦进入销毁阶段，所有异步 ACK/HELLO/控制处理都立即失去 ingress 授权，不再依赖 Socket.close() 完成的时间窗口。
+- [x] `peer.hello` 异步任务在持久化前和发送 `peer.ack` 前分别复核 ingress；统一 helper 使 teardown guard 同样覆盖 ACK 的异步账本更新。
+- [x] 最新代码 head `3ba7da00aa6b8114a0d4e5c49dd60b8e32e38bfc) / PR run [46031571050](https://github.com/shua00/rebackmyphone3/actions/runs/46031571050)：Python 467 tests（skipped=1）、Windows Socket Binding、Android unit/debug/slim release 全部成功；artifact `15215120518`。
+- [ ] 仍需真机验证网络切换、Service 快速销毁/重建和热点双路径下的实际收发；CI 不能替代这些设备级验证。
