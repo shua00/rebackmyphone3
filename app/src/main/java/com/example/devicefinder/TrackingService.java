@@ -2861,7 +2861,7 @@ public class TrackingService extends Service implements LocationListener {
             } else if ("ACTION_LAN_TRANSFER_PAIRING_REJECT".equals(action)) {
                 if (initiator != null) {
                     initiator.rejectLocal(5000, 10000);
-                    lanTransferPairingInitiators.remove(sessionId, initiator);
+                    removeLanTransferPairingInitiator(sessionId, initiator);
                 } else {
                     LanTransferPairingControlHost host = findLanTransferPairingHost(sessionId, peerId);
                     if (host == null) throw new IllegalStateException("Pairing responder is unavailable on any active LAN path");
@@ -2872,7 +2872,7 @@ public class TrackingService extends Service implements LocationListener {
             } else if ("ACTION_LAN_TRANSFER_PAIRING_CANCEL".equals(action)) {
                 if (initiator != null) {
                     initiator.cancel(3000, 5000);
-                    lanTransferPairingInitiators.remove(sessionId, initiator);
+                    removeLanTransferPairingInitiator(sessionId, initiator);
                 } else {
                     LanTransferPairingControlHost host = findLanTransferPairingHost(sessionId, peerId);
                     if (host != null) host.cancelPendingForRemote(sessionId, peerId);
@@ -2989,7 +2989,7 @@ public class TrackingService extends Service implements LocationListener {
             try {
                 LanTransferPairingSession.State current = initiator.state();
                 if (current == LanTransferPairingSession.State.EXPIRED) {
-                    lanTransferPairingInitiators.remove(sessionId, initiator);
+                    removeLanTransferPairingInitiator(sessionId, initiator);
                     initiator.close();
                     broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
                             sessionId, initiator.remotePeerId(), "", "initiator", "EXPIRED", 0L);
@@ -3006,7 +3006,7 @@ public class TrackingService extends Service implements LocationListener {
                 else if (next == LanTransferPairingSession.State.REJECTED
                         || next == LanTransferPairingSession.State.CANCELLED
                         || next == LanTransferPairingSession.State.EXPIRED) {
-                    lanTransferPairingInitiators.remove(sessionId, initiator);
+                    removeLanTransferPairingInitiator(sessionId, initiator);
                     initiator.close();
                 }
             } catch (Exception retryFailure) {
@@ -3014,7 +3014,7 @@ public class TrackingService extends Service implements LocationListener {
                     if (initiator.state() == LanTransferPairingSession.State.WAITING_REMOTE_CONFIRMATION)
                         scheduleLanPairingRetry(sessionId);
                 } catch (Exception expired) {
-                    lanTransferPairingInitiators.remove(sessionId, initiator);
+                    removeLanTransferPairingInitiator(sessionId, initiator);
                     initiator.close();
                 }
             }
@@ -3050,7 +3050,7 @@ public class TrackingService extends Service implements LocationListener {
     private void removeLanTransferPairingInitiator(String sessionId,
             LanTransferPairingInitiator initiator) {
         if (initiator == null) return;
-        lanTransferPairingInitiators.remove(sessionId, initiator);
+        removeLanTransferPairingInitiator(sessionId, initiator);
         lanTransferPairingInitiatorFingerprints.remove(sessionId);
     }
 
