@@ -53,13 +53,13 @@ public final class LanTransferDiscovery implements AutoCloseable {
             Inet4Address localAddress, Inet4Address broadcastAddress,
             String networkFingerprint, PortProvider portProvider) {
         if (context == null || networkPath == null
-                || networkPath.kind != LanNetworkPath.Kind.ANDROID_NETWORK
-                || networkPath.network == null || localPeerId == null
-                || !localPeerId.matches("[A-Za-z0-9._:-]{1,128}")
-                || localAddress == null || broadcastAddress == null
+                || (networkPath.kind == LanNetworkPath.Kind.ANDROID_NETWORK && networkPath.network == null)
+                || localPeerId == null || !localPeerId.matches("[A-Za-z0-9._:-]{1,128}")
+                || localAddress == null || !localAddress.equals(networkPath.localAddress)
+                || broadcastAddress == null || !broadcastAddress.equals(networkPath.broadcastAddress)
                 || networkFingerprint == null || networkFingerprint.isEmpty()
                 || portProvider == null) {
-            throw new IllegalArgumentException("Discovery requires a bindable Android LAN path");
+            throw new IllegalArgumentException("Discovery requires a concrete selected LAN interface path");
         }
         this.context = context.getApplicationContext();
         this.networkPath = networkPath;
@@ -84,10 +84,13 @@ public final class LanTransferDiscovery implements AutoCloseable {
         try {
             socket.setReuseAddress(true);
             socket.setBroadcast(true);
-            LanSocketBinding.bindDatagramSocket(networkPath, socket);
-            // Bind wildcard after pinning the socket to the selected Wi-Fi Network.
-            // A directed-broadcast packet's destination is the subnet broadcast address,
-            // not this device's unicast address; binding the latter can silently miss it.
+            if (networkPath.kind == LanNetworkPath.Kind.ANDROID_NETWORK) {
+                LanSocketBinding.bindDatagramSocket(networkPath, socket);
+            }
+            // Receive on the wildcard port so directed-broadcast packets are delivered.
+            // AP candidates have no Network handle: inbound beacons are filtered to this
+            // exact selected subnet in acceptCandidate(), while outgoing beacons bind
+            // their source address before sending.
             socket.bind(new InetSocketAddress(UDP_PORT));
             socket.setSoTimeout(1000);
             receiver = socket;
@@ -212,6 +215,8 @@ public final class LanTransferDiscovery implements AutoCloseable {
         if (!(packet.getAddress() instanceof Inet4Address)
                 || packet.getAddress().isLoopbackAddress()
                 || packet.getAddress().equals(localAddress)
+                || !LanTransferIpv4Subnet.contains(localAddress, networkPath.prefixLength,
+                        (Inet4Address) packet.getAddress())
                 || packet.getLength() < 8 || packet.getLength() > 200) return;
         recordBeaconCandidate(context, packet, localPeerId, networkFingerprint,
                 System.currentTimeMillis());
