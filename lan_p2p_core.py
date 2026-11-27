@@ -1067,9 +1067,7 @@ def send_outgoing_fragment_window(sock, db_path, sender_scope, message_id, peer_
         return 0
     first_missing = bitmap.find("0")
     if first_missing < 0:
-        if not mark_attempt:
-            return 0  # ACK-driven window advance must not create a completion-probe ping-pong
-        indices = [len(packets) - 1]  # retry worker probes until whole-message chat.ack
+        indices = [len(packets) - 1]  # one completion probe; receiver suppresses duplicate fragment ACKs
     else:
         if not mark_attempt and first_missing % 8 != 0:
             return 0  # ACK-driven advancement waits for the current flight to complete
@@ -2133,7 +2131,7 @@ def store_incoming_chat_fragment(db_path, receiver_scope, sender_peer_id,
                 WHERE receiver_scope=? AND sender_peer_id=? AND message_id=?""",
                 (receiver_scope, sender_peer_id, message_id)).fetchone()[0]
             conn.commit()
-            return "complete" if int(received) == count else "duplicate"
+            return "complete_duplicate" if int(received) == count else "duplicate"
         cached_chars = conn.execute(
             "SELECT COALESCE(SUM(LENGTH(fragment_data)),0) FROM lan_chat_fragments").fetchone()[0]
         if int(cached_chars or 0) + len(encoded) > MAX_CHAT_FRAGMENT_CACHE_CHARS:
@@ -2147,7 +2145,7 @@ def store_incoming_chat_fragment(db_path, receiver_scope, sender_peer_id,
             WHERE receiver_scope=? AND sender_peer_id=? AND message_id=?""",
             (receiver_scope, sender_peer_id, message_id)).fetchone()[0]
         conn.commit()
-        return "complete" if int(received) == count else "stored"
+        return "completed" if int(received) == count else "stored"
     except Exception as exc:
         if conn is not None:
             _safe_rollback(conn)
