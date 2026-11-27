@@ -2747,6 +2747,13 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("db.beginTransaction()", upsert)
         self.assertIn("db.setTransactionSuccessful()", upsert)
         self.assertIn("lanChatControlExecutor.execute", handler)
+        # peer.ack route registration must retain the exact receiving listener epoch.
+        self.assertIn('("peer.ack".equals(type) || "chat.ack".equals(type)', service)
+        self.assertIn("final String verifiedPathFingerprint = ackIngressPath;", handler)
+        self.assertIn("final long verifiedListenerGeneration = ackIngressGeneration;", handler)
+        self.assertIn("isCurrentLanChatIngress(verifiedPathFingerprint, socket,", handler)
+        self.assertIn("long verifiedAt = android.os.SystemClock.elapsedRealtime();", handler)
+        self.assertNotIn("long verifiedAt = System.currentTimeMillis()", handler)
 
 
     def test_chat_send_restores_editor_focus_for_continuous_typing(self):
