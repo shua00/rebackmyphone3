@@ -97,6 +97,14 @@ public class LanNetworkPathTest {
         @Override public void bind(java.net.SocketAddress address) { bound = address; }
     }
 
+    @Test public void hotspotDiscoveryAcceptsOnlyTheSelectedSubnet() throws Exception {
+        LanNetworkPath candidate = LanNetworkPath.localInterfaceCandidate(
+                "vendor_ap42", ipv4("192.168.43.1"), 24, ipv4("192.168.43.255"));
+        assertTrue(LanTransferDiscovery.isOnSelectedSubnet(candidate, ipv4("192.168.43.100")));
+        assertFalse(LanTransferDiscovery.isOnSelectedSubnet(candidate, ipv4("192.168.44.100")));
+        assertFalse(LanTransferDiscovery.isOnSelectedSubnet(candidate, ipv4("127.0.0.1")));
+    }
+
     @Test public void serverListenerAddressMustMatchSelectedPath() throws Exception {
         LanNetworkPath path = LanNetworkPath.fromAndroidNetwork(ShadowNetwork.newInstance(42),
                 "wlan0", ipv4("192.168.1.2"), 24, ipv4("192.168.1.255"));
