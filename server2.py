@@ -59,7 +59,7 @@ from urllib.parse import urlparse, parse_qs
 # ★ 新增ThreadPoolExecutor 补丁： 2026-11-05 13:50
 from concurrent.futures import ThreadPoolExecutor
 
-from lan_p2p_core import LanP2PStorageError, assemble_chat_fragments, store_incoming_chat_fragment, load_incoming_chat_fragments, record_outgoing_fragment_ack, load_outgoing_fragment_targets_for_peer, send_outgoing_fragment_window, build_authenticated_chat_fragment_packets, send_discovery_fragment_window, MAX_PEER_ID_BYTES, max_peer_id_budget_probe, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, BoundedPacketDispatcher, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, encode_chat_http_fallback_payload, decode_chat_http_fallback_payload, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, add_discovery_targets_for_peer, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, send_discovery_broadcast_with_retries, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, next_peer_recovery_eligible_at_ms, list_due_outgoing_peers
+from lan_p2p_core import LanP2PStorageError, assemble_chat_fragments, store_incoming_chat_fragment, load_incoming_chat_fragments, record_outgoing_fragment_ack, load_outgoing_fragment_targets_for_peer, send_outgoing_fragment_window, build_authenticated_chat_fragment_packets, send_discovery_fragment_window, load_outgoing_message, MAX_PEER_ID_BYTES, max_peer_id_budget_probe, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, BoundedPacketDispatcher, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, encode_chat_http_fallback_payload, decode_chat_http_fallback_payload, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, add_discovery_targets_for_peer, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, send_discovery_broadcast_with_retries, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, next_peer_recovery_eligible_at_ms, list_due_outgoing_peers
 UDP_LISTEN_PORT = 8887  # server2 独立监听端口；发往 Android 的指令仍使用 8888
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "server2")
 
@@ -899,18 +899,27 @@ def _build_version_aware_commands(target_devs, action_name, payload, message_id=
                   "created_at_ms": created_at_ms,
                   "display_name": "Web_Console", "body": str(payload)}
         try:
-            if target_devs:
-                # Fixed targets are immutable: validate every actual ID before the Outbox commit.
-                for peer_id in target_devs:
-                    targeted_packet = dict(packet)
-                    targeted_packet["target_peer_id"] = str(peer_id)
-                    encode_packet(targeted_packet, RESCUE_SECRET)
-            else:
-                # Empty discovery may learn a recipient later, so reserve the maximum ID budget.
-                budget_packet = dict(packet)
-                budget_packet["target_peer_id"] = max_peer_id_budget_probe()
-                encode_packet(budget_packet, RESCUE_SECRET)
-            encoded = encode_packet(packet, RESCUE_SECRET)
+            try:
+                encoded = encode_packet(packet, RESCUE_SECRET)
+                long_message = False
+            except ValueError:
+                # Validate all actual recipient IDs (or the maximum discovery ID budget)
+                # against every fragment before committing the immutable Outbox row.
+                if target_devs:
+                    for peer_id in target_devs:
+                        build_authenticated_chat_fragment_packets(
+                            message_id, str(peer_id), str(payload), created_at_ms,
+                            PEER_NODE_ID, "server2", PEER_NODE_ID, RESCUE_SECRET,
+                            "Web_Console")
+                else:
+                    build_authenticated_chat_fragment_packets(
+                        message_id, max_peer_id_budget_probe(), str(payload), created_at_ms,
+                        PEER_NODE_ID, "server2", PEER_NODE_ID, RESCUE_SECRET,
+                        "Web_Console")
+                long_message = True
+                packet["_outbox_long"] = True
+                packet["body"] = ""
+                encoded = encode_packet(packet, RESCUE_SECRET)
         except ValueError as e:
             with print_lock:
                 print(f"⚠️ Web chat UDP path unavailable; retain HTTP fallback: {e}")
@@ -1798,29 +1807,63 @@ def send_udp_chat_from_listener(command_str, target_ip):
 
 
 def send_server2_v2_chat_from_outbox(command_str, fixed_target_ids):
-    """Send server2 web chat only to its persisted fixed targets; broadcast only for an empty open discovery set."""
+    """Send persisted server2 chat via the short packet fast path or selective fragments."""
     sock = UDP_LISTENER_SOCKET
     if sock is None or sock.fileno() < 0:
         return 0
     try:
-        raw = command_str.encode("utf-8")
-        envelope = decode_packet(raw, RESCUE_SECRET)
+        envelope = decode_packet(command_str.encode("utf-8"), RESCUE_SECRET)
         message_id = str(envelope.get("message_id") or "")
         if not message_id or envelope.get("type") != "chat.message":
             return 0
+        stored = load_outgoing_message(CHAT_DEDUP_DB, "server2", message_id)
+        if stored is None:
+            return 0
+        body = stored["body"]
+        created = stored["created_at_ms"]
+        packet = dict(envelope)
+        packet.pop("_outbox_long", None)
+        packet["body"] = body
+        try:
+            raw = encode_packet(packet, RESCUE_SECRET)
+            long_message = False
+        except ValueError:
+            long_message = True
 
-        # A non-empty snapshot is immutable: offline members wait for a verified
-        # route to return, and are never replaced by devices joining later.
         if fixed_target_ids:
+            if long_message:
+                peer_snapshot = {
+                    row["peer_id"]: row
+                    for row in list_known_peer_snapshot(CHAT_DEDUP_DB, "server2", limit=500)
+                }
+                sent = 0
+                for peer_id in fixed_target_ids:
+                    peer = peer_snapshot.get(str(peer_id))
+                    if not peer or not peer.get("endpoint_ip"):
+                        continue
+                    port = int(peer.get("endpoint_port") or 0)
+                    if port not in (8887, 8888, 8889, 8890):
+                        continue
+                    sent += send_outgoing_fragment_window(
+                        sock, CHAT_DEDUP_DB, "server2", message_id, str(peer_id),
+                        body, created, (peer["endpoint_ip"], port), PEER_NODE_ID,
+                        "server2", PEER_NODE_ID, RESCUE_SECRET,
+                        send_lock=UDP_CHAT_SEND_LOCK, display_name="Web_Console",
+                        mark_attempt=True, allow_fast_retry=True)
+                return sent
             return send_outbox_to_active_peers(
-                sock, CHAT_DEDUP_DB, "server2", message_id, envelope, RESCUE_SECRET,
+                sock, CHAT_DEDUP_DB, "server2", message_id, packet, RESCUE_SECRET,
                 send_lock=UDP_CHAT_SEND_LOCK, attempts=1, retry_delay_seconds=0.25)
 
-        # No known recipients at message creation: the shared dispatcher opens
-        # the deadline and re-arms it if every UDP sendto fails.
         subnet = get_subnet_broadcast()
         destinations = [(ip, 8888) for ip in dict.fromkeys(
             [subnet, "255.255.255.255"])]
+        if long_message:
+            return send_discovery_fragment_window(
+                sock, CHAT_DEDUP_DB, "server2", message_id, body, created,
+                destinations, PEER_NODE_ID, "server2", PEER_NODE_ID,
+                RESCUE_SECRET, send_lock=UDP_CHAT_SEND_LOCK,
+                display_name="Web_Console")
         return send_discovery_broadcast_with_retries(
             sock, CHAT_DEDUP_DB, "server2", message_id, raw, destinations,
             send_lock=UDP_CHAT_SEND_LOCK, attempts=3, retry_delay_seconds=0.25)
