@@ -5788,6 +5788,44 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
         self.assertEqual(len(bitmap) - 1,
                          decode_packet(sock.sent[-1][0], "shared-secret")["fragment_index"])
 
+    def test_python_discovery_long_chat_sends_only_first_bounded_fragment_flight(self):
+        from lan_p2p_core import (
+            persist_outgoing_message, send_discovery_fragment_window,
+            decode_packet, is_outgoing_discovery_pending,
+        )
+        fd, db_path = tempfile.mkstemp(prefix="lan-fragment-broadcast-")
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(db_path) and os.unlink(db_path))
+        body = "broadcast-window🙂" * 300
+        created = int(time.time() * 1000)
+        self.assertTrue(persist_outgoing_message(
+            db_path, "server2", "peer-server", "tx-discovery-window", body, [], created))
+
+        class FakeSocket:
+            def __init__(self):
+                self.sent = []
+            def sendto(self, raw, endpoint):
+                self.sent.append((raw, endpoint))
+
+        sock = FakeSocket()
+        destinations = [("192.0.2.40", 8888), ("255.255.255.255", 8888)]
+        sent = send_discovery_fragment_window(
+            sock, db_path, "server2", "tx-discovery-window", body, created,
+            destinations, "peer-server", "server2", "peer-server", "shared-secret")
+        self.assertEqual(16, sent)
+        self.assertEqual(16, len(sock.sent))
+        self.assertTrue(is_outgoing_discovery_pending(
+            db_path, "server2", "tx-discovery-window"))
+        indexes = set()
+        for raw, destination in sock.sent:
+            packet = decode_packet(raw, "shared-secret")
+            self.assertEqual("chat.fragment", packet["type"])
+            self.assertEqual("*", packet["target_peer_id"])
+            self.assertLess(packet["fragment_index"], 8)
+            self.assertIn(destination, destinations)
+            indexes.add(packet["fragment_index"])
+        self.assertEqual(set(range(8)), indexes)
+
     def test_python_long_chat_round_trip_over_real_udp_sockets(self):
         import socket
         from lan_p2p_core import (
