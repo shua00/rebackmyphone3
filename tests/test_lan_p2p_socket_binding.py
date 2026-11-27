@@ -123,7 +123,7 @@ class LanSocketBindingTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "win32", "Windows IP_UNICAST_IF smoke test")
     def test_windows_ip_unicast_if_binds_real_loopback_socket(self):
         loopback_name = next(
-            (name for name, _index in socket.if_nameindex()
+            (name for _index, name in socket.if_nameindex()
              if "loopback" in name.lower()),
             None,
         )
