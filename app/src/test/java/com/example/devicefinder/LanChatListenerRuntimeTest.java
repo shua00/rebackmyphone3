@@ -11,6 +11,26 @@ public class LanChatListenerRuntimeTest {
         return new DatagramSocket(0, InetAddress.getByName("127.0.0.1"));
     }
 
+    @Test public void registrationRejectsUnboundOrInvalidListenerInputs() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        LanChatListenerRuntime runtime = new LanChatListenerRuntime(registry);
+        DatagramSocket unbound = new DatagramSocket(null);
+        try {
+            try {
+                runtime.register("sta|192.168.1.2/24", unbound, 1L);
+                fail("unbound sockets must never become listener leases");
+            } catch (IllegalArgumentException expected) { }
+            assertEquals(0, runtime.listenerCount());
+            assertEquals(0, registry.listenerCount());
+            try {
+                runtime.register(" ", unbound, 1L);
+                fail("empty path identity must be rejected");
+            } catch (IllegalArgumentException expected) { }
+        } finally {
+            unbound.close();
+        }
+    }
+
     @Test public void onePathRegistersOneLeaseWithoutBackgroundRuntime() throws Exception {
         LanChatPathRegistry registry = new LanChatPathRegistry();
         LanChatListenerRuntime runtime = new LanChatListenerRuntime(registry);
