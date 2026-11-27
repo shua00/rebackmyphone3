@@ -4324,7 +4324,7 @@ class PythonFixedTargetImmediateDispatchTests(unittest.TestCase):
 
 
 class AndroidFixedTargetImmediateDispatchTests(unittest.TestCase):
-    def test_fixed_target_uses_persisted_endpoint_without_waiting_for_verified_route(self):
+    def test_fixed_target_payload_requires_a_current_path_scoped_verified_route(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
         send = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
@@ -4332,11 +4332,15 @@ class AndroidFixedTargetImmediateDispatchTests(unittest.TestCase):
         self.assertIn("dispatchBindings.put(target.peerId, liveBinding)", send)
         self.assertIn("dispatchEndpoints.put(target.peerId, liveBinding.route.endpoint)", send)
         self.assertIn("target.endpointIp", send)
-        self.assertIn("activeChatListenerCount == 1", send)
-        self.assertIn("preparedCachedEndpoints.get(target.peerId)", send)
+        self.assertIn("directed-challenge candidate only", send)
+        self.assertNotIn("dispatchEndpoints.put(target.peerId, cachedRoute)", send)
+        self.assertNotIn("preparedCachedEndpoints", send)
         self.assertNotIn("verifiedChatPeers.get(target.peerId)", send)
         self.assertIn("store.markAttempt(messageId, peerId, attemptedEndpoint", send)
-        self.assertIn("CHAT_UNICAST_CACHED_ENDPOINT", send)
+        self.assertIn("isCurrentLanChatSendBinding(routeBinding, socket, socketGeneration)", send)
+        guard = extract_java_method(source, "private boolean isCurrentLanChatSendBinding(")
+        self.assertIn("lanChatPathRegistry.isCurrentBinding(binding)", guard)
+        self.assertIn("return false;", guard)
 
     def test_ack_matches_attempted_endpoint_but_not_historical_route_candidate(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -4793,22 +4797,24 @@ class AndroidLanUnattemptedRouteRetryTests(unittest.TestCase):
         self.assertIn("sendMs=", udp)
         self.assertNotIn("lockWaitMs=", udp)
 
-    def test_android_cached_endpoint_resolution_is_outside_transmit_lock(self):
+    def test_android_cached_endpoint_is_only_resolved_for_async_directed_challenge(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/TrackingService.java").read_text(encoding="utf-8")
         send = extract_java_method(source, "private void transmitLocalUdpMessage(")
         internal = extract_java_method(source, "private void transmitLocalUdpMessageInternal(")
-        resolve = send.index("InetAddress.getByName(target.endpointIp)")
         lock = send.index("lanChatTransmitLock.lock()")
-        self.assertLess(resolve, lock)
-        self.assertIn("preparedCachedEndpoints.put(target.peerId", send)
-        self.assertIn("preparedCachedEndpoints.get(target.peerId)", internal)
+        call = send.index("transmitLocalUdpMessageInternal(")
+        self.assertLess(lock, call)
+        self.assertNotIn("InetAddress.getByName(target.endpointIp)", send)
+        self.assertNotIn("preparedCachedEndpoints", source)
         self.assertIn("LanAdaptiveRouteSelector.selectPrimaryBinding(", internal)
-        self.assertIn("if (activeChatListenerCount == 1)", internal)
-        self.assertLess(internal.index("LanAdaptiveRouteSelector.selectPrimaryBinding("),
-                        internal.index("preparedCachedEndpoints.get(target.peerId)"))
-        self.assertNotIn("InetAddress.getByName(target.endpointIp)", internal)
-        self.assertIn("preLockEndpointResolveMs=", internal)
+        self.assertIn("target.endpointIp", internal)
+        self.assertIn("lanChatProbeExecutor.execute(", internal)
+        resolve = internal.index("InetAddress.getByName(challengeIp)")
+        probe = internal.index("lanChatProbeExecutor.execute(", internal.index("int directedChallenges"))
+        self.assertLess(probe, resolve)
+        self.assertIn("sendDirectedPeerChallenge(socket, challengePeerId, savedAddress, challengePort)", internal)
+        self.assertNotIn("preLockEndpointResolveMs=", internal)
 
     def test_chat_activity_restores_input_caret_when_resumed(self):
         repo_root = Path(__file__).resolve().parents[1]
