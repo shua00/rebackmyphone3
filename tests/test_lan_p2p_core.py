@@ -5710,7 +5710,7 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
             db_path, "rescue2", "peer-a", "tx-pinned-route", body, [], 123456))
         self.assertTrue(begin_outgoing_discovery_window(
             db_path, "rescue2", "tx-pinned-route", window_ms=30000))
-        record_peer(db_path, "rescue2", "peer-other", "test", "", "192.0.2.88", 8888, "suspect")
+        record_peer(db_path, "rescue2", "peer-unknown", "test", "", "192.0.2.88", 8888, "suspect")
         fragments = fragment_chat_message("tx-pinned-route", "*", body, 123456)
         self.assertIsNotNone(record_outgoing_fragment_ack(
             db_path, "rescue2", "tx-pinned-route", "peer-unknown", 0,
