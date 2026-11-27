@@ -5701,6 +5701,27 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
         self.assertEqual(bitmap, load_outgoing_fragment_ack_bitmap(
             db_path, "tx-long-1", "peer-b"))
 
+    def test_python_fragment_discovery_target_admission_is_bounded(self):
+        from lan_p2p_core import (
+            persist_outgoing_message, begin_outgoing_discovery_window,
+            record_outgoing_fragment_ack, MAX_FRAGMENT_DISCOVERY_TARGETS,
+        )
+        fd, db_path = tempfile.mkstemp(prefix="lan-fragment-target-cap-")
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(db_path) and os.unlink(db_path))
+        body = "discovery target cap🙂" * 200
+        self.assertTrue(persist_outgoing_message(
+            db_path, "server2", "peer-server", "tx-target-cap", body, [], 123456))
+        self.assertTrue(begin_outgoing_discovery_window(
+            db_path, "server2", "tx-target-cap", window_ms=30000))
+        for index in range(MAX_FRAGMENT_DISCOVERY_TARGETS):
+            self.assertIsNotNone(record_outgoing_fragment_ack(
+                db_path, "server2", "tx-target-cap", f"peer-{index}", 0,
+                "192.0.2.90", 8888, now_ms=2000 + index))
+        self.assertIsNone(record_outgoing_fragment_ack(
+            db_path, "server2", "tx-target-cap", "peer-over-cap", 0,
+            "192.0.2.91", 8888, now_ms=3000))
+
     def test_python_broadcast_fragment_target_retries_without_active_peer_lease(self):
         from lan_p2p_core import (
             persist_outgoing_message, begin_outgoing_discovery_window,
