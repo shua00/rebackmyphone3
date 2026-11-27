@@ -6825,9 +6825,12 @@ public class TrackingService extends Service implements LocationListener {
             String senderId = envelope.optString("sender_peer_id", "");
             String serviceId = envelope.optString("service_id", "");
             long now = System.currentTimeMillis();
-            // Snapshot the exact ingress listener epoch before dispatching asynchronous ACK work.
-            String ingressPathFingerprint = rescueSocketPathFingerprint;
-            LanChatPathRegistry.Listener ingressListener = ingressPathFingerprint == null
+            // Only ACK frames need an ingress ownership snapshot. Keep ordinary chat,
+            // fragments, and peer-control packets off this additional Registry lookup.
+            final String ingressPathFingerprint =
+                    ("chat.ack".equals(type) || "chat.fragment.ack".equals(type))
+                            ? rescueSocketPathFingerprint : null;
+            final LanChatPathRegistry.Listener ingressListener = ingressPathFingerprint == null
                     ? null : lanChatPathRegistry.getListener(ingressPathFingerprint);
             final String ackIngressPath = ingressListener != null && ingressListener.socket == socket
                     && ingressListener.generation == lanSocketGeneration.get()
