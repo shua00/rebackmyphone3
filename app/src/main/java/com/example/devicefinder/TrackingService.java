@@ -5983,6 +5983,10 @@ public class TrackingService extends Service implements LocationListener {
                     LanChatStore store = lanChatStore;
                     if (store == null) return;
                     int finalizedDiscovery = store.finalizeExpiredDiscoveryWindows(System.currentTimeMillis());
+                    int expiredOutbox = store.expireOutboxMessages(System.currentTimeMillis());
+                    if (expiredOutbox > 0) {
+                        FileLogger.log(this, "CHAT", "LAN Outbox TTL expired messages=" + expiredOutbox);
+                    }
                     if (finalizedDiscovery > 0) {
                         FileLogger.log(this, "CHAT", "LAN 恢复时结算已过期发现窗口 messages=" + finalizedDiscovery);
                     }
