@@ -3338,7 +3338,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertLess(selector.index("for (Network network : cm.getAllNetworks())"),
                         selector.index("Network active = cm.getActiveNetwork()"))
         self.assertLess(method.index("selectWifiLanNetwork(cm)"),
-                        method.index("LanSocketBinding.bindDatagramSocket(selectedPath, socket)"))
+                        method.index("LanSocketBinding.bindDatagramListenerSocket(selectedPath, socket, listenerPort)"))
 
     def test_outbox_queries_still_return_empty_for_a_valid_empty_ledger(self):
         from lan_p2p_core import ensure_outbox_retry_schema
