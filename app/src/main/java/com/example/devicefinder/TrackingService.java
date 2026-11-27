@@ -221,6 +221,8 @@ public class TrackingService extends Service implements LocationListener {
     // rescueLock remains process-wide only to serialize socket publication/revocation across instances.
     private volatile boolean isListeningForRescue = false;
     private volatile Thread rescueListenerThread = null;
+    // Identity token ties the single-listener worker/socket to one immutable generation.
+    private volatile LanChatListenerInstance activeLanChatListenerInstance = null;
 
     private static long lastNotificationClickTime = 0;
     private static int notificationClickCount = 0;
@@ -7912,6 +7914,8 @@ public class TrackingService extends Service implements LocationListener {
     private void startRescueListener() {
         final long listenerGeneration = lanSocketGeneration.get();
         final String listenerPathFingerprint = wifiLanFingerprint;
+        final LanChatListenerInstance listenerInstance =
+                new LanChatListenerInstance(listenerPathFingerprint, listenerGeneration);
         synchronized (rescueLock) {
             // Teardown may race a delayed listener-start callback. Never acquire a
             // resource or publish a new owner after this Service has begun destruction.
@@ -7921,6 +7925,7 @@ public class TrackingService extends Service implements LocationListener {
                 return;
             }
             isListeningForRescue = true;
+            activeLanChatListenerInstance = listenerInstance;
             // Acquire under the same lifecycle lock used by onDestroy. This closes the
             // acquire-after-release window between listener admission and Thread.start().
             if (multicastLock != null && !multicastLock.isHeld()) {
@@ -7941,6 +7946,9 @@ public class TrackingService extends Service implements LocationListener {
                 // Exit before opening/binding a socket when teardown already won that race.
                 if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 rescueSocket = new DatagramSocket(null);
+                if (!listenerInstance.attachSocket(rescueSocket)) {
+                    throw new java.net.SocketException("Listener instance no longer accepts a socket");
+                }
                 Network boundWifiNetwork = bindSocketToWifi(rescueSocket, 8888);
                 // Keep the legacy non-Wi-Fi UDP fallback only when no concrete Wi-Fi
                 // Network was selected. A selected LAN path is always exact-address bound.
@@ -8250,8 +8258,11 @@ public class TrackingService extends Service implements LocationListener {
                         // The published Network is valid only while its owning listener socket is current.
                         lanChatBoundWifiNetwork = null;
                     }
-                    boolean ownsListener = rescueListenerThread == Thread.currentThread();
+                    boolean ownsListener = rescueListenerThread == Thread.currentThread()
+                            && activeLanChatListenerInstance == listenerInstance
+                            && listenerInstance.ownsThread(Thread.currentThread());
                     if (ownsListener) {
+                        activeLanChatListenerInstance = null;
                         rescueListenerThread = null;
                         isListeningForRescue = false;
                         // Release before another start can acquire this Service's lock.
@@ -8292,12 +8303,21 @@ public class TrackingService extends Service implements LocationListener {
                 return;
             }
             rescueListenerThread = listenerThread;
+            if (!listenerInstance.attachThread(listenerThread)) {
+                activeLanChatListenerInstance = null;
+                rescueListenerThread = null;
+                isListeningForRescue = false;
+                releaseLanMulticastLock();
+                return;
+            }
         }
         try {
             listenerThread.start();
         } catch (RuntimeException startFailure) {
             synchronized (rescueLock) {
-                if (rescueListenerThread == listenerThread) {
+                if (rescueListenerThread == listenerThread
+                        && activeLanChatListenerInstance == listenerInstance) {
+                    activeLanChatListenerInstance = null;
                     rescueListenerThread = null;
                     isListeningForRescue = false;
                     releaseLanMulticastLock();
