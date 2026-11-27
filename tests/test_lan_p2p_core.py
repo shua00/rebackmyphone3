@@ -2794,7 +2794,7 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("db.setTransactionSuccessful()", upsert)
         self.assertIn("lanChatControlExecutor.execute", handler)
         # peer.ack route registration must retain the exact receiving listener epoch.
-        self.assertIn('final boolean isAckFrame = "peer.ack".equals(type) || "chat.ack".equals(type)', handler)
+        self.assertIn('final boolean isAckFrame = "peer.ack".equals(type) || "chat.ack".equals(type)', service)
         self.assertIn("final String verifiedPathFingerprint = ackIngressPath;", handler)
         self.assertIn("final long verifiedListenerGeneration = ackIngressGeneration;", handler)
         self.assertIn("isCurrentLanChatIngress(verifiedPathFingerprint, socket,", handler)
