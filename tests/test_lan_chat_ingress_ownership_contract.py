@@ -177,7 +177,16 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
     def test_duplicate_chat_message_collects_per_ingress_ack_targets(self):
         source = self.source
         self.assertIn("pendingLanChatV2Receives.putIfAbsent(", source)
-        self.assertIn("pendingReceive.ackTargets.add(ackTarget)", source)
+        self.assertIn("pendingReceive.addAckTarget(ackTarget)", source)
+        receive_class = self._method(
+            "private static final class PendingLanChatReceive",
+            "private final java.util.concurrent.ConcurrentHashMap<String, PendingLanChatReceive>",
+        )
+        self.assertIn("MAX_ACK_TARGETS = 8", receive_class)
+        self.assertIn("ackTargets.size() >= MAX_ACK_TARGETS", receive_class)
+        self.assertIn("existing.socket == candidate.socket", receive_class)
+        self.assertIn("existing.generation == candidate.generation", receive_class)
+        self.assertIn("existing.pathFingerprint.equals(candidate.pathFingerprint)", receive_class)
         self.assertIn("pendingReceive.completed && pendingReceive.stored", source)
         self.assertIn("new java.util.ArrayList<>(pendingReceive.ackTargets)", source)
         self.assertIn("pendingLanChatV2Receives.remove(receiveKey, pendingReceive)", source)
