@@ -1446,20 +1446,22 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
                 with print_lock:
                     print(f"⚠️ server2 pending chat retry payload preparation failed peer={peer_id}: {type(e).__name__}")
                 return
-            try:
-                attempt_admitted = mark_outgoing_attempt(
-                    CHAT_DEDUP_DB, pending["message_id"], peer_id,
-                    pending["endpoint_ip"], target_port, allow_fast_retry=False)
-            except LanP2PStorageError as e:
-                # No durable attempt was admitted, so a recovery permission remains valid.
-                if recovery_event:
-                    with _V2_RECOVERY_RETRY_LOCK:
-                        _V2_RECOVERY_RETRY_PEERS.add(peer_id)
-                with print_lock:
-                    print(f"⚠️ server2 pending chat attempt admission failed; recovery retained: {type(e).__name__}")
-                return
-            if not attempt_admitted:
-                continue
+            # Let the fragment sender admit long-message retries only after
+            # it has selected a missing flight; short-message admission is unchanged.
+            if not long_message:
+                try:
+                    attempt_admitted = mark_outgoing_attempt(
+                        CHAT_DEDUP_DB, pending["message_id"], peer_id,
+                        pending["endpoint_ip"], target_port, allow_fast_retry=False)
+                except LanP2PStorageError as e:
+                    if recovery_event:
+                        with _V2_RECOVERY_RETRY_LOCK:
+                            _V2_RECOVERY_RETRY_PEERS.add(peer_id)
+                    with print_lock:
+                        print(f"⚠️ server2 pending chat attempt admission failed; recovery retained: {type(e).__name__}")
+                    return
+                if not attempt_admitted:
+                    continue
             try:
                 if long_message:
                     send_outgoing_fragment_window(
@@ -1467,7 +1469,7 @@ def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
                         pending["body"], pending["created_at_ms"],
                         (pending["endpoint_ip"], target_port), PEER_NODE_ID, "server2",
                         PEER_NODE_ID, RESCUE_SECRET, send_lock=UDP_CHAT_SEND_LOCK,
-                        display_name="Web_Console", mark_attempt=False)
+                        display_name="Web_Console", mark_attempt=True, allow_fast_retry=False)
                 else:
                     send_outgoing_packet(
                         sock, raw, (pending["endpoint_ip"], target_port),
