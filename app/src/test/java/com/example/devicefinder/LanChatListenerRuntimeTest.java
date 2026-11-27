@@ -87,6 +87,22 @@ public class LanChatListenerRuntimeTest {
         }
     }
 
+    @Test public void externalPathInvalidationCanRetireTheStaleRuntimeLease() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        LanChatListenerRuntime runtime = new LanChatListenerRuntime(registry);
+        DatagramSocket socket = socket();
+        try {
+            LanChatListenerRuntime.Lease lease =
+                    runtime.register("ap|192.168.43.1/24", socket, 49L);
+            registry.invalidatePath(lease.pathFingerprint);
+            assertFalse(runtime.isCurrent(lease));
+            assertFalse(runtime.remove(lease));
+            assertEquals(0, runtime.listenerCount());
+        } finally {
+            socket.close();
+        }
+    }
+
     @Test public void snapshotIsImmutableAndEmptySnapshotIsShared() throws Exception {
         LanChatPathRegistry registry = new LanChatPathRegistry();
         LanChatListenerRuntime runtime = new LanChatListenerRuntime(registry);
