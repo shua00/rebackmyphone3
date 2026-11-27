@@ -82,7 +82,12 @@ public final class LanTransferPathSet {
             selected.put(candidate.diagnosticFingerprint(), candidate);
         }
         if (selected.isEmpty()) throw new IOException("No usable LAN paths");
-        return new LanTransferPathSet(new ArrayList<>(selected.values()));
+        List<LanNetworkPath> ordered = new ArrayList<>(selected.values());
+        // Network enumeration order is not stable across Android callbacks/reboots. A
+        // deterministic fingerprint prevents needless listener churn on identical snapshots.
+        Collections.sort(ordered, (left, right) ->
+                left.diagnosticFingerprint().compareTo(right.diagnosticFingerprint()));
+        return new LanTransferPathSet(ordered);
     }
 
     private static boolean samePath(LanNetworkPath left, LanNetworkPath right) {
