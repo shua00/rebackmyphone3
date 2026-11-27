@@ -175,6 +175,10 @@ public class TrackingService extends Service implements LocationListener {
     // Observe Wi-Fi LAN separately: the default route may remain on cellular.
     private ConnectivityManager.NetworkCallback wifiLanNetworkCallback;
     private volatile String wifiLanFingerprint;
+    // Runtime ownership registry; currently mirrors the selected Wi-Fi listener only.
+    // It is deliberately dormant when no usable LAN fingerprint/listener exists.
+    private final LanChatPathRegistry lanChatPathRegistry = new LanChatPathRegistry();
+    private volatile String rescueSocketPathFingerprint;
     // Exact Network that owns the currently published UDP listener socket.
     private volatile Network lanChatBoundWifiNetwork;
     private AlarmManager alarmManager;
@@ -7791,6 +7795,7 @@ public class TrackingService extends Service implements LocationListener {
 
     private void startRescueListener() {
         final long listenerGeneration = lanSocketGeneration.get();
+        final String listenerPathFingerprint = wifiLanFingerprint;
         synchronized (rescueLock) {
             // Teardown may race a delayed listener-start callback. Never acquire a
             // resource or publish a new owner after this Service has begun destruction.
@@ -7831,6 +7836,17 @@ public class TrackingService extends Service implements LocationListener {
                     // Publish the route before the volatile socket reference; readers that
                     // observe this socket must also observe its exact bound Network.
                     lanChatBoundWifiNetwork = boundWifiNetwork;
+                    if (listenerPathFingerprint != null
+                            && !listenerPathFingerprint.isEmpty()
+                            && !"NO_WIFI".equals(listenerPathFingerprint)
+                            && !"ERROR".equals(listenerPathFingerprint)
+                            && !"UNAVAILABLE".equals(listenerPathFingerprint)) {
+                        lanChatPathRegistry.registerListener(
+                                listenerPathFingerprint, rescueSocket, listenerGeneration);
+                        rescueSocketPathFingerprint = listenerPathFingerprint;
+                    } else {
+                        rescueSocketPathFingerprint = null;
+                    }
                     rescueSocketRef = rescueSocket;
                 }
                 udpBindFailCount = 0;
@@ -8098,7 +8114,16 @@ public class TrackingService extends Service implements LocationListener {
                 Log.e("TrackingService", "UDP 监听异常: " + e.toString());
                 FileLogger.log(this, "UDP", "❌ 监听异常: " + e.getMessage());
             } finally {
-                if (rescueSocket != null && !rescueSocket.isClosed()) rescueSocket.close();
+                if (rescueSocket != null) {
+                    String ownedPath = rescueSocketPathFingerprint;
+                    if (ownedPath != null) {
+                        lanChatPathRegistry.removeListener(ownedPath, rescueSocket);
+                        if (ownedPath.equals(rescueSocketPathFingerprint)) {
+                            rescueSocketPathFingerprint = null;
+                        }
+                    }
+                    if (!rescueSocket.isClosed()) rescueSocket.close();
+                }
                 final boolean networkGenerationChanged;
                 synchronized (rescueLock) {
                     if (rescueSocketRef == rescueSocket) {
