@@ -66,9 +66,11 @@ public final class LanChatListenerRuntime {
         if (expected == null || leases.get(expected.pathFingerprint) != expected) return false;
         boolean removed = registry.removeListener(expected.pathFingerprint,
                 expected.socket, expected.generation);
-        if (!removed) return false;
+        // Another lifecycle event may already have invalidated this exact lease in the
+        // underlying registry. Retire our local owner record either way; never retain a
+        // dead lease merely because path invalidation won the race.
         leases.remove(expected.pathFingerprint);
-        return true;
+        return removed;
     }
 
     public synchronized boolean isCurrent(Lease lease) {
