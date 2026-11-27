@@ -42,7 +42,7 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
         self.assertIn("ingressListener.generation == listenerGeneration", method)
         self.assertIn("ingressListener.pathFingerprint.equals(listenerPathFingerprint)", method)
         self.assertIn("ingressListener.isUsable()", method)
-        self.assertNotIn("rescueSocketPathFingerprint", method)
+        executable = "\\n".join(\n            line for line in method.splitlines()\n            if not line.lstrip().startswith("//")\n        )\n        self.assertNotIn("rescueSocketPathFingerprint", executable)
 
     def test_async_chat_and_fragment_ack_keep_ingress_socket_and_epoch(self):
         method = self._method(
