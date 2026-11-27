@@ -5663,7 +5663,9 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
             fragment_chat_message, store_incoming_chat_fragment,
             load_incoming_chat_fragments, assemble_chat_fragments,
         )
-        db_path = os.path.join(self.temp_dir.name, "fragment-inbox.db")
+        fd, db_path = tempfile.mkstemp(prefix="lan-fragment-inbox-")
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(db_path) and os.unlink(db_path))
         body = ("跨端长消息🙂" * 900)
         fragments = fragment_chat_message("rx-long-1", "peer-a", body, 123456)
         order = list(reversed(fragments))
@@ -5688,7 +5690,9 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
             fragment_chat_message, store_incoming_chat_fragment,
             load_incoming_chat_fragments, CHAT_FRAGMENT_SESSION_TTL_MS,
         )
-        db_path = os.path.join(self.temp_dir.name, "fragment-expiry.db")
+        fd, db_path = tempfile.mkstemp(prefix="lan-fragment-expiry-")
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(db_path) and os.unlink(db_path))
         fragments = fragment_chat_message("rx-long-2", "peer-a", "x" * 900, 123456)
         self.assertEqual("stored", store_incoming_chat_fragment(
             db_path, "chat.py", "peer-a", fragments[0], now_ms=10))
