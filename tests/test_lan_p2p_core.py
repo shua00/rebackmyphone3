@@ -5750,6 +5750,11 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
         self.assertEqual(("192.0.2.77", 8888),
                          (rows[0]["endpoint_ip"], rows[0]["endpoint_port"]))
         self.assertEqual(len(fragments), rows[0]["fragment_count"])
+        record_peer(db_path, "rescue2", "peer-unknown", "test", "", "192.0.2.99", 8889, "active")
+        verified_rows = load_outgoing_fragment_targets_for_peer(
+            db_path, "rescue2", "peer-unknown")
+        self.assertEqual(("192.0.2.99", 8889),
+                         (verified_rows[0]["endpoint_ip"], verified_rows[0]["endpoint_port"]))
 
     def test_python_fragment_sender_advances_only_after_eight_selective_acks(self):
         from lan_p2p_core import (
