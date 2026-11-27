@@ -292,7 +292,8 @@ public class TrackingService extends Service implements LocationListener {
     // File-transfer transport has its own durable ledger and lifecycle; it never shares chat Outbox.
     private volatile LanTransferStore lanTransferStore;
     private volatile LanTransferFilesystem lanTransferFilesystem;
-    private volatile LanTransferTcpListener lanTransferTcpListener;
+    // One independent data listener per verified LAN path fingerprint (STA/AP may coexist).
+    private final java.util.concurrent.ConcurrentHashMap<String, LanTransferTcpListener> lanTransferTcpListeners = new java.util.concurrent.ConcurrentHashMap<>();
     // Pairing control has its own TCP listener and pending in-memory ceremony state.
     private volatile LanTransferPairingControlHost lanTransferPairingControlHost;
     private volatile String lanTransferPairingControlFingerprint;
@@ -304,11 +305,9 @@ public class TrackingService extends Service implements LocationListener {
     private final java.util.Set<String> lanTransferPairingCommitPending =
             java.util.Collections.newSetFromMap(
                     new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
-    private volatile String lanTransferListenerFingerprint;
     private volatile String lanTransferCredentialsFingerprint;
-    // File-transfer discovery owns a separate UDP socket/port and endpoint directory.
-    private volatile LanTransferDiscovery lanTransferDiscovery;
-    private volatile String lanTransferDiscoveryFingerprint;
+    // Discovery and file-data sockets are independently owned per STA/AP path.
+    private final java.util.concurrent.ConcurrentHashMap<String, LanTransferDiscovery> lanTransferDiscoveries = new java.util.concurrent.ConcurrentHashMap<>();
     private final Object lanTransferListenerLock = new Object();
     private final java.util.concurrent.atomic.AtomicBoolean lanChatRetryInFlight =
             new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -2685,12 +2684,8 @@ public class TrackingService extends Service implements LocationListener {
     /** User-triggered refresh; discovery hints never create or modify trust. */
     private void refreshLanTransferDiscoveryNow() {
         if (serviceDestroyed || !LanTransferFeature.isEnabled(this)) return;
-        LanTransferDiscovery current = lanTransferDiscovery;
-        if (current == null || !current.isRunning()) {
-            refreshLanTransferDiscovery("user requested device refresh");
-            current = lanTransferDiscovery;
-        }
-        if (current != null) current.announceNow();
+        refreshLanTransferDiscovery("user requested device refresh");
+        for (LanTransferDiscovery discovery : lanTransferDiscoveries.values()) discovery.announceNow();
         sendBroadcast(new Intent("ACTION_LAN_TRANSFER_PEERS_UPDATED").setPackage(getPackageName()));
     }
 
@@ -3098,31 +3093,24 @@ public class TrackingService extends Service implements LocationListener {
         if (!serviceDestroyed && LanTransferFeature.isEnabled(this))
             handler.postDelayed(lanTransferPathRefreshRunnable, 15_000L);
         logLocalLanInterfaceCandidates(reason);
-        // Pairing must be available before the first peer credential exists. Its listener is
-        // deliberately independent of the credential-gated file-data listener.
         refreshLanTransferPairingControlHost(reason);
         refreshLanTransferDiscovery(reason);
-        if (!LanTransferFeature.isEnabled(this)) {
-            stopLanTransferTcpListener("file-transfer feature disabled");
-            return;
-        }
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || serviceDestroyed) {
-            stopLanTransferTcpListener("unsupported or service destroyed");
+        if (!LanTransferFeature.isEnabled(this) || Build.VERSION.SDK_INT < Build.VERSION_CODES.M
+                || serviceDestroyed) {
+            stopLanTransferTcpListener("feature disabled, unsupported or service destroyed");
             return;
         }
         final LanTransferCredentials.Value credentials;
         try {
             credentials = LanTransferCredentials.load(this);
-        } catch (SecurityException permissionFailure) {
-            stopLanTransferTcpListener("credential access permission denied");
+        } catch (SecurityException denied) {
             LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_PERMISSION_DENIED);
             FileLogger.log(this, "LAN_TRANSFER", "Secure credentials access denied: "
-                    + permissionFailure.getClass().getSimpleName());
-            return;
-        } catch (Exception credentialFailure) {
-            stopLanTransferTcpListener("credential decryption or validation failed");
-            FileLogger.log(this, "LAN_TRANSFER", "Secure credentials unavailable; listener closed: "
-                    + credentialFailure.getClass().getSimpleName());
+                    + denied.getClass().getSimpleName());
+            return; // A transient credential read failure must not revoke last-known-good paths.
+        } catch (Exception invalid) {
+            FileLogger.log(this, "LAN_TRANSFER", "Secure credentials unavailable: "
+                    + invalid.getClass().getSimpleName());
             return;
         }
         if (credentials == null) {
@@ -3131,52 +3119,67 @@ public class TrackingService extends Service implements LocationListener {
         }
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-            LanNetworkPath selectedPath = selectLanTransferPath(cm);
-            java.net.Inet4Address bindAddress = selectedPath.localAddress;
+            LanTransferPathSet paths = currentLanTransferPathSet(cm);
             String credentialFingerprint = transferCredentialsFingerprint(credentials);
-            String fingerprint = selectedPath.diagnosticFingerprint();
             synchronized (lanTransferListenerLock) {
                 if (serviceDestroyed) return;
-                if (fingerprint.equals(lanTransferListenerFingerprint)
-                        && credentialFingerprint.equals(lanTransferCredentialsFingerprint)
-                        && lanTransferTcpListener != null && lanTransferTcpListener.isRunning()) return;
-                closeLanTransferListenerLocked();
-                if (lanTransferStore == null) lanTransferStore = new LanTransferStore(this);
-                if (lanTransferFilesystem == null)
-                    lanTransferFilesystem = new LanTransferFilesystem(this, lanTransferStore);
-                LanTransferTcpListener listener = new LanTransferTcpListener(this,
-                        lanTransferStore, lanTransferFilesystem, getUniqueDeviceId(),
-                        credentials::secretFor, credentials.trustedPeerIds::contains,
-                        (stage, failure) -> FileLogger.log(this, "LAN_TRANSFER",
-                                "TCP listener stage=" + stage + " error=" + failure.getClass().getSimpleName()));
-                listener.start(selectedPath, bindAddress, LanTransferTcpListener.DEFAULT_PORT);
-                lanTransferTcpListener = listener;
-                // The discovery socket may have emitted its startup beacon before the
-                // credential-gated data listener was ready (filePort=0). Announce again
-                // now so peers learn the usable TCP endpoint without waiting 15 seconds.
-                LanTransferDiscovery discovery = lanTransferDiscovery;
-                if (discovery != null) discovery.announceNow();
-                LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_RUNNING);
-                lanTransferListenerFingerprint = fingerprint;
+                java.util.Set<String> desired = new java.util.HashSet<>();
+                for (LanNetworkPath path : paths.paths()) {
+                    String fingerprint = path.diagnosticFingerprint();
+                    desired.add(fingerprint);
+                    LanTransferTcpListener existing = lanTransferTcpListeners.get(fingerprint);
+                    if (existing != null && existing.isRunning()
+                            && credentialFingerprint.equals(lanTransferCredentialsFingerprint)) continue;
+                    if (existing != null) {
+                        lanTransferTcpListeners.remove(fingerprint, existing);
+                        existing.close();
+                    }
+                    if (lanTransferStore == null) lanTransferStore = new LanTransferStore(this);
+                    if (lanTransferFilesystem == null)
+                        lanTransferFilesystem = new LanTransferFilesystem(this, lanTransferStore);
+                    LanTransferTcpListener listener = new LanTransferTcpListener(this,
+                            lanTransferStore, lanTransferFilesystem, getUniqueDeviceId(),
+                            credentials::secretFor, credentials.trustedPeerIds::contains,
+                            (stage, failure) -> FileLogger.log(this, "LAN_TRANSFER",
+                                    "TCP listener path=" + fingerprint + " stage=" + stage
+                                            + " error=" + failure.getClass().getSimpleName()));
+                    try {
+                        listener.start(path, path.localAddress, LanTransferTcpListener.DEFAULT_PORT);
+                        lanTransferTcpListeners.put(fingerprint, listener);
+                        FileLogger.log(this, "LAN_TRANSFER", "TCP listener active path="
+                                + path.interfaceName + " address=" + path.localAddress.getHostAddress()
+                                + " reason=" + reason);
+                    } catch (Exception pathFailure) {
+                        listener.close();
+                        FileLogger.log(this, "LAN_TRANSFER", "TCP path unavailable interface="
+                                + path.interfaceName + " error=" + pathFailure.getClass().getSimpleName());
+                    }
+                }
+                for (String oldFingerprint : new java.util.HashSet<>(lanTransferTcpListeners.keySet())) {
+                    if (!desired.contains(oldFingerprint)) {
+                        LanTransferTcpListener old = lanTransferTcpListeners.remove(oldFingerprint);
+                        if (old != null) old.close();
+                    }
+                }
                 lanTransferCredentialsFingerprint = credentialFingerprint;
-                FileLogger.log(this, "LAN_TRANSFER", "TCP listener active on "
-                        + selectedPath.interfaceName + " address=" + bindAddress.getHostAddress()
-                        + " reason=" + reason);
+                boolean running = false;
+                for (LanTransferTcpListener listener : lanTransferTcpListeners.values())
+                    running |= listener.isRunning();
+                LanTransferRuntimeDiagnostics.publishTcpState(running
+                        ? LanTransferRuntimeDiagnostics.STATE_RUNNING : LanTransferRuntimeDiagnostics.STATE_FAILED);
+                for (LanTransferDiscovery discovery : lanTransferDiscoveries.values())
+                    discovery.announceNow();
             }
-        } catch (SecurityException permissionFailure) {
-            if (lanTransferTcpListener == null || !lanTransferTcpListener.isRunning())
-                LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_PERMISSION_DENIED);
-            FileLogger.log(this, "LAN_TRANSFER", "TCP listener permission denied: "
-                    + permissionFailure.getClass().getSimpleName());
-            // Keep a previously running listener and its last-known-good route intact.
-        } catch (Exception failure) {
-            if (isConfirmedLocalLanPathUnavailable(failure))
-                stopLanTransferTcpListener("selected local LAN path disappeared or became ambiguous");
-            if (lanTransferTcpListener == null)
-                LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_FAILED);
-            FileLogger.log(this, "LAN_TRANSFER", "TCP listener reconcile failed: "
-                    + failure.getClass().getSimpleName());
-            // Only a confirmed empty/ambiguous candidate set revokes the previous path.
+        } catch (SecurityException denied) {
+            LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_PERMISSION_DENIED);
+            FileLogger.log(this, "LAN_TRANSFER", "TCP path permission denied: "
+                    + denied.getClass().getSimpleName());
+        } catch (Exception snapshotFailure) {
+            if (isConfirmedLocalLanPathUnavailable(snapshotFailure))
+                stopLanTransferTcpListener("confirmed LAN path set unavailable");
+            FileLogger.log(this, "LAN_TRANSFER", "TCP path-set reconcile failed: "
+                    + snapshotFailure.getClass().getSimpleName());
+            // Incomplete snapshots are fail-closed for publication but do not tear down known-good paths.
         }
     }
 
@@ -3326,8 +3329,6 @@ public class TrackingService extends Service implements LocationListener {
 
     /** Start/refresh file-transfer discovery independently of credentials and chat UDP state. */
     private void refreshLanTransferDiscovery(String reason) {
-        // DatagramSocket Network.bindSocket is API 23+. API 21-22 must not enter
-        // this path even if a secondary Wi-Fi Network is visible.
         if (!LanTransferFeature.isEnabled(this) || serviceDestroyed
                 || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             stopLanTransferDiscovery();
@@ -3335,55 +3336,84 @@ public class TrackingService extends Service implements LocationListener {
         }
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-            LanNetworkPath selectedPath = selectLanTransferPath(cm);
-            java.net.Inet4Address local = selectedPath.localAddress;
-            java.net.Inet4Address broadcast = selectedPath.broadcastAddress;
-            if (broadcast == null) throw new java.io.IOException("Selected LAN path has no broadcast address");
-            String fingerprint = selectedPath.diagnosticFingerprint();
+            LanTransferPathSet paths = currentLanTransferPathSet(cm);
             synchronized (lanTransferListenerLock) {
                 if (serviceDestroyed) return;
-                if (fingerprint.equals(lanTransferDiscoveryFingerprint)
-                        && lanTransferDiscovery != null && lanTransferDiscovery.isRunning()) return;
-                closeLanTransferDiscoveryLocked();
-                LanTransferPeerDirectory.activateNetwork(this, fingerprint);
-                LanTransferDiscovery discovery = new LanTransferDiscovery(this, selectedPath,
-                        getUniqueDeviceId(), local, broadcast, fingerprint,
-                        () -> lanTransferTcpListener == null ? 0 : lanTransferTcpListener.getBoundPort());
-                discovery.start();
-                lanTransferDiscovery = discovery;
-                LanTransferRuntimeDiagnostics.publishDiscoveryState(LanTransferRuntimeDiagnostics.STATE_RUNNING);
-                lanTransferDiscoveryFingerprint = fingerprint;
-                FileLogger.log(this, "LAN_TRANSFER", "Independent discovery active on "
-                        + selectedPath.interfaceName + " address=" + local.getHostAddress()
-                        + " reason=" + reason);
+                java.util.Set<String> desired = new java.util.HashSet<>();
+                java.util.Set<String> active = new java.util.HashSet<>();
+                for (LanNetworkPath path : paths.paths()) {
+                    String fingerprint = path.diagnosticFingerprint();
+                    desired.add(fingerprint);
+                    active.add(fingerprint);
+                    LanTransferDiscovery existing = lanTransferDiscoveries.get(fingerprint);
+                    if (existing != null && existing.isRunning()) continue;
+                    if (existing != null) {
+                        lanTransferDiscoveries.remove(fingerprint, existing);
+                        existing.close();
+                    }
+                    if (path.broadcastAddress == null) {
+                        FileLogger.log(this, "LAN_TRANSFER", "Discovery skipped: no broadcast for "
+                                + path.interfaceName);
+                        continue;
+                    }
+                    LanTransferPeerDirectory.activatePath(this, fingerprint);
+                    LanTransferDiscovery discovery = new LanTransferDiscovery(this, path,
+                            getUniqueDeviceId(), path.localAddress, path.broadcastAddress, fingerprint,
+                            () -> {
+                                LanTransferTcpListener listener = lanTransferTcpListeners.get(fingerprint);
+                                return listener == null ? 0 : listener.getBoundPort();
+                            });
+                    try {
+                        discovery.start();
+                        lanTransferDiscoveries.put(fingerprint, discovery);
+                        FileLogger.log(this, "LAN_TRANSFER", "Discovery active path="
+                                + path.interfaceName + " address=" + path.localAddress.getHostAddress()
+                                + " reason=" + reason);
+                    } catch (Exception pathFailure) {
+                        discovery.close();
+                        FileLogger.log(this, "LAN_TRANSFER", "Discovery path unavailable interface="
+                                + path.interfaceName + " error=" + pathFailure.getClass().getSimpleName());
+                    }
+                }
+                for (String oldFingerprint : new java.util.HashSet<>(lanTransferDiscoveries.keySet())) {
+                    if (!desired.contains(oldFingerprint)) {
+                        LanTransferDiscovery old = lanTransferDiscoveries.remove(oldFingerprint);
+                        if (old != null) old.close();
+                    }
+                }
+                for (String oldFingerprint : LanTransferPeerDirectory.getActiveNetworks(this)) {
+                    if (!active.contains(oldFingerprint))
+                        LanTransferPeerDirectory.deactivateNetwork(this, oldFingerprint);
+                }
+                boolean running = false;
+                for (LanTransferDiscovery discovery : lanTransferDiscoveries.values())
+                    running |= discovery.isRunning();
+                LanTransferRuntimeDiagnostics.publishDiscoveryState(running
+                        ? LanTransferRuntimeDiagnostics.STATE_RUNNING : LanTransferRuntimeDiagnostics.STATE_FAILED);
             }
-        } catch (SecurityException permissionFailure) {
-            if (lanTransferDiscovery == null || !lanTransferDiscovery.isRunning())
-                LanTransferRuntimeDiagnostics.publishDiscoveryState(LanTransferRuntimeDiagnostics.STATE_PERMISSION_DENIED);
-            FileLogger.log(this, "LAN_TRANSFER", "Independent discovery permission denied: "
-                    + permissionFailure.getClass().getSimpleName());
-            // Preserve an existing discovery socket after a transient permission failure.
-        } catch (Exception failure) {
-            if (isConfirmedLocalLanPathUnavailable(failure))
-                stopLanTransferDiscovery();
-            if (lanTransferDiscovery == null || !lanTransferDiscovery.isRunning())
-                LanTransferRuntimeDiagnostics.publishDiscoveryState(LanTransferRuntimeDiagnostics.STATE_FAILED);
-            FileLogger.log(this, "LAN_TRANSFER", "Independent discovery reconcile failed: "
-                    + failure.getClass().getSimpleName());
-            // Preserve only on transient snapshot failures, not confirmed path loss/ambiguity.
+        } catch (SecurityException denied) {
+            LanTransferRuntimeDiagnostics.publishDiscoveryState(LanTransferRuntimeDiagnostics.STATE_PERMISSION_DENIED);
+            FileLogger.log(this, "LAN_TRANSFER", "Discovery permission denied: "
+                    + denied.getClass().getSimpleName());
+        } catch (Exception snapshotFailure) {
+            if (isConfirmedLocalLanPathUnavailable(snapshotFailure)) stopLanTransferDiscovery();
+            LanTransferRuntimeDiagnostics.publishDiscoveryState(
+                    lanTransferDiscoveries.isEmpty() ? LanTransferRuntimeDiagnostics.STATE_FAILED
+                            : LanTransferRuntimeDiagnostics.STATE_RUNNING);
+            FileLogger.log(this, "LAN_TRANSFER", "Discovery path-set reconcile failed: "
+                    + snapshotFailure.getClass().getSimpleName());
         }
     }
 
     private void stopLanTransferDiscovery() {
         synchronized (lanTransferListenerLock) { closeLanTransferDiscoveryLocked(); }
-        LanTransferRuntimeDiagnostics.publishDiscoveryState(LanTransferRuntimeDiagnostics.STATE_STOPPED);
     }
 
     private void closeLanTransferDiscoveryLocked() {
-        LanTransferDiscovery old = lanTransferDiscovery;
-        lanTransferDiscovery = null;
-        lanTransferDiscoveryFingerprint = null;
-        if (old != null) old.close();
+        for (LanTransferDiscovery discovery : lanTransferDiscoveries.values()) discovery.close();
+        lanTransferDiscoveries.clear();
+        for (String fingerprint : LanTransferPeerDirectory.getActiveNetworks(this))
+            LanTransferPeerDirectory.deactivateNetwork(this, fingerprint);
         LanTransferRuntimeDiagnostics.publishDiscoveryState(LanTransferRuntimeDiagnostics.STATE_STOPPED);
     }
 
@@ -3408,26 +3438,21 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private void stopLanTransferTcpListener(String reason) {
-        synchronized (lanTransferListenerLock) {
-            closeLanTransferListenerLocked();
-        }
-        LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_STOPPED);
+        synchronized (lanTransferListenerLock) { closeLanTransferListenerLocked(); }
     }
 
     private void closeLanTransferListenerLocked() {
-        LanTransferTcpListener old = lanTransferTcpListener;
-        lanTransferTcpListener = null;
-        lanTransferListenerFingerprint = null;
+        for (LanTransferTcpListener listener : lanTransferTcpListeners.values()) listener.close();
+        lanTransferTcpListeners.clear();
         lanTransferCredentialsFingerprint = null;
-        if (old != null) old.close();
         LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_STOPPED);
     }
 
     private void closeLanTransferResources() {
-        final LanTransferTcpListener listenerToDrain;
+        final java.util.List<LanTransferTcpListener> listenersToDrain;
         final LanTransferStore storeToClose;
         synchronized (lanTransferListenerLock) {
-            listenerToDrain = lanTransferTcpListener;
+            listenersToDrain = new java.util.ArrayList<>(lanTransferTcpListeners.values());
             closeLanTransferListenerLocked();
             closeLanTransferDiscoveryLocked();
             closeLanTransferPairingControlHostLocked();
@@ -3435,28 +3460,26 @@ public class TrackingService extends Service implements LocationListener {
             lanTransferStore = null;
             lanTransferFilesystem = null;
         }
-        // Service teardown must not leave the previous Wi-Fi endpoint set active for UI lookups.
         LanTransferPeerDirectory.deactivateNetwork(this);
         if (storeToClose == null) return;
         Runnable closeStore = () -> {
             try {
+                for (LanTransferTcpListener listener : listenersToDrain) listener.awaitTermination();
                 storeToClose.closeStore();
-                FileLogger.log(this, "LAN_TRANSFER", "Transfer SQLite store closed after TCP sessions drained");
+                FileLogger.log(this, "LAN_TRANSFER", "Transfer SQLite store closed after all TCP paths drained");
             } catch (Exception failure) {
                 FileLogger.log(this, "LAN_TRANSFER", "Transfer SQLite close failed: "
                         + failure.getClass().getSimpleName());
             }
         };
-        if (listenerToDrain != null && !listenerToDrain.isTerminated()) {
-            Thread closer = new Thread(() -> {
-                listenerToDrain.awaitTermination();
-                closeStore.run();
-            }, "LanTransfer-Store-Close");
+        boolean draining = false;
+        for (LanTransferTcpListener listener : listenersToDrain)
+            draining |= !listener.isTerminated();
+        if (draining) {
+            Thread closer = new Thread(closeStore, "LanTransfer-Store-Close");
             closer.setDaemon(true);
             closer.start();
-        } else {
-            closeStore.run();
-        }
+        } else closeStore.run();
     }
 
     private void registerNetworkCallback() {
