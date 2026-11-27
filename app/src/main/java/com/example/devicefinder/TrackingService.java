@@ -2345,6 +2345,20 @@ public class TrackingService extends Service implements LocationListener {
         return selectLanTransferPath(cm);
     }
 
+    private static java.net.Inet4Address computeLanBroadcastAddress(
+            java.net.Inet4Address address, int prefix) throws java.io.IOException {
+        if (address == null || prefix < 1 || prefix > 30)
+            throw new java.io.IOException("LAN broadcast requires an IPv4 subnet prefix between /1 and /30");
+        byte[] raw = address.getAddress();
+        int value = ((raw[0] & 255) << 24) | ((raw[1] & 255) << 16)
+                | ((raw[2] & 255) << 8) | (raw[3] & 255);
+        int mask = (int) (0xffffffffL << (32 - prefix));
+        int broadcast = (value & mask) | (~mask);
+        byte[] bytes = new byte[] { (byte) (broadcast >>> 24), (byte) (broadcast >>> 16),
+                (byte) (broadcast >>> 8), (byte) broadcast };
+        return (java.net.Inet4Address) java.net.InetAddress.getByAddress(bytes);
+    }
+
     private LanNetworkPath selectLanTransferPath(ConnectivityManager cm) throws java.io.IOException {
         Network selected = selectWifiLanNetwork(cm);
         if (selected != null) {
@@ -2357,9 +2371,10 @@ public class TrackingService extends Service implements LocationListener {
                 if (address instanceof java.net.Inet4Address
                         && LanNetworkPath.isUsableLanIpv4((java.net.Inet4Address) address)
                         && prefix >= 1 && prefix <= 32) {
+                    java.net.Inet4Address local = (java.net.Inet4Address) address;
                     return LanTransferPathSelector.select(
                             LanNetworkPath.fromAndroidNetwork(selected, links.getInterfaceName(),
-                                    (java.net.Inet4Address) address, prefix, null),
+                                    local, prefix, computeLanBroadcastAddress(local, prefix)),
                             java.util.Collections.emptyList());
                 }
             }
