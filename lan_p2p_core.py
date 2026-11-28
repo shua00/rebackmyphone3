@@ -1879,6 +1879,17 @@ def send_broadcast_packet_with_retries(sock, packet_bytes, destinations,
     return sent_total
 
 
+
+def packet_service_identity_matches(packet, sender_peer_id):
+    """Require ACK service identity to remain bound to its authenticated peer ID."""
+    if not isinstance(packet, dict) or not is_valid_peer_id(sender_peer_id):
+        return False
+    peer_type = packet.get("sender_peer_type")
+    return (isinstance(peer_type, str) and bool(peer_type.strip())
+            and packet.get("sender_peer_id") == sender_peer_id
+            and packet.get("service_id") == sender_peer_id)
+
+
 def peer_endpoint_matches(db_path, receiver_scope, peer_id, endpoint_ip, endpoint_port):
     """Return true only when an ACK comes from the currently recorded route for its target peer."""
     if not receiver_scope or not peer_id or not endpoint_ip or not endpoint_port:
