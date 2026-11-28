@@ -379,7 +379,7 @@ public class ChatActivity extends Activity {
                     LanChatStore store = new LanChatStore(getApplicationContext());
                     try {
                         store.expireOutboxMessages(System.currentTimeMillis());
-                        for (LanChatStore.DeliverySummary item : store.loadRecentDeliverySummaries(20)) {
+                        for (LanChatStore.DeliverySummary item : store.loadRecentDeliverySummaries(3)) {
                             if (!"delivered".equals(item.state) && !"expired".equals(item.state)) {
                                 pending.add(item);
                             }
