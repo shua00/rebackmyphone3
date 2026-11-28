@@ -7013,8 +7013,9 @@ class PythonRealProductionSenderRestartTests(unittest.TestCase):
                 sock.close()
                 return port
 
-            sender_port = free_udp_port()
-            receiver_port = free_udp_port()
+            # Production handlers accept only the documented LAN chat source ports.
+            sender_port = 8890
+            receiver_port = 8888
             sender_id = "production-chat-sender"
             receiver_id = "production-rescue-receiver"
             secret = "production-process-restart-secret"
@@ -7118,6 +7119,10 @@ else:
                     cwd=temp_dir, env=env, capture_output=True, text=True, timeout=20)
                 self.assertEqual(0, first.returncode, first.stdout + "\n" + first.stderr)
                 self.assertIn("PRODUCTION_SEND_SUBMITTED", first.stdout)
+                from lan_p2p_core import load_pending_outgoing_for_peer
+                pending_before_restart = load_pending_outgoing_for_peer(
+                    db_path, "chat.py", receiver_id, limit=10)
+                self.assertEqual(1, len(pending_before_restart), pending_before_restart)
 
                 resumed = subprocess.run(
                     [sys.executable, "-u", "-c", sender_code, sender_copy, db_path,
