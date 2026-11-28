@@ -7529,6 +7529,54 @@ class PythonProductionFragmentSenderAndRecoveryTests(unittest.TestCase):
                 self.assertFalse(namespace["_V2_RECOVERY_INFLIGHT"])
 
 
+class PythonRecoveryWorkerLifecycleTests(unittest.TestCase):
+    """The production recovery worker must remain singleton across repeated starts."""
+
+    def test_worker_start_is_idempotent_for_all_python_services_even_if_schema_is_locked(self):
+        import threading
+        import types
+
+        cases = (
+            ("rescue2.py", "_CHAT_DEDUP_DB"),
+            ("chat.py", "CHAT_DB"),
+            ("server2.py", "CHAT_DEDUP_DB"),
+        )
+
+        class FakeLock:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+
+        class FakeThread:
+            starts = 0
+            def __init__(self, *args, **kwargs): pass
+            def start(self):
+                type(self).starts += 1
+
+        for filename, db_name in cases:
+            with self.subTest(service=filename):
+                FakeThread.starts = 0
+                namespace = {
+                    db_name: "isolated-" + filename + ".sqlite3",
+                    "_V2_RECOVERY_WORKER_STARTED": False,
+                    "_V2_RECOVERY_SCHEMA_READY": False,
+                    "_V2_RECOVERY_RETRY_LOCK": FakeLock(),
+                    "ensure_outbox_retry_schema": lambda db: (_ for _ in ()).throw(
+                        sqlite3.OperationalError("database is locked")),
+                    "threading": types.SimpleNamespace(Thread=FakeThread),
+                    "print_lock": FakeLock(),
+                    "print": lambda *args, **kwargs: None,
+                    "_diag_event": lambda *args, **kwargs: None,
+                }
+                start = self._load_function(
+                    filename, "_start_v2_recovery_retry_worker", namespace)
+                start()
+                start()
+                start()
+                self.assertEqual(1, FakeThread.starts)
+                self.assertTrue(namespace["_V2_RECOVERY_WORKER_STARTED"])
+                self.assertFalse(namespace["_V2_RECOVERY_SCHEMA_READY"])
+
+
 class PythonRealServiceUdpListenerProcessTests(unittest.TestCase):
     """Run each actual service UDP listener and its dispatcher in an isolated process."""
 
