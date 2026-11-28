@@ -7577,11 +7577,13 @@ class PythonProductionFragmentSenderAndRecoveryTests(unittest.TestCase):
                             "target_peer_id": "*",
                             "body": "placeholder",
                         }
-                        namespace["load_outgoing_message"] = (
-                            lambda *args: {
+                        def load_existing_outbox(*args):
+                            calls.append(("load-existing", args))
+                            return {
                                 "body": ("L" * 160 if is_long else "short"),
                                 "created_at_ms": 1234,
-                            })
+                            }
+                        namespace["load_outgoing_message"] = load_existing_outbox
                         sender_args = ("{}", ["remote-peer"])
                     elif scope == "rescue2":
                         sender_args = (("L" * 160 if is_long else "short"),
@@ -7596,6 +7598,9 @@ class PythonProductionFragmentSenderAndRecoveryTests(unittest.TestCase):
                     if function_name == "send_server2_v2_chat_from_outbox":
                         self.assertFalse(any(c[0] == "persist" for c in calls),
                                          "server2 sender must reuse its existing Outbox row")
+                        loaded = [c[1] for c in calls if c[0] == "load-existing"]
+                        self.assertEqual([(namespace[db_name], "server2", "server-message")],
+                                         loaded, "server2 must load the exact pre-existing message")
                         self.assertEqual(1, len([c for c in calls if c[0] in ("fragments", "short")]))
                     else:
                         self.assertEqual(1, len([c for c in calls if c[0] == "persist"]))
@@ -7606,6 +7611,11 @@ class PythonProductionFragmentSenderAndRecoveryTests(unittest.TestCase):
                         fragment_calls = [c for c in calls if c[0] == "fragments"]
                         self.assertEqual(1, len(fragment_calls))
                         args, kwargs = fragment_calls[0][1], fragment_calls[0][2]
+                        if function_name == "send_server2_v2_chat_from_outbox":
+                            self.assertEqual("server-message", args[3],
+                                             "server2 must resume the original Outbox message ID")
+                            self.assertEqual("remote-peer", args[4],
+                                             "server2 must retain the original recipient target")
                         self.assertEqual(namespace[db_name], args[1])
                         self.assertEqual(scope, args[2])
                         self.assertEqual("remote-peer", args[4])
