@@ -781,8 +781,8 @@
 ## #1035 单 Listener 历史 endpoint 兼容 fallback：实现进展（2026-11-28）
 
 - [x] 新增纯 Java 准入策略 `LanChatCachedRoutePolicy`：仅允许当前唯一 Listener、有效持久化认证租约、IPv4 site-local endpoint 且 endpoint 落在当前本地 LAN prefix 内；只解析 dotted-decimal IPv4 literal，不对 Outbox endpoint 做 DNS。
-- [x] `lan_peers` schema 升至 DB v14，新增 `verified_path_fingerprint`、`verified_listener_generation`、`verified_listener_instance_id`。认证 ACK 持久化时记录接收该 ACK 的 path/generation 和当前 Service 实例 ID；旧数据库升级后默认空值/无效 generation，旧记录不会自动获得 fallback 权限。
-- [x] 新增 `hasFreshVerifiedPeerRoute()`：必须精确匹配 peerId、IP、端口、active 状态、last_verified_at、未过期 lease、path fingerprint、listener generation 和 Service instance ID。
+- [x] `lan_peers` schema 升至 DB v15，新增 `verified_path_fingerprint`、`verified_listener_generation`、`verified_listener_instance_id`、`verified_route_admitted`。认证 ACK 持久化时记录接收该 ACK 的 path/generation 和当前 Service 实例 ID；旧数据库升级后默认空值/无效 generation，旧记录不会自动获得 fallback 权限。
+- [x] 新增 `hasFreshVerifiedPeerRoute()`：必须精确匹配 peerId、IP、端口、active 状态、last_verified_at、未过期 lease、path fingerprint、listener generation、Service instance ID，并要求 `verified_route_admitted=1`。
 - [x] `observePeer()` 仍不延长认证租约；若同一 endpoint 的对端 network_scope 改变，则清空旧 lease 和 listener epoch，要求重新 challenge。
 - [x] 固定收件人路由解析在当前 live RouteBinding 缺失时，才评估单 Listener fallback；必须同时确认 Runtime/Registry 都恰有一个 Listener、当前 socket/generation/lease 有效、path 与当前 primary path 一致、数据库认证记录属于当前 Service 实例，并且 endpoint 在当前 LAN subnet。
 - [x] 单播/分片每个 UDP dispatch 边界重新验证 fallback 的 endpoint、租约、path/generation/Service instance 与 subnet；多 Listener 仍只接受当前 path-scoped RouteBinding。ACK 仍要求同一 messageId 实际成功发送 endpoint 证据，不因 fallback 直接放宽。
@@ -799,3 +799,13 @@
 - [x] GitHub Actions run [#1954](https://github.com/shua00/rebackmyphone3/actions/runs/46131188787)：Python 509 项测试通过（含本轮静态契约）、Windows Socket Binding 通过、Android `testDebugUnitTest` 通过、Debug APK 构建通过、slim Release APK 构建通过。
 - [x] APK artifact：`app-diagnostic-and-slim-apks`，artifact ID `15258420847`，SHA-256 `fc3d403750899e88c5624eaa427460762bc47343cbfe72565d3a18b1ddb1199a`。
 - [ ] 仍需真机安装该 run 的诊断 APK，按已确认的中兴 A2023BH + Redmi Note 8 基线做双向对讲验收；CI 通过不等于真机回归已解决。
+
+
+### Registry admission 安全窗口收口（DB v15）
+
+- [x] 新增 `verified_route_admitted`，`upsertPeer()` 只写入 authenticated-but-unadmitted hint，初值固定为 0；该记录只能用于定向 challenge，不能授权 payload fallback，也不再提前加入 discovery snapshot。
+- [x] 只有 `LanChatPathRegistry.recordVerifiedPeer()` 成功后，ACK 处理器才调用 `markPeerRouteRegistryAdmitted()`；该方法使用 peer/IP/port/lease/path/generation/Service instance 精确条件更新，并在同一 SQLite transaction 内把标记置 1、加入开放 discovery snapshots。
+- [x] Registry admission 或 durable CAS 任一失败，都不会释放 peer discovery latch 或更新 peer-wide verified cache；CAS 失败会回滚 marker 和 snapshot 更新。
+- [x] marker 写入后再次检查 ingress Listener epoch，避免 SQLite 等待期间 Listener 已被替换仍释放旧 waiter。
+- [x] Python 静态契约与 Robolectric store 测试覆盖“upsert 后 marker 仍为 0”“错误 endpoint/generation/Service instance 不能 CAS”“只有 Registry admission 后 marker 才可用于 fallback”“network_scope 改变清除 marker”。
+- [ ] 最新 DB v15 代码的完整 CI 正在验证；此前 DB v14 的 run #1954 已通过，但不能替代本轮 DB v15 验证。
