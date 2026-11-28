@@ -6506,6 +6506,16 @@ class PythonChatAckServiceIdentityTests(unittest.TestCase):
             "service_id": "stable-peer-1",
         }
         self.assertTrue(packet_service_identity_matches(valid, "stable-peer-1"))
+        # Android intentionally uses the stable service namespace android-main
+        # while its sender_peer_id remains the device's unique ID.
+        android_ack = {
+            "sender_peer_id": "android-device-1",
+            "sender_peer_type": "android",
+            "service_id": "android-main",
+        }
+        self.assertTrue(packet_service_identity_matches(android_ack, "android-device-1"))
+        android_ack["service_id"] = "android-device-1"
+        self.assertFalse(packet_service_identity_matches(android_ack, "android-device-1"))
         for field, value in (
                 ("sender_peer_id", "other-peer"),
                 ("service_id", "other-service"),
