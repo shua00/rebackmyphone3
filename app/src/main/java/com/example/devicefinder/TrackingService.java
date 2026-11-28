@@ -7611,6 +7611,10 @@ public class TrackingService extends Service implements LocationListener {
                                         + senderId + " path=" + verifiedPathFingerprint);
                                 return;
                             }
+                            // The DB CAS may itself have waited on SQLite; do not promote
+                            // compatibility cache state or release waiters for a retired epoch.
+                            if (!isCurrentLanChatIngress(verifiedPathFingerprint, socket,
+                                    verifiedListenerGeneration)) return;
                             // Registry admission is now durable, and the same transaction has
                             // joined this verified peer to every still-open discovery snapshot.
                             FileLogger.log(this, "CHAT", "P2P peer route verified peer=" + senderId
