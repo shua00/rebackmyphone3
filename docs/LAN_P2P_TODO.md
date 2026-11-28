@@ -696,3 +696,6 @@
 - [x] rescue2 启动发现与首次广播改为枚举所有活动 IPv4 LAN 接口的 directed broadcast，并保留 limited-broadcast 兜底；不扫描公网、不猜测子网、不增加简单单网卡设备的周期探测。
 - Android 诊断日志与 UI/长消息/传输状态改动的 APK build：run [46120796577](https://github.com/shua00/rebackmyphone3/actions/runs/46120796577)，四项 job 均通过，artifact `app-diagnostic-and-slim-apks`。
 - 最新 Python-only 变更（rescue2 多接口广播与回归测试）：run [46120972364](https://github.com/shua00/rebackmyphone3/actions/runs/46120972364)，Python 与 Windows Socket Binding 通过；Android build 按变更检测跳过（该提交未改 Android 文件）。
+
+
+- **拓扑补充**：中兴日志显示其上游/服务端网络为 `192.168.1.x`，热点 AP 为 `192.168.124.144/24)，两台 Redmi 在热点下为 `192.168.124.x`；rescue2 主机日志目标为 `192.168.1.178:9090`。若 Windows 主机只有 `192.168.1.x` 接口且没有到 `192.168.124.0/24` 的路由，rescue2 的广播不会穿越 Android 热点 NAT 到达两台客户端。验证 rescue2 对热点客户端发现时，Windows 主机也需连接该热点或具备明确可达路由；否则应归类为拓扑不可达，而非发现代码失败。
