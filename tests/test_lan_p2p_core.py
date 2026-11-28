@@ -6564,19 +6564,35 @@ print("SENDER_RESTART_FINAL_ACK", flush=True)
 sock.close()
 """
             try:
-                first_run = subprocess.run(
+                fragments = {}
+                first_proc = subprocess.Popen(
                     [sys.executable, "-u", "-c", first, db, endpoint[0], str(endpoint[1]),
                      sender_id, receiver_id, message_id, secret],
-                    cwd=str(repo_root), env=env, capture_output=True, text=True, timeout=20)
-                self.assertEqual(0, first_run.returncode, first_run.stdout + "\n" + first_run.stderr)
-                self.assertIn("SENDER_CRASH_AFTER_ACK:", first_run.stdout)
+                    cwd=str(repo_root), env=env, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True)
+                raw, first_addr = receiver.recvfrom(1200)
+                first_packet = decode_packet(raw, secret)
+                self.assertEqual("chat.fragment", first_packet.get("type"))
+                first_result = store_incoming_chat_fragment(
+                    receiver_db, "restart-receiver", sender_id, first_packet)
+                self.assertIn(first_result, ("stored", "completed", "complete_duplicate"))
+                fragments[first_packet["fragment_index"]] = first_packet
+                first_ack = encode_packet({
+                    "type": "chat.fragment.ack", "sender_peer_id": receiver_id,
+                    "sender_peer_type": "python", "service_id": receiver_id,
+                    "target_peer_id": sender_id, "message_id": message_id,
+                    "fragment_index": first_packet["fragment_index"], "status": "received",
+                }, secret)
+                receiver.sendto(first_ack, first_addr)
+                first_stdout, first_stderr = first_proc.communicate(timeout=12)
+                self.assertEqual(0, first_proc.returncode, first_stdout + "\n" + first_stderr)
+                self.assertIn("SENDER_CRASH_AFTER_ACK:", first_stdout)
 
                 resumed_proc = subprocess.Popen(
                     [sys.executable, "-u", "-c", resumed, db, endpoint[0], str(endpoint[1]),
                      sender_id, receiver_id, message_id, secret],
                     cwd=str(repo_root), env=env, stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE, text=True)
-                fragments = {}
                 complete = False
                 deadline = time.time() + 22
                 while time.time() < deadline and not complete:
