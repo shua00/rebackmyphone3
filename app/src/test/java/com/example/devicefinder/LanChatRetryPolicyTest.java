@@ -13,6 +13,13 @@ public class LanChatRetryPolicyTest {
         assertEquals(60_000L, LanChatRetryPolicy.retryDelayAfterAttemptMs(6));
     }
 
+    @Test public void onlyConcreteRecoveryEventsBypassOutboxBackoff() {
+        assertEquals(true, LanChatRetryPolicy.shouldImmediatelyRetryForRecovery(true, false));
+        assertEquals(true, LanChatRetryPolicy.shouldImmediatelyRetryForRecovery(false, true));
+        // ACK-timeout route refresh alone has neither recovery flag and must use Outbox backoff.
+        assertEquals(false, LanChatRetryPolicy.shouldImmediatelyRetryForRecovery(false, false));
+    }
+
     @Test public void schedulerWakeDoesNotTurnIntoAnExtraDeliveryAttempt() {
         assertEquals(1_500L, LanChatRetryPolicy.outboxRetryWakeDelayMs(1, false));
         assertEquals(4_000L, LanChatRetryPolicy.outboxRetryWakeDelayMs(2, false));
