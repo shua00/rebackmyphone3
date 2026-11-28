@@ -96,6 +96,27 @@
 
 **实施约束**：共享 Network Awareness、peer 身份和已验证路径事实；聊天、文件、Rescue2 命令继续使用独立业务协议、队列、存储和幂等边界。保留 Rescue2 现有完整管理能力、旧版 `pull_logs_multi()`、Shell/ADB/Root 能力。
 
+### 3.2 Rescue2 对网络感知能力的实际应用契约
+
+网络感知必须成为 Rescue2 的真实决策输入，而不只是诊断信息或设备列表的附属字段。Rescue2 对每个设备维护统一的连接状态视图，但连接状态必须由证据驱动，至少区分：
+
+- **discovered**：收到候选设备信息；只代表发现，不代表可连接。
+- **locally-reachable**：某条明确 LAN path 上完成双向认证/探测；允许该路径上的直连 UDP。
+- **outbound-session**：设备主动建立到 Rescue2/Server2 可达入口的认证会话；可跨热点 NAT、不同子网和多数入站受限网络维持控制通道。
+- **relay-required**：没有可用直连路径，但双方均能到达受控中继；通过中继承载控制或文件会话。
+- **offline/unreachable**：没有任何已验证直连、主动会话或中继路径；必须显示不可达原因，不得用“已发现”伪装在线。
+
+Rescue2 每次通信按用途选择通道，而不是给设备永久贴一个“局域网/外网”标签：
+
+1. 实时指令：有 fresh authenticated LAN route 时优先 UDP；否则使用已认证 outbound session/HTTP；只有会话不可达且中继可用时才走 relay。每个 commandId/operationId 贯穿回退链。
+2. 设备状态与管理：优先复用现存会话和已验证路径；网络变化只刷新受影响设备/路径，避免全量扫描。
+3. 文件互传：先协商 Offer/接受状态，再选择直连或会话/中继数据通道；传输会话独立认证、独立限流、分块校验和断点恢复，不把控制通道当作文件数据面。
+4. 热点发现：同一可达热点网段使用定向发现；跨 NAT 不尝试“广播穿透”，由 Android 主动出站注册/保活，使 Rescue2 能通过设备身份找到其当前会话。
+
+感知到应用之间必须有明确闭环：网络事件 → 候选路径刷新 → 身份认证与双向可达验证 → route/session lease → 按业务策略选择 → 成功/失败/RTT/ACK 结果回写感知层 → 有界重选或恢复。单向收包、接口存在、同网段、Socket bind 成功均不能单独提升为在线/可达。
+
+**回归优先级门槛**：#1035（run 45754370135，对应当时提交 ad911d2）记录了 Python 验证与 Android APK 构建成功；用户在相同 LAN 环境下实测双 Android 对讲畅通。它作为普通 LAN 功能行为基线。V2 后续改造必须先恢复双 Android 普通 LAN 双向发现、peer.hello/peer.ack、route verified、消息与 ACK 闭环，再把 STA/AP 多路径和 Rescue2 跨网能力叠加上去。该历史 CI 记录不等于当前代码已通过，也不替代当前真机回归。
+
 ## 4. 共享与隔离边界
 
 共享：网络感知事件、path fingerprint 语义、认证可达性事实、route registry/lease、路径选择接口、错误分类、限量诊断字段。
