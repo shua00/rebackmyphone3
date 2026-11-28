@@ -2,6 +2,15 @@
 
 更新：2026-11-28
 
+## 网络感知落地与 #1035 回归基线（P0）
+
+- [ ] **回归门槛优先**：以 #1035（run 45754370135）作为普通 LAN 双 Android 对讲历史行为基线；先恢复并实测双向发现、peer.hello/peer.ack、route verified、消息与 ACK 闭环，再叠加 STA/AP 多路径和 Rescue2 跨网能力。
+- [ ] **感知→应用闭环**：网络/接口事件、候选路径、身份认证、双向可达验证、route/session lease、业务通道选择、RTT/ACK/失败结果回写必须形成闭环；单向收包、同网段或 socket bind 成功不代表在线。
+- [ ] **Rescue2 统一连接状态**：区分 discovered、locally-reachable、outbound-session、relay-required、offline/unreachable；设备列表和操作入口不得把“发现到”误显示为“可连接”。
+- [ ] **Rescue2 分业务路由**：即时指令优先已验证 LAN UDP，跨网时使用设备主动出站认证会话/HTTP，必要时受控中继；文件传输独立协商与认证数据面；设备管理复用会话但不混用聊天/文件/命令账本。
+- [ ] **跨 NAT 明确边界**：Android 主动向可达入口注册并维持会话；不依赖 UDP 广播穿透。没有直连、出站会话或中继时明确报告不可达。
+- [ ] **快路径成本门槛**：普通单路径设备保持 O(1) 路由选择，不增加常驻扫描线程、周期探测、每包接口枚举或冗余 fan-out；异常/多路径工作按事件和目标定向激活。
+
 ## 新增 P0 架构目标：统一网络感知与自适应路由
 
 > 架构定义见 [UNIFIED_NETWORK_AWARENESS_AND_ADAPTIVE_ROUTING.md](UNIFIED_NETWORK_AWARENESS_AND_ADAPTIVE_ROUTING.md)。这是项目级 P0 架构原则，当前先确立契约和边界，不打断 LAN P2P v2 IPv4 STA/AP 主线。
