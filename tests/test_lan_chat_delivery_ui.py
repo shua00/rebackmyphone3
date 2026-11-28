@@ -13,7 +13,7 @@ class LanChatDeliveryUiTests(unittest.TestCase):
         store = (JAVA / "LanChatStore.java").read_text(encoding="utf-8")
         layout = (RES / "layout/activity_chat.xml").read_text(encoding="utf-8")
 
-        self.assertIn("loadRecentDeliverySummaries(20)", activity)
+        self.assertIn("loadRecentDeliverySummaries(3)", activity)
         self.assertIn("deliveryStatusExecutor.execute", activity)
         self.assertIn("deliveryStatusRefreshQueued", activity)
         self.assertIn("tvDeliveryStatus", activity)
