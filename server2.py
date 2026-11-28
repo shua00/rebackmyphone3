@@ -3382,29 +3382,29 @@ def handle_client(client_conn, client_addr):
             try:
                 request_data = json.loads(body_part.decode("utf-8", errors="ignore"))
                 if not isinstance(request_data, dict):
-                    client_conn.sendall(b"HTTP/1.1 400 Bad Request\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n")
+                    client_conn.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                     return
                 if CONTROL_AUTH_ENABLED:
                     if CONTROL_IP_ALLOWLIST and not any(
                             str(client_addr[0]).startswith(prefix) for prefix in CONTROL_IP_ALLOWLIST):
-                        client_conn.sendall(b"HTTP/1.1 403 Forbidden\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n")
+                        client_conn.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                         return
                     if request_data.get("token") != CONTROL_TOKEN:
-                        client_conn.sendall(b"HTTP/1.1 403 Forbidden\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n")
+                        client_conn.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                         return
                 result = request_active_peer_discovery()
                 status_code = 200 if result["status"] in ("ok", "throttled") else 503
                 body = json.dumps(result, ensure_ascii=False).encode("utf-8")
                 client_conn.sendall(
-                    f"HTTP/1.1 {status_code} {'OK' if status_code == 200 else 'Service Unavailable'}\\r\\n"
-                    f"Content-Type: application/json; charset=utf-8\\r\\n"
-                    f"Access-Control-Allow-Origin: *\\r\\nContent-Length: {len(body)}\\r\\n"
-                    f"Connection: close\\r\\n\\r\\n".encode("utf-8") + body)
+                    f"HTTP/1.1 {status_code} {'OK' if status_code == 200 else 'Service Unavailable'}\r\n"
+                    f"Content-Type: application/json; charset=utf-8\r\n"
+                    f"Access-Control-Allow-Origin: *\r\nContent-Length: {len(body)}\r\n"
+                    f"Connection: close\r\n\r\n".encode("utf-8") + body)
             except Exception as e:
                 with print_lock:
                     print(f"LAN peer discovery refresh failed: {type(e).__name__}")
                 try:
-                    client_conn.sendall(b"HTTP/1.1 503 Service Unavailable\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n")
+                    client_conn.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 except Exception:
                     pass
 
