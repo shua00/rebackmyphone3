@@ -171,7 +171,7 @@ peer 级恢复不能误重开所有 peer；路径变化不能无差别重置所�
 - [飞秋安卓版](https://github.com/zyqg/feiq-android)：LAN 发现、网络回调后重建 socket、职责分层、UDP 消息与 TCP 文件分工；不照搬以 IP 为身份或缺少持久化可靠账本的部分。
 - [KouChat](https://github.com/blurpy/kouchat)：无中心 LAN 发现和点对点交互体验；发现/发送成功不等于可靠送达。
 - [LanChat](https://github.com/zyqg/LanChat)：简洁 LAN 自动发现和点对点机制参考。
-- [Simple LAN Chat](https://github.com/)：仅作为 UDP 广播/心跳/分片思路的讨论对象；引用前需核对具体仓库地址和实现证据，不据名称推断能力。
+- Simple LAN Chat：仅作为此前讨论过的 UDP 广播/心跳/分片思路参考名称；当前未在本项目文档中确认其准确仓库地址，因此不附猜测链接，也不据名称推断能力。
 - [IP Messenger 官方协议与源码](https://github.com/shirouzu/ipmsg)：成员发现/应答、接收确认与阅读确认分离、UDP 消息和 TCP 文件通道、有界重试。
 - Geogram、Jami、qaul：去中心化和跨网络通信的比较研究对象；Mesh、多跳、relay、BLE/Wi-Fi Aware 等能力不自动进入当前 LAN 范围。
 
