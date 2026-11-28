@@ -3968,8 +3968,16 @@ class LanP2PCoreTests(unittest.TestCase):
             end = source.index("\ndef _handle_authenticated_v2_packet", start)
             starter = source[start:end]
             self.assertIn("_V2_RECOVERY_SCHEMA_READY = False", starter, filename)
-            self.assertIn("threading.Thread(target=_retry_deferred_v2_peer_recoveries", starter, filename)
+            self.assertIn("threading.Thread(target=_run_v2_recovery_retry_worker", starter, filename)
             self.assertNotIn("return\n    with _V2_RECOVERY_RETRY_LOCK", starter, filename)
+            supervisor_start = source.index("def _run_v2_recovery_retry_worker():")
+            supervisor_end = source.index("\ndef _start_v2_recovery_retry_worker", supervisor_start)
+            supervisor = source[supervisor_start:supervisor_end]
+            self.assertIn("_retry_deferred_v2_peer_recoveries()", supervisor, filename)
+            self.assertIn("except Exception as exc:", supervisor, filename)
+            self.assertIn("finally:", supervisor, filename)
+            self.assertIn("_V2_RECOVERY_WORKER_STARTED = False", supervisor, filename)
+            self.assertIn("time.sleep(1.0)", supervisor, filename)
 
 
 class AndroidLanNetworkScopeTests(unittest.TestCase):
