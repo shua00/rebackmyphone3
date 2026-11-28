@@ -253,14 +253,14 @@ public final class LanTransferSenderWorker implements Runnable {
         if (cancelled.get()) { cancelLedger(); return; }
         if (pauseRequested.get()) { notifyPausedAtBoundary(); return; }
         if (!offerAcknowledged) {
-            notifyState("waiting_for_network");
+            notifyState(waitingStateForOffer(false));
             return; // No remote Offer response was received; keep the durable Offer for retry.
         }
         if (acknowledgement == null
                 || !("accepted".equals(acknowledgement.optString("state"))
                     || "transferring".equals(acknowledgement.optString("state"))
                     || "completed".equals(acknowledgement.optString("state")))) {
-            notifyState("waiting_for_acceptance");
+            notifyState(waitingStateForOffer(true));
             return; // The peer has the Offer; the receiver still needs to accept it.
         }
 
@@ -296,6 +296,10 @@ public final class LanTransferSenderWorker implements Runnable {
         if (cancelled.get()) cancelLedger();
         else if (pauseRequested.get()) notifyPausedAtBoundary();
         else pauseIfTransferring();
+    }
+
+    static String waitingStateForOffer(boolean offerAcknowledged) {
+        return offerAcknowledged ? "waiting_for_acceptance" : "waiting_for_network";
     }
 
     private LanTransferStore.Transfer requireLocalTask() {
