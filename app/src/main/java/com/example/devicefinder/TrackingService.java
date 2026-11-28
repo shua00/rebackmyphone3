@@ -7601,6 +7601,16 @@ public class TrackingService extends Service implements LocationListener {
                             // admission. Recheck before updating peer-wide compatibility hints.
                             if (!isCurrentLanChatIngress(verifiedPathFingerprint, socket,
                                     verifiedListenerGeneration)) return;
+                            // A durable peer row is not fallback authorization until Registry
+                            // has accepted this exact route. Compare-and-set the admission marker
+                            // only after that in-memory path-scoped commit succeeds.
+                            if (!store.markPeerRouteRegistryAdmitted(senderId,
+                                    peerAddress.getHostAddress(), port, System.currentTimeMillis(),
+                                    verifiedPathFingerprint, verifiedListenerGeneration, serviceInstanceId)) {
+                                FileLogger.log(this, "CHAT", "P2P route registry admitted but durable fallback marker failed peer="
+                                        + senderId + " path=" + verifiedPathFingerprint);
+                                return;
+                            }
                             // upsertPeer() atomically commits this verified route and joins all
                             // still-open first-discovery target snapshots in the same transaction.
                             FileLogger.log(this, "CHAT", "P2P peer route verified peer=" + senderId
