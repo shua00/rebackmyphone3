@@ -6869,7 +6869,7 @@ public class TrackingService extends Service implements LocationListener {
             boolean durableCurrentRoute = cachedPeerAddress != null && target.endpointPort > 0
                     && store.hasFreshVerifiedPeerRoute(target.peerId, target.endpointIp,
                             target.endpointPort, System.currentTimeMillis(),
-                            preferredChatPath, socketGeneration);
+                            preferredChatPath, socketGeneration, serviceInstanceId);
             if (LanChatCachedRoutePolicy.isEligible(singleCurrentListener, durableCurrentRoute,
                     cachedPath == null ? null : cachedPath.localAddress,
                     cachedPath == null ? 0 : cachedPath.prefixLength, cachedPeerAddress)) {
@@ -7570,7 +7570,7 @@ public class TrackingService extends Service implements LocationListener {
                             }
                             boolean persisted = store.upsertPeer(senderId, peerType, serviceId,
                                     peerNetwork, peerAddress.getHostAddress(), port, now, now + 120_000L,
-                                    verifiedPathFingerprint, verifiedListenerGeneration);
+                                    verifiedPathFingerprint, verifiedListenerGeneration, serviceInstanceId);
                             if (!persisted) {
                                 FileLogger.log(this, "CHAT", "⚠️ peer.ack 路由持久化失败，暂不启用单播 peer="
                                         + senderId + " path=" + verifiedPathFingerprint);
@@ -7848,7 +7848,7 @@ public class TrackingService extends Service implements LocationListener {
         LanChatStore store = lanChatStore;
         if (store == null || !store.hasFreshVerifiedPeerRoute(peerId,
                 endpoint.getAddress().getHostAddress(), endpoint.getPort(),
-                System.currentTimeMillis(), pathFingerprint, generation)) return false;
+                System.currentTimeMillis(), pathFingerprint, generation, serviceInstanceId)) return false;
         return LanChatCachedRoutePolicy.isEligible(true, true, path.localAddress,
                 path.prefixLength, (java.net.Inet4Address) endpoint.getAddress());
     }
