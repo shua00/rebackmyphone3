@@ -7768,6 +7768,7 @@ class PythonRecoveryWorkerLifecycleTests(unittest.TestCase):
                     # the thread; provide that production dependency in this isolated
                     # AST-loaded namespace rather than loading unrelated module globals.
                     "_retry_deferred_v2_peer_recoveries": lambda: None,
+                    "_run_v2_recovery_retry_worker": lambda: None,
                 }
                 source = (Path(__file__).resolve().parents[1] / filename).read_text(encoding="utf-8")
                 parsed = ast.parse(source, filename=filename)
@@ -7817,6 +7818,7 @@ class PythonRecoveryWorkerLifecycleTests(unittest.TestCase):
                     "print": lambda *args, **kwargs: None,
                     "_diag_event": lambda *args, **kwargs: None,
                     "_retry_deferred_v2_peer_recoveries": lambda: None,
+                    "_run_v2_recovery_retry_worker": lambda: None,
                 }
                 source = (Path(__file__).resolve().parents[1] / filename).read_text(encoding="utf-8")
                 parsed = ast.parse(source, filename=filename)
@@ -7833,6 +7835,41 @@ class PythonRecoveryWorkerLifecycleTests(unittest.TestCase):
                 start()
                 self.assertTrue(namespace["_V2_RECOVERY_WORKER_STARTED"])
                 self.assertEqual(2, FakeThread.starts)
+
+    def test_worker_supervisor_retries_unexpected_loop_failure_and_clears_flag_on_exit(self):
+        for filename in ("rescue2.py", "chat.py", "server2.py"):
+            with self.subTest(service=filename):
+                class FakeLock:
+                    def __enter__(self): return self
+                    def __exit__(self, *args): return False
+
+                calls = []
+                def retry_loop():
+                    calls.append("called")
+                    if len(calls) == 1:
+                        raise RuntimeError("transient worker failure")
+                    raise KeyboardInterrupt("simulated process shutdown")
+
+                namespace = {
+                    "_V2_RECOVERY_WORKER_STARTED": True,
+                    "_V2_RECOVERY_RETRY_LOCK": FakeLock(),
+                    "_retry_deferred_v2_peer_recoveries": retry_loop,
+                    "print_lock": FakeLock(),
+                    "print": lambda *args, **kwargs: None,
+                    "time": types.SimpleNamespace(sleep=lambda seconds: None),
+                }
+                source = (Path(__file__).resolve().parents[1] / filename).read_text(encoding="utf-8")
+                parsed = ast.parse(source, filename=filename)
+                function_node = next(
+                    node for node in parsed.body
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "_run_v2_recovery_retry_worker")
+                exec(compile(ast.Module(body=[function_node], type_ignores=[]),
+                             filename, "exec"), namespace)
+                with self.assertRaises(KeyboardInterrupt):
+                    namespace["_run_v2_recovery_retry_worker"]()
+                self.assertEqual(["called", "called"], calls)
+                self.assertFalse(namespace["_V2_RECOVERY_WORKER_STARTED"])
 
 
 class PythonRealServiceUdpListenerProcessTests(unittest.TestCase):
