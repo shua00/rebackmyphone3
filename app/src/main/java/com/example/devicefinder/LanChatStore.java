@@ -21,7 +21,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
     public static final long FIRST_DISCOVERY_WINDOW_MS = LanChatRetryPolicy.FIRST_DISCOVERY_WINDOW_MS;
     private static final String DB_NAME = "lan_p2p_delivery.db";
     // v14 binds durable authenticated peer hints to the exact service/listener epoch.
-    private static final int DB_VERSION = 14;
+    private static final int DB_VERSION = 15;
     // Durable partial long-chat receive cache: strict per-message, session and global bounds.
     public static final long FRAGMENT_SESSION_TTL_MS = 30L * 60L * 1000L;
     public static final int MAX_FRAGMENT_SESSIONS = 32;
@@ -176,7 +176,8 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 "status TEXT NOT NULL DEFAULT 'offline'," +
                 "verified_path_fingerprint TEXT NOT NULL DEFAULT ''," +
                 "verified_listener_generation INTEGER NOT NULL DEFAULT -1," +
-                "verified_listener_instance_id TEXT NOT NULL DEFAULT '')");
+                "verified_listener_instance_id TEXT NOT NULL DEFAULT ''," +
+                "verified_route_admitted INTEGER NOT NULL DEFAULT 0)");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_lan_peers_lease ON lan_peers(status, lease_expires_at)");
 
         db.execSQL("CREATE TABLE IF NOT EXISTS lan_outbox (" +
@@ -407,6 +408,10 @@ public final class LanChatStore extends SQLiteOpenHelper {
         if (oldVersion < 14 && hasTable(db, "lan_peers")
                 && !hasColumn(db, "lan_peers", "verified_listener_instance_id")) {
             db.execSQL("ALTER TABLE lan_peers ADD COLUMN verified_listener_instance_id TEXT NOT NULL DEFAULT ''");
+        }
+        if (oldVersion < 15 && hasTable(db, "lan_peers")
+                && !hasColumn(db, "lan_peers", "verified_route_admitted")) {
+            db.execSQL("ALTER TABLE lan_peers ADD COLUMN verified_route_admitted INTEGER NOT NULL DEFAULT 0");
         }
         if (oldVersion < 12 && hasTable(db, "lan_outbox")) {
             if (!hasColumn(db, "lan_outbox", "expires_at_ms")) {
@@ -2147,10 +2152,11 @@ public final class LanChatStore extends SQLiteOpenHelper {
             String oldVerifiedPathFingerprint = "";
             long oldVerifiedListenerGeneration = -1L;
             String oldVerifiedListenerInstanceId = "";
+            int oldVerifiedRouteAdmitted = 0;
             Cursor c = db.rawQuery(
                     "SELECT endpoint_ip,endpoint_port,last_verified_at,status,lease_expires_at,"
                     + "network_scope,verified_path_fingerprint,verified_listener_generation,"
-                    + "verified_listener_instance_id "
+                    + "verified_listener_instance_id,verified_route_admitted "
                     + "FROM lan_peers WHERE peer_id=?",
                     new String[]{peerId});
             try {
@@ -2164,6 +2170,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     oldVerifiedPathFingerprint = c.getString(6);
                     oldVerifiedListenerGeneration = c.getLong(7);
                     oldVerifiedListenerInstanceId = c.getString(8);
+                    oldVerifiedRouteAdmitted = c.getInt(9);
                 }
             } finally { c.close(); }
 
@@ -2185,6 +2192,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
             v.put("verified_path_fingerprint", sameRoute ? oldVerifiedPathFingerprint : "");
             v.put("verified_listener_generation", sameRoute ? oldVerifiedListenerGeneration : -1L);
             v.put("verified_listener_instance_id", sameRoute ? oldVerifiedListenerInstanceId : "");
+            v.put("verified_route_admitted", sameRoute ? oldVerifiedRouteAdmitted : 0);
             if (oldIp == null) {
                 v.put("peer_id", peerId);
                 long rowId = db.insertWithOnConflict("lan_peers", null, v, SQLiteDatabase.CONFLICT_IGNORE);
@@ -2285,6 +2293,9 @@ public final class LanChatStore extends SQLiteOpenHelper {
             v.put("verified_path_fingerprint", verifiedPathFingerprint);
             v.put("verified_listener_generation", verifiedListenerGeneration);
             v.put("verified_listener_instance_id", verifiedListenerInstanceId);
+            // Registry admission is a separate commit point. Until the caller confirms it,
+            // this durable row may only seed a directed challenge, never payload fallback.
+            v.put("verified_route_admitted", 0);
             long rowId = db.insertWithOnConflict("lan_peers", null, v, SQLiteDatabase.CONFLICT_REPLACE);
             if (rowId < 0) {
                 Cursor c = db.rawQuery(
@@ -2337,7 +2348,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     "SELECT 1 FROM lan_peers WHERE peer_id=? AND endpoint_ip=? AND endpoint_port=? "
                     + "AND status='active' AND last_verified_at>0 AND lease_expires_at>? "
                     + "AND verified_path_fingerprint=? AND verified_listener_generation=? "
-                    + "AND verified_listener_instance_id=? LIMIT 1",
+                    + "AND verified_listener_instance_id=? AND verified_route_admitted=1 LIMIT 1",
                     new String[]{peerId, ip, String.valueOf(port), String.valueOf(now),
                             pathFingerprint, String.valueOf(listenerGeneration), listenerInstanceId});
             return c.moveToFirst();
@@ -2345,6 +2356,33 @@ public final class LanChatStore extends SQLiteOpenHelper {
             return false;
         } finally {
             if (c != null) c.close();
+        }
+    }
+
+    /**
+     * Promote the durable hint only after the caller has successfully admitted the matching
+     * path/socket/generation into LanChatPathRegistry. Compare-and-set prevents a delayed
+     * admission callback from blessing a newer endpoint or listener epoch.
+     */
+    public boolean markPeerRouteRegistryAdmitted(String peerId, String ip, int port, long now,
+            String pathFingerprint, long listenerGeneration, String listenerInstanceId) {
+        if (peerId == null || peerId.isEmpty() || ip == null || ip.isEmpty()
+                || port <= 0 || port > 65535 || now <= 0L
+                || pathFingerprint == null || pathFingerprint.isEmpty()
+                || listenerGeneration < 0L || listenerInstanceId == null
+                || listenerInstanceId.isEmpty()) return false;
+        try {
+            ContentValues values = new ContentValues();
+            values.put("verified_route_admitted", 1);
+            return getWritableDatabase().update("lan_peers", values,
+                    "peer_id=? AND endpoint_ip=? AND endpoint_port=? AND status='active' "
+                    + "AND last_verified_at>0 AND lease_expires_at>? "
+                    + "AND verified_path_fingerprint=? AND verified_listener_generation=? "
+                    + "AND verified_listener_instance_id=?",
+                    new String[]{peerId, ip, String.valueOf(port), String.valueOf(now),
+                            pathFingerprint, String.valueOf(listenerGeneration), listenerInstanceId}) == 1;
+        } catch (Exception failure) {
+            return false;
         }
     }
 
