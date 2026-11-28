@@ -6495,3 +6495,34 @@ class PythonLongChatCrossServiceDiscoveryTests(unittest.TestCase):
                 source = (repo_root / filename).read_text(encoding="utf-8")
                 self.assertIn("build_chat_discovery_destinations", source)
                 self.assertIn(expected, source)
+
+
+class PythonChatAckServiceIdentityTests(unittest.TestCase):
+    def test_ack_identity_must_bind_sender_and_service_id(self):
+        from lan_p2p_core import packet_service_identity_matches
+        valid = {
+            "sender_peer_id": "stable-peer-1",
+            "sender_peer_type": "server2",
+            "service_id": "stable-peer-1",
+        }
+        self.assertTrue(packet_service_identity_matches(valid, "stable-peer-1"))
+        for field, value in (
+                ("sender_peer_id", "other-peer"),
+                ("service_id", "other-service"),
+                ("sender_peer_type", ""),
+                ("sender_peer_type", None)):
+            packet = dict(valid)
+            packet[field] = value
+            with self.subTest(field=field, value=value):
+                self.assertFalse(packet_service_identity_matches(packet, "stable-peer-1"))
+        self.assertFalse(packet_service_identity_matches(valid, "different-expected-peer"))
+
+    def test_all_python_services_gate_fragment_and_final_acks_on_service_identity(self):
+        root = Path(__file__).resolve().parents[1]
+        for filename in ("rescue2.py", "chat.py", "server2.py"):
+            source = (root / filename).read_text(encoding="utf-8")
+            for packet_type in ("chat.fragment.ack", "chat.ack"):
+                marker = f'if packet_type == "{packet_type}":'
+                start = source.index(marker)
+                section = source[start:start + 500]
+                self.assertIn("packet_service_identity_matches(envelope, sender)", section)
