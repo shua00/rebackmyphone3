@@ -7179,6 +7179,193 @@ else:
                     receiver.stderr.close()
 
 
+    def test_rescue2_service_process_restart_recovers_through_production_entrypoints(self):
+        import socket
+        import shutil
+
+        repo_root = Path(__file__).resolve().parents[1]
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+        env["PYTHONUNBUFFERED"] = "1"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sender_copy = os.path.join(temp_dir, "rescue2_sender.py")
+            receiver_copy = os.path.join(temp_dir, "rescue2.py")
+            shutil.copyfile(repo_root / "rescue2.py", sender_copy)
+            shutil.copyfile(repo_root / "rescue2.py", receiver_copy)
+
+            def free_udp_port():
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+                sock.close()
+                return port
+
+            # Production handlers accept only the documented LAN chat source ports.
+            sender_port = 8890
+            receiver_port = 8888
+            sender_id = "production-rescue2-sender"
+            receiver_id = "production-rescue-receiver"
+            secret = "production-process-restart-secret"
+            message_id = "production-rescue2-restart-long-message"
+            db_path = os.path.join(temp_dir, "sender.sqlite3")
+            receiver_ready = os.path.join(temp_dir, "receiver.ready")
+            receiver_code = r"""
+import importlib.util, os, sys, threading, time
+path, peer, secret, port, ready = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("isolated_receiver", path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module._CHAT_DEDUP_DB = os.path.join(os.path.dirname(path), "receiver.sqlite3")
+module.PEER_NODE_ID = peer
+module.RESCUE_SECRET = secret
+module.UDP_PORT = int(port)
+module._start_v2_recovery_retry_worker = lambda: None
+module.send_startup_peer_beacon = lambda *args, **kwargs: False
+module.get_subnet_broadcast = lambda: "127.255.255.255"
+module.get_subnet_broadcasts = lambda: []
+threading.Thread(target=module.udp_listener, daemon=True).start()
+deadline = time.time() + 12
+while time.time() < deadline:
+    if module.UDP_LISTENER_SOCKET is not None:
+        with open(ready, "w", encoding="utf-8") as stream:
+            stream.write("ready")
+        break
+    time.sleep(0.02)
+else:
+    raise RuntimeError("receiver listener did not bind")
+while True:
+    time.sleep(1)
+"""
+            sender_code = r"""
+import importlib.util, os, sys, threading, time
+path, db, sender_id, receiver_id, secret, sender_port, receiver_port, mode, message_id = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("isolated_sender", path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module._CHAT_DEDUP_DB = db
+module.PEER_NODE_ID = sender_id
+module.RESCUE_SECRET = secret
+module.UDP_PORT = int(sender_port)
+module.UDP_DEVICE_PORT = int(receiver_port)
+from lan_p2p_core import record_peer
+assert record_peer(db, "rescue2", receiver_id, "python", receiver_id,
+                   "127.0.0.1", int(receiver_port), status="active")
+module.list_known_peer_snapshot = lambda *args, **kwargs: [{
+    "peer_id": receiver_id, "endpoint_ip": "127.0.0.1",
+    "endpoint_port": int(receiver_port),
+}]
+if mode == "first":
+    module._start_v2_recovery_retry_worker = lambda: None
+module.send_startup_peer_beacon = lambda *args, **kwargs: False
+module.get_subnet_broadcasts = lambda: []
+threading.Thread(target=module.udp_listener, daemon=True).start()
+deadline = time.time() + 12
+while time.time() < deadline:
+    if module.UDP_LISTENER_SOCKET is not None:
+        break
+    time.sleep(0.02)
+else:
+    raise RuntimeError("sender listener did not bind")
+if mode == "first":
+    body = "rescue2 生产发送入口进程重启恢复🙂 " * 160
+    assert module.send_chat_v2(body, ["127.0.0.1"])
+    print("PRODUCTION_SEND_SUBMITTED", flush=True)
+    # Simulate an abrupt process death: no graceful Outbox flush or ACK wait.
+    os._exit(0)
+else:
+    import sqlite3
+    body = "生产发送入口进程重启恢复🙂 " * 160
+    module._resume_pending_v2_for_peer(
+        module.UDP_LISTENER_SOCKET, receiver_id,
+        ("127.0.0.1", int(receiver_port)), True)
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        conn = sqlite3.connect(db)
+        try:
+            row = conn.execute(
+                "SELECT status FROM lan_outbox_targets WHERE message_id=? AND peer_id=?",
+                (message_id, receiver_id)).fetchone()
+        finally:
+            conn.close()
+        if row and row[0] == "acked":
+            print("PRODUCTION_RECOVERY_DELIVERED", flush=True)
+            os._exit(0)
+        time.sleep(0.1)
+    raise RuntimeError("production Outbox target did not reach delivered state: " + repr(row))
+"""
+            receiver = subprocess.Popen(
+                [sys.executable, "-u", "-c", receiver_code, receiver_copy,
+                 receiver_id, secret, str(receiver_port), receiver_ready],
+                cwd=temp_dir, env=env, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True)
+            try:
+                deadline = time.time() + 12
+                while time.time() < deadline and not os.path.exists(receiver_ready):
+                    if receiver.poll() is not None:
+                        break
+                    time.sleep(0.025)
+                self.assertTrue(
+                    os.path.exists(receiver_ready),
+                    "real receiver listener failed: " +
+                    (receiver.stderr.read() if receiver.poll() is not None else "timeout"))
+
+                first = subprocess.run(
+                    [sys.executable, "-u", "-c", sender_code, sender_copy, db_path,
+                     sender_id, receiver_id, secret, str(sender_port),
+                     str(receiver_port), "first", message_id],
+                    cwd=temp_dir, env=env, capture_output=True, text=True, timeout=20)
+                self.assertEqual(0, first.returncode, first.stdout + "\n" + first.stderr)
+                self.assertIn("PRODUCTION_SEND_SUBMITTED", first.stdout)
+                conn = sqlite3.connect(db_path)
+                try:
+                    target_state = conn.execute(
+                        "SELECT status, attempt_count, fragment_count, fragment_ack_bitmap "
+                        "FROM lan_outbox_targets WHERE message_id=? AND peer_id=?",
+                        (message_id, receiver_id)).fetchone()
+                finally:
+                    conn.close()
+                self.assertIsNotNone(target_state, "production sender did not persist its recipient target")
+                self.assertEqual("sent", target_state[0], target_state)
+                self.assertEqual(1, target_state[1], target_state)
+                self.assertGreater(target_state[2], 8, target_state)
+                self.assertEqual("0" * target_state[2], target_state[3], target_state)
+
+                resumed = subprocess.run(
+                    [sys.executable, "-u", "-c", sender_code, sender_copy, db_path,
+                     sender_id, receiver_id, secret, str(sender_port),
+                     str(receiver_port), "resume", message_id],
+                    cwd=temp_dir, env=env, capture_output=True, text=True, timeout=32)
+                self.assertEqual(0, resumed.returncode, resumed.stdout + "\n" + resumed.stderr)
+                self.assertIn("PRODUCTION_RECOVERY_DELIVERED", resumed.stdout)
+                from lan_p2p_core import load_incoming_chat_fragments, assemble_chat_fragments
+                receiver_db = os.path.join(temp_dir, "receiver.sqlite3")
+                conn = sqlite3.connect(receiver_db)
+                try:
+                    stored_scope = conn.execute(
+                        "SELECT receiver_scope, sender_peer_id, COUNT(*) "
+                        "FROM lan_chat_fragments WHERE message_id=? "
+                        "GROUP BY receiver_scope, sender_peer_id",
+                        (message_id,)).fetchall()
+                finally:
+                    conn.close()
+                self.assertEqual(1, len(stored_scope), stored_scope)
+                self.assertEqual(sender_id, stored_scope[0][1], stored_scope)
+                self.assertGreater(stored_scope[0][2], 1, stored_scope)
+                cached = load_incoming_chat_fragments(
+                    receiver_db, stored_scope[0][0], sender_id, message_id)
+                self.assertEqual(
+                    "rescue2 生产发送入口进程重启恢复🙂 " * 160,
+                    assemble_chat_fragments(cached))
+            finally:
+                if receiver.poll() is None:
+                    receiver.terminate()
+                receiver_stdout, receiver_stderr = receiver.communicate(timeout=5)
+                if receiver.stdout and not receiver.stdout.closed:
+                    receiver.stdout.close()
+                if receiver.stderr and not receiver.stderr.closed:
+                    receiver.stderr.close()
+
+
 class PythonProductionFragmentHandlerTests(unittest.TestCase):
     def test_each_real_service_handler_persists_before_fragment_and_final_ack(self):
         repo_root = Path(__file__).resolve().parents[1]
