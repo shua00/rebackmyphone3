@@ -4,6 +4,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = ROOT / "server2.py"
+RESCUE2 = ROOT / "rescue2.py"
 
 
 class Server2ActivePeerDiscoveryUiTests(unittest.TestCase):
@@ -24,6 +25,13 @@ class Server2ActivePeerDiscoveryUiTests(unittest.TestCase):
         self.assertIn("input.value === 'all' || other.value === 'all'", source)
         self.assertIn("function mediaTarget()", source)
         self.assertIn("请至少选择一个设备，或选择所有人群发", source)
+
+    def test_rescue2_startup_discovery_uses_each_active_interface_broadcast(self):
+        source = RESCUE2.read_text(encoding="utf-8")
+        self.assertIn("from lan_p2p_network_paths import enumerate_ipv4_paths, directed_broadcast_addresses", source)
+        self.assertIn("directed_broadcast_addresses(enumerate_ipv4_paths())", source)
+        self.assertIn("subnet_broadcasts", source)
+        self.assertIn('"255.255.255.255"', source)
 
     def test_batch_reports_inherit_current_app_version_metadata(self):
         source = SERVER.read_text(encoding="utf-8")
