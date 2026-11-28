@@ -6925,3 +6925,234 @@ class PythonProductionFragmentHandlerTests(unittest.TestCase):
                 self.assertEqual([("persist", service, "remote-peer")],
                                  [event for event in events if event[0] == "persist"])
                 self.assertEqual([], sent)
+
+
+class PythonProductionFragmentSenderAndRecoveryTests(unittest.TestCase):
+    """Execute the production sender/recovery functions from all three services."""
+
+    @staticmethod
+    def _load_function(filename, function_name, namespace):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / filename).read_text(encoding="utf-8")
+        module = ast.parse(source, filename=filename)
+        node = next(
+            item for item in module.body
+            if isinstance(item, ast.FunctionDef) and item.name == function_name)
+        exec(compile(ast.Module(body=[node], type_ignores=[]), filename, "exec"),
+             namespace)
+        return namespace[function_name]
+
+    def test_production_senders_keep_short_fast_path_and_route_long_fragments(self):
+        import time
+        import uuid
+
+        cases = (
+            ("rescue2.py", "rescue2", "_CHAT_DEDUP_DB", "send_chat_v2"),
+            ("chat.py", "chat.py", "CHAT_DB", "send_chat_v2"),
+            ("server2.py", "server2", "CHAT_DEDUP_DB",
+             "send_server2_v2_chat_from_outbox"),
+        )
+        for filename, scope, db_name, function_name in cases:
+            for is_long in (False, True):
+                with self.subTest(service=scope, long_message=is_long):
+                    calls = []
+                    peer_rows = [{
+                        "peer_id": "remote-peer",
+                        "endpoint_ip": "10.20.30.40",
+                        "endpoint_port": 8888,
+                    }]
+
+                    class FakeSocket:
+                        def fileno(self):
+                            return 17
+
+                    def encode(packet, secret):
+                        if len(str(packet.get("body", "")).encode("utf-8")) > 80:
+                            raise ValueError("packet too large")
+                        return b"short-packet"
+
+                    def persist(*args):
+                        calls.append(("persist", args))
+                        return True
+
+                    def send_fragments(*args, **kwargs):
+                        calls.append(("fragments", args, kwargs))
+                        return 3
+
+                    def send_short(*args, **kwargs):
+                        calls.append(("short", args, kwargs))
+                        return 1
+
+                    namespace = {
+                        db_name: "isolated-" + scope + ".sqlite3",
+                        "PEER_NODE_ID": "local-" + scope,
+                        "RESCUE_SECRET": "test-secret",
+                        "UDP_LISTENER_SOCKET": FakeSocket(),
+                        "UDP_DEVICE_PORT": 8888,
+                        "UDP_PORT": 8889,
+                        "UDP_LISTEN_PORT": 8888,
+                        "UDP_CHAT_SEND_LOCK": object(),
+                        "list_known_peer_snapshot": lambda *args, **kwargs: peer_rows,
+                        "encode_packet": encode,
+                        "build_authenticated_chat_fragment_packets":
+                            lambda *args, **kwargs: [{"type": "chat.fragment"}],
+                        "persist_outgoing_message": persist,
+                        "send_outgoing_fragment_window": send_fragments,
+                        "send_discovery_fragment_window": send_fragments,
+                        "send_outbox_to_active_peers": send_short,
+                        "send_discovery_broadcast_with_retries": send_short,
+                        "build_chat_discovery_destinations":
+                            lambda targets, port: [(target, port) for target in targets],
+                        "get_subnet_broadcast": lambda: "10.20.30.255",
+                        "get_subnet_broadcasts": lambda: ["10.20.30.255"],
+                        "max_peer_id_budget_probe": lambda: "budget-peer",
+                        "time": time,
+                        "uuid": uuid,
+                        "_diag_event": lambda *args, **kwargs: None,
+                        "_diag_exception": lambda *args, **kwargs: None,
+                        "print": lambda *args, **kwargs: None,
+                        "logging": __import__("logging"),
+                    }
+                    if function_name == "send_server2_v2_chat_from_outbox":
+                        namespace["decode_packet"] = lambda raw, secret: {
+                            "type": "chat.message",
+                            "message_id": "server-message",
+                            "sender_peer_id": "local-server2",
+                            "sender_peer_type": "server2",
+                            "service_id": "local-server2",
+                            "target_peer_id": "*",
+                            "body": "placeholder",
+                        }
+                        namespace["load_outgoing_message"] = (
+                            lambda *args: {
+                                "body": ("L" * 160 if is_long else "short"),
+                                "created_at_ms": 1234,
+                            })
+                        sender_args = ("{}", ["remote-peer"])
+                    elif scope == "rescue2":
+                        sender_args = (("L" * 160 if is_long else "short"),
+                                       ["10.20.30.40"])
+                    else:
+                        sender_args = (("L" * 160 if is_long else "short"),
+                                       "Web_Guest", "chat-message")
+
+                    sender = self._load_function(filename, function_name, namespace)
+                    result = sender(*sender_args)
+                    self.assertTrue(result)
+                    self.assertEqual(1, len([c for c in calls if c[0] == "persist"]))
+                    persisted = next(c[1] for c in calls if c[0] == "persist")
+                    self.assertEqual(namespace[db_name], persisted[0])
+                    self.assertEqual(scope, persisted[1])
+                    if is_long:
+                        fragment_calls = [c for c in calls if c[0] == "fragments"]
+                        self.assertEqual(1, len(fragment_calls))
+                        args, kwargs = fragment_calls[0][1], fragment_calls[0][2]
+                        self.assertEqual(namespace[db_name], args[1])
+                        self.assertEqual(scope, args[2])
+                        self.assertEqual("remote-peer", args[4])
+                        self.assertEqual(("10.20.30.40", 8888), args[7])
+                        self.assertEqual("local-" + scope, args[8])
+                        self.assertEqual(scope, args[9])
+                        self.assertEqual("local-" + scope, args[10])
+                        self.assertTrue(kwargs.get("mark_attempt"))
+                        self.assertTrue(kwargs.get("allow_fast_retry"))
+                        self.assertFalse(any(c[0] == "short" for c in calls))
+                    else:
+                        self.assertTrue(any(c[0] == "short" for c in calls))
+                        self.assertFalse(any(c[0] == "fragments" for c in calls))
+
+    def test_production_recovery_uses_service_scoped_ledger_and_durable_endpoint(self):
+        cases = (
+            ("rescue2.py", "rescue2", "_CHAT_DEDUP_DB"),
+            ("chat.py", "chat.py", "CHAT_DB"),
+            ("server2.py", "server2", "CHAT_DEDUP_DB"),
+        )
+        for filename, scope, db_name in cases:
+            with self.subTest(service=scope):
+                calls = []
+                peer_id = "recovered-peer"
+                pending_rows = [
+                    {
+                        "message_id": "short-id", "created_at_ms": 100,
+                        "body": "short", "endpoint_ip": "10.1.2.3",
+                        "endpoint_port": 8887,
+                    },
+                    {
+                        "message_id": "long-id", "created_at_ms": 200,
+                        "body": "L" * 160, "endpoint_ip": "10.1.2.3",
+                        "endpoint_port": 8889,
+                    },
+                ]
+
+                class FakeLock:
+                    def __enter__(self): return self
+                    def __exit__(self, *args): return False
+
+                def encode(packet, secret):
+                    if len(packet["body"].encode("utf-8")) > 80:
+                        raise ValueError("packet too large")
+                    return b"encoded-short"
+
+                def load_pending(db, service_scope, requested_peer, limit):
+                    calls.append(("load", db, service_scope, requested_peer, limit))
+                    return pending_rows
+
+                def mark_attempt(*args, **kwargs):
+                    calls.append(("admit", args, kwargs))
+                    return True
+
+                def send_packet(*args, **kwargs):
+                    calls.append(("short-send", args, kwargs))
+
+                def send_fragments(*args, **kwargs):
+                    calls.append(("fragment-send", args, kwargs))
+                    return 2
+
+                namespace = {
+                    db_name: "recovery-" + scope + ".sqlite3",
+                    "PEER_NODE_ID": "local-" + scope,
+                    "RESCUE_SECRET": "test-secret",
+                    "UDP_CHAT_SEND_LOCK": object(),
+                    "_V2_RECOVERY_RETRY_LOCK": FakeLock(),
+                    "_V2_RECOVERY_RETRY_PEERS": set(),
+                    "_V2_RECOVERY_INFLIGHT": set(),
+                    "LanP2PStorageError": LanP2PStorageError,
+                    "add_discovery_targets_for_peer":
+                        lambda *args: calls.append(("discovery", args)),
+                    "prepare_outgoing_peer_recovery":
+                        lambda *args: calls.append(("prepare", args)),
+                    "load_pending_outgoing_for_peer": load_pending,
+                    "next_peer_recovery_eligible_at_ms": lambda *args: None,
+                    "encode_packet": encode,
+                    "mark_outgoing_attempt": mark_attempt,
+                    "send_outgoing_packet": send_packet,
+                    "send_outgoing_fragment_window": send_fragments,
+                    "_diag_event": lambda *args, **kwargs: None,
+                    "_diag_exception": lambda *args, **kwargs: None,
+                    "print": lambda *args, **kwargs: None,
+                    "print_lock": FakeLock(),
+                }
+                recovery = self._load_function(
+                    filename, "_resume_pending_v2_for_peer", namespace)
+                recovery(object(), peer_id, ("10.1.2.3", 8888), False)
+
+                load_call = next(c for c in calls if c[0] == "load")
+                self.assertEqual(namespace[db_name], load_call[1])
+                self.assertEqual(scope, load_call[2])
+                self.assertEqual(peer_id, load_call[3])
+                admissions = [c for c in calls if c[0] == "admit"]
+                self.assertEqual(1, len(admissions),
+                                 "only short-message recovery should consume outer admission")
+                self.assertEqual(namespace[db_name], admissions[0][1][0])
+                self.assertEqual("short-id", admissions[0][1][1])
+                short_send = next(c for c in calls if c[0] == "short-send")
+                self.assertEqual(("10.1.2.3", 8887), short_send[1][2])
+                fragment_send = next(c for c in calls if c[0] == "fragment-send")
+                self.assertEqual(namespace[db_name], fragment_send[1][1])
+                self.assertEqual(scope, fragment_send[1][2])
+                self.assertEqual("long-id", fragment_send[1][3])
+                self.assertEqual(peer_id, fragment_send[1][4])
+                self.assertEqual(("10.1.2.3", 8889), fragment_send[1][7])
+                self.assertTrue(fragment_send[2].get("mark_attempt"))
+                self.assertFalse(fragment_send[2].get("allow_fast_retry"))
+                self.assertFalse(namespace["_V2_RECOVERY_INFLIGHT"])
