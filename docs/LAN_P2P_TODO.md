@@ -649,3 +649,41 @@
 - [ ] **端到端验收仍未完成**：Android↔Rescue2、Android↔chat.py/server2 及 Python peer↔Python peer 的真实服务进程/设备双向测试，覆盖乱序、丢片、重复片/ACK、进程重启和最终送达；core UDP 测试与静态源码契约不能替代端到端验证。
 - 结论：Android 与 Python 三个服务端点的长消息代码路径均已接入；Python core UDP 往返测试通过，但真实 Android↔Python 互通和多服务部署验收仍待完成，不能提前宣称所有对讲端真机长消息已通过。
 
+
+
+## 2026-11-28 三手机真机测试与修复记录
+
+本节记录三台手机安装版本 `20261128-0440-V2520` 后的现场结果。**诊断探针 6/6 PASS 不等于 P2P 通信验收通过。**
+
+### 真机观测
+
+- Redmi 4X（API 25）、Redmi Note 8（API 35）、ZTE A2023BH（API 30）的本地诊断均为 6/6 PASS：运行环境、Wi-Fi、安装、IPv4 接口、UDP 绑定和传输运行时探针通过；当时 `fresh_peer_count=0`，因此没有证明发现/互通成功。
+- 三端日志均出现 Android 发送时 `固定目标 0、已验证路径路由 0、待路径验证目标 0`，首次发现窗口结束后进入 `waiting_peers`。这是 Android→Android 发现/收件人路由未建立的直接证据。
+- Android 成功持久化接收来自 server2/rescue2 的 P2P 消息；Python 服务群发、单发在用户现场测试中成功。不能据此推断 Android→Android 已通过。
+- VPN 开启时，中兴日志将 `tun0 10.10.14.1/30` 作为 `ANDROID_NETWORK` secondary path，反复绑定失败；Wi-Fi 实际路径为 `wlan0 192.168.1.114/24`。
+- 热点场景：中兴 AP 接口 `wlan2 192.168.124.144/24`，两台 Redmi 分别为 `192.168.124.10/24` 和 `192.168.124.246/24`；中兴日志记录 AP secondary listener 已绑定，但现场仍未实现三端互通。需要进一步区分热点/AP 客户端隔离与应用发现/接收问题。
+- 中兴和 Redmi Note 8 日志均出现“LAN 对讲消息超过单个 UDP 数据包限制，未入队”；这是长消息入队前仍按单个 UDP 包校验的代码问题。
+- Windows 上 8080 端口占用时，rescue2/server2 的恢复扫描反复报告 `LanP2PStorageError`，chat 启动闪退；释放端口后用户确认恢复。端口占用与存储异常的因果链尚未由 Windows 日志证明，暂记为已绕过的环境冲突，不记作代码根因已修复。
+
+### 本轮代码修复（代码/CI，不代表真机复验）
+
+- [x] Wi-Fi LAN Network 选择排除 `TRANSPORT_VPN`，即使 VPN Network 同时暴露 Wi-Fi transport，也不得将 tun 接口当作 LAN Listener 路径。
+- [x] Android 长消息入队校验改用与实际发送一致的分片编码验证，避免有效长消息在 Outbox 入队前被单 UDP 帧限制拒绝；分片总长度仍受协议上限约束。
+- [x] 对讲发送状态区只显示最近 3 条送达摘要。
+- [x] 对讲输入栏固定高度，附件/发送按钮缩窄并统一垂直对齐，避免清空输入后布局高度跳变。
+- [x] 文件传输发送状态区分“等待网络”和“已发送请求、待对方接收”；初始通知不再提前宣称“等待网络”。
+- [x] 文件传输设备列表按稳定身份/端点排序，并在数据未变化时跳过整表重建；“与此设备配对”操作按钮改为紧凑尺寸。
+- [x] server2 对讲页打开时主动广播一次发现请求，提供手动刷新入口；服务端按 LAN 接口明确广播地址发送，5 秒节流，并将当前有效租约的 Android peer 合并进目标列表。
+- [x] server2 对讲与陪护设备选择器实现“所有人群发”与单设备/多设备互斥；显式清空选择后不再自动回退成全员群发。
+- [x] server2 批量离线上报继承当前客户端 envelope 的 `build_version/protocol_version`，避免旧 report item 缺字段时把新设备显示回“旧版 · v1”；缺字段时保留已知版本。
+- [x] 新增/更新对应回归测试。最新本轮 CI：run [46120399852](https://github.com/shua00/rebackmyphone3/actions/runs/46120399852)，commit `8a4014cb9c6a3649df075303eb3e9d4b6f9c8d1b`；Python、Windows Socket Binding、Android build 均通过。
+
+### 仍未通过/下一步
+
+- [ ] **P0 阻断**：三台 Android 同网段双向发现与消息收发；必须证明每端 peer.hello/peer.ack、路径指纹、peer route、固定收件人快照和最终 ACK 闭环。
+- [ ] **P0 阻断**：中兴热点 STA+AP 双路径；验证 AP secondary listener 收到两台 Redmi 的发现报文并完成双向认证。需用新日志区分“未收到 UDP 广播”“收到但认证/落库失败”“ACK 回程失败”。
+- [ ] **P0**：VPN 开启时重新验证只保留真实 Wi-Fi LAN path，tun0 不再启动 Secondary Listener；开启/关闭 VPN 都应恢复发现。
+- [ ] **P0**：长消息重新实测：中兴→Redmi、Redmi→中兴，超过单 UDP 包但不超过协议总长度上限；验证分片、乱序/重复、最终 ACK 和重启恢复。
+- [ ] **P1**：文件传输发现需记录候选接收/拒绝原因，确认热点 AP 下中兴是否实际收到两台 Redmi 的 beacon；测量 Offer 等待、接受后吞吐、分块耗时和重传率后再调参。
+- [ ] **P1**：验证 server2 主动发现、目标列表更新、群发/多选互斥、版本显示；核查 Windows 8080 冲突时的实际异常原因，必要时补充明确端口占用诊断。
+- [ ] 真机复测前，不将本轮代码/CI 结果标记为 Android↔Android、热点多路径或文件传输实机通过。
