@@ -7349,7 +7349,7 @@ while True:
                                             receiver_id, body, created_at,
                                             ("127.0.0.1", receiver_port), sender_id,
                                             "python", sender_id, secret,
-                                            mark_attempt=False, allow_fast_retry=False)
+                                            mark_attempt=False, allow_fast_retry=True)
                                         self.assertGreater(resumed, 0)
                                         total_sent += resumed
                                     if len(acked) < expected_fragments and len(acked) % 8 == 0:
