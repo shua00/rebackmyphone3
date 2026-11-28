@@ -7404,9 +7404,6 @@ public class TrackingService extends Service implements LocationListener {
             final long ackIngressGeneration = ackIngressPath == null ? -1L : listenerGeneration;
             if ("peer.hello".equals(type)) {
                 int sourcePort = packet.getPort();
-                FileLogger.log(this, "CHAT", "P2P peer.hello RX peer=" + senderId
-                        + " source=" + packet.getAddress().getHostAddress() + ":" + sourcePort
-                        + " path=" + (listenerPathFingerprint == null ? "legacy" : listenerPathFingerprint));
                 if (senderId.isEmpty() || senderId.equals(getUniqueDeviceId())
                         || envelope.optString("nonce", "").isEmpty()
                         || !(sourcePort == 8888 || sourcePort == 8887
@@ -7435,6 +7432,9 @@ public class TrackingService extends Service implements LocationListener {
                     lanChatPeerExecutor.execute(() -> {
                         long peerQueueMs = android.os.SystemClock.elapsedRealtime()
                                 - packetReceivedAtElapsedMs;
+                        FileLogger.log(this, "CHAT", "P2P peer.hello RX peer=" + senderId
+                                + " source=" + peerIp + ":" + sourcePort
+                                + " path=" + (helloIngressPath == null ? "legacy" : helloIngressPath));
                         if (peerQueueMs >= 150L) {
                             FileLogger.log(this, "CHAT", "P2P peer.hello peer queueMs="
                                     + peerQueueMs + " peer=" + senderId);
