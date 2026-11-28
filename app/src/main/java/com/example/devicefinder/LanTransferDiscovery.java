@@ -221,8 +221,17 @@ public final class LanTransferDiscovery implements AutoCloseable {
     private void acceptCandidate(DatagramPacket packet) {
         if (!(packet.getAddress() instanceof Inet4Address)
                 || packet.getAddress().equals(localAddress)
-                || !isOnSelectedSubnet(networkPath, packet.getAddress())
                 || packet.getLength() < 8 || packet.getLength() > 200) return;
+        String raw = new String(packet.getData(), packet.getOffset(),
+                packet.getLength(), StandardCharsets.US_ASCII);
+        Beacon beacon = parseBeacon(raw, localPeerId);
+        if (beacon == null) return;
+        if (!isOnSelectedSubnet(networkPath, packet.getAddress())) {
+            FileLogger.log(context, "LAN_TRANSFER", "Discovery candidate rejected subnet peer="
+                    + beacon.peerId + " source=" + packet.getAddress().getHostAddress()
+                    + " path=" + networkFingerprint);
+            return;
+        }
         recordBeaconCandidate(context, packet, localPeerId, networkFingerprint,
                 System.currentTimeMillis());
     }
@@ -242,6 +251,9 @@ public final class LanTransferDiscovery implements AutoCloseable {
             String host = packet.getAddress().getHostAddress();
             LanTransferPeerDirectory.recordFileDiscoveryCandidate(context, beacon.peerId,
                     host, beacon.filePort, beacon.pairingPort, networkFingerprint, nowWallTimeMs);
+            FileLogger.log(context, "LAN_TRANSFER", "Discovery candidate accepted peer="
+                    + beacon.peerId + " endpoint=" + host + ":" + beacon.filePort
+                    + " path=" + networkFingerprint);
             android.util.Log.d("LanTransferDiscovery", "Candidate received peer=" + beacon.peerId
                     + " endpoint=" + host + ":" + beacon.filePort
                     + " pairingPort=" + beacon.pairingPort);
