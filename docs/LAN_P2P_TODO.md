@@ -1,6 +1,6 @@
 # LAN P2P 后续 TODO 与验收门槛
 
-更新：2026-11-27
+更新：2026-11-28
 
 ## 新增 P0 架构目标：统一网络感知与自适应路由
 
@@ -18,8 +18,12 @@
 - [x] **去重并发回归保护**：Java 12 并发 ingress 单测验证同一广播仅一次接纳；Python 静态契约防止后续接收循环复制时退回局部去重表。
 - [ ] **当前 P0-A**：普通路由器两台或多台 Android/Python 设备快路径回归；不增加无关周期扫描、高频探测、每包全路径枚举或默认多路径重复发送。
 - [ ] **P0-B**：沉淀 Android/Python 对齐的 path state、route lease、failure reason、route decision 语义及可复用接口。
-- [ ] **P0-C（LAN P2P v2 真机验收后排期）**：Rescue2/Server2 复用感知结果，LAN 内优先 UDP 即时指令，LAN 外或 LAN route 不可用时走 HTTP；以 commandId 幂等、TTL、接收/执行状态和结果回传防止重复执行。
-- [ ] P0-C 不提前实现，不改变当前 Rescue2 新诊断封存状态；旧版 `pull_logs_multi()`、Shell/ADB/Root 能力及聊天/文件传输隔离必须保持。
+- [ ] **P0-C（正式 P0 目标，分阶段实施）**：Rescue2/Server2 复用统一网络感知与已验证路径；LAN 内优先 UDP，即时跨网/无 LAN route 时使用设备主动出站会话、HTTP 或受控中继；以 commandId 幂等、TTL、接收/执行状态和结果回传防止重复执行。
+- [ ] **P0-C 热点发现**：Rescue2 能发现连接 Android 手机热点的设备。同热点且双向可达时使用定向发现与认证单播；跨子网/NAT/客户端隔离时不得假设广播可穿透，必须通过设备主动出站会话或受控中继发现和保持会话。
+- [ ] **P0-C 跨网络指令下发**：同一 commandId/operationId 跨 UDP/HTTP/会话回退；设备端持久化幂等执行账本；区分 queued、sent、received/accepted、executing、succeeded、failed、expired；即时命令 TTL 到期不得补执行。
+- [ ] **P0-C Android ↔ Rescue2 双向文件互传**：双方均可发起；采用类似蓝牙分享的用户流程（选设备、发送 Offer、对端接受/拒绝、显示进度和结果），底层使用独立认证文件传输数据面，具备分块、SHA-256 完整性校验、逐块 ACK、有限重试、断点续传和进程重启恢复。
+- [ ] **P0-C 网络边界**：跨子网/NAT 不依赖 UDP 广播穿透；优先设备主动出站连接，必要时受控中继/隧道。没有可达入口或中继时明确报告不可达，不宣称已实现 NAT 穿透。
+- [ ] 上述 Rescue2 P0 目标不改变当前 Rescue2 新诊断封存状态；旧版 `pull_logs_multi()`、Shell/ADB/Root 能力必须保持。聊天、文件、命令继续共享网络感知事实但隔离业务协议、队列、存储和幂等执行边界。
 
 ## 2026-11-27 多 Listener runtime 审计结论（历史记录；当前状态见下方批次 B/C 更新）
 
