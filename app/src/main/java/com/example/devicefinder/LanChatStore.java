@@ -20,7 +20,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
     /** Compatibility aliases; policy values are owned by LanChatRetryPolicy. */
     public static final long FIRST_DISCOVERY_WINDOW_MS = LanChatRetryPolicy.FIRST_DISCOVERY_WINDOW_MS;
     private static final String DB_NAME = "lan_p2p_delivery.db";
-    // v9 records attempted endpoints; v10 adds durable receive fragments; v11 adds sender ACK bitmaps.
+    // v13 binds durable authenticated peer hints to the exact listener path/generation.
     private static final int DB_VERSION = 13;
     // Durable partial long-chat receive cache: strict per-message, session and global bounds.
     public static final long FRAGMENT_SESSION_TTL_MS = 30L * 60L * 1000L;
@@ -2138,8 +2138,13 @@ public final class LanChatStore extends SQLiteOpenHelper {
             long oldVerifiedAt = 0L;
             long oldLeaseExpiresAt = 0L;
             String oldStatus = "suspect";
+            String oldNetworkScope = "";
+            String oldVerifiedPathFingerprint = "";
+            long oldVerifiedListenerGeneration = -1L;
             Cursor c = db.rawQuery(
-                    "SELECT endpoint_ip,endpoint_port,last_verified_at,status,lease_expires_at FROM lan_peers WHERE peer_id=?",
+                    "SELECT endpoint_ip,endpoint_port,last_verified_at,status,lease_expires_at,"
+                    + "network_scope,verified_path_fingerprint,verified_listener_generation "
+                    + "FROM lan_peers WHERE peer_id=?",
                     new String[]{peerId});
             try {
                 if (c.moveToFirst()) {
@@ -2148,10 +2153,14 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     oldVerifiedAt = c.getLong(2);
                     oldStatus = c.getString(3);
                     oldLeaseExpiresAt = c.getLong(4);
+                    oldNetworkScope = c.getString(5);
+                    oldVerifiedPathFingerprint = c.getString(6);
+                    oldVerifiedListenerGeneration = c.getLong(7);
                 }
             } finally { c.close(); }
 
-            boolean sameRoute = ip.equals(oldIp) && port == oldPort;
+            boolean sameRoute = ip.equals(oldIp) && port == oldPort
+                    && (networkScope == null ? "" : networkScope).equals(oldNetworkScope);
             ContentValues v = new ContentValues();
             v.put("peer_type", peerType == null ? "unknown" : peerType);
             v.put("service_id", serviceId == null ? "" : serviceId);
@@ -2163,8 +2172,10 @@ public final class LanChatStore extends SQLiteOpenHelper {
             v.put("last_verified_at", sameRoute ? oldVerifiedAt : 0L);
             // HELLO is discovery evidence, not a route challenge. It must never
             // renew a verified lease; only upsertPeer after nonce-bound validation may do so.
-            v.put("lease_expires_at", oldLeaseExpiresAt);
+            v.put("lease_expires_at", sameRoute ? oldLeaseExpiresAt : 0L);
             v.put("status", sameRoute && "active".equals(oldStatus) ? "active" : "suspect");
+            v.put("verified_path_fingerprint", sameRoute ? oldVerifiedPathFingerprint : "");
+            v.put("verified_listener_generation", sameRoute ? oldVerifiedListenerGeneration : -1L);
             if (oldIp == null) {
                 v.put("peer_id", peerId);
                 long rowId = db.insertWithOnConflict("lan_peers", null, v, SQLiteDatabase.CONFLICT_IGNORE);
