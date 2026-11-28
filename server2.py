@@ -1595,6 +1595,25 @@ def _retry_deferred_v2_peer_recoveries():
                 _V2_RECOVERY_RETRY_PEERS.update(unresolved_recovery_peers)
 
 
+def _run_v2_recovery_retry_worker():
+    """Supervise the long-lived retry loop so transient failures do not strand the worker."""
+    global _V2_RECOVERY_WORKER_STARTED
+    try:
+        while True:
+            try:
+                _retry_deferred_v2_peer_recoveries()
+            except Exception as exc:
+                with print_lock:
+                    print(f"⚠️ server2 LAN recovery worker recovered from unexpected failure: {type(exc).__name__}")
+            # The retry loop is expected to block forever; a return is treated as
+            # an unexpected exit and restarted after a bounded pause.
+            time.sleep(1.0)
+    finally:
+        # BaseException / interpreter shutdown must not leave a stale singleton flag.
+        with _V2_RECOVERY_RETRY_LOCK:
+            _V2_RECOVERY_WORKER_STARTED = False
+
+
 def _start_v2_recovery_retry_worker():
     """Start one worker even if schema migration is temporarily locked; it retries migration."""
     global _V2_RECOVERY_WORKER_STARTED, _V2_RECOVERY_SCHEMA_READY
@@ -1609,7 +1628,7 @@ def _start_v2_recovery_retry_worker():
         if _V2_RECOVERY_WORKER_STARTED:
             return
         _V2_RECOVERY_WORKER_STARTED = True
-    worker = threading.Thread(target=_retry_deferred_v2_peer_recoveries, daemon=True,
+    worker = threading.Thread(target=_run_v2_recovery_retry_worker, daemon=True,
                                name="lan-v2-recovery-retry")
     try:
         worker.start()
