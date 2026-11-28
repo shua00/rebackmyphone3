@@ -7059,10 +7059,9 @@ module.PEER_NODE_ID = sender_id
 module.RESCUE_SECRET = secret
 module.UDP_PORT = int(sender_port)
 module.UDP_DEVICE_PORT = int(receiver_port)
-module.list_known_peer_snapshot = lambda *args, **kwargs: [{
-    "peer_id": receiver_id, "endpoint_ip": "127.0.0.1",
-    "endpoint_port": int(receiver_port),
-}]
+from lan_p2p_core import record_peer
+assert record_peer(db, "chat.py", receiver_id, "python", receiver_id,
+                   "127.0.0.1", int(receiver_port), status="active")
 module._start_v2_recovery_retry_worker = lambda: None
 module.send_startup_peer_beacon = lambda *args, **kwargs: False
 module.get_subnet_broadcasts = lambda: []
