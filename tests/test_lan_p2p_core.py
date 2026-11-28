@@ -7178,6 +7178,7 @@ class PythonRealServiceUdpListenerProcessTests(unittest.TestCase):
             persist_outgoing_message, send_outgoing_fragment_window,
             decode_packet, record_outgoing_fragment_ack,
             acknowledge_outgoing_message, packet_service_identity_matches,
+            fragment_chat_message,
         )
 
         cases = (
@@ -7287,12 +7288,16 @@ while True:
                                 ("127.0.0.1", receiver_port), sender_id,
                                 "python", sender_id, secret,
                                 mark_attempt=True, allow_fast_retry=True)
+                            expected_fragments = len(fragment_chat_message(
+                                message_id, receiver_id, body, created_at))
                             self.assertGreater(sent, 1)
+                            self.assertLessEqual(sent, 8)
+                            total_sent = sent
                             acked = set()
                             final_acknowledged = False
                             deadline = time.time() + 15
                             while time.time() < deadline and (
-                                    len(acked) < sent or not final_acknowledged):
+                                    len(acked) < expected_fragments or not final_acknowledged):
                                 try:
                                     raw, source = sender_sock.recvfrom(1200)
                                 except socket.timeout:
@@ -7314,11 +7319,21 @@ while True:
                                         sender_db, sender_scope, message_id,
                                         receiver_id, index, source[0], source[1]))
                                     acked.add(index)
+                                    if len(acked) == total_sent and total_sent < expected_fragments:
+                                        advanced = send_outgoing_fragment_window(
+                                            sender_sock, sender_db, sender_scope, message_id,
+                                            receiver_id, body, created_at,
+                                            ("127.0.0.1", receiver_port), sender_id,
+                                            "python", sender_id, secret,
+                                            mark_attempt=False, allow_fast_retry=False)
+                                        self.assertGreater(advanced, 0)
+                                        total_sent += advanced
                                 elif packet.get("type") == "chat.ack":
                                     self.assertEqual("stored", packet.get("status"))
                                     final_acknowledged = acknowledge_outgoing_message(
                                         sender_db, sender_scope, message_id, receiver_id)
-                            self.assertEqual(sent, len(acked))
+                            self.assertEqual(expected_fragments, len(acked))
+                            self.assertEqual(expected_fragments, total_sent)
                             self.assertTrue(final_acknowledged)
                         finally:
                             sender_sock.close()
