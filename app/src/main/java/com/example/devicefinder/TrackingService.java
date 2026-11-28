@@ -6118,11 +6118,15 @@ public class TrackingService extends Service implements LocationListener {
                         if (!retryBatchCompleted) {
                             scheduleLanChatRetryAfterFailure(
                                     "outbox-retry-after-failure", lanChatRecoveryEventPending.get());
-                        } else if (lanChatRecoveryEventPending.get()) {
-                            retryPendingLanChatMessages(true);
+                        } else if (LanChatRetryPolicy.shouldImmediatelyRetryForRecovery(
+                                lanChatRecoveryEventPending.get(), !lanChatPeerRecoveryEvents.isEmpty())) {
+                            // Real network/listener or authenticated peer recovery may wake
+                            // immediately. An ACK-timeout route refresh is not a recovery event.
+                            retryPendingLanChatMessages(lanChatRecoveryEventPending.get());
                         } else {
-                            // An ACK-timeout route refresh must not be lost behind this batch.
-                            retryPendingLanChatMessages(false);
+                            // Route refreshes are coalesced into the normal persisted Outbox
+                            // cadence; do not turn ACK timeouts into immediate full-queue scans.
+                            scheduleLanChatRetryFromOutbox();
                         }
                     } else {
                         // Re-arm after releasing the in-flight guard. A delayed callback may
@@ -7223,7 +7227,10 @@ public class TrackingService extends Service implements LocationListener {
         }
         if (requestRouteRefresh && !serviceDestroyed) {
             lanChatRouteRefreshPending.set(true);
-            retryPendingLanChatMessages(false);
+            // A missing ACK is not proof of network/peer recovery. Coalesce a planner request
+            // and let the persisted Outbox backoff choose the next full scan instead of
+            // immediately restarting the entire Outbox from every 250ms ACK window.
+            requestLanChatRetryPlan();
         } else if (!serviceDestroyed) {
             // Arm the durable backoff only after the short ACK/fast-retry decision has
             // completed; this prevents an early timer from bypassing the intended 10s tier.
