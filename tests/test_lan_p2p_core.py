@@ -7168,6 +7168,7 @@ class PythonRealServiceUdpListenerProcessTests(unittest.TestCase):
     """Run each actual service UDP listener and its dispatcher in an isolated process."""
 
     def test_real_service_listener_dispatches_fragments_and_returns_durable_final_ack(self):
+        import socket
         import shutil
         from lan_p2p_core import (
             persist_outgoing_message, send_outgoing_fragment_window,
