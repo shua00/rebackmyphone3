@@ -24,6 +24,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
@@ -46,6 +47,7 @@ public final class LanTransferActivity extends Activity {
     private static final int REQUEST_SAVE_RECEIVED_FILE = 7402;
     private LanTransferStore.Transfer pendingSaveTransfer;
     private LanTransferPeerDirectory.Candidate selectedDestination;
+    private String lastPeerListFingerprint;
 
     private String lastPairingPromptSessionId;
     private final BroadcastReceiver updates = new BroadcastReceiver() {
@@ -143,8 +145,7 @@ public final class LanTransferActivity extends Activity {
             startPairing(candidate);
             return;
         }
-        List<LanTransferPeerDirectory.Candidate> candidates =
-                LanTransferPeerDirectory.loadCurrent(this, System.currentTimeMillis());
+        List<LanTransferPeerDirectory.Candidate> candidates = loadStableCandidates();
         if (candidates.isEmpty()) {
             new AlertDialog.Builder(this)
                     .setTitle("暂未发现可配对设备")
@@ -439,12 +440,21 @@ public final class LanTransferActivity extends Activity {
         if (offerList == null || isFinishing() || isDestroyed()) return;
         LinearLayout peerList = findViewById(R.id.lanTransferPeerList);
         if (peerList == null) return;
-        peerList.removeAllViews();
-        List<LanTransferPeerDirectory.Candidate> candidates =
-                LanTransferPeerDirectory.loadCurrent(this, System.currentTimeMillis());
+        List<LanTransferPeerDirectory.Candidate> candidates = loadStableCandidates();
         LanTransferCredentials.Value credentials = null;
         try { credentials = LanTransferCredentials.load(this); } catch (Exception ignored) {}
         Set<String> trusted = credentials == null ? Collections.emptySet() : credentials.trustedPeerIds;
+        StringBuilder fingerprint = new StringBuilder();
+        for (LanTransferPeerDirectory.Candidate candidate : candidates) {
+            fingerprint.append(candidate.peerId).append('|').append(candidate.host).append('|')
+                    .append(candidate.port).append('|').append(candidate.networkFingerprint).append('|')
+                    .append(candidate.isConnectable()).append('|')
+                    .append(trusted.contains(candidate.peerId)).append(';');
+        }
+        String nextFingerprint = fingerprint.toString();
+        if (nextFingerprint.equals(lastPeerListFingerprint)) return;
+        lastPeerListFingerprint = nextFingerprint;
+        peerList.removeAllViews();
         if (candidates.isEmpty()) {
             TextView empty = new TextView(this);
             empty.setText("暂未发现设备。使用独立文件传输发现通道；对讲发现不是必需条件。");
@@ -461,6 +471,12 @@ public final class LanTransferActivity extends Activity {
                     + (isTrusted ? "\n已配对 · 可发送" : "\n未配对 · 仅发现，不可信任"));
             peerList.addView(item);
             Button action = new Button(this);
+            action.setAllCaps(false);
+            action.setTextSize(13);
+            action.setMinHeight(0);
+            action.setMinimumHeight(0);
+            int density = (int) (getResources().getDisplayMetrics().density + 0.5f);
+            action.setPadding(10 * density, 4 * density, 10 * density, 4 * density);
             if (isTrusted && candidate.isConnectable()) {
                 action.setText("发送文件到此设备");
                 action.setOnClickListener(v -> { selectedDestination = candidate; pickFileForSending(); });
@@ -469,8 +485,32 @@ public final class LanTransferActivity extends Activity {
                 action.setEnabled(!isTrusted);
                 action.setOnClickListener(v -> showPairingDialog(candidate.peerId));
             }
-            peerList.addView(action);
+            LinearLayout.LayoutParams actionParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, 36 * density);
+            actionParams.topMargin = 2 * density;
+            actionParams.bottomMargin = 8 * density;
+            peerList.addView(action, actionParams);
         }
+    }
+
+    private List<LanTransferPeerDirectory.Candidate> loadStableCandidates() {
+        List<LanTransferPeerDirectory.Candidate> candidates = new ArrayList<>(
+                LanTransferPeerDirectory.loadCurrent(this, System.currentTimeMillis()));
+        Collections.sort(candidates, (left, right) -> {
+            String leftId = left.peerId == null ? "" : left.peerId;
+            String rightId = right.peerId == null ? "" : right.peerId;
+            int byId = leftId.compareToIgnoreCase(rightId);
+            if (byId != 0) return byId;
+            int byExactId = leftId.compareTo(rightId);
+            if (byExactId != 0) return byExactId;
+            String leftHost = left.host == null ? "" : left.host;
+            String rightHost = right.host == null ? "" : right.host;
+            int byHost = leftHost.compareTo(rightHost);
+            if (byHost != 0) return byHost;
+            return String.valueOf(left.networkFingerprint).compareTo(
+                    String.valueOf(right.networkFingerprint));
+        });
+        return candidates;
     }
 
     private void refreshOffers() {
