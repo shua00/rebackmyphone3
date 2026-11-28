@@ -7324,6 +7324,17 @@ public class TrackingService extends Service implements LocationListener {
                 clearPendingPeerChallenge(nonce);
             }
         }, LAN_PEER_CHALLENGE_TIMEOUT_MS);
+        FileLogger.log(this, "CHAT", "P2P peer.hello TX broadcast=" + address
+                + " ports=" + ports.length + " path=" + lanChatPathFingerprintForSocket(socket));
+    }
+
+    private String lanChatPathFingerprintForSocket(DatagramSocket socket) {
+        if (socket == null) return "none";
+        for (LanChatListenerRuntime.Lease lease : lanChatListenerRuntime.snapshot()) {
+            if (lease != null && lease.socket == socket && lanChatListenerRuntime.isCurrent(lease))
+                return lease.pathFingerprint;
+        }
+        return "unregistered";
     }
 
     /**
@@ -7393,6 +7404,9 @@ public class TrackingService extends Service implements LocationListener {
             final long ackIngressGeneration = ackIngressPath == null ? -1L : listenerGeneration;
             if ("peer.hello".equals(type)) {
                 int sourcePort = packet.getPort();
+                FileLogger.log(this, "CHAT", "P2P peer.hello RX peer=" + senderId
+                        + " source=" + packet.getAddress().getHostAddress() + ":" + sourcePort
+                        + " path=" + (listenerPathFingerprint == null ? "legacy" : listenerPathFingerprint));
                 if (senderId.isEmpty() || senderId.equals(getUniqueDeviceId())
                         || envelope.optString("nonce", "").isEmpty()
                         || !(sourcePort == 8888 || sourcePort == 8887
@@ -7434,13 +7448,17 @@ public class TrackingService extends Service implements LocationListener {
                                             helloIngressGeneration)) return;
                             if (!store.observePeer(senderId, peerType, serviceId, peerNetwork,
                                     peerIp, sourcePort, now, now + 120_000L)) {
-                                FileLogger.log(this, "CHAT", "⚠️ peer HELLO 持久化未确认，不发送 peer.ack");
+                                FileLogger.log(this, "CHAT", "⚠️ peer HELLO 持久化未确认，不发送 peer.ack peer="
+                                        + senderId + " path=" + helloIngressPath);
                                 return;
                             }
                             if (helloIngressPath != null
                                     && !isCurrentLanChatIngress(helloIngressPath, socket,
                                             helloIngressGeneration)) return;
                             sendLanUdpPacket(socket, response, "PEER_ACK_V2");
+                            FileLogger.log(this, "CHAT", "P2P peer.ack TX peer=" + senderId
+                                    + " target=" + peerAddress.getHostAddress() + ":" + sourcePort
+                                    + " path=" + (helloIngressPath == null ? "legacy" : helloIngressPath));
                             // A normal beacon also challenges its sender once, allowing an
                             // existing sender to rediscover this device and resume its outbox.
                             // challenge_only prevents challenge ping-pong.
@@ -7525,7 +7543,8 @@ public class TrackingService extends Service implements LocationListener {
                             boolean persisted = store.upsertPeer(senderId, peerType, serviceId,
                                     peerNetwork, peerAddress.getHostAddress(), port, now, now + 120_000L);
                             if (!persisted) {
-                                FileLogger.log(this, "CHAT", "⚠️ peer.ack 路由持久化失败，暂不启用单播");
+                                FileLogger.log(this, "CHAT", "⚠️ peer.ack 路由持久化失败，暂不启用单播 peer="
+                                        + senderId + " path=" + verifiedPathFingerprint);
                                 return;
                             }
                             // The listener may be replaced while the durable peer write runs.
@@ -7555,6 +7574,9 @@ public class TrackingService extends Service implements LocationListener {
                                     verifiedListenerGeneration)) return;
                             // upsertPeer() atomically commits this verified route and joins all
                             // still-open first-discovery target snapshots in the same transaction.
+                            FileLogger.log(this, "CHAT", "P2P peer route verified peer=" + senderId
+                                    + " endpoint=" + peerAddress.getHostAddress() + ":" + port
+                                    + " path=" + verifiedPathFingerprint);
                             synchronized (verifiedChatPeerRouteVersions) {
                                 verifiedChatPeerRouteVersions.put(senderId,
                                         verifiedChatPeerRouteVersionCounter.incrementAndGet());
