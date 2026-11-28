@@ -7567,8 +7567,15 @@ class PythonRecoveryWorkerLifecycleTests(unittest.TestCase):
                     "print": lambda *args, **kwargs: None,
                     "_diag_event": lambda *args, **kwargs: None,
                 }
-                start = self._load_function(
-                    filename, "_start_v2_recovery_retry_worker", namespace)
+                source = (Path(__file__).resolve().parents[1] / filename).read_text(encoding="utf-8")
+                parsed = ast.parse(source, filename=filename)
+                function_node = next(
+                    node for node in parsed.body
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "_start_v2_recovery_retry_worker")
+                exec(compile(ast.Module(body=[function_node], type_ignores=[]),
+                             filename, "exec"), namespace)
+                start = namespace["_start_v2_recovery_retry_worker"]
                 start()
                 start()
                 start()
