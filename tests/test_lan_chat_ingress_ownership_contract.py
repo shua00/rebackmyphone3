@@ -195,10 +195,21 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
         )
         self.assertIn("verified route registry admission rejected:", peer_ack)
         self.assertIn("verifiedListenerGeneration)) return;", peer_ack)
+        self.assertIn("store.markPeerRouteRegistryAdmitted(", peer_ack)
         self.assertLess(
             peer_ack.index("verified route registry admission rejected:"),
+            peer_ack.index("store.markPeerRouteRegistryAdmitted("),
+        )
+        self.assertLess(
+            peer_ack.index("store.markPeerRouteRegistryAdmitted("),
             peer_ack.index("verifiedChatPeers.put(senderId,"),
         )
+        store = (
+            ROOT / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn('v.put("verified_route_admitted", 0)', store)
+        self.assertIn('AND verified_route_admitted=1 LIMIT 1', store)
+        self.assertIn('values.put("verified_route_admitted", 1)', store)
 
     def test_duplicate_chat_message_collects_per_ingress_ack_targets(self):
         source = self.source
