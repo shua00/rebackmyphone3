@@ -7100,7 +7100,7 @@ else:
                 (message_id, receiver_id)).fetchone()
         finally:
             conn.close()
-        if row and row[0] == "delivered":
+        if row and row[0] == "acked":
             print("PRODUCTION_RECOVERY_DELIVERED", flush=True)
             os._exit(0)
         time.sleep(0.1)
