@@ -7132,7 +7132,10 @@ else:
                 finally:
                     conn.close()
                 self.assertIsNotNone(target_state, "production sender did not persist its recipient target")
-                self.assertEqual("pending", target_state[0], target_state)
+                self.assertEqual("sent", target_state[0], target_state)
+                self.assertEqual(1, target_state[1], target_state)
+                self.assertGreater(target_state[2], 8, target_state)
+                self.assertEqual("0" * target_state[2], target_state[3], target_state)
 
                 resumed = subprocess.run(
                     [sys.executable, "-u", "-c", sender_code, sender_copy, db_path,
