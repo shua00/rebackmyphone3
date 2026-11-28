@@ -7785,6 +7785,55 @@ class PythonRecoveryWorkerLifecycleTests(unittest.TestCase):
                 self.assertTrue(namespace["_V2_RECOVERY_WORKER_STARTED"])
                 self.assertFalse(namespace["_V2_RECOVERY_SCHEMA_READY"])
 
+    def test_worker_start_failure_releases_singleton_guard_for_all_services(self):
+        import threading
+        import types
+
+        for filename, db_name in (
+                ("rescue2.py", "_CHAT_DEDUP_DB"),
+                ("chat.py", "CHAT_DB"),
+                ("server2.py", "CHAT_DEDUP_DB")):
+            with self.subTest(service=filename):
+                class FakeLock:
+                    def __enter__(self): return self
+                    def __exit__(self, *args): return False
+
+                class FakeThread:
+                    starts = 0
+                    def __init__(self, *args, **kwargs): pass
+                    def start(self):
+                        type(self).starts += 1
+                        if type(self).starts == 1:
+                            raise RuntimeError("simulated thread start failure")
+
+                namespace = {
+                    db_name: "isolated-" + filename + ".sqlite3",
+                    "_V2_RECOVERY_WORKER_STARTED": False,
+                    "_V2_RECOVERY_SCHEMA_READY": False,
+                    "_V2_RECOVERY_RETRY_LOCK": FakeLock(),
+                    "ensure_outbox_retry_schema": lambda db: None,
+                    "threading": types.SimpleNamespace(Thread=FakeThread),
+                    "print_lock": FakeLock(),
+                    "print": lambda *args, **kwargs: None,
+                    "_diag_event": lambda *args, **kwargs: None,
+                    "_retry_deferred_v2_peer_recoveries": lambda: None,
+                }
+                source = (Path(__file__).resolve().parents[1] / filename).read_text(encoding="utf-8")
+                parsed = ast.parse(source, filename=filename)
+                function_node = next(
+                    node for node in parsed.body
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "_start_v2_recovery_retry_worker")
+                exec(compile(ast.Module(body=[function_node], type_ignores=[]),
+                             filename, "exec"), namespace)
+                start = namespace["_start_v2_recovery_retry_worker"]
+                with self.assertRaisesRegex(RuntimeError, "simulated thread start failure"):
+                    start()
+                self.assertFalse(namespace["_V2_RECOVERY_WORKER_STARTED"])
+                start()
+                self.assertTrue(namespace["_V2_RECOVERY_WORKER_STARTED"])
+                self.assertEqual(2, FakeThread.starts)
+
 
 class PythonRealServiceUdpListenerProcessTests(unittest.TestCase):
     """Run each actual service UDP listener and its dispatcher in an isolated process."""
