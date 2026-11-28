@@ -2317,10 +2317,8 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     "SELECT 1 FROM lan_outbox o WHERE o.message_id=lan_outbox_targets.message_id " +
                     "AND o.state NOT IN ('delivered','expired','waiting_peers'))",
                     new String[]{peerId});
-            // Persist the verified route and admit it to open discovery snapshots in the
-            // same SQLite writer transaction. This removes a second writer-lock round trip
-            // from the peer.ack critical path and prevents an intermediate half-committed state.
-            if (!addDiscoveryPeerToOpenMessages(db, peerId, now)) return false;
+            // This row is an authenticated but not-yet-Registry-admitted hint. The ACK
+            // owner promotes it and joins open discovery snapshots only after path admission.
             db.setTransactionSuccessful();
             return true;
         } catch (Exception e) {
@@ -2371,18 +2369,25 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 || pathFingerprint == null || pathFingerprint.isEmpty()
                 || listenerGeneration < 0L || listenerInstanceId == null
                 || listenerInstanceId.isEmpty()) return false;
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
         try {
             ContentValues values = new ContentValues();
             values.put("verified_route_admitted", 1);
-            return getWritableDatabase().update("lan_peers", values,
+            int updated = db.update("lan_peers", values,
                     "peer_id=? AND endpoint_ip=? AND endpoint_port=? AND status='active' "
                     + "AND last_verified_at>0 AND lease_expires_at>? "
                     + "AND verified_path_fingerprint=? AND verified_listener_generation=? "
                     + "AND verified_listener_instance_id=?",
                     new String[]{peerId, ip, String.valueOf(port), String.valueOf(now),
-                            pathFingerprint, String.valueOf(listenerGeneration), listenerInstanceId}) == 1;
+                            pathFingerprint, String.valueOf(listenerGeneration), listenerInstanceId});
+            if (updated != 1 || !addDiscoveryPeerToOpenMessages(db, peerId, now)) return false;
+            db.setTransactionSuccessful();
+            return true;
         } catch (Exception failure) {
             return false;
+        } finally {
+            db.endTransaction();
         }
     }
 
