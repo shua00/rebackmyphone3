@@ -364,6 +364,21 @@ def get_all_local_ips():
         except Exception: pass
     return ips
 
+
+def get_subnet_broadcasts():
+    """Enumerate directed broadcasts for every active local IPv4 LAN interface."""
+    try:
+        return list(directed_broadcast_addresses(enumerate_ipv4_paths()))
+    except Exception:
+        return []
+
+
+def get_subnet_broadcast():
+    """Compatibility fallback for older call sites."""
+    targets = get_subnet_broadcasts()
+    return targets[0] if targets else "255.255.255.255"
+
+
 def _is_private_ip(ip):
     if not is_valid_ip(ip): return False
     parts = [int(p) for p in ip.split(".")]
@@ -1162,9 +1177,9 @@ def send_chat_v2(body, target_ips):
                     sock, _CHAT_DEDUP_DB, "rescue2", message_id, probe, RESCUE_SECRET,
                     send_lock=UDP_CHAT_SEND_LOCK, attempts=1, retry_delay_seconds=0.25)
         elif broadcast_all:
-            subnet = get_subnet_broadcast()
+            subnet_broadcasts = get_subnet_broadcasts()
             destinations = build_chat_discovery_destinations(
-                [subnet, "255.255.255.255"], UDP_PORT)
+                [*subnet_broadcasts, "255.255.255.255"], UDP_PORT)
             if long_message:
                 send_discovery_fragment_window(
                     sock, _CHAT_DEDUP_DB, "rescue2", message_id, body, created,
