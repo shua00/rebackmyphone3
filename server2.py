@@ -2471,6 +2471,11 @@ def handle_client(client_conn, client_addr):
                     return
 
                 now_ms = int(datetime.datetime.now().timestamp() * 1000)
+                # Batch-level app metadata belongs to the currently installed client.
+                # Offline report items may predate the current build and omit these fields.
+                batch_build_version = batch_data.get("build_version")
+                batch_protocol_version = batch_data.get("protocol_version")
+
                 batch_dev_id = batch_data.get("device_id")
                 if not batch_dev_id and reports_list and isinstance(reports_list[0], dict):
                     batch_dev_id = reports_list[0].get("device_id")
@@ -2488,6 +2493,11 @@ def handle_client(client_conn, client_addr):
                 for item in reports_list:
                     if not isinstance(item, dict):
                         break
+                    item = dict(item)
+                    if not item.get("build_version") and batch_build_version:
+                        item["build_version"] = batch_build_version
+                    if not item.get("protocol_version") and batch_protocol_version:
+                        item["protocol_version"] = batch_protocol_version
                     item_token = item.get("token") or batch_data.get("token")
                     if item_token != AUTH_TOKEN:
                         break
@@ -2549,8 +2559,10 @@ def handle_client(client_conn, client_addr):
                         if valid_ip:
                             item["last_valid_ip"] = valid_ip
                         # ★ 2026-11-07 [P4.4]
-                        item["build_version"] = item.get("build_version") or "旧版"
-                        item["protocol_version"] = item.get("protocol_version") or 1
+                        item["build_version"] = (item.get("build_version")
+                                                or prev_info.get("build_version") or "旧版")
+                        item["protocol_version"] = (item.get("protocol_version")
+                                                    or prev_info.get("protocol_version") or 1)
                         if prev_udp_ip:
                             item["udp_source_ip"] = prev_udp_ip
                         if prev_info.get("last_chat"):
@@ -2664,8 +2676,10 @@ def handle_client(client_conn, client_addr):
                     if valid_ip:
                         data["last_valid_ip"] = valid_ip
                     # ★ 2026-11-07 [P4.4]
-                    data["build_version"] = data.get("build_version") or "旧版"
-                    data["protocol_version"] = data.get("protocol_version") or 1
+                    data["build_version"] = (data.get("build_version")
+                                              or prev_info.get("build_version") or "旧版")
+                    data["protocol_version"] = (data.get("protocol_version")
+                                                or prev_info.get("protocol_version") or 1)
                     if prev_udp_ip:
                         data["udp_source_ip"] = prev_udp_ip
                     if prev_info.get("last_chat"):
