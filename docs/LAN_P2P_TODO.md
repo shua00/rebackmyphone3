@@ -776,3 +776,18 @@
 - `loadKnownPeers()` 明确包含离线 peer；不能把它的 endpoint 当作新鲜认证路由。
 - `upsertPeer()` 会把 peer-wide endpoint 写入所有未 ACK 的 Outbox target 的 `last_endpoint`，并把 peer 加入仍开放的 discovery snapshot；该字段因此只是 route candidate，不足以单独证明 endpoint 仍在租约内或属于当前 LAN path。
 - 所以不能仅把旧版 `preparedCachedEndpoints` 逻辑复制回来。安全实现必须从 `lan_peers` 读取并校验 `status='active'`、`lease_expires_at > now`、精确 endpoint 一致、当前 network_scope 一致，并验证 endpoint 与唯一活动 Listener 的 LAN path 匹配；若任一信息缺失则只做定向 challenge，不直投。
+
+
+## #1035 单 Listener 历史 endpoint 兼容 fallback：实现进展（2026-11-28）
+
+- [x] 新增纯 Java 准入策略 `LanChatCachedRoutePolicy`：仅允许当前唯一 Listener、有效持久化认证租约、IPv4 site-local endpoint 且 endpoint 落在当前本地 LAN prefix 内；只解析 dotted-decimal IPv4 literal，不对 Outbox endpoint 做 DNS。
+- [x] `lan_peers` schema 升至 DB v14，新增 `verified_path_fingerprint`、`verified_listener_generation`、`verified_listener_instance_id`。认证 ACK 持久化时记录接收该 ACK 的 path/generation 和当前 Service 实例 ID；旧数据库升级后默认空值/无效 generation，旧记录不会自动获得 fallback 权限。
+- [x] 新增 `hasFreshVerifiedPeerRoute()`：必须精确匹配 peerId、IP、端口、active 状态、last_verified_at、未过期 lease、path fingerprint、listener generation 和 Service instance ID。
+- [x] `observePeer()` 仍不延长认证租约；若同一 endpoint 的对端 network_scope 改变，则清空旧 lease 和 listener epoch，要求重新 challenge。
+- [x] 固定收件人路由解析在当前 live RouteBinding 缺失时，才评估单 Listener fallback；必须同时确认 Runtime/Registry 都恰有一个 Listener、当前 socket/generation/lease 有效、path 与当前 primary path 一致、数据库认证记录属于当前 Service 实例，并且 endpoint 在当前 LAN subnet。
+- [x] 单播/分片每个 UDP dispatch 边界重新验证 fallback 的 endpoint、租约、path/generation/Service instance 与 subnet；多 Listener 仍只接受当前 path-scoped RouteBinding。ACK 仍要求同一 messageId 实际成功发送 endpoint 证据，不因 fallback 直接放宽。
+- [x] 新增 `LanChatCachedRoutePolicyTest` 覆盖同子网、跨子网、多 Listener、租约不匹配、非法地址和 IPv4 literal；新增 Robolectric `LanChatStoreCachedRouteTest` 覆盖租约到期、IP/端口变化、generation/Service instance 不匹配和 network_scope 变化。
+- [x] 更新 Python 静态契约，明确受限 fallback 与旧版 peer-wide endpoint 无条件直投不同。
+- [ ] **CI 尚待收口**：最新验证 run [46130981095](https://github.com/shua00/rebackmyphone3/actions/runs/46130981095) 的 Python 与 Windows Socket Binding 已通过；Android build 正在运行。后续最新提交还会触发完整 Android build。
+- [ ] **真机验收仍未完成**：安装本轮最终 APK，在中兴 A2023BH API 30 + Redmi Note 8 API 35、同一 5GHz Wi-Fi 上双向发送短消息，记录 route fallback 是否命中、ACK endpoint、送达结果；随后复测多 Listener/热点矩阵。
+- 结论：当前已实现受限兼容代码与测试，仍不能宣称普通 LAN 对讲回归已在真机解决；若最新 APK 仍失败，需依据双方新日志继续定位，不得把设备发现失败等同于聊天发送失败。
