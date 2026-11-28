@@ -7137,13 +7137,9 @@ else:
                         (message_id,)).fetchall()
                 finally:
                     conn.close()
-                self.assertEqual([( "rescue2", sender_id,
-                                    len(__import__("lan_p2p_core").fragment_chat_message(
-                                        message_id, receiver_id,
-                                        "生产发送入口进程重启恢复🙂 " * 160, 0)))],
-                                 stored_scope) if False else None
                 self.assertEqual(1, len(stored_scope), stored_scope)
                 self.assertEqual(sender_id, stored_scope[0][1], stored_scope)
+                self.assertGreater(stored_scope[0][2], 1, stored_scope)
                 cached = load_incoming_chat_fragments(
                     receiver_db, stored_scope[0][0], sender_id, message_id)
                 self.assertEqual(
