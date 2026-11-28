@@ -7242,6 +7242,7 @@ path, db, sender_id, receiver_id, secret, sender_port, receiver_port, mode, mess
 spec = importlib.util.spec_from_file_location("isolated_sender", path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+module.uuid.uuid4 = lambda: type("FixedUUID", (), {"hex": message_id})()
 module._CHAT_DEDUP_DB = db
 module.PEER_NODE_ID = sender_id
 module.RESCUE_SECRET = secret
