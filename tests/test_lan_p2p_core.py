@@ -7340,4 +7340,4 @@ while True:
                     finally:
                         if receiver.poll() is None:
                             receiver.terminate()
-                            receiver.wait(timeout=5)
+                        receiver.communicate(timeout=5)
