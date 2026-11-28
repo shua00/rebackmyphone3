@@ -6811,6 +6811,7 @@ sock.close()
                     finally:
                         if receiver.poll() is None:
                             receiver.terminate()
+                            receiver.wait(timeout=5)
                         if receiver.stdout and not receiver.stdout.closed:
                             receiver.stdout.close()
                         if receiver.stderr and not receiver.stderr.closed:
@@ -7187,6 +7188,7 @@ class PythonRealServiceUdpListenerProcessTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         env = os.environ.copy()
         env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+        env["PYTHONUNBUFFERED"] = "1"
         receiver_code = r"""
 import importlib.util, os, sys, threading, time
 module_path, service_type, receiver_id, secret, port, ready = sys.argv[1:]
@@ -7206,6 +7208,9 @@ if service_type == "server2":
 else:
     module.UDP_PORT = int(port)
 module._start_v2_recovery_retry_worker = lambda: None
+module._V2_PACKET_DISPATCHER = module.BoundedPacketDispatcher(
+    module._handle_authenticated_v2_packet, "isolated-" + service_type,
+    on_error=lambda exc, lane: print("DISPATCH_ERROR:" + lane + ":" + repr(exc), flush=True))
 module.send_startup_peer_beacon = lambda *args, **kwargs: False
 if hasattr(module, "get_subnet_broadcast"):
     module.get_subnet_broadcast = lambda: "127.255.255.255"
@@ -7237,7 +7242,7 @@ while True:
                     probe.close()
                     ready = os.path.join(temp_dir, "listener.ready")
                     receiver = subprocess.Popen(
-                        [sys.executable, "-c", receiver_code, service_copy,
+                        [sys.executable, "-u", "-c", receiver_code, service_copy,
                          receiver_type, receiver_id, secret, str(receiver_port), ready],
                         cwd=temp_dir, env=env, stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE, text=True)
