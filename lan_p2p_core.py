@@ -1885,9 +1885,11 @@ def packet_service_identity_matches(packet, sender_peer_id):
     if not isinstance(packet, dict) or not is_valid_peer_id(sender_peer_id):
         return False
     peer_type = packet.get("sender_peer_type")
-    return (isinstance(peer_type, str) and bool(peer_type.strip())
-            and packet.get("sender_peer_id") == sender_peer_id
-            and packet.get("service_id") == sender_peer_id)
+    if not isinstance(peer_type, str) or not peer_type.strip():
+        return False
+    expected_service_id = "android-main" if peer_type == "android" else sender_peer_id
+    return (packet.get("sender_peer_id") == sender_peer_id
+            and packet.get("service_id") == expected_service_id)
 
 
 def peer_endpoint_matches(db_path, receiver_scope, peer_id, endpoint_ip, endpoint_port):
