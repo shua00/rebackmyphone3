@@ -7162,3 +7162,139 @@ class PythonProductionFragmentSenderAndRecoveryTests(unittest.TestCase):
                 self.assertTrue(fragment_send[2].get("mark_attempt"))
                 self.assertFalse(fragment_send[2].get("allow_fast_retry"))
                 self.assertFalse(namespace["_V2_RECOVERY_INFLIGHT"])
+
+
+class PythonRealServiceUdpListenerProcessTests(unittest.TestCase):
+    """Run each actual service UDP listener and its dispatcher in an isolated process."""
+
+    def test_real_service_listener_dispatches_fragments_and_returns_durable_final_ack(self):
+        import shutil
+        from lan_p2p_core import (
+            persist_outgoing_message, send_outgoing_fragment_window,
+            decode_packet, record_outgoing_fragment_ack,
+            acknowledge_outgoing_message, packet_service_identity_matches,
+        )
+
+        cases = (
+            ("rescue2.py", "rescue2", "_CHAT_DEDUP_DB", "UDP_PORT"),
+            ("chat.py", "chat.py", "CHAT_DB", "UDP_PORT"),
+            ("server2.py", "server2", "CHAT_DEDUP_DB", "UDP_LISTEN_PORT"),
+        )
+        repo_root = Path(__file__).resolve().parents[1]
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+        receiver_code = r"""
+import importlib.util, os, sys, threading, time
+module_path, service_type, receiver_id, secret, port, ready = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("isolated_service", module_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+if service_type == "rescue2":
+    module._CHAT_DEDUP_DB = os.path.join(os.path.dirname(module_path), "receiver.sqlite3")
+elif service_type == "chat.py":
+    module.CHAT_DB = os.path.join(os.path.dirname(module_path), "receiver.sqlite3")
+else:
+    module.CHAT_DEDUP_DB = os.path.join(os.path.dirname(module_path), "receiver.sqlite3")
+module.PEER_NODE_ID = receiver_id
+module.RESCUE_SECRET = secret
+if service_type == "server2":
+    module.UDP_LISTEN_PORT = int(port)
+else:
+    module.UDP_PORT = int(port)
+module._start_v2_recovery_retry_worker = lambda: None
+module.send_startup_peer_beacon = lambda *args, **kwargs: False
+if hasattr(module, "get_subnet_broadcast"):
+    module.get_subnet_broadcast = lambda: "127.255.255.255"
+if hasattr(module, "get_subnet_broadcasts"):
+    module.get_subnet_broadcasts = lambda: []
+threading.Thread(target=module.udp_listener, daemon=True).start()
+deadline = time.time() + 10
+while time.time() < deadline:
+    if getattr(module, "UDP_LISTENER_SOCKET", None) is not None:
+        with open(ready, "w", encoding="utf-8") as marker:
+            marker.write("BOUND")
+        break
+    time.sleep(0.02)
+else:
+    raise RuntimeError("production UDP listener did not bind")
+while True:
+    time.sleep(1)
+"""
+        for filename, receiver_type, db_name, port_name in cases:
+            with self.subTest(service=receiver_type):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    service_copy = os.path.join(temp_dir, filename)
+                    shutil.copyfile(repo_root / filename, service_copy)
+                    receiver_id = "real-listener-" + receiver_type
+                    secret = "real-service-process-secret"
+                    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    probe.bind(("127.0.0.1", 0))
+                    receiver_port = probe.getsockname()[1]
+                    probe.close()
+                    ready = os.path.join(temp_dir, "listener.ready")
+                    receiver = subprocess.Popen(
+                        [sys.executable, "-c", receiver_code, service_copy,
+                         receiver_type, receiver_id, secret, str(receiver_port), ready],
+                        cwd=temp_dir, env=env, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, text=True)
+                    try:
+                        deadline = time.time() + 12
+                        while time.time() < deadline and not os.path.exists(ready):
+                            if receiver.poll() is not None:
+                                break
+                            time.sleep(0.025)
+                        self.assertTrue(
+                            os.path.exists(ready),
+                            "production listener failed to bind: " +
+                            (receiver.stderr.read() if receiver.poll() is not None else "timeout"))
+
+                        sender_db = os.path.join(temp_dir, "sender.sqlite3")
+                        sender_scope = "sender-process"
+                        sender_id = "actual-sender-" + receiver_type
+                        message_id = "real-listener-long-message-" + receiver_type
+                        body = ("actual production listener integration 长消息🙂 " * 64)
+                        created_at = 123456789
+                        self.assertTrue(persist_outgoing_message(
+                            sender_db, sender_scope, sender_id, message_id,
+                            body, [receiver_id], created_at))
+                        sender_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        sender_sock.bind(("127.0.0.1", 8887))
+                        sender_sock.settimeout(10)
+                        try:
+                            sent = send_outgoing_fragment_window(
+                                sender_sock, sender_db, sender_scope, message_id,
+                                receiver_id, body, created_at,
+                                ("127.0.0.1", receiver_port), sender_id,
+                                "python", sender_id, secret,
+                                mark_attempt=True, allow_fast_retry=True)
+                            self.assertGreater(sent, 1)
+                            acked = set()
+                            final_acknowledged = False
+                            deadline = time.time() + 15
+                            while time.time() < deadline and (
+                                    len(acked) < sent or not final_acknowledged):
+                                raw, source = sender_sock.recvfrom(1200)
+                                packet = decode_packet(raw, secret)
+                                if not packet_service_identity_matches(packet, receiver_id):
+                                    continue
+                                self.assertEqual(sender_id, packet.get("target_peer_id"))
+                                self.assertEqual(message_id, packet.get("message_id"))
+                                if packet.get("type") == "chat.fragment.ack":
+                                    index = packet.get("fragment_index")
+                                    self.assertIs(type(index), int)
+                                    self.assertIsNotNone(record_outgoing_fragment_ack(
+                                        sender_db, sender_scope, message_id,
+                                        receiver_id, index, source[0], source[1]))
+                                    acked.add(index)
+                                elif packet.get("type") == "chat.ack":
+                                    self.assertEqual("stored", packet.get("status"))
+                                    final_acknowledged = acknowledge_outgoing_message(
+                                        sender_db, sender_scope, message_id, receiver_id)
+                            self.assertEqual(sent, len(acked))
+                            self.assertTrue(final_acknowledged)
+                        finally:
+                            sender_sock.close()
+                    finally:
+                        if receiver.poll() is None:
+                            receiver.terminate()
+                            receiver.wait(timeout=5)
