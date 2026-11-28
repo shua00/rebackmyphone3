@@ -58,6 +58,7 @@ import ipaddress
 from urllib.parse import urlparse, parse_qs
 # ★ 新增ThreadPoolExecutor 补丁： 2026-11-05 13:50
 from concurrent.futures import ThreadPoolExecutor
+from lan_p2p_network_paths import enumerate_ipv4_paths, directed_broadcast_addresses
 
 from lan_p2p_core import LanP2PStorageError, assemble_chat_fragments, store_incoming_chat_fragment, load_incoming_chat_fragments, record_outgoing_fragment_ack, load_outgoing_fragment_targets_for_peer, send_outgoing_fragment_window, build_authenticated_chat_fragment_packets, send_discovery_fragment_window, build_chat_discovery_destinations, load_outgoing_message, MAX_PEER_ID_BYTES, max_peer_id_budget_probe, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, BoundedPacketDispatcher, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, encode_chat_http_fallback_payload, decode_chat_http_fallback_payload, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, add_discovery_targets_for_peer, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, send_discovery_broadcast_with_retries, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, next_peer_recovery_eligible_at_ms, list_due_outgoing_peers, packet_service_identity_matches
 UDP_LISTEN_PORT = 8887  # server2 独立监听端口；发往 Android 的指令仍使用 8888
@@ -277,6 +278,38 @@ LAST_MSG_INFO_TTL = 10.0
 CHAT_DEDUP_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3")
 CHAT_DEDUP_LOCK = threading.Lock()
 UDP_LISTENER_SOCKET = None
+
+_ACTIVE_PEER_DISCOVERY_LOCK = threading.Lock()
+_LAST_ACTIVE_PEER_DISCOVERY_AT = 0.0
+_ACTIVE_PEER_DISCOVERY_COOLDOWN_S = 5.0
+
+
+def request_active_peer_discovery():
+    """Send one throttled LAN HELLO burst when the talk page is opened/refreshed."""
+    global _LAST_ACTIVE_PEER_DISCOVERY_AT
+    with _ACTIVE_PEER_DISCOVERY_LOCK:
+        now = time.monotonic()
+        if now - _LAST_ACTIVE_PEER_DISCOVERY_AT < _ACTIVE_PEER_DISCOVERY_COOLDOWN_S:
+            return {"status": "throttled", "sent": 0}
+        sock = UDP_LISTENER_SOCKET
+        if sock is None:
+            return {"status": "not_ready", "sent": 0}
+        try:
+            if sock.fileno() < 0:
+                return {"status": "not_ready", "sent": 0}
+        except Exception:
+            return {"status": "not_ready", "sent": 0}
+        # Use only explicit interface broadcast addresses; limited broadcast is a
+        # bounded fallback when interface enumeration is unavailable.
+        addresses = directed_broadcast_addresses(enumerate_ipv4_paths())
+        if not addresses:
+            addresses = ("255.255.255.255",)
+        sent = send_startup_peer_beacon(
+            sock, PEER_NODE_ID, "server2", PEER_NODE_ID, RESCUE_SECRET,
+            UDP_LISTEN_PORT, [8888, 8889, 8890], addresses,
+            db_path=CHAT_DEDUP_DB, receiver_scope="server2")
+        _LAST_ACTIVE_PEER_DISCOVERY_AT = now
+        return {"status": "ok" if sent else "unavailable", "sent": sent}
 UDP_CHAT_SEND_LOCK = threading.Lock()
 _V2_RECOVERY_RETRY_PEERS = set()
 _V2_FRAGMENT_WINDOW_PEERS = set()
@@ -3344,17 +3377,66 @@ def handle_client(client_conn, client_addr):
                 try: client_conn.sendall(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 except Exception: pass
 
+        # ===== POST /api/discovery/refresh =====
+        elif "POST /api/discovery/refresh" in header_text:
+            try:
+                request_data = json.loads(body_part.decode("utf-8", errors="ignore"))
+                if not isinstance(request_data, dict):
+                    client_conn.sendall(b"HTTP/1.1 400 Bad Request\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n")
+                    return
+                if CONTROL_AUTH_ENABLED:
+                    if CONTROL_IP_ALLOWLIST and not any(
+                            str(client_addr[0]).startswith(prefix) for prefix in CONTROL_IP_ALLOWLIST):
+                        client_conn.sendall(b"HTTP/1.1 403 Forbidden\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n")
+                        return
+                    if request_data.get("token") != CONTROL_TOKEN:
+                        client_conn.sendall(b"HTTP/1.1 403 Forbidden\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n")
+                        return
+                result = request_active_peer_discovery()
+                status_code = 200 if result["status"] in ("ok", "throttled") else 503
+                body = json.dumps(result, ensure_ascii=False).encode("utf-8")
+                client_conn.sendall(
+                    f"HTTP/1.1 {status_code} {'OK' if status_code == 200 else 'Service Unavailable'}\\r\\n"
+                    f"Content-Type: application/json; charset=utf-8\\r\\n"
+                    f"Access-Control-Allow-Origin: *\\r\\nContent-Length: {len(body)}\\r\\n"
+                    f"Connection: close\\r\\n\\r\\n".encode("utf-8") + body)
+            except Exception as e:
+                with print_lock:
+                    print(f"LAN peer discovery refresh failed: {type(e).__name__}")
+                try:
+                    client_conn.sendall(b"HTTP/1.1 503 Service Unavailable\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n")
+                except Exception:
+                    pass
+
         # ===== GET /api/chat_history =====
         elif "GET /api/chat_history" in header_text:
             try:
                 with state_lock:
                     devices_snapshot = {k: dict(v) for k, v in ALL_DEVICES_STATUS.items()}
                     messages_snapshot = list(CHAT_MESSAGES)
-                devices_list = []
+                devices_by_id = {}
                 for dev_id, info in devices_snapshot.items():
-                    ip = (info.get("source_ip") or info.get("udp_source_ip") or (info.get("network") or {}).get("local_ip"))
-                    if ip and ip != '0.0.0.0':
-                        devices_list.append({"id": dev_id, "ip": ip})
+                    ip = (info.get("source_ip") or info.get("udp_source_ip")
+                          or (info.get("network") or {}).get("local_ip"))
+                    if ip and ip != "0.0.0.0":
+                        devices_by_id[dev_id] = ip
+                # Include currently authenticated Android peers learned by LAN discovery,
+                # not only devices that have recently posted an HTTP tracking report.
+                try:
+                    now = time.time()
+                    for peer in list_known_peer_snapshot(CHAT_DEDUP_DB, "server2", limit=500):
+                        ip = str(peer.get("endpoint_ip") or "")
+                        if (peer.get("peer_type") == "android"
+                                and peer.get("status") == "active"
+                                and float(peer.get("lease_expires_at") or 0) > now
+                                and ip and ip != "0.0.0.0"):
+                            devices_by_id[str(peer["peer_id"])] = ip
+                except Exception as peer_snapshot_error:
+                    with print_lock:
+                        print("LAN chat peer snapshot temporarily unavailable: "
+                              + type(peer_snapshot_error).__name__)
+                devices_list = [{"id": dev_id, "ip": ip}
+                                for dev_id, ip in sorted(devices_by_id.items())]
                 data_to_send = {"messages": messages_snapshot, "devices": devices_list}
                 with print_lock: resp = json.dumps(data_to_send)
                 resp_bytes = resp.encode('utf-8')
@@ -3777,6 +3859,9 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
 <div id="chatBox">
     <div class="device-selector" id="deviceSelector">
         """ + chat_options + """
+    </div>
+    <div style="display:flex;justify-content:flex-end;margin:6px 0;">
+        <button type="button" onclick="refreshLanPeerDiscovery(true)">主动发现设备</button>
     </div>
     <div id="chatMessages"></div>
     <div class="chat-input-area">
@@ -4211,7 +4296,12 @@ function showToast(msg) {
 function openTalkPage() {
     showAdminPage('talk');
     var panel = document.getElementById('chatBox');
-    if (panel && !isChatVisible) { isChatVisible = true; panel.style.display = 'flex'; fetchChatHistory(); }
+    if (panel && !isChatVisible) {
+        isChatVisible = true;
+        panel.style.display = 'flex';
+        refreshLanPeerDiscovery(false);
+        fetchChatHistory();
+    }
 }
 
 function toggleChatBox() {
@@ -4220,6 +4310,7 @@ function toggleChatBox() {
     isChatVisible = !isChatVisible;
     if (isChatVisible) {
         chatBox.style.display = 'flex';
+        refreshLanPeerDiscovery(false);
         fetchChatHistory();
     } else {
         chatBox.style.display = 'none';
@@ -4249,6 +4340,30 @@ function toggleCompanionBox() {
     isCompanionVisible = !isCompanionVisible;
     box.style.display = isCompanionVisible ? 'block' : 'none';
     if (isCompanionVisible) fetchDeviceTargets();
+}
+
+var lastLanPeerDiscoveryRequestAt = 0;
+function refreshLanPeerDiscovery(showFeedback) {
+    var now = Date.now();
+    if (now - lastLanPeerDiscoveryRequestAt < 5000) return;
+    lastLanPeerDiscoveryRequestAt = now;
+    fetch('/api/discovery/refresh', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({token: ADMIN_TOKEN})
+    }).then(function(res) {
+        return res.json().then(function(data) {
+            if (!res.ok) throw new Error(data.status || ('HTTP ' + res.status));
+            if (showFeedback) {
+                showToast(data.status === 'throttled'
+                    ? '刚刚已发起发现，请稍候'
+                    : '已主动广播发现请求，正在更新设备列表');
+            }
+            setTimeout(fetchChatHistory, 500);
+        });
+    }).catch(function(error) {
+        if (showFeedback) showToast('主动发现失败：' + error.message);
+    });
 }
 
 function handleChatEnter(e) { if (e.key === 'Enter') sendChat(); }
@@ -4394,8 +4509,29 @@ function readChecked(cls) {
     return out;
 }
 
-function buildSelectorHtml(devices, currentChecked, cls) {
-    var tagHtml = '<label class="device-tag"><input type="checkbox" class="' + cls + '" value="all" ' + (currentChecked.indexOf('all') !== -1 || currentChecked.length === 0 ? 'checked' : '') + '><span>所有人 (群发)</span></label>';
+var selectorTouched = {chat: false, companion: false};
+
+document.addEventListener('change', function(event) {
+    var input = event.target;
+    if (!input || input.type !== 'checkbox' || !input.classList) return;
+    var cls = input.classList.contains(SEL_CHAT) ? SEL_CHAT
+        : (input.classList.contains(SEL_COMPANION) ? SEL_COMPANION : '');
+    if (!cls) return;
+    var isChat = cls === SEL_CHAT;
+    selectorTouched[isChat ? 'chat' : 'companion'] = true;
+    if (!input.checked) return;
+    var container = document.getElementById(isChat ? 'deviceSelector' : 'companionSelector');
+    if (!container) return;
+    container.querySelectorAll('input.' + cls).forEach(function(other) {
+        if (other !== input && (input.value === 'all' || other.value === 'all')) {
+            other.checked = false;
+        }
+    });
+});
+
+function buildSelectorHtml(devices, currentChecked, cls, defaultAll) {
+    var allChecked = currentChecked.indexOf('all') !== -1 || defaultAll;
+    var tagHtml = '<label class="device-tag"><input type="checkbox" class="' + cls + '" value="all" ' + (allChecked ? 'checked' : '') + '><span>所有人 (群发)</span></label>';
     devices.forEach(function(dev) {
         var isChecked = currentChecked.indexOf(dev.ip) !== -1 ? 'checked' : '';
         tagHtml += '<label class="device-tag"><input type="checkbox" class="' + cls + '" value="' + escapeHtml(dev.ip) + '" ' + isChecked + '><span>' + escapeHtml(dev.id) + '</span></label>';
@@ -4408,12 +4544,16 @@ function buildSelectorHtml(devices, currentChecked, cls) {
 function renderSelectors(devices) {
     var el1 = document.getElementById('deviceSelector');
     if (el1) {
-        var h1 = buildSelectorHtml(devices, readChecked(SEL_CHAT), SEL_CHAT);
+        var checkedChat = readChecked(SEL_CHAT);
+        var h1 = buildSelectorHtml(devices, checkedChat, SEL_CHAT,
+            !selectorTouched.chat && checkedChat.length === 0);
         if (el1.innerHTML !== h1) el1.innerHTML = h1;
     }
     var el2 = document.getElementById('companionSelector');
     if (el2) {
-        var h2 = buildSelectorHtml(devices, readChecked(SEL_COMPANION), SEL_COMPANION);
+        var checkedCompanion = readChecked(SEL_COMPANION);
+        var h2 = buildSelectorHtml(devices, checkedCompanion, SEL_COMPANION,
+            !selectorTouched.companion && checkedCompanion.length === 0);
         if (el2.innerHTML !== h2) el2.innerHTML = h2;
     }
     // ★ v2.5.3：高级设置选择器默认不勾选任何设备，避免页面初次打开就隐式全选。
@@ -4439,11 +4579,16 @@ function getSelectedTarget(cls) {
 // 推送类指令取目标；未勾选任何设备时回退全推（保持老行为，不会把功能改坏）
 function mediaTarget() {
     var t = getSelectedTarget(SEL_COMPANION);
-    return t ? t : "all";
+    if (!t) {
+        showToast("请至少选择一个设备，或选择所有人群发");
+        return null;
+    }
+    return t;
 }
 
 function sendCmd(action, payload, target_ip) {
     if (payload === undefined) payload = "";
+    if (target_ip === null) return;
     if (target_ip === undefined) target_ip = 'all'; // ★ v2.5.3：不再隐式继承陪伴面板的设备选择状态
     
     fetch('/api/control', {
