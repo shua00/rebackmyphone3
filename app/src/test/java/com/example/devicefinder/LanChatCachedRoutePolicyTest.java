@@ -42,5 +42,6 @@ public class LanChatCachedRoutePolicyTest {
                 LanChatCachedRoutePolicy.parseIpv4Literal("192.168.1.55"));
         assertNull(LanChatCachedRoutePolicy.parseIpv4Literal("peer.local"));
         assertNull(LanChatCachedRoutePolicy.parseIpv4Literal("192.168.1.999"));
+        assertNull(LanChatCachedRoutePolicy.parseIpv4Literal("+1.2.3.4"));
     }
 }
