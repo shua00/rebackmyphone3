@@ -27,6 +27,22 @@ class LanChatDeliveryUiTests(unittest.TestCase):
         self.assertIn("清理已结束记录", activity)
         self.assertIn("expireOutboxMessages", activity)
 
+    def test_long_messages_are_validated_with_fragment_framing_before_outbox_admission(self):
+        service = (JAVA / "TrackingService.java").read_text(encoding="utf-8")
+        start = service.index("private void sendLocalUdpMessage(final String message) {")
+        end = service.index("private void notifyLanChatSendRejected", start)
+        admission = service[start:end]
+        self.assertIn("buildAuthenticatedLanChatFragmentPackets", admission)
+        self.assertNotIn("buildAuthenticatedLanChatPacket(", admission)
+
+    def test_chat_composer_has_stable_height_and_compact_actions(self):
+        layout = (RES / "layout/activity_chat.xml").read_text(encoding="utf-8")
+        self.assertIn('android:layout_height="72dp"', layout)
+        self.assertIn('android:layout_height="56dp"', layout)
+        self.assertIn('android:maxLines="5"', layout)
+        self.assertIn('android:layout_width="48dp"', layout)
+        self.assertIn('android:layout_width="56dp"', layout)
+
     def test_chat_ui_distinguishes_delivery_states_without_read_receipts(self):
         activity = (JAVA / "ChatActivity.java").read_text(encoding="utf-8")
         for label in ("全部送达", "部分送达", "等待设备确认", "正在发现收件设备",
