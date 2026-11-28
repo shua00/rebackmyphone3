@@ -7012,6 +7012,7 @@ class PythonProductionFragmentSenderAndRecoveryTests(unittest.TestCase):
                         "_diag_exception": lambda *args, **kwargs: None,
                         "print": lambda *args, **kwargs: None,
                         "logging": __import__("logging"),
+                        "I": type("Icons", (), {"ok": "", "warn": ""})(),
                     }
                     if function_name == "send_server2_v2_chat_from_outbox":
                         namespace["decode_packet"] = lambda raw, secret: {
@@ -7039,10 +7040,15 @@ class PythonProductionFragmentSenderAndRecoveryTests(unittest.TestCase):
                     sender = self._load_function(filename, function_name, namespace)
                     result = sender(*sender_args)
                     self.assertTrue(result)
-                    self.assertEqual(1, len([c for c in calls if c[0] == "persist"]))
-                    persisted = next(c[1] for c in calls if c[0] == "persist")
-                    self.assertEqual(namespace[db_name], persisted[0])
-                    self.assertEqual(scope, persisted[1])
+                    if function_name == "send_server2_v2_chat_from_outbox":
+                        self.assertFalse(any(c[0] == "persist" for c in calls),
+                                         "server2 sender must reuse its existing Outbox row")
+                        self.assertEqual(1, len([c for c in calls if c[0] in ("fragments", "short")]))
+                    else:
+                        self.assertEqual(1, len([c for c in calls if c[0] == "persist"]))
+                        persisted = next(c[1] for c in calls if c[0] == "persist")
+                        self.assertEqual(namespace[db_name], persisted[0])
+                        self.assertEqual(scope, persisted[1])
                     if is_long:
                         fragment_calls = [c for c in calls if c[0] == "fragments"]
                         self.assertEqual(1, len(fragment_calls))
