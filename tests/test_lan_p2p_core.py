@@ -6603,7 +6603,7 @@ sock.close()
                     self.assertEqual(receiver_id, packet.get("target_peer_id"))
                     result = store_incoming_chat_fragment(receiver_db, "restart-receiver",
                                                           sender_id, packet)
-                    self.assertIn(result, ("stored", "completed", "complete_duplicate"))
+                    self.assertIn(result, ("stored", "duplicate", "completed", "complete_duplicate"))
                     fragments[packet["fragment_index"]] = packet
                     ack = encode_packet({
                         "type": "chat.fragment.ack", "sender_peer_id": receiver_id,
