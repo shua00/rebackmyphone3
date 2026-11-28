@@ -25,6 +25,15 @@ class Server2ActivePeerDiscoveryUiTests(unittest.TestCase):
         self.assertIn("function mediaTarget()", source)
         self.assertIn("请至少选择一个设备，或选择所有人群发", source)
 
+    def test_batch_reports_inherit_current_app_version_metadata(self):
+        source = SERVER.read_text(encoding="utf-8")
+        self.assertIn('batch_build_version = batch_data.get("build_version")', source)
+        self.assertIn('batch_protocol_version = batch_data.get("protocol_version")', source)
+        self.assertIn('item["build_version"] = batch_build_version', source)
+        self.assertIn('item["protocol_version"] = batch_protocol_version', source)
+        self.assertIn('or prev_info.get("build_version") or "旧版"', source)
+        self.assertIn('or prev_info.get("protocol_version") or 1', source)
+
     def test_chat_target_list_includes_fresh_authenticated_android_peers(self):
         source = SERVER.read_text(encoding="utf-8")
         self.assertIn('list_known_peer_snapshot(CHAT_DEDUP_DB, "server2", limit=500)', source)
