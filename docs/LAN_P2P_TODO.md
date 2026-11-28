@@ -791,3 +791,11 @@
 - [ ] **CI 尚待收口**：最新验证 run [46130981095](https://github.com/shua00/rebackmyphone3/actions/runs/46130981095) 的 Python 与 Windows Socket Binding 已通过；Android build 正在运行。后续最新提交还会触发完整 Android build。
 - [ ] **真机验收仍未完成**：安装本轮最终 APK，在中兴 A2023BH API 30 + Redmi Note 8 API 35、同一 5GHz Wi-Fi 上双向发送短消息，记录 route fallback 是否命中、ACK endpoint、送达结果；随后复测多 Listener/热点矩阵。
 - 结论：当前已实现受限兼容代码与测试，仍不能宣称普通 LAN 对讲回归已在真机解决；若最新 APK 仍失败，需依据双方新日志继续定位，不得把设备发现失败等同于聊天发送失败。
+
+
+### 最新验证结果补记（run #1954）
+
+- [x] 最新代码/测试提交：`2897a7b4f88b4766efebafb707fcdb5e0cdabb27`。
+- [x] GitHub Actions run [#1954](https://github.com/shua00/rebackmyphone3/actions/runs/46131188787)：Python 509 项测试通过（含本轮静态契约）、Windows Socket Binding 通过、Android `testDebugUnitTest` 通过、Debug APK 构建通过、slim Release APK 构建通过。
+- [x] APK artifact：`app-diagnostic-and-slim-apks`，artifact ID `15258420847`，SHA-256 `fc3d403750899e88c5624eaa427460762bc47343cbfe72565d3a18b1ddb1199a`。
+- [ ] 仍需真机安装该 run 的诊断 APK，按已确认的中兴 A2023BH + Redmi Note 8 基线做双向对讲验收；CI 通过不等于真机回归已解决。
