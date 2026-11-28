@@ -6811,7 +6811,10 @@ sock.close()
                     finally:
                         if receiver.poll() is None:
                             receiver.terminate()
-                            receiver.wait(timeout=5)
+                        if receiver.stdout and not receiver.stdout.closed:
+                            receiver.stdout.close()
+                        if receiver.stderr and not receiver.stderr.closed:
+                            receiver.stderr.close()
 
 
 class PythonProductionFragmentHandlerTests(unittest.TestCase):
@@ -7274,7 +7277,15 @@ while True:
                             deadline = time.time() + 15
                             while time.time() < deadline and (
                                     len(acked) < sent or not final_acknowledged):
-                                raw, source = sender_sock.recvfrom(1200)
+                                try:
+                                    raw, source = sender_sock.recvfrom(1200)
+                                except socket.timeout:
+                                    if receiver.poll() is None:
+                                        receiver.terminate()
+                                    receiver_stdout, receiver_stderr = receiver.communicate(timeout=5)
+                                    self.fail("real listener produced no ACK for " + receiver_type +
+                                              "\nstdout:\n" + receiver_stdout +
+                                              "\nstderr:\n" + receiver_stderr)
                                 packet = decode_packet(raw, secret)
                                 if not packet_service_identity_matches(packet, receiver_id):
                                     continue
