@@ -7208,8 +7208,19 @@ if service_type == "server2":
 else:
     module.UDP_PORT = int(port)
 module._start_v2_recovery_retry_worker = lambda: None
+original_handler = module._handle_authenticated_v2_packet
+def debug_handler(envelope, sock, addr):
+    print("HANDLER_PACKET:" + repr((envelope.get("type"), envelope.get("sender_peer_id"),
+                                    envelope.get("target_peer_id"), addr)), flush=True)
+    return original_handler(envelope, sock, addr)
+original_store = module.store_incoming_chat_fragment
+def debug_store(*args, **kwargs):
+    result = original_store(*args, **kwargs)
+    print("STORE_RESULT:" + repr(result), flush=True)
+    return result
+module.store_incoming_chat_fragment = debug_store
 module._V2_PACKET_DISPATCHER = module.BoundedPacketDispatcher(
-    module._handle_authenticated_v2_packet, "isolated-" + service_type,
+    debug_handler, "isolated-" + service_type,
     on_error=lambda exc, lane: print("DISPATCH_ERROR:" + lane + ":" + repr(exc), flush=True))
 module.send_startup_peer_beacon = lambda *args, **kwargs: False
 if hasattr(module, "get_subnet_broadcast"):
