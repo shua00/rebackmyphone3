@@ -3134,9 +3134,13 @@ class LanP2PCoreTests(unittest.TestCase):
         start = source.index("public boolean observePeer(")
         end = source.index("public boolean isIncomingDisplayed(", start)
         observe = source[start:end]
-        self.assertIn("last_verified_at,status,lease_expires_at", observe)
+        self.assertIn("last_verified_at,status,lease_expires_at,", observe)
+        self.assertIn("network_scope,verified_path_fingerprint,verified_listener_generation", observe)
         self.assertIn("oldLeaseExpiresAt = c.getLong(4)", observe)
-        self.assertIn("v.put(\"lease_expires_at\", oldLeaseExpiresAt)", observe)
+        self.assertIn("sameRoute = ip.equals(oldIp) && port == oldPort", observe)
+        self.assertIn("equals(oldNetworkScope)", observe)
+        self.assertIn("v.put(\"lease_expires_at\", sameRoute ? oldLeaseExpiresAt : 0L)", observe)
+        self.assertIn("v.put(\"verified_listener_generation\", sameRoute ? oldVerifiedListenerGeneration : -1L)", observe)
         self.assertNotIn("v.put(\"lease_expires_at\", leaseExpiresAt)", observe)
         verified = source[source.index("public boolean upsertPeer("):source.index("public void closeStore(")]
         self.assertIn("v.put(\"lease_expires_at\", leaseExpiresAt)", verified)
