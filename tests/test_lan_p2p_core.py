@@ -6811,7 +6811,7 @@ sock.close()
                     finally:
                         if receiver.poll() is None:
                             receiver.terminate()
-                            receiver.wait(timeout=5)
+                        receiver.communicate(timeout=5)
                         if receiver.stdout and not receiver.stdout.closed:
                             receiver.stdout.close()
                         if receiver.stderr and not receiver.stderr.closed:
