@@ -6632,3 +6632,157 @@ class PythonLongChatLoopbackUdpIntegrationTests(unittest.TestCase):
             self.assertEqual(receiver_peer, final["service_id"])
             self.assertTrue(acknowledge_outgoing_message(
                 sender_db, "rescue2", message_id, receiver_peer))
+
+
+class PythonLongChatThreeServiceProcessUdpTests(unittest.TestCase):
+    """Exercise the shared durable fragment path between isolated service processes."""
+
+    def test_rescue_chat_server2_cross_service_udp_delivery_and_ack_isolation(self):
+        import socket
+        pairs = (
+            ("rescue2", "peer-rescue-process", "chat.py", "peer-chat-process"),
+            ("chat.py", "peer-chat-process", "server2", "peer-server-process"),
+            ("server2", "peer-server-process", "rescue2", "peer-rescue-process"),
+        )
+        repo_root = Path(__file__).resolve().parents[1]
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+
+        receiver_code = """
+import os, socket, sys, time
+from lan_p2p_core import (
+    decode_packet, encode_packet, store_incoming_chat_fragment,
+    load_incoming_chat_fragments, assemble_chat_fragments,
+)
+db, scope, receiver_id, receiver_type, sender_id, secret, port, ready = sys.argv[1:]
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(('127.0.0.1', int(port)))
+sock.settimeout(8)
+with open(ready, 'w', encoding='utf-8') as marker:
+    marker.write(str(sock.getsockname()[1]))
+completed = False
+while not completed:
+    raw, sender_addr = sock.recvfrom(1200)
+    packet = decode_packet(raw, secret)
+    assert packet['type'] == 'chat.fragment', packet
+    assert packet['target_peer_id'] == receiver_id, packet
+    result = store_incoming_chat_fragment(db, scope, sender_id, packet)
+    assert result in ('stored', 'completed', 'complete_duplicate'), result
+    fragment_ack = encode_packet({
+        'type': 'chat.fragment.ack',
+        'sender_peer_id': receiver_id,
+        'sender_peer_type': receiver_type,
+        'service_id': receiver_id,
+        'target_peer_id': sender_id,
+        'message_id': packet['message_id'],
+        'fragment_index': packet['fragment_index'],
+        'status': 'received',
+    }, secret)
+    sock.sendto(fragment_ack, sender_addr)
+    if result == 'completed':
+        cached = load_incoming_chat_fragments(
+            db, scope, sender_id, packet['message_id'])
+        body = assemble_chat_fragments(cached)
+        final_ack = encode_packet({
+            'type': 'chat.ack',
+            'sender_peer_id': receiver_id,
+            'sender_peer_type': receiver_type,
+            'service_id': receiver_id,
+            'target_peer_id': sender_id,
+            'message_id': packet['message_id'],
+            'status': 'stored',
+        }, secret)
+        sock.sendto(final_ack, sender_addr)
+        print('RECEIVER_OK:' + body, flush=True)
+        completed = True
+sock.close()
+"""
+
+        sender_code = """
+import socket, sys
+from lan_p2p_core import (
+    persist_outgoing_message, fragment_chat_message,
+    send_outgoing_fragment_window, decode_packet,
+    record_outgoing_fragment_ack, acknowledge_outgoing_message,
+    packet_service_identity_matches,
+)
+db, scope, sender_id, sender_type, receiver_id, receiver_type, secret, port, message_id = sys.argv[1:]
+body = 'process-level cross-service 长消息🙂 ' * 48
+created = 123456
+assert persist_outgoing_message(db, scope, sender_id, message_id,
+                                body, [receiver_id], created)
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(('127.0.0.1', 0))
+sock.settimeout(8)
+endpoint = ('127.0.0.1', int(port))
+expected = len(fragment_chat_message(message_id, receiver_id, body, created))
+sent = send_outgoing_fragment_window(
+    sock, db, scope, message_id, receiver_id, body, created,
+    endpoint, sender_id, sender_type, sender_id, secret,
+    mark_attempt=True, allow_fast_retry=True)
+assert sent == expected and 0 < sent <= 8, (sent, expected)
+acked = set()
+while len(acked) < sent:
+    raw, source = sock.recvfrom(1200)
+    packet = decode_packet(raw, secret)
+    assert packet['type'] == 'chat.fragment.ack', packet
+    assert packet_service_identity_matches(packet, receiver_id), packet
+    assert packet['target_peer_id'] == sender_id, packet
+    assert packet['message_id'] == message_id, packet
+    assert record_outgoing_fragment_ack(
+        db, scope, message_id, receiver_id, packet['fragment_index'],
+        source[0], source[1]) is not None
+    acked.add(packet['fragment_index'])
+raw, source = sock.recvfrom(1200)
+final = decode_packet(raw, secret)
+assert final['type'] == 'chat.ack', final
+assert packet_service_identity_matches(final, receiver_id), final
+assert final['target_peer_id'] == sender_id and final['message_id'] == message_id
+assert acknowledge_outgoing_message(db, scope, message_id, receiver_id)
+print('SENDER_OK:' + ','.join(str(i) for i in sorted(acked)), flush=True)
+sock.close()
+"""
+
+        for sender_type, sender_id, receiver_type, receiver_id in pairs:
+            with self.subTest(sender=sender_type, receiver=receiver_type):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    sender_db = os.path.join(temp_dir, "sender.sqlite3")
+                    receiver_db = os.path.join(temp_dir, "receiver.sqlite3")
+                    ready = os.path.join(temp_dir, "receiver.ready")
+                    message_id = "proc-" + sender_type.replace(".", "-") + "-" + receiver_type.replace(".", "-")
+                    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    probe.bind(("127.0.0.1", 0))
+                    port = probe.getsockname()[1]
+                    probe.close()
+
+                    receiver = subprocess.Popen(
+                        [sys.executable, "-c", receiver_code, receiver_db,
+                         receiver_type, receiver_id, receiver_type, sender_id,
+                         "process-cross-service-secret", str(port), ready],
+                        cwd=str(repo_root), env=env,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    try:
+                        deadline = time.time() + 8
+                        while time.time() < deadline and not os.path.exists(ready):
+                            if receiver.poll() is not None:
+                                break
+                            time.sleep(0.02)
+                        self.assertTrue(os.path.exists(ready),
+                                        "receiver process failed to bind: " +
+                                        (receiver.stderr.read() if receiver.poll() is not None else "timeout"))
+                        sender = subprocess.run(
+                            [sys.executable, "-c", sender_code, sender_db,
+                             sender_type, sender_id, sender_type, receiver_id,
+                             receiver_type, "process-cross-service-secret",
+                             str(port), message_id],
+                            cwd=str(repo_root), env=env, capture_output=True,
+                            text=True, timeout=20)
+                        self.assertEqual(0, sender.returncode, sender.stderr)
+                        self.assertIn("SENDER_OK:", sender.stdout)
+                        receiver_stdout, receiver_stderr = receiver.communicate(timeout=10)
+                        self.assertEqual(0, receiver.returncode, receiver_stderr)
+                        self.assertIn("RECEIVER_OK:", receiver_stdout)
+                    finally:
+                        if receiver.poll() is None:
+                            receiver.terminate()
+                            receiver.wait(timeout=5)
