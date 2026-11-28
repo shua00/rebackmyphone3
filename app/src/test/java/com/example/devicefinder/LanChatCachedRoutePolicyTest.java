@@ -35,6 +35,8 @@ public class LanChatCachedRoutePolicyTest {
                 ip("192.168.1.20"), 0, ip("192.168.1.55")));
         assertFalse(LanChatCachedRoutePolicy.isEligible(true, true,
                 ip("192.168.1.20"), 24, ip("8.8.8.8")));
+        assertFalse(LanChatCachedRoutePolicy.isEligible(true, true,
+                ip("192.168.1.20"), 24, ip("192.168.1.20")));
     }
 
     @Test public void parsesOnlyNumericIpv4Literals() throws Exception {
