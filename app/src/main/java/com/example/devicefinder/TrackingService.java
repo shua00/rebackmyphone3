@@ -6965,9 +6965,9 @@ public class TrackingService extends Service implements LocationListener {
                     for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
                         LanChatPathRegistry.RouteBinding routeBinding = dispatchBindings.get(peerId);
                         DatagramSocket peerSocket = routeBinding == null ? socket : routeBinding.listener.socket;
-                        if (!isCurrentLanChatTargetBinding(routeBinding, socket, socketGeneration, peerId, peer)) continue;
                         java.net.InetSocketAddress peer = dispatchEndpoints.get(peerId);
-                        if (peer == null) continue;
+                        if (peer == null || !isCurrentLanChatTargetBinding(
+                                routeBinding, socket, socketGeneration, peerId, peer)) continue;
                         try {
                             // Resolve the immutable packet before charging the durable send budget.
                             // A missing prebuilt frame is a local preparation failure, not a UDP attempt.
@@ -6994,7 +6994,7 @@ public class TrackingService extends Service implements LocationListener {
                             // may authorize a delayed chat.ack / chat.fragment.ack.
                             // Persist the exact endpoint before UDP dispatch and revalidate the
                             // immutable recipient snapshot immediately before any datagram.
-                            if (!isCurrentLanChatSendBinding(routeBinding, socket, socketGeneration)) {
+                            if (!isCurrentLanChatTargetBinding(routeBinding, socket, socketGeneration, peerId, peer)) {
                                 FileLogger.logD("CHAT", "P2P route binding expired before dispatch peer=" + peerId);
                                 continue;
                             }
@@ -7015,7 +7015,7 @@ public class TrackingService extends Service implements LocationListener {
                             if (peerData != null) {
                                 DatagramPacket p = new DatagramPacket(peerData, peerData.length,
                                         peer.getAddress(), peer.getPort());
-                                if (!isCurrentLanChatSendBinding(routeBinding, socket, socketGeneration))
+                                if (!isCurrentLanChatTargetBinding(routeBinding, socket, socketGeneration, peerId, peer))
                                     throw new java.net.SocketException("stale LAN route binding");
                                 hadUdpDispatchAttempt.set(true);
                                 sendLanUdpPacket(peerSocket, p, verifiedRoutePeerIds.contains(peerId)
@@ -7043,7 +7043,7 @@ public class TrackingService extends Service implements LocationListener {
                                 // skipped; when all are ACKed, resend the final fragment as a
                                 // completion probe until the whole-message chat.ack arrives.
                                 for (int i = windowStart; i < windowEnd; i++) {
-                                    if (!isCurrentLanChatSendBinding(routeBinding, socket, socketGeneration)) break;
+                                    if (!isCurrentLanChatTargetBinding(routeBinding, socket, socketGeneration, peerId, peer)) break;
                                     if (bitmap.charAt(i) == '1') continue;
                                     byte[] fragmentPacket = peerFragments.get(i);
                                     DatagramPacket p = new DatagramPacket(fragmentPacket,
@@ -7058,7 +7058,7 @@ public class TrackingService extends Service implements LocationListener {
                                     byte[] finalProbe = peerFragments.get(peerFragments.size() - 1);
                                     DatagramPacket p = new DatagramPacket(finalProbe, finalProbe.length,
                                             peer.getAddress(), peer.getPort());
-                                    if (!isCurrentLanChatSendBinding(routeBinding, socket, socketGeneration))
+                                    if (!isCurrentLanChatTargetBinding(routeBinding, socket, socketGeneration, peerId, peer))
                                         throw new java.net.SocketException("stale LAN route binding");
                                     hadUdpDispatchAttempt.set(true);
                                     sendLanUdpPacket(peerSocket, p, "CHAT_FRAGMENT_COMPLETION_PROBE");
