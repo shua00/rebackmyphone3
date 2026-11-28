@@ -108,14 +108,15 @@
 - [x] 建立统一网络感知与自适应路由架构原则。
 - [x] LAN 聊天发送端已使用 path-scoped RouteBinding；单 Listener 快路径和 binding 复核已接入。
 - [x] 新增 `LanChatListenerRuntime` path-keyed lease owner，并将当前单 Wi-Fi Listener 的注册/注销接入；该步骤只统一现有单 Listener 的 lease 生命周期。
-- [ ] 将接收线程、socket 发布/关闭、generation 和 Network path snapshot 全部迁移为真正的 per-path listener instances；STA/AP 并行 Listener 仍未完成。
-- [ ] STA/AP 双路径分别认证、双向验证；三台设备任意两台双向通信。
+- [x] Android STA primary + validated secondary/AP candidate 的 per-path socket/worker/lease/generation 代码已接入；路径变化与 teardown 按实例身份清理，普通单路径不额外创建 Listener（代码/CI 层完成）。
+- [ ] 多 Listener ingress、peer.hello/peer.ack、ACK/fragment ACK、peer×path 认证与 generation 竞争闭环仍需收口；STA/AP 双路径真机双向验证、三设备任意两台互通仍未通过验收。
 - [ ] 普通路由器多 peer 快路径回归，不引入常驻扫描/探测或冗余 fan-out。
 
 ### P0-B：共享感知/决策接口
 - [ ] 定义跨 Android/Python 可对齐的 path state、route lease、failure reason 和 route decision 语义。
 - [ ] 将网络变化事件、路径认证、可达性和 route lifecycle 从业务发送逻辑中明确分层。
-- [ ] 建立 selector 的单路径快路径、多路径有界回退和异步 binding 复核测试。
+- [x] selector 单路径 O(1) 快路径、多路径已认证候选选择及异步 binding 复核基础已接入并有组件测试。
+- [ ] 发送失败/ACK 超时后的备用 RouteBinding 回退、真实 RTT/成功率/失败质量事实闭环仍待完成。
 - [ ] 统一诊断字段与导出语义，保持 bounded、redacted、可关闭/剥离。
 
 ### P0-C：Rescue2 / Server2 热点发现、跨网指令与文件互传（正式 P0；分阶段实施）
