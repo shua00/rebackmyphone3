@@ -119,6 +119,7 @@ PACKAGE_NAME = "com.example.devicefinder"
 
 # ===== 配置区 =====
 RESCUE_SECRET = "your_private_secret_key"
+from lan_p2p_network_paths import enumerate_ipv4_paths, directed_broadcast_addresses
 from lan_p2p_core import LanP2PStorageError, assemble_chat_fragments, store_incoming_chat_fragment, load_incoming_chat_fragments, record_outgoing_fragment_ack, load_outgoing_fragment_targets_for_peer, send_outgoing_fragment_window, build_authenticated_chat_fragment_packets, send_discovery_fragment_window, build_chat_discovery_destinations, max_peer_id_budget_probe, is_outgoing_discovery_pending, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, BoundedPacketDispatcher, list_known_peers, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, send_outbox_to_active_peers, send_broadcast_packet_with_retries, send_discovery_broadcast_with_retries, load_active_pending_targets, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, next_peer_recovery_eligible_at_ms, list_due_outgoing_peers, packet_service_identity_matches
 PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "rescue2")
 DEFAULT_SERVER_URL = "http://dingwei.bai001.de5.net/api/report"
@@ -1218,19 +1219,29 @@ def udp_listener():
             _diag_event("udp_listener_bound", bind="0.0.0.0", port=UDP_PORT,
                         socket_fd=sock.fileno())
             try:
-                subnet_broadcast = get_subnet_broadcast()
+                subnet_broadcasts = list(directed_broadcast_addresses(enumerate_ipv4_paths()))
             except Exception as broadcast_error:
-                subnet_broadcast = "255.255.255.255"
-                _diag_exception("udp_broadcast_address_failed", fallback=subnet_broadcast,
+                subnet_broadcasts = []
+                _diag_exception("udp_broadcast_address_failed", fallback="limited-broadcast",
                                 error_type=type(broadcast_error).__name__)
+            if not subnet_broadcasts:
+                try:
+                    fallback_broadcast = get_subnet_broadcast()
+                    if fallback_broadcast:
+                        subnet_broadcasts.append(fallback_broadcast)
+                except Exception as broadcast_error:
+                    _diag_exception("udp_broadcast_fallback_failed",
+                                    error_type=type(broadcast_error).__name__)
+            subnet_broadcasts = list(dict.fromkeys(
+                [*subnet_broadcasts, "255.255.255.255"]))
             announced = send_startup_peer_beacon(
                 sock, PEER_NODE_ID, "rescue2", PEER_NODE_ID, RESCUE_SECRET,
                 UDP_PORT, [8888, 8887, 8890],
-                [subnet_broadcast, "255.255.255.255"],
+                subnet_broadcasts,
                 db_path=_CHAT_DEDUP_DB, receiver_scope="rescue2")
             _diag_event("udp_listener_started", bind="0.0.0.0", port=UDP_PORT,
                         local_ips=",".join(get_all_local_ips()) or "unavailable",
-                        subnet_broadcast=subnet_broadcast, beacon_sent=announced)
+                        subnet_broadcasts=",".join(subnet_broadcasts), beacon_sent=announced)
             print(f"{I.ok} UDP 监听已启动...")
             print(f"{I.send} rescue2 startup peer beacon sent={announced}")
             while True:
