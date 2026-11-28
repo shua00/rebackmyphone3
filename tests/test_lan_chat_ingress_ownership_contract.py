@@ -147,7 +147,7 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
         )
         self.assertIn("target.endpointIp == null || target.endpointIp.isEmpty()", sender)
         self.assertIn("sendDirectedPeerChallenge(socket, challengePeerId, savedAddress, challengePort)", sender)
-        self.assertIn("directed-challenge candidate only", sender)
+        self.assertIn("directed-challenge candidate by default", sender)
         self.assertNotIn("dispatchEndpoints.put(target.peerId, cachedRoute)", sender)
         binding_guard = self._method(
             "private boolean isCurrentLanChatSendBinding(",
@@ -157,6 +157,13 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
         self.assertIn("return false;", binding_guard)
         self.assertNotIn("listenerCount() == 1", binding_guard)
         self.assertIn("dispatchBindings.put(target.peerId, liveBinding)", sender)
+        target_guard = self._method(
+            "private boolean isCurrentLanChatTargetBinding(",
+            "private void scheduleLanChatFragmentWindowAdvance(",
+        )
+        self.assertIn("store.hasFreshVerifiedPeerRoute(peerId", target_guard)
+        self.assertIn("lanChatListenerRuntime.listenerCount() != 1", target_guard)
+        self.assertIn("LanChatCachedRoutePolicy.isEligible", target_guard)
         self.assertIn("DatagramSocket peerSocket = routeBinding == null ? socket : routeBinding.listener.socket", sender)
 
         self.assertIn("hasFreshLanChatPeerRoute(target.peerId)", self.source)
