@@ -3,7 +3,6 @@ package com.example.devicefinder;
 import static org.junit.Assert.*;
 import java.net.Inet4Address;
 import java.net.InetAddress;
-import android.net.NetworkCapabilities;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
@@ -18,18 +17,10 @@ public class LanNetworkPathTest {
     }
 
     @Test public void vpnTransportIsNeverSelectedAsWifiLanEvenWithWifiUnderlyingTransport() {
-        NetworkCapabilities wifi = new NetworkCapabilities.Builder()
-                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build();
-        assertTrue(LanNetworkPath.isWifiLanNetwork(wifi));
-
-        NetworkCapabilities vpnOverWifi = new NetworkCapabilities.Builder()
-                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-                .addTransportType(NetworkCapabilities.TRANSPORT_VPN).build();
-        assertFalse(LanNetworkPath.isWifiLanNetwork(vpnOverWifi));
-
-        NetworkCapabilities vpnOnly = new NetworkCapabilities.Builder()
-                .addTransportType(NetworkCapabilities.TRANSPORT_VPN).build();
-        assertFalse(LanNetworkPath.isWifiLanNetwork(vpnOnly));
+        assertTrue(LanNetworkPath.isWifiLanTransport(true, false));
+        assertFalse(LanNetworkPath.isWifiLanTransport(true, true));
+        assertFalse(LanNetworkPath.isWifiLanTransport(false, true));
+        assertFalse(LanNetworkPath.isWifiLanTransport(false, false));
     }
 
     @Test public void acceptsPrivateIpv4AndRejectsNonLanAddresses() throws Exception {
