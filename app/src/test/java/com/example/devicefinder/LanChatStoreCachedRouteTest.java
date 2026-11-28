@@ -29,6 +29,13 @@ public class LanChatStoreCachedRouteTest {
                     8888, 2_000L, "wifi-path-a", 7L));
             assertFalse(store.hasFreshVerifiedPeerRoute("peer-1", "192.168.1.55",
                     8889, 2_000L, "wifi-path-a", 7L));
+
+            assertTrue(store.upsertPeer("peer-2", "android", "android-main", "scope-a",
+                    "192.168.1.56", 8888, 1_000L, 3_000L, "wifi-path-a", 7L));
+            assertTrue(store.observePeer("peer-2", "android", "android-main", "scope-b",
+                    "192.168.1.56", 8888, 2_000L, 4_000L));
+            assertFalse(store.hasFreshVerifiedPeerRoute("peer-2", "192.168.1.56",
+                    8888, 2_500L, "wifi-path-a", 7L));
         } finally {
             store.closeStore();
         }
