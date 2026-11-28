@@ -30,7 +30,8 @@ class Server2ActivePeerDiscoveryUiTests(unittest.TestCase):
         source = RESCUE2.read_text(encoding="utf-8")
         self.assertIn("from lan_p2p_network_paths import enumerate_ipv4_paths, directed_broadcast_addresses", source)
         self.assertIn("directed_broadcast_addresses(enumerate_ipv4_paths())", source)
-        self.assertIn("subnet_broadcasts", source)
+        self.assertIn("def get_subnet_broadcasts()", source)
+        self.assertIn("subnet_broadcasts = get_subnet_broadcasts()", source)
         self.assertIn('"255.255.255.255"', source)
 
     def test_batch_reports_inherit_current_app_version_metadata(self):
