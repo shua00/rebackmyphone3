@@ -7566,6 +7566,10 @@ class PythonRecoveryWorkerLifecycleTests(unittest.TestCase):
                     "print_lock": FakeLock(),
                     "print": lambda *args, **kwargs: None,
                     "_diag_event": lambda *args, **kwargs: None,
+                    # The worker entrypoint resolves its loop target when constructing
+                    # the thread; provide that production dependency in this isolated
+                    # AST-loaded namespace rather than loading unrelated module globals.
+                    "_retry_deferred_v2_peer_recoveries": lambda: None,
                 }
                 source = (Path(__file__).resolve().parents[1] / filename).read_text(encoding="utf-8")
                 parsed = ast.parse(source, filename=filename)
