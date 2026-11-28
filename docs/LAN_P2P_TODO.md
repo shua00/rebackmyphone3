@@ -768,3 +768,11 @@
 - [ ] 对照真机新日志确认：Outbox target 是否非空、target endpoint 是否存在且未过期、当前 RouteBinding 数量、定向 challenge 是否收到 ACK、是否因此进入 waiting_peers；重新以中兴 A2023BH API 30 + Redmi Note 8 API 35、同一 5GHz Wi-Fi 做双向短消息验收。
 
 > 当前已定位到“#1035 有持久化 endpoint 直投 fallback、V2 删除该 fallback”的确定代码差异；尚未修改生产发送授权逻辑。下一步先补足历史 endpoint 的认证/租约/scope 证据与单 Listener 安全边界，再实现受限兼容并跑 Android 单测/CI。发现失败与聊天失败仍分别记录。
+
+
+### 兼容 fallback 的数据证据边界补充
+
+- 当前 `lan_peers` 表已有 `network_scope`、`last_verified_at`、`lease_expires_at`、`status`，但 `LanChatStore.loadTargets(messageId)` 只读取 `lan_outbox_targets.last_endpoint`，不返回 peer 验证时间、租约、scope 或 status。
+- `loadKnownPeers()` 明确包含离线 peer；不能把它的 endpoint 当作新鲜认证路由。
+- `upsertPeer()` 会把 peer-wide endpoint 写入所有未 ACK 的 Outbox target 的 `last_endpoint`，并把 peer 加入仍开放的 discovery snapshot；该字段因此只是 route candidate，不足以单独证明 endpoint 仍在租约内或属于当前 LAN path。
+- 所以不能仅把旧版 `preparedCachedEndpoints` 逻辑复制回来。安全实现必须从 `lan_peers` 读取并校验 `status='active'`、`lease_expires_at > now`、精确 endpoint 一致、当前 network_scope 一致，并验证 endpoint 与唯一活动 Listener 的 LAN path 匹配；若任一信息缺失则只做定向 challenge，不直投。
