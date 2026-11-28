@@ -6830,6 +6830,7 @@ class PythonProductionFragmentHandlerTests(unittest.TestCase):
                     and node.name == "_handle_authenticated_v2_packet")
                 events = []
                 sent = []
+                store_result = ["completed"]
 
                 class FakeSocket:
                     def sendto(self, packet, address):
@@ -6842,7 +6843,7 @@ class PythonProductionFragmentHandlerTests(unittest.TestCase):
 
                 def store(db, scope, sender, packet):
                     events.append(("persist", scope, sender))
-                    return "completed"
+                    return store_result[0]
 
                 def load(db, scope, sender, message_id):
                     events.append(("load", scope, sender, message_id))
@@ -6907,3 +6908,20 @@ class PythonProductionFragmentHandlerTests(unittest.TestCase):
                     [event for event in events if event[0] == "send"])
                 self.assertLess(events.index(("claim", "remote-peer", "same-id", "assembled body")),
                                 events.index(("send", "chat.ack")))
+
+                # A fragment addressed to another local peer must never reach storage.
+                events.clear()
+                sent.clear()
+                wrong_target = dict(packet, target_peer_id="not-this-service")
+                handler(wrong_target, FakeSocket(), ("127.0.0.1", 8888))
+                self.assertEqual([], events)
+                self.assertEqual([], sent)
+
+                # A durable-storage rejection must withhold both ACK layers.
+                events.clear()
+                sent.clear()
+                store_result[0] = "rejected"
+                handler(packet, FakeSocket(), ("127.0.0.1", 8888))
+                self.assertEqual([("persist", service, "remote-peer")],
+                                 [event for event in events if event[0] == "persist"])
+                self.assertEqual([], sent)
