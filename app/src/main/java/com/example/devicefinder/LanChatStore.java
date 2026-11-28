@@ -21,7 +21,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
     public static final long FIRST_DISCOVERY_WINDOW_MS = LanChatRetryPolicy.FIRST_DISCOVERY_WINDOW_MS;
     private static final String DB_NAME = "lan_p2p_delivery.db";
     // v13 binds durable authenticated peer hints to the exact listener path/generation.
-    private static final int DB_VERSION = 13;
+    private static final int DB_VERSION = 14;
     // Durable partial long-chat receive cache: strict per-message, session and global bounds.
     public static final long FRAGMENT_SESSION_TTL_MS = 30L * 60L * 1000L;
     public static final int MAX_FRAGMENT_SESSIONS = 32;
@@ -175,7 +175,8 @@ public final class LanChatStore extends SQLiteOpenHelper {
                 "lease_expires_at INTEGER NOT NULL DEFAULT 0," +
                 "status TEXT NOT NULL DEFAULT 'offline'," +
                 "verified_path_fingerprint TEXT NOT NULL DEFAULT ''," +
-                "verified_listener_generation INTEGER NOT NULL DEFAULT -1)");
+                "verified_listener_generation INTEGER NOT NULL DEFAULT -1," +
+                "verified_listener_instance_id TEXT NOT NULL DEFAULT '')");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_lan_peers_lease ON lan_peers(status, lease_expires_at)");
 
         db.execSQL("CREATE TABLE IF NOT EXISTS lan_outbox (" +
@@ -402,6 +403,10 @@ public final class LanChatStore extends SQLiteOpenHelper {
             if (!hasColumn(db, "lan_peers", "verified_listener_generation")) {
                 db.execSQL("ALTER TABLE lan_peers ADD COLUMN verified_listener_generation INTEGER NOT NULL DEFAULT -1");
             }
+        }
+        if (oldVersion < 14 && hasTable(db, "lan_peers")
+                && !hasColumn(db, "lan_peers", "verified_listener_instance_id")) {
+            db.execSQL("ALTER TABLE lan_peers ADD COLUMN verified_listener_instance_id TEXT NOT NULL DEFAULT ''");
         }
         if (oldVersion < 12 && hasTable(db, "lan_outbox")) {
             if (!hasColumn(db, "lan_outbox", "expires_at_ms")) {
@@ -2141,9 +2146,11 @@ public final class LanChatStore extends SQLiteOpenHelper {
             String oldNetworkScope = "";
             String oldVerifiedPathFingerprint = "";
             long oldVerifiedListenerGeneration = -1L;
+            String oldVerifiedListenerInstanceId = "";
             Cursor c = db.rawQuery(
                     "SELECT endpoint_ip,endpoint_port,last_verified_at,status,lease_expires_at,"
-                    + "network_scope,verified_path_fingerprint,verified_listener_generation "
+                    + "network_scope,verified_path_fingerprint,verified_listener_generation,"
+                    + "verified_listener_instance_id "
                     + "FROM lan_peers WHERE peer_id=?",
                     new String[]{peerId});
             try {
@@ -2156,6 +2163,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
                     oldNetworkScope = c.getString(5);
                     oldVerifiedPathFingerprint = c.getString(6);
                     oldVerifiedListenerGeneration = c.getLong(7);
+                    oldVerifiedListenerInstanceId = c.getString(8);
                 }
             } finally { c.close(); }
 
@@ -2176,6 +2184,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
             v.put("status", sameRoute && "active".equals(oldStatus) ? "active" : "suspect");
             v.put("verified_path_fingerprint", sameRoute ? oldVerifiedPathFingerprint : "");
             v.put("verified_listener_generation", sameRoute ? oldVerifiedListenerGeneration : -1L);
+            v.put("verified_listener_instance_id", sameRoute ? oldVerifiedListenerInstanceId : "");
             if (oldIp == null) {
                 v.put("peer_id", peerId);
                 long rowId = db.insertWithOnConflict("lan_peers", null, v, SQLiteDatabase.CONFLICT_IGNORE);
@@ -2251,11 +2260,13 @@ public final class LanChatStore extends SQLiteOpenHelper {
 
     public boolean upsertPeer(String peerId, String peerType, String serviceId, String networkScope,
                               String ip, int port, long now, long leaseExpiresAt,
-                              String verifiedPathFingerprint, long verifiedListenerGeneration) {
+                              String verifiedPathFingerprint, long verifiedListenerGeneration,
+                              String verifiedListenerInstanceId) {
         if (peerId == null || peerId.length() == 0 || ip == null || ip.length() == 0
                 || port <= 0 || port > 65535
                 || verifiedPathFingerprint == null || verifiedPathFingerprint.isEmpty()
-                || verifiedListenerGeneration < 0L) return false;
+                || verifiedListenerGeneration < 0L
+                || verifiedListenerInstanceId == null || verifiedListenerInstanceId.isEmpty()) return false;
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
@@ -2273,6 +2284,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
             v.put("status", "active");
             v.put("verified_path_fingerprint", verifiedPathFingerprint);
             v.put("verified_listener_generation", verifiedListenerGeneration);
+            v.put("verified_listener_instance_id", verifiedListenerInstanceId);
             long rowId = db.insertWithOnConflict("lan_peers", null, v, SQLiteDatabase.CONFLICT_REPLACE);
             if (rowId < 0) {
                 Cursor c = db.rawQuery(
@@ -2313,19 +2325,21 @@ public final class LanChatStore extends SQLiteOpenHelper {
      * Listener generations are process-local, so rows from a prior service generation fail closed.
      */
     public boolean hasFreshVerifiedPeerRoute(String peerId, String ip, int port, long now,
-            String pathFingerprint, long listenerGeneration) {
+            String pathFingerprint, long listenerGeneration, String listenerInstanceId) {
         if (peerId == null || peerId.isEmpty() || ip == null || ip.isEmpty()
                 || port <= 0 || port > 65535 || now <= 0L
                 || pathFingerprint == null || pathFingerprint.isEmpty()
-                || listenerGeneration < 0L) return false;
+                || listenerGeneration < 0L || listenerInstanceId == null
+                || listenerInstanceId.isEmpty()) return false;
         Cursor c = null;
         try {
             c = getReadableDatabase().rawQuery(
                     "SELECT 1 FROM lan_peers WHERE peer_id=? AND endpoint_ip=? AND endpoint_port=? "
                     + "AND status='active' AND last_verified_at>0 AND lease_expires_at>? "
-                    + "AND verified_path_fingerprint=? AND verified_listener_generation=? LIMIT 1",
+                    + "AND verified_path_fingerprint=? AND verified_listener_generation=? "
+                    + "AND verified_listener_instance_id=? LIMIT 1",
                     new String[]{peerId, ip, String.valueOf(port), String.valueOf(now),
-                            pathFingerprint, String.valueOf(listenerGeneration)});
+                            pathFingerprint, String.valueOf(listenerGeneration), listenerInstanceId});
             return c.moveToFirst();
         } catch (Exception failure) {
             return false;
