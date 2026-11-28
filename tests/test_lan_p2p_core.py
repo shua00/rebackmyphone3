@@ -7374,3 +7374,201 @@ while True:
                         if receiver.poll() is None:
                             receiver.terminate()
                         receiver.communicate(timeout=5)
+
+
+class PythonRealServiceListenerRestartTests(unittest.TestCase):
+    """Verify persisted receive fragments survive a real service listener process restart."""
+
+    def test_listener_restart_resumes_from_durable_fragment_ack_bitmap(self):
+        import socket
+        import shutil
+        from lan_p2p_core import (
+            persist_outgoing_message, send_outgoing_fragment_window,
+            decode_packet, record_outgoing_fragment_ack,
+            acknowledge_outgoing_message, packet_service_identity_matches,
+            fragment_chat_message,
+        )
+
+        cases = (
+            ("rescue2.py", "rescue2", "_CHAT_DEDUP_DB"),
+            ("chat.py", "chat.py", "CHAT_DB"),
+            ("server2.py", "server2", "CHAT_DEDUP_DB"),
+        )
+        repo_root = Path(__file__).resolve().parents[1]
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+        env["PYTHONUNBUFFERED"] = "1"
+        receiver_code = r"""
+import importlib.util, os, sys, threading, time
+module_path, service_type, receiver_id, secret, port, ready, marker = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("isolated_service", module_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+db = os.path.join(os.path.dirname(module_path), "receiver.sqlite3")
+if service_type == "rescue2":
+    module._CHAT_DEDUP_DB = db
+elif service_type == "chat.py":
+    module.CHAT_DB = db
+else:
+    module.CHAT_DEDUP_DB = db
+module.PEER_NODE_ID = receiver_id
+module.RESCUE_SECRET = secret
+if service_type == "server2":
+    module.UDP_LISTEN_PORT = int(port)
+else:
+    module.UDP_PORT = int(port)
+module._start_v2_recovery_retry_worker = lambda: None
+original_store = module.store_incoming_chat_fragment
+def tracked_store(*args, **kwargs):
+    result = original_store(*args, **kwargs)
+    packet = args[3] if len(args) > 3 else kwargs.get("packet", {})
+    if result in ("stored", "duplicate", "complete"):
+        with open(marker, "a", encoding="utf-8") as stream:
+            stream.write(str(packet.get("fragment_index", -1)) + "\n")
+    return result
+module.store_incoming_chat_fragment = tracked_store
+module._V2_PACKET_DISPATCHER = module.BoundedPacketDispatcher(
+    module._handle_authenticated_v2_packet, "restart-" + service_type,
+    on_error=lambda exc, lane: print("DISPATCH_ERROR:" + repr(exc), flush=True))
+module.send_startup_peer_beacon = lambda *args, **kwargs: False
+if hasattr(module, "get_subnet_broadcast"):
+    module.get_subnet_broadcast = lambda: "127.255.255.255"
+if hasattr(module, "get_subnet_broadcasts"):
+    module.get_subnet_broadcasts = lambda: []
+threading.Thread(target=module.udp_listener, daemon=True).start()
+deadline = time.time() + 10
+while time.time() < deadline:
+    if getattr(module, "UDP_LISTENER_SOCKET", None) is not None:
+        with open(ready, "w", encoding="utf-8") as stream:
+            stream.write("BOUND")
+        break
+    time.sleep(0.02)
+else:
+    raise RuntimeError("production UDP listener did not bind")
+while True:
+    time.sleep(1)
+"""
+        for filename, service_type, db_name in cases:
+            with self.subTest(service=service_type):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    service_copy = os.path.join(temp_dir, filename)
+                    shutil.copyfile(repo_root / filename, service_copy)
+                    receiver_id = "restart-listener-" + service_type
+                    sender_id = "restart-sender-" + service_type
+                    secret = "listener-restart-secret"
+                    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    probe.bind(("127.0.0.1", 0))
+                    port = probe.getsockname()[1]
+                    probe.close()
+                    ready = os.path.join(temp_dir, "listener.ready")
+                    marker = os.path.join(temp_dir, "stored-fragments.txt")
+
+                    def start_receiver():
+                        if os.path.exists(ready):
+                            os.remove(ready)
+                        proc = subprocess.Popen(
+                            [sys.executable, "-u", "-c", receiver_code, service_copy,
+                             service_type, receiver_id, secret, str(port), ready, marker],
+                            cwd=temp_dir, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+                        deadline = time.time() + 12
+                        while time.time() < deadline and not os.path.exists(ready):
+                            if proc.poll() is not None:
+                                out, err = proc.communicate(timeout=5)
+                                self.fail("listener startup failed: " + out + "\n" + err)
+                            time.sleep(0.025)
+                        self.assertTrue(os.path.exists(ready), "listener bind timed out")
+                        return proc
+
+                    receiver = start_receiver()
+                    sender_db = os.path.join(temp_dir, "sender.sqlite3")
+                    scope = "restart-sender-scope"
+                    message_id = "restart-long-message-" + service_type
+                    body = "restart durable fragments 跨进程恢复🙂 " * 70
+                    created_at = 987654321
+                    self.assertTrue(persist_outgoing_message(
+                        sender_db, scope, sender_id, message_id, body,
+                        [receiver_id], created_at))
+                    sender_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    sender_sock.bind(("127.0.0.1", 8887))
+                    sender_sock.settimeout(10)
+                    try:
+                        destination = ("127.0.0.1", port)
+                        expected = len(fragment_chat_message(
+                            message_id, receiver_id, body, created_at))
+                        initial = send_outgoing_fragment_window(
+                            sender_sock, sender_db, scope, message_id, receiver_id,
+                            body, created_at, destination, sender_id, "python",
+                            sender_id, secret, mark_attempt=True,
+                            allow_fast_retry=True)
+                        self.assertGreater(initial, 1)
+                        acked = set()
+                        deadline = time.time() + 12
+                        while not acked and time.time() < deadline:
+                            raw, source = sender_sock.recvfrom(1200)
+                            packet = decode_packet(raw, secret)
+                            if packet_service_identity_matches(packet, receiver_id) and packet.get("type") == "chat.fragment.ack":
+                                self.assertIsNotNone(record_outgoing_fragment_ack(
+                                    sender_db, scope, message_id, receiver_id,
+                                    packet["fragment_index"], source[0], source[1]))
+                                acked.add(packet["fragment_index"])
+                        self.assertTrue(acked, "first listener never persisted/ACKed a fragment")
+                        receiver.terminate()
+                        receiver_out, receiver_err = receiver.communicate(timeout=5)
+                        receiver = start_receiver()
+
+                        # The same sender ledger suppresses already-ACKed fragments after restart.
+                        sent_total = send_outgoing_fragment_window(
+                            sender_sock, sender_db, scope, message_id, receiver_id,
+                            body, created_at, destination, sender_id, "python",
+                            sender_id, secret, mark_attempt=False,
+                            allow_fast_retry=False)
+                        self.assertGreater(sent_total, 0)
+                        sent_total += len(acked)
+                        final_ack = False
+                        deadline = time.time() + 20
+                        while time.time() < deadline and not final_ack:
+                            try:
+                                raw, source = sender_sock.recvfrom(1200)
+                            except socket.timeout:
+                                more = send_outgoing_fragment_window(
+                                    sender_sock, sender_db, scope, message_id,
+                                    receiver_id, body, created_at, destination,
+                                    sender_id, "python", sender_id, secret,
+                                    mark_attempt=False, allow_fast_retry=False)
+                                if more:
+                                    sent_total += more
+                                continue
+                            packet = decode_packet(raw, secret)
+                            if not packet_service_identity_matches(packet, receiver_id):
+                                continue
+                            if packet.get("target_peer_id") != sender_id:
+                                continue
+                            if packet.get("type") == "chat.fragment.ack":
+                                index = packet.get("fragment_index")
+                                if index not in acked:
+                                    self.assertIsNotNone(record_outgoing_fragment_ack(
+                                        sender_db, scope, message_id, receiver_id,
+                                        index, source[0], source[1]))
+                                    acked.add(index)
+                                if len(acked) < expected:
+                                    more = send_outgoing_fragment_window(
+                                        sender_sock, sender_db, scope, message_id,
+                                        receiver_id, body, created_at, destination,
+                                        sender_id, "python", sender_id, secret,
+                                        mark_attempt=False, allow_fast_retry=False)
+                                    sent_total += more
+                            elif packet.get("type") == "chat.ack":
+                                self.assertEqual("stored", packet.get("status"))
+                                final_ack = acknowledge_outgoing_message(
+                                    sender_db, scope, message_id, receiver_id)
+                        self.assertTrue(final_ack, "restarted listener did not return final ACK")
+                        self.assertEqual(expected, len(acked))
+                        self.assertEqual(expected, sent_total)
+                        self.assertGreaterEqual(
+                            len(open(marker, encoding="utf-8").read().splitlines()), 1)
+                    finally:
+                        sender_sock.close()
+                        if receiver.poll() is None:
+                            receiver.terminate()
+                        receiver.communicate(timeout=5)
