@@ -1,0 +1,36 @@
+package com.example.devicefinder;
+
+import android.content.Context;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
+import org.robolectric.annotation.Config;
+import static org.junit.Assert.*;
+
+@RunWith(RobolectricTestRunner.class)
+@Config(sdk = 28)
+public class LanChatStoreCachedRouteTest {
+    @Test public void cachedRouteRequiresExactUnexpiredListenerEpochAndEndpoint() {
+        Context context = RuntimeEnvironment.getApplication();
+        LanChatStore store = new LanChatStore(context);
+        try {
+            store.getWritableDatabase();
+            assertTrue(store.upsertPeer("peer-1", "android", "android-main", "remote-scope",
+                    "192.168.1.55", 8888, 1_000L, 3_000L, "wifi-path-a", 7L));
+
+            assertTrue(store.hasFreshVerifiedPeerRoute("peer-1", "192.168.1.55",
+                    8888, 2_000L, "wifi-path-a", 7L));
+            assertFalse(store.hasFreshVerifiedPeerRoute("peer-1", "192.168.1.55",
+                    8888, 3_000L, "wifi-path-a", 7L));
+            assertFalse(store.hasFreshVerifiedPeerRoute("peer-1", "192.168.1.55",
+                    8888, 2_000L, "wifi-path-a", 8L));
+            assertFalse(store.hasFreshVerifiedPeerRoute("peer-1", "192.168.1.56",
+                    8888, 2_000L, "wifi-path-a", 7L));
+            assertFalse(store.hasFreshVerifiedPeerRoute("peer-1", "192.168.1.55",
+                    8889, 2_000L, "wifi-path-a", 7L));
+        } finally {
+            store.closeStore();
+        }
+    }
+}
