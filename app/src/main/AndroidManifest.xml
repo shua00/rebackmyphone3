@@ -85,6 +85,13 @@
             android:stopWithTask="false"
             android:foregroundServiceType="location|dataSync" />
 
+        <service
+            android:name=".LanTransferSenderService"
+            android:enabled="true"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- 保活 JobService 声明 -->
         <service
             android:name=".KeepAliveJobService"
@@ -199,6 +206,23 @@
             android:screenOrientation="portrait"
             android:resizeableActivity="false"
             android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|density|uiMode" />
+
+        <!-- 独立局域网文件传输控制界面；不耦合文字对讲 Activity -->
+        <activity
+            android:name=".LanTransferActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!-- 本机诊断报告历史与导出；不暴露给其他应用调用 -->
+        <activity
+            android:name=".diagnostics.DiagnosticHistoryActivity"
+            android:enabled="${diagnosticsEnabled}"
+            android:exported="false" />
+
+        <!-- Rescue2 管理员身份信任与撤销；属于核心功能，不随 diagnostics 开关剥离 -->
+        <activity
+            android:name=".Rescue2AdminTrustActivity"
+            android:exported="false" />
 
         <!-- 局域网聊天界面 -->
         <activity

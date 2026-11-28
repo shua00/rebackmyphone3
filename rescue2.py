@@ -4,10 +4,11 @@
 ============================================================
 rescue2.py — 局域网救援/调试终端（Ultimate v2 协议）
 ------------------------------------------------------------
-构建批次 : 20261111-2000
-协议版本 : v2
-最后修改 : 2026-11-20 1:30（v2.0.3 远程陪伴特权推流）
+构建批次 : 20261122-P2P-r3
+协议版本 : v2-only
+最后修改 : 2026-11-22（v2-only；peer challenge；消息 ID/ACK）
 ------------------------------------------------------------
+本轮约束 : 保留救援、ADB、日志与陪护能力；LAN 对讲使用 v2 JSON chat.message/chat.ack 和稳定 message_id；响应随机 nonce peer challenge；服务 peer ID 持久化保存。
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
   2026-11-20 1:30  v2.0.2 新增p远程陪伴特权推流
   2026-11-13 00:30  v2.0.2 紧急三连击 + ADB 安装工具箱 + 并发防弹
@@ -28,14 +29,15 @@ DeviceFinder 局域网救援/调试终端 (Ultimate 终极完全体)
 - 局域网扫描：ARP 表优先 + 全网段探测，多网卡场景遍历所有本机网段
 - 多设备定向：单播 / 子网广播 / 全局广播 三档，按 IP 或设备编号选择
 - 拉日志：并发下发 + 统一等待 30s，结果汇总缺失清单
-- 对讲机：FLOAT/CHAT 双前缀发送与接收，PC 自身消息不记入设备列表
+- 对讲机：LAN 使用 v2 JSON chat.message/chat.ack，逐消息 ID 持久化、逐 peer 确认；PC 自身消息不记入手机设备列表
 - UDP 8888 监听：断线自愈，指数退避重试，避免端口被占用后永久失聪
 
-【二、协议兼容 v1/v2 双发】
-- custom_msg：发 FIND_ME_FLOAT（v2）+ FIND_ME_MSG（v1，内容不含冒号才发）
-              含冒号时只发 FLOAT，避免 v1 手机的 legacy 4 段被误判为 chat
-- chat_msg  ：同时发 FIND_ME_CHAT（v2）+ FIND_ME_MSG（v1）
-- 接收侧    ：认 FIND_ME_CHAT / FIND_ME_MSG 双前缀，5 秒去重
+【二、协议 v2-only】
+- 悬浮留言 custom_msg：继续使用独立 FIND_ME_FLOAT 通道，不并入对讲 Inbox/历史
+- LAN 对讲 chat_msg：发送 v2 JSON chat.message，携带稳定 message_id；接收后持久化再回 chat.ack
+- 逐设备确认：按 peer_id 记录 ACK，只补发未确认目标；重试沿用原 message_id
+- 发现握手：peer.hello/peer.ack 使用随机 nonce；启动监听后一次性广播，不做周期性高频扫描
+- FIND_ME_CHAT_LOCK/UNLOCK：仅是原有聊天窗口锁定控制命令，不是聊天消息协议，继续保留
 - 版本上报  ：_handle_report 记录 build_version / protocol_version 到 DISCOVERED_DEVICES
 - 设备列表  ：show_devices / 选择目标列表 显示 build_version，便于分辨新旧 APK
 
@@ -48,6 +50,7 @@ DeviceFinder 局域网救援/调试终端 (Ultimate 终极完全体)
 - 📥 物理拉日志：无视手机休眠，通过 exec-out 瞬间抽干本地日志
 - 🛠️ 指令发射：模拟开机广播、断网、发 ACTION
 - 🔍 权限检查：强制 UTF-8 解析，防止 Windows GBK 报错闪退
+- 🛡️ Root Shell：通过 su 请求目标设备 Root 授权，获批后提供不设命令白名单的交互式 Shell
 
 【四、未来功能预演 (T 菜单)】
 - 🏃 传感器探底：一键获取硬件层全量传感器（气压计/计步器/光线）
@@ -69,18 +72,23 @@ Termux 运行前强烈建议执行：termux-wake-lock
 
 import socket
 import time
+import sqlite3
+import uuid
 import sys
 import json as _json
 import gzip
 import os
 import re
 import subprocess
+import shlex
 import threading
 import concurrent.futures
 import urllib.request
 import tempfile
 import zipfile
 import shutil
+import logging
+from logging.handlers import RotatingFileHandler
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
@@ -105,16 +113,31 @@ except ImportError:
 # ============================================================
 # 脚本自身元数据 (Script Metadata)
 # ============================================================
-BUILD_VERSION = "20261111-2000"
+BUILD_VERSION = "20261126-1445"
 PROTOCOL_VERSION = 2
 PACKAGE_NAME = "com.example.devicefinder"
 
 # ===== 配置区 =====
 RESCUE_SECRET = "your_private_secret_key"
+from lan_p2p_network_paths import enumerate_ipv4_paths, directed_broadcast_addresses
+from lan_p2p_core import LanP2PStorageError, assemble_chat_fragments, store_incoming_chat_fragment, load_incoming_chat_fragments, record_outgoing_fragment_ack, load_outgoing_fragment_targets_for_peer, send_outgoing_fragment_window, build_authenticated_chat_fragment_packets, send_discovery_fragment_window, build_chat_discovery_destinations, max_peer_id_budget_probe, is_outgoing_discovery_pending, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, BoundedPacketDispatcher, list_known_peers, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, add_discovery_targets_for_peer, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, validate_incoming_message_claim, send_outbox_to_active_peers, send_broadcast_packet_with_retries, send_discovery_broadcast_with_retries, load_active_pending_targets, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, next_peer_recovery_eligible_at_ms, list_due_outgoing_peers, packet_service_identity_matches
+PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "rescue2")
 DEFAULT_SERVER_URL = "http://dingwei.bai001.de5.net/api/report"
 DEFAULT_CONFIG_URL = "https://your-config-url.com/config.txt"
 LOG_PORT = 9090
-UDP_PORT = 8888
+UDP_DEVICE_PORT = 8888
+UDP_PORT = 8889  # 独立监听端口，避免与 server2.py 的 8888 冲突
+UDP_LISTENER_SOCKET = None
+UDP_CHAT_SEND_LOCK = threading.Lock()
+_V2_RECOVERY_RETRY_PEERS = set()
+_V2_FRAGMENT_WINDOW_PEERS = set()
+_V2_RECOVERY_RETRY_LOCK = threading.Lock()
+_V2_RECOVERY_WAKE_EVENT = threading.Event()
+_V2_RECOVERY_INFLIGHT = set()
+_V2_RECOVERY_WORKER_STARTED = False
+_V2_RECOVERY_SCHEMA_READY = False
+
+
 LOG_DIR = "received_logs"
 
 # ============================================================
@@ -147,7 +170,107 @@ RECEIVER_OK = False
 UDP_OK = False
 _LAST_UDP_MSG = {}
 _LAST_UDP_MSG_TTL = 10
+_CHAT_DEDUP_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3")
+_CHAT_DEDUP_LOCK = threading.Lock()
 print_lock = threading.Lock()  # v2.0.2 补丁：全局打印锁，防多线程输出错乱
+
+# Bounded local diagnostics: never write packet bodies, chat content or credentials.
+_DIAG_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rescue2_runtime.log")
+_DIAG_LOGGER = logging.getLogger("rescue2.runtime")
+_DIAG_LOGGER.setLevel(logging.INFO)
+_DIAG_LOGGER.propagate = False
+if not _DIAG_LOGGER.handlers:
+    try:
+        _diag_handler = RotatingFileHandler(
+            _DIAG_LOG_PATH, maxBytes=4 * 1024 * 1024,
+            backupCount=4, encoding="utf-8")
+    except OSError:
+        _diag_handler = logging.StreamHandler()
+    _diag_handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s [%(threadName)s] %(message)s"))
+    _DIAG_LOGGER.addHandler(_diag_handler)
+
+
+def _diag_event(event, level=logging.INFO, **fields):
+    """Write bounded structured diagnostics while filtering sensitive field names."""
+    safe_fields = []
+    blocked = ("secret", "token", "password", "body", "content", "payload", "raw", "auth")
+    for key, value in sorted(fields.items()):
+        if any(part in key.lower() for part in blocked):
+            continue
+        rendered = str(value).replace("\\n", " ").replace("\\r", " ")[:240]
+        safe_fields.append("{}={}".format(key, rendered))
+    suffix = " " + " ".join(safe_fields) if safe_fields else ""
+    _DIAG_LOGGER.log(level, "%s%s", event, suffix)
+
+
+def _diag_exception(event, **fields):
+    """Call inside an except block to retain a traceback in the rotating log."""
+    _diag_event(event, logging.ERROR, **fields)
+    _DIAG_LOGGER.exception("traceback event=%s", event)
+
+
+def _on_v2_dispatch_error(exc, lane):
+    _diag_exception("v2_dispatch_failed", lane=lane,
+                    error_type=type(exc).__name__)
+
+
+
+def _restore_chat_history():
+    """Return the last 20 messages accepted by rescue2 for terminal recovery."""
+    try:
+        conn = sqlite3.connect(_CHAT_DEDUP_DB, timeout=5)
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("""CREATE TABLE IF NOT EXISTS received_chat_messages (
+                receiver_scope TEXT NOT NULL, sender TEXT NOT NULL, message_key TEXT NOT NULL,
+                content TEXT NOT NULL, received_at REAL NOT NULL, display_time TEXT NOT NULL,
+                PRIMARY KEY(receiver_scope, sender, message_key))""")
+            return conn.execute("""SELECT display_time,sender,content FROM received_chat_messages
+                WHERE receiver_scope=? ORDER BY received_at DESC LIMIT 20""",
+                ("rescue2",)).fetchall()[::-1]
+        finally:
+            conn.close()
+    except Exception as e:
+        _diag_exception("chat_history_restore_failed", error_type=type(e).__name__)
+        with print_lock:
+            print(f"{I.warn} 对讲历史恢复失败: {type(e).__name__}")
+        return []
+
+
+def _claim_chat_message(sender, message_id, content):
+    """Persist body and ID atomically in a receiver-specific namespace before ACK."""
+    key = str(message_id or content or "")
+    if not key: return None
+    now = time.time()
+    display_time = time.strftime("%H:%M:%S", time.localtime(now))
+    try:
+        with _CHAT_DEDUP_LOCK:
+            conn = sqlite3.connect(_CHAT_DEDUP_DB, timeout=5)
+            try:
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("""CREATE TABLE IF NOT EXISTS received_chat_messages (
+                    receiver_scope TEXT NOT NULL, sender TEXT NOT NULL, message_key TEXT NOT NULL,
+                    content TEXT NOT NULL, received_at REAL NOT NULL, display_time TEXT NOT NULL,
+                    PRIMARY KEY(receiver_scope, sender, message_key))""")
+                conn.execute("BEGIN IMMEDIATE")
+                cur = conn.execute("""INSERT OR IGNORE INTO received_chat_messages
+                    (receiver_scope,sender,message_key,content,received_at,display_time) VALUES(?,?,?,?,?,?)""",
+                    ("rescue2", str(sender), key, str(content), now, display_time))
+                claim = validate_incoming_message_claim(
+                    conn, cur.rowcount, "rescue2", str(sender), key, str(content))
+                if claim is None:
+                    conn.rollback()
+                    with print_lock:
+                        print("⚠️ rescue2 message_id payload conflict; refusing stored ACK")
+                    return None
+                conn.commit()
+                return claim
+            finally: conn.close()
+    except Exception as e:
+        _diag_exception("chat_message_persist_failed", error_type=type(e).__name__)
+        with print_lock: print(f"⚠️ 聊天消息持久化失败，本条不确认: {type(e).__name__}")
+        return None
 
 # ===== 环境检测 =====
 def is_termux():
@@ -241,6 +364,21 @@ def get_all_local_ips():
         except Exception: pass
     return ips
 
+
+def get_subnet_broadcasts():
+    """Enumerate directed broadcasts for every active local IPv4 LAN interface."""
+    try:
+        return list(directed_broadcast_addresses(enumerate_ipv4_paths()))
+    except Exception:
+        return []
+
+
+def get_subnet_broadcast():
+    """Compatibility fallback for older call sites."""
+    targets = get_subnet_broadcasts()
+    return targets[0] if targets else "255.255.255.255"
+
+
 def _is_private_ip(ip):
     if not is_valid_ip(ip): return False
     parts = [int(p) for p in ip.split(".")]
@@ -254,24 +392,41 @@ def send_udp(command_str, target_ip="255.255.255.255", quiet=False, no_retry=Fal
     if isinstance(target_ip, (list, tuple)):
         if not target_ip:
             if not quiet: print(f"{I.warn} 无有效目标，未发送")
+            _diag_event("udp_tx_skipped", reason="empty_target_list")
             return
         for ip in target_ip: send_udp(command_str, ip, quiet=quiet, no_retry=no_retry)
         return
-    if not quiet: print(f"\n{I.send} 发送指令至 {target_ip}: {command_str}")
+    command_type = str(command_str).split(":", 1)[0][:64]
     is_broadcast = (target_ip == "255.255.255.255") or target_ip.endswith(".255")
     send_times = 1 if no_retry else (3 if is_broadcast else 2)
     gap = 0.5 if is_broadcast else 0.15
+    sent_count = 0
+    _diag_event("udp_tx_start", target=target_ip, port=UDP_DEVICE_PORT,
+                command_type=command_type, attempts=send_times, broadcast=is_broadcast)
+    if not quiet: print(f"\\n{I.send} 发送指令至 {target_ip}: {command_type}")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         for i in range(send_times):
-            try: sock.sendto(command_str.encode('utf-8'), (target_ip, UDP_PORT))
+            try:
+                sock.sendto(command_str.encode('utf-8'), (target_ip, UDP_DEVICE_PORT))
+                sent_count += 1
             except Exception as e:
-                if not quiet: print(f"   [{i+1}/{send_times}] 发送失败: {e}")
+                _diag_exception("udp_tx_failed", target=target_ip, port=UDP_DEVICE_PORT,
+                                command_type=command_type, attempt=i + 1,
+                                error_type=type(e).__name__)
+                if not quiet: print(f"   [{i+1}/{send_times}] 发送失败: {type(e).__name__}")
                 break
             if not quiet and send_times > 1: print(f"   [{i+1}/{send_times}] 发送中...")
             if i < send_times - 1: time.sleep(gap)
-    finally: sock.close()
+    except Exception as e:
+        _diag_exception("udp_tx_socket_failed", target=target_ip, port=UDP_DEVICE_PORT,
+                        error_type=type(e).__name__)
+        raise
+    finally:
+        sock.close()
+    _diag_event("udp_tx_complete", target=target_ip, port=UDP_DEVICE_PORT,
+                command_type=command_type, sent=sent_count, attempts=send_times)
     if not quiet: print(f"{I.ok} 发送完毕。")
 
 def wait_for_response(before, wait_sec, wait_type):
@@ -430,44 +585,713 @@ def start_log_receiver():
         server = ThreadingHTTPServer(("0.0.0.0", LOG_PORT), LogReceiver)
         RECEIVER_OK = True
         local_ip = get_local_ip()
+        _diag_event("http_log_receiver_started", bind="0.0.0.0",
+                    port=LOG_PORT, advertised_ip=local_ip)
         print(f"{I.recv} 内置接收端已启动: http://{local_ip}:{LOG_PORT}/")
         server.serve_forever()
-    except Exception as e: print(f"{I.warn} 接收端启动失败: {e}")
+    except Exception as e:
+        RECEIVER_OK = False
+        _diag_exception("http_log_receiver_failed", port=LOG_PORT,
+                        error_type=type(e).__name__)
+        print(f"{I.warn} 接收端启动失败: {type(e).__name__}")
+
+def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
+    """Replay due durable rows; verified peer recovery is throttled and finite."""
+    _diag_event("chat_recovery_peer_started", peer_id=peer_id,
+                endpoint_ip=addr[0], endpoint_port=addr[1],
+                recovery_event=recovery_event)
+    with _V2_RECOVERY_RETRY_LOCK:
+        # Consume a queued event only when this invocation can own the work.
+        # If another invocation is active, put it back for the next worker pass.
+        queued_recovery_event = peer_id in _V2_RECOVERY_RETRY_PEERS
+        _V2_RECOVERY_RETRY_PEERS.discard(peer_id)
+        if peer_id in _V2_RECOVERY_INFLIGHT:
+            _V2_RECOVERY_RETRY_PEERS.add(peer_id)
+            return
+        _V2_RECOVERY_INFLIGHT.add(peer_id)
+        recovery_event = recovery_event or queued_recovery_event
+    try:
+        try:
+            add_discovery_targets_for_peer(_CHAT_DEDUP_DB, "rescue2", peer_id)
+            if recovery_event:
+                prepare_outgoing_peer_recovery(_CHAT_DEDUP_DB, "rescue2", peer_id)
+            pending_rows = load_pending_outgoing_for_peer(
+                _CHAT_DEDUP_DB, "rescue2", peer_id, limit=10)
+            _diag_event("chat_recovery_pending_loaded", peer_id=peer_id,
+                        pending_count=len(pending_rows), recovery_event=recovery_event)
+            if recovery_event:
+                next_eligible_at = next_peer_recovery_eligible_at_ms(_CHAT_DEDUP_DB, "rescue2", peer_id)
+                if next_eligible_at is not None:
+                    with _V2_RECOVERY_RETRY_LOCK:
+                        _V2_RECOVERY_RETRY_PEERS.add(peer_id)
+        except Exception as e:
+            _diag_exception("chat_recovery_ledger_read_failed", peer_id=peer_id,
+                            error_type=type(e).__name__, recovery_event=recovery_event)
+            with print_lock:
+                print(f"⚠️ rescue2 LAN outbox recovery deferred; durable ledger read failed: {type(e).__name__}")
+            if recovery_event:
+                with _V2_RECOVERY_RETRY_LOCK:
+                    _V2_RECOVERY_RETRY_PEERS.add(peer_id)
+            return
+        for pending in pending_rows:
+            chat_packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
+                           "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
+                           "target_peer_id": peer_id, "message_id": pending["message_id"],
+                           "created_at_ms": pending["created_at_ms"],
+                           "display_name": "PC_Terminal", "body": pending["body"]}
+            try:
+                target_port = int(pending.get("endpoint_port") or addr[1])
+                try:
+                    raw = encode_packet(chat_packet, RESCUE_SECRET)
+                    long_message = False
+                except ValueError:
+                    raw = None
+                    long_message = True
+            except Exception as e:
+                with print_lock:
+                    print(f"⚠️ rescue2 pending chat retry payload preparation failed peer={peer_id}: {type(e).__name__}")
+                return
+            # Long-message admission belongs to the fragment sender: it first
+            # determines the missing flight, then consumes retry budget only for
+            # an actual recovery send. Short messages retain the original admission.
+            if not long_message:
+                try:
+                    attempt_admitted = mark_outgoing_attempt(
+                        _CHAT_DEDUP_DB, pending["message_id"], peer_id,
+                        pending["endpoint_ip"], target_port, allow_fast_retry=False)
+                except LanP2PStorageError as e:
+                    _diag_exception("chat_recovery_attempt_admission_failed", peer_id=peer_id,
+                                    message_id=pending["message_id"], error_type=type(e).__name__)
+                    if recovery_event:
+                        with _V2_RECOVERY_RETRY_LOCK:
+                            _V2_RECOVERY_RETRY_PEERS.add(peer_id)
+                    with print_lock:
+                        print(f"⚠️ rescue2 pending chat attempt admission failed; recovery retained: {type(e).__name__}")
+                    return
+                if not attempt_admitted:
+                    _diag_event("chat_recovery_attempt_not_admitted", peer_id=peer_id,
+                                message_id=pending["message_id"])
+                    continue
+            try:
+                _diag_event("chat_recovery_send_started", peer_id=peer_id,
+                            message_id=pending["message_id"], endpoint_ip=pending["endpoint_ip"],
+                            endpoint_port=target_port)
+                if long_message:
+                    sent = send_outgoing_fragment_window(
+                        sock, _CHAT_DEDUP_DB, "rescue2", pending["message_id"], peer_id,
+                        pending["body"], pending["created_at_ms"],
+                        (pending["endpoint_ip"], target_port), PEER_NODE_ID, "rescue2",
+                        PEER_NODE_ID, RESCUE_SECRET, send_lock=UDP_CHAT_SEND_LOCK,
+                        display_name="PC_Terminal", mark_attempt=True, allow_fast_retry=False)
+                else:
+                    send_outgoing_packet(
+                        sock, raw, (pending["endpoint_ip"], target_port),
+                        _CHAT_DEDUP_DB, "rescue2", pending["message_id"], peer_id,
+                        send_lock=UDP_CHAT_SEND_LOCK)
+                    sent = 1
+                _diag_event("chat_recovery_send_submitted", peer_id=peer_id,
+                            message_id=pending["message_id"], endpoint_ip=pending["endpoint_ip"],
+                            endpoint_port=target_port, long_message=long_message,
+                            fragments_sent=sent if long_message else 0)
+            except LanP2PStorageError as e:
+                _diag_exception("chat_recovery_send_storage_failed", peer_id=peer_id,
+                                message_id=pending["message_id"], error_type=type(e).__name__)
+                # The durable attempt is already consumed; let normal persisted backoff
+                # take over instead of force-reopening the same retry epoch.
+                with print_lock:
+                    print(f"⚠️ rescue2 pending chat send stopped; backoff retained: {type(e).__name__}")
+                return
+            except Exception as e:
+                _diag_exception("chat_recovery_send_failed", peer_id=peer_id,
+                                message_id=pending["message_id"], error_type=type(e).__name__)
+                with print_lock:
+                    print(f"⚠️ rescue2 pending chat retry failed peer={peer_id}: {type(e).__name__}")
+                return
+    finally:
+        _diag_event("chat_recovery_peer_finished", peer_id=peer_id)
+        with _V2_RECOVERY_RETRY_LOCK:
+            # A new event may have arrived during this batch; never erase it here.
+            _V2_RECOVERY_INFLIGHT.discard(peer_id)
+
+
+def _advance_v2_fragment_windows(sock, peer_id, fallback_addr=None, retry_round=False):
+    """Advance only fully ACKed 8-fragment flights; never consume a retry epoch."""
+    try:
+        rows = load_outgoing_fragment_targets_for_peer(
+            _CHAT_DEDUP_DB, "rescue2", peer_id, limit=50)
+    except Exception as exc:
+        _diag_exception("chat_fragment_window_load_failed", peer_id=peer_id,
+                        error_type=type(exc).__name__)
+        return
+    for row in rows:
+        endpoint_ip = row.get("endpoint_ip") or ""
+        endpoint_port = int(row.get("endpoint_port") or 0)
+        if (not endpoint_ip or endpoint_port not in (8887, 8888, 8889, 8890)) and fallback_addr:
+            endpoint_ip, endpoint_port = fallback_addr[0], int(fallback_addr[1])
+        if not endpoint_ip or endpoint_port not in (8887, 8888, 8889, 8890):
+            continue
+        try:
+            sent = send_outgoing_fragment_window(
+                sock, _CHAT_DEDUP_DB, "rescue2", row["message_id"], peer_id,
+                row["body"], row["created_at_ms"], (endpoint_ip, endpoint_port),
+                PEER_NODE_ID, "rescue2", PEER_NODE_ID, RESCUE_SECRET,
+                send_lock=UDP_CHAT_SEND_LOCK, display_name="PC_Terminal",
+                mark_attempt=retry_round, allow_fast_retry=False)
+            if sent:
+                _diag_event("chat_fragment_window_advanced", peer_id=peer_id,
+                            message_id=row["message_id"], sent=sent)
+        except Exception as exc:
+            _diag_exception("chat_fragment_window_send_failed", peer_id=peer_id,
+                            message_id=row["message_id"], error_type=type(exc).__name__)
+
+
+def _retry_deferred_v2_peer_recoveries():
+    """One process-wide worker handles ACK-timeout retries and deferred storage failures."""
+    global _V2_RECOVERY_SCHEMA_READY
+    while True:
+        _V2_RECOVERY_WAKE_EVENT.wait(1.0)
+        _V2_RECOVERY_WAKE_EVENT.clear()
+        if not _V2_RECOVERY_SCHEMA_READY:
+            try:
+                ensure_outbox_retry_schema(_CHAT_DEDUP_DB)
+                _V2_RECOVERY_SCHEMA_READY = True
+            except Exception as exc:
+                _diag_exception("chat_recovery_schema_retry_failed",
+                                error_type=type(exc).__name__)
+                with print_lock:
+                    print(f"⚠️ rescue2 LAN retry schema initialization still deferred: {type(exc).__name__}")
+                time.sleep(4)
+                continue
+        with _V2_RECOVERY_RETRY_LOCK:
+            recovery_event_peers = set(_V2_RECOVERY_RETRY_PEERS)
+            fragment_window_peers = set(_V2_FRAGMENT_WINDOW_PEERS)
+            _V2_RECOVERY_RETRY_PEERS.clear()
+            _V2_FRAGMENT_WINDOW_PEERS.clear()
+            pending_peer_ids = set(recovery_event_peers)
+        sock = UDP_LISTENER_SOCKET
+        if sock is None:
+            with _V2_RECOVERY_RETRY_LOCK:
+                _V2_RECOVERY_RETRY_PEERS.update(recovery_event_peers)
+                _V2_FRAGMENT_WINDOW_PEERS.update(fragment_window_peers)
+            continue
+        try:
+            if sock.fileno() < 0:
+                with _V2_RECOVERY_RETRY_LOCK:
+                    _V2_RECOVERY_RETRY_PEERS.update(recovery_event_peers)
+                    _V2_FRAGMENT_WINDOW_PEERS.update(fragment_window_peers)
+                continue
+            pending_peer_ids.update(list_due_outgoing_peers(_CHAT_DEDUP_DB, "rescue2", limit=500))
+            if not pending_peer_ids and not fragment_window_peers:
+                continue
+            known_peers = {row["peer_id"]: row for row in list_known_peer_snapshot(_CHAT_DEDUP_DB, "rescue2", limit=500)}
+        except Exception as exc:
+            _diag_exception("chat_recovery_retry_scan_failed",
+                            recovery_peer_count=len(recovery_event_peers),
+                            error_type=type(exc).__name__)
+            with _V2_RECOVERY_RETRY_LOCK:
+                _V2_RECOVERY_RETRY_PEERS.update(recovery_event_peers)
+                _V2_FRAGMENT_WINDOW_PEERS.update(fragment_window_peers)
+            with print_lock:
+                print(f"⚠️ rescue2 LAN recovery retry scan deferred: {type(exc).__name__}")
+            continue
+        for fragment_peer_id in fragment_window_peers:
+            peer = known_peers.get(fragment_peer_id)
+            fallback_addr = ((peer["endpoint_ip"], int(peer.get("endpoint_port") or 0))
+                             if peer and peer.get("endpoint_ip") else None)
+            _advance_v2_fragment_windows(sock, fragment_peer_id, fallback_addr)
+        unresolved_recovery_peers = recovery_event_peers - set(known_peers)
+        with _V2_RECOVERY_RETRY_LOCK:
+            _V2_RECOVERY_RETRY_PEERS.update(unresolved_recovery_peers)
+        for peer_id in pending_peer_ids:
+            peer = known_peers.get(peer_id)
+            if not peer or not peer.get("endpoint_ip"):
+                _advance_v2_fragment_windows(sock, peer_id, retry_round=True)
+                if peer_id in recovery_event_peers:
+                    unresolved_recovery_peers.add(peer_id)
+                continue
+            try:
+                target_port = int(peer.get("endpoint_port") or 0)
+            except (TypeError, ValueError):
+                target_port = 0
+            if target_port not in (8887, 8888, 8889, 8890):
+                _advance_v2_fragment_windows(sock, peer_id, retry_round=True)
+                if peer_id in recovery_event_peers:
+                    unresolved_recovery_peers.add(peer_id)
+                continue
+            _resume_pending_v2_for_peer(
+                sock, peer_id, (peer["endpoint_ip"], target_port),
+                recovery_event=peer_id in recovery_event_peers)
+        if unresolved_recovery_peers:
+            with _V2_RECOVERY_RETRY_LOCK:
+                _V2_RECOVERY_RETRY_PEERS.update(unresolved_recovery_peers)
+
+
+def _run_v2_recovery_retry_worker():
+    """Supervise the long-lived retry loop so transient failures do not strand the worker."""
+    global _V2_RECOVERY_WORKER_STARTED
+    try:
+        while True:
+            try:
+                _retry_deferred_v2_peer_recoveries()
+            except Exception as exc:
+                with print_lock:
+                    print(f"⚠️ rescue2 LAN recovery worker recovered from unexpected failure: {type(exc).__name__}")
+            # The retry loop is expected to block forever; a return is treated as
+            # an unexpected exit and restarted after a bounded pause.
+            time.sleep(1.0)
+    finally:
+        # BaseException / interpreter shutdown must not leave a stale singleton flag.
+        with _V2_RECOVERY_RETRY_LOCK:
+            _V2_RECOVERY_WORKER_STARTED = False
+
+
+def _start_v2_recovery_retry_worker():
+    """Start one worker even if schema migration is temporarily locked; it retries migration."""
+    global _V2_RECOVERY_WORKER_STARTED, _V2_RECOVERY_SCHEMA_READY
+    try:
+        ensure_outbox_retry_schema(_CHAT_DEDUP_DB)
+        _V2_RECOVERY_SCHEMA_READY = True
+    except Exception as exc:
+        _V2_RECOVERY_SCHEMA_READY = False
+        with print_lock:
+            print(f"⚠️ rescue2 LAN retry schema initialization deferred to recovery worker: {type(exc).__name__}")
+    with _V2_RECOVERY_RETRY_LOCK:
+        if _V2_RECOVERY_WORKER_STARTED:
+            return
+        _V2_RECOVERY_WORKER_STARTED = True
+    worker = threading.Thread(target=_run_v2_recovery_retry_worker, daemon=True,
+                               name="lan-v2-recovery-retry")
+    try:
+        worker.start()
+    except Exception:
+        # A failed Thread.start() must not leave the singleton guard stuck true.
+        with _V2_RECOVERY_RETRY_LOCK:
+            _V2_RECOVERY_WORKER_STARTED = False
+        raise
+    _diag_event("chat_recovery_worker_started", schema_ready=_V2_RECOVERY_SCHEMA_READY)
+
+
+def _handle_authenticated_v2_packet(envelope, sock, addr):
+    packet_type = envelope.get("type")
+    sender = str(envelope.get("sender_peer_id") or "")
+    if sender == PEER_NODE_ID:
+        return
+    display_sender = str(envelope.get("display_name") or sender)
+    if packet_type == "peer.hello":
+        nonce = str(envelope.get("nonce") or "")
+        if (not sender or not nonce
+                or int(addr[1]) not in (8887, 8888, 8889, 8890)):
+            _diag_event("peer_hello_rejected", logging.WARNING,
+                        source_ip=addr[0], source_port=addr[1],
+                        has_sender=bool(sender), has_nonce=bool(nonce))
+            return
+        _diag_event("peer_hello_received", peer_id=sender,
+                    source_ip=addr[0], source_port=addr[1],
+                    challenge_only=bool(envelope.get("challenge_only", False)))
+        # Receipt proves inbound reachability only. Keep the route suspect until
+        # our own nonce-bound challenge receives a matching peer.ack.
+        if not record_peer(_CHAT_DEDUP_DB, "rescue2", sender,
+                           envelope.get("sender_peer_type", "unknown"),
+                           envelope.get("service_id", ""), addr[0], addr[1], "suspect"):
+            _diag_event("peer_hello_persist_failed", logging.ERROR, peer_id=sender,
+                        source_ip=addr[0], source_port=addr[1])
+            print(f"⚠️ rescue2 peer HELLO persistence failed; withholding peer.ack")
+            return
+        reply = {"type": "peer.ack", "sender_peer_id": PEER_NODE_ID,
+                 "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
+                 "reply_nonce": nonce, "listen_port": UDP_PORT}
+        try:
+            sock.sendto(encode_packet(reply, RESCUE_SECRET), addr)
+        except OSError as exc:
+            _diag_exception("peer_hello_ack_send_failed", peer_id=sender,
+                            source_ip=addr[0], source_port=addr[1],
+                            error_type=type(exc).__name__)
+            return
+        _diag_event("peer_hello_ack_sent", peer_id=sender,
+                    source_ip=addr[0], source_port=addr[1])
+        # Normal HELLO triggers a reverse challenge. challenge_only receives only
+        # the response; it must not activate the source endpoint on this side.
+        if not envelope.get("challenge_only", False):
+            send_directed_peer_challenge(
+                sock, _CHAT_DEDUP_DB, "rescue2", PEER_NODE_ID, "rescue2",
+                PEER_NODE_ID, RESCUE_SECRET, UDP_PORT,
+                sender, addr[0], addr[1])
+        return
+    if packet_type == "peer.ack":
+        reply_nonce = str(envelope.get("reply_nonce") or "")
+        challenge_ok = bool(reply_nonce) and complete_peer_challenge(
+            _CHAT_DEDUP_DB, "rescue2", reply_nonce, sender, addr[0], addr[1],
+            envelope.get("sender_peer_type", "unknown"),
+            envelope.get("service_id", ""))
+        _diag_event("peer_challenge_result", peer_id=sender,
+                    source_ip=addr[0], source_port=addr[1],
+                    nonce_present=bool(reply_nonce), verified=bool(challenge_ok))
+        if challenge_ok:
+            # Keep the UDP receive loop free for incoming messages and ACKs.
+            with _V2_RECOVERY_RETRY_LOCK:
+                _V2_RECOVERY_RETRY_PEERS.add(sender)
+            _V2_RECOVERY_WAKE_EVENT.set()
+        return
+    if packet_type == "chat.fragment.ack":
+        if not packet_service_identity_matches(envelope, sender):
+            return
+        message_id = str(envelope.get("message_id") or "")
+        target = str(envelope.get("target_peer_id") or "")
+        fragment_index = envelope.get("fragment_index")
+        if (target != PEER_NODE_ID or envelope.get("status") != "received"
+                or not sender or type(fragment_index) is not int
+                or int(addr[1]) not in (8887, 8888, 8889, 8890)):
+            return
+        active_route = peer_endpoint_matches(_CHAT_DEDUP_DB, "rescue2", sender, addr[0], addr[1])
+        sent_endpoint_route = outgoing_ack_endpoint_matches(
+            _CHAT_DEDUP_DB, "rescue2", message_id, sender, addr[0], addr[1])
+        discovery_flight = fragment_index < 8 and is_outgoing_discovery_pending(
+            _CHAT_DEDUP_DB, "rescue2", message_id)
+        if not (active_route or sent_endpoint_route or discovery_flight):
+            return
+        try:
+            bitmap = record_outgoing_fragment_ack(
+                _CHAT_DEDUP_DB, "rescue2", message_id, sender, fragment_index,
+                addr[0], int(addr[1]))
+        except LanP2PStorageError as exc:
+            _diag_exception("chat_fragment_ack_persist_failed", peer_id=sender,
+                            message_id=message_id, fragment_index=fragment_index,
+                            error_type=type(exc).__name__)
+            return
+        if bitmap is not None:
+            with _V2_RECOVERY_RETRY_LOCK:
+                _V2_FRAGMENT_WINDOW_PEERS.add(sender)
+            _V2_RECOVERY_WAKE_EVENT.set()
+            _diag_event("chat_fragment_ack_persisted", peer_id=sender,
+                        message_id=message_id, fragment_index=fragment_index,
+                        acked=bitmap.count("1"), fragment_count=len(bitmap))
+        return
+    if packet_type == "chat.ack":
+        if not packet_service_identity_matches(envelope, sender):
+            return
+        message_id = str(envelope.get("message_id") or "")
+        target = str(envelope.get("target_peer_id") or "")
+        active_route = peer_endpoint_matches(_CHAT_DEDUP_DB, "rescue2", sender, addr[0], addr[1])
+        sent_endpoint_route = outgoing_ack_endpoint_matches(
+            _CHAT_DEDUP_DB, "rescue2", message_id, sender, addr[0], addr[1])
+        ack_accepted = (target == PEER_NODE_ID and envelope.get("status") == "stored"
+                        and sender and (active_route or sent_endpoint_route))
+        _diag_event("chat_ack_received", peer_id=sender, message_id=message_id,
+                    status=envelope.get("status", "unknown"),
+                    active_route=bool(active_route), sent_endpoint_route=bool(sent_endpoint_route),
+                    accepted=bool(ack_accepted), source_ip=addr[0], source_port=addr[1])
+        if ack_accepted:
+            acknowledged = acknowledge_outgoing_message(
+                _CHAT_DEDUP_DB, "rescue2", message_id, sender)
+            _diag_event("chat_ack_persisted", peer_id=sender, message_id=message_id,
+                        acknowledged=bool(acknowledged))
+        return
+    if packet_type == "chat.fragment":
+        target = envelope.get("target_peer_id", "*")
+        message_id = str(envelope.get("message_id") or "")
+        if (target not in ("*", PEER_NODE_ID) or not sender or not message_id
+                or int(addr[1]) not in (8887, 8888, 8889, 8890)):
+            return
+        try:
+            stored = store_incoming_chat_fragment(
+                _CHAT_DEDUP_DB, "rescue2", sender, envelope)
+        except LanP2PStorageError as exc:
+            _diag_exception("chat_fragment_persist_failed", peer_id=sender,
+                            message_id=message_id, error_type=type(exc).__name__)
+            return
+        if stored == "rejected":
+            _diag_event("chat_fragment_rejected", logging.WARNING,
+                        peer_id=sender, message_id=message_id,
+                        fragment_index=envelope.get("fragment_index"))
+            return
+        fragment_index = int(envelope.get("fragment_index", -1))
+        fragment_ack = {"type": "chat.fragment.ack", "sender_peer_id": PEER_NODE_ID,
+                        "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
+                        "target_peer_id": sender, "message_id": message_id,
+                        "fragment_index": fragment_index, "status": "received"}
+        if stored != "complete_duplicate":
+            try:
+                sock.sendto(encode_packet(fragment_ack, RESCUE_SECRET), addr)
+            except OSError:
+                return
+        cached = load_incoming_chat_fragments(
+            _CHAT_DEDUP_DB, "rescue2", sender, message_id)
+        if not cached or len(cached) != int(envelope.get("fragment_count", -1)):
+            return
+        try:
+            body = assemble_chat_fragments(cached)
+        except ValueError as exc:
+            _diag_exception("chat_fragment_reassembly_failed", peer_id=sender,
+                            message_id=message_id, error_type=type(exc).__name__)
+            return
+        claim_result = _claim_chat_message(sender, message_id, body)
+        if claim_result is None:
+            return
+        record_peer(_CHAT_DEDUP_DB, "rescue2", sender,
+                    envelope.get("sender_peer_type", "unknown"),
+                    envelope.get("service_id", ""), addr[0], addr[1], "suspect")
+        final_ack = {"type": "chat.ack", "sender_peer_id": PEER_NODE_ID,
+                     "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
+                     "target_peer_id": sender, "message_id": message_id, "status": "stored"}
+        try:
+            sock.sendto(encode_packet(final_ack, RESCUE_SECRET), addr)
+        except OSError:
+            return
+        if not claim_result:
+            return
+        print(f"\\n{I.chat} [{display_sender}] {body}  (来自 {addr[0]})")
+        with _state_lock:
+            info = DISCOVERED_DEVICES.setdefault(sender, {})
+            info["source_ip"] = addr[0]
+            info["last_chat"] = time.time()
+        return
+    if packet_type != "chat.message":
+        return
+    target = envelope.get("target_peer_id", "*")
+    if target not in ("*", PEER_NODE_ID):
+        _diag_event("chat_message_not_for_this_peer", peer_id=sender,
+                    target_peer_id=target, message_id=envelope.get("message_id", ""))
+        return
+    message_id = str(envelope.get("message_id") or "")
+    body = str(envelope.get("body") or "")
+    if not sender or not message_id:
+        return
+    # Every authenticated v2 message is persisted before it can receive a stored ACK.
+    # Display names are presentation metadata, never sender identity or a persistence bypass.
+    claim_result = _claim_chat_message(sender, message_id, body)
+    if claim_result is None:
+        _diag_event("chat_message_persist_rejected", logging.WARNING,
+                    peer_id=sender, message_id=message_id,
+                    source_ip=addr[0], source_port=addr[1])
+        return
+    _diag_event("chat_message_persisted", peer_id=sender, message_id=message_id,
+                is_new=bool(claim_result), source_ip=addr[0], source_port=addr[1])
+    record_peer(_CHAT_DEDUP_DB, "rescue2", sender, envelope.get("sender_peer_type", "unknown"),
+                envelope.get("service_id", ""), addr[0], addr[1], "suspect")
+    ack_packet = {"type": "chat.ack", "sender_peer_id": PEER_NODE_ID,
+                  "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
+                  "target_peer_id": sender, "message_id": message_id, "status": "stored"}
+    try:
+        ack_bytes = encode_packet(ack_packet, RESCUE_SECRET)
+        ack_sent = sock.sendto(ack_bytes, addr)
+        _diag_event("chat_ack_sent", peer_id=sender, message_id=message_id,
+                    bytes=ack_sent, source_ip=addr[0], source_port=addr[1])
+    except OSError as exc:
+        _diag_exception("chat_ack_send_failed", peer_id=sender, message_id=message_id,
+                        source_ip=addr[0], source_port=addr[1],
+                        error_type=type(exc).__name__)
+    if not claim_result:
+        _diag_event("chat_duplicate_message_suppressed", peer_id=sender,
+                    message_id=message_id)
+        return
+    print(f"\\n{I.chat} [{display_sender}] {body}  (来自 {addr[0]})")
+    with _state_lock:
+        info = DISCOVERED_DEVICES.setdefault(sender, {})
+        info["source_ip"] = addr[0]
+        info["last_chat"] = time.time()
+
+
+def send_chat_v2(body, target_ips):
+    """Persist PC-originated chat and send from bound UDP 8889 so ACKs return here."""
+    message_id = uuid.uuid4().hex
+    _diag_event("chat_send_requested", message_id=message_id,
+                body_bytes=len(str(body).encode("utf-8")),
+                target_count=len(target_ips or []))
+    peer_snapshot = list_known_peer_snapshot(_CHAT_DEDUP_DB, "rescue2")
+    selected_ips = set(target_ips or [])
+    broadcast_all = not selected_ips or "255.255.255.255" in selected_ips
+    if broadcast_all:
+        selected_ips = {"255.255.255.255"}
+        target_ids = [p["peer_id"] for p in peer_snapshot]
+    else:
+        # Preserve known offline recipients selected by their last recorded address.
+        target_ids = [p["peer_id"] for p in peer_snapshot if p["endpoint_ip"] in selected_ips]
+    created = int(time.time() * 1000)
+    probe = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
+             "sender_peer_type": "rescue2", "service_id": PEER_NODE_ID,
+             "target_peer_id": "*", "message_id": message_id,
+             "created_at_ms": created, "display_name": "PC_Terminal", "body": body}
+    try:
+        broadcast_bytes = encode_packet(probe, RESCUE_SECRET)
+        long_message = False
+        if target_ids:
+            for peer_id in target_ids:
+                targeted = dict(probe)
+                targeted["target_peer_id"] = peer_id
+                encode_packet(targeted, RESCUE_SECRET)
+        else:
+            budget = dict(probe)
+            budget["target_peer_id"] = max_peer_id_budget_probe()
+            encode_packet(budget, RESCUE_SECRET)
+    except ValueError:
+        try:
+            if target_ids:
+                for peer_id in target_ids:
+                    build_authenticated_chat_fragment_packets(
+                        message_id, peer_id, body, created, PEER_NODE_ID, "rescue2",
+                        PEER_NODE_ID, RESCUE_SECRET, "PC_Terminal")
+            else:
+                build_authenticated_chat_fragment_packets(
+                    message_id, max_peer_id_budget_probe(), body, created,
+                    PEER_NODE_ID, "rescue2", PEER_NODE_ID, RESCUE_SECRET, "PC_Terminal")
+            broadcast_bytes = None
+            long_message = True
+        except ValueError as exc:
+            _diag_event("chat_send_packet_encode_failed", logging.WARNING,
+                        message_id=message_id, error_type=type(exc).__name__)
+            print("⚠️ 对讲消息超过长消息支持上限，未发送。")
+            return False
+    if not persist_outgoing_message(_CHAT_DEDUP_DB, "rescue2", PEER_NODE_ID,
+                                    message_id, body, target_ids, created):
+        _diag_event("chat_send_persist_failed", logging.ERROR, message_id=message_id,
+                    target_peer_count=len(target_ids))
+        print("⚠️ 对讲消息无法写入持久化队列，已阻止发送。")
+        return False
+    _diag_event("chat_send_persisted", message_id=message_id,
+                target_peer_count=len(target_ids))
+    sock = UDP_LISTENER_SOCKET
+    if sock is None or sock.fileno() < 0:
+        _diag_event("chat_send_waiting_for_listener", logging.WARNING,
+                    message_id=message_id, listener_available=False)
+        print("⚠️ rescue2 UDP 监听尚未就绪，消息已保存，等待设备重新发现后补发。")
+        return False
+    try:
+        if target_ids:
+            # Fixed identities remain immutable; long messages use the same per-target
+            # selective ACK bitmap and bounded 8-fragment flight as Android.
+            if long_message:
+                for peer in peer_snapshot:
+                    if peer["peer_id"] not in target_ids:
+                        continue
+                    endpoint_ip = peer.get("endpoint_ip") or ""
+                    endpoint_port = int(peer.get("endpoint_port") or UDP_DEVICE_PORT)
+                    if endpoint_ip and endpoint_port in (8887, 8888, 8889, 8890):
+                        send_outgoing_fragment_window(
+                            sock, _CHAT_DEDUP_DB, "rescue2", message_id, peer["peer_id"],
+                            body, created, (endpoint_ip, endpoint_port), PEER_NODE_ID,
+                            "rescue2", PEER_NODE_ID, RESCUE_SECRET,
+                            send_lock=UDP_CHAT_SEND_LOCK, display_name="PC_Terminal",
+                            mark_attempt=True, allow_fast_retry=True)
+            else:
+                send_outbox_to_active_peers(
+                    sock, _CHAT_DEDUP_DB, "rescue2", message_id, probe, RESCUE_SECRET,
+                    send_lock=UDP_CHAT_SEND_LOCK, attempts=1, retry_delay_seconds=0.25)
+        elif broadcast_all:
+            subnet_broadcasts = get_subnet_broadcasts()
+            destinations = build_chat_discovery_destinations(
+                [*subnet_broadcasts, "255.255.255.255"], UDP_PORT)
+            if long_message:
+                send_discovery_fragment_window(
+                    sock, _CHAT_DEDUP_DB, "rescue2", message_id, body, created,
+                    destinations, PEER_NODE_ID, "rescue2", PEER_NODE_ID, RESCUE_SECRET,
+                    send_lock=UDP_CHAT_SEND_LOCK, display_name="PC_Terminal")
+            else:
+                send_discovery_broadcast_with_retries(
+                    sock, _CHAT_DEDUP_DB, "rescue2", message_id, broadcast_bytes, destinations,
+                    send_lock=UDP_CHAT_SEND_LOCK, attempts=3, retry_delay_seconds=0.25)
+        elif selected_ips:
+            # A specifically requested IP with no known peer identity is a directed
+            # first-discovery probe, never a subnet-wide fallback.
+            destinations = build_chat_discovery_destinations(
+                [ip for ip in selected_ips if ip != "255.255.255.255"], UDP_PORT)
+            if long_message:
+                send_discovery_fragment_window(
+                    sock, _CHAT_DEDUP_DB, "rescue2", message_id, body, created,
+                    destinations, PEER_NODE_ID, "rescue2", PEER_NODE_ID, RESCUE_SECRET,
+                    send_lock=UDP_CHAT_SEND_LOCK, display_name="PC_Terminal")
+            else:
+                send_discovery_broadcast_with_retries(
+                    sock, _CHAT_DEDUP_DB, "rescue2", message_id, broadcast_bytes, destinations,
+                    send_lock=UDP_CHAT_SEND_LOCK, attempts=3, retry_delay_seconds=0.25)
+        _diag_event("chat_send_submitted", message_id=message_id,
+                    target_peer_count=len(target_ids), broadcast=broadcast_all)
+        print(f"{I.ok} 对讲消息已提交发送队列: {message_id}")
+        return True
+    except Exception as e:
+        _diag_exception("chat_send_failed", message_id=message_id,
+                        target_peer_count=len(target_ids), error_type=type(e).__name__)
+        print(f"{I.warn} 对讲发送失败，消息保留待补发: {type(e).__name__}")
+        return False
+
+
+_V2_PACKET_DISPATCHER = BoundedPacketDispatcher(
+    _handle_authenticated_v2_packet,
+    "rescue2",
+    on_error=_on_v2_dispatch_error)
+
 
 def udp_listener():
-    global UDP_OK
+    global UDP_OK, UDP_LISTENER_SOCKET
     while True:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             sock.bind(('0.0.0.0', UDP_PORT))
+            UDP_LISTENER_SOCKET = sock
+            _start_v2_recovery_retry_worker()
             UDP_OK = True
+            _diag_event("udp_listener_bound", bind="0.0.0.0", port=UDP_PORT,
+                        socket_fd=sock.fileno())
+            try:
+                subnet_broadcasts = list(directed_broadcast_addresses(enumerate_ipv4_paths()))
+            except Exception as broadcast_error:
+                subnet_broadcasts = []
+                _diag_exception("udp_broadcast_address_failed", fallback="limited-broadcast",
+                                error_type=type(broadcast_error).__name__)
+            if not subnet_broadcasts:
+                try:
+                    fallback_broadcast = get_subnet_broadcast()
+                    if fallback_broadcast:
+                        subnet_broadcasts.append(fallback_broadcast)
+                except Exception as broadcast_error:
+                    _diag_exception("udp_broadcast_fallback_failed",
+                                    error_type=type(broadcast_error).__name__)
+            subnet_broadcasts = list(dict.fromkeys(
+                [*subnet_broadcasts, "255.255.255.255"]))
+            announced = send_startup_peer_beacon(
+                sock, PEER_NODE_ID, "rescue2", PEER_NODE_ID, RESCUE_SECRET,
+                UDP_PORT, [8888, 8887, 8890],
+                subnet_broadcasts,
+                db_path=_CHAT_DEDUP_DB, receiver_scope="rescue2")
+            _diag_event("udp_listener_started", bind="0.0.0.0", port=UDP_PORT,
+                        local_ips=",".join(get_all_local_ips()) or "unavailable",
+                        subnet_broadcasts=",".join(subnet_broadcasts), beacon_sent=announced)
             print(f"{I.ok} UDP 监听已启动...")
+            print(f"{I.send} rescue2 startup peer beacon sent={announced}")
             while True:
                 data, addr = sock.recvfrom(4096)
-                msg = data.decode('utf-8', errors='ignore')
-                if msg.startswith("FIND_ME_MSG:") or msg.startswith("FIND_ME_CHAT:"):
-                    parts = msg.split(":", 3)
-                    if len(parts) >= 3 and parts[1] == RESCUE_SECRET:
-                        sender = parts[2]
-                        content = parts[3] if len(parts) == 4 else ""
-                        if sender in ("PC_Terminal", "Web_Console", "Guest_"): continue
-                        dedup_key = (sender, content)
-                        now_ts = time.time()
-                        if now_ts - _LAST_UDP_MSG.get(dedup_key, 0) < 5.0: continue
-                        _LAST_UDP_MSG[dedup_key] = now_ts
-                        if len(_LAST_UDP_MSG) > 100:
-                            # v2.0.2 补丁：利用字典有序性，超限时直接踢掉最老的记录，防内存泄漏
-                            while len(_LAST_UDP_MSG) > 100:
-                                _LAST_UDP_MSG.pop(next(iter(_LAST_UDP_MSG)))
-                        print(f"\n{I.chat} [{sender}] {content}  (来自 {addr[0]})")
-                        with _state_lock:
-                            info = DISCOVERED_DEVICES.setdefault(sender, {})
-                            info["source_ip"] = addr[0]
-                            info["last_chat"] = time.time()
-        except Exception:
+                if data[:1] == b"{":
+                    try:
+                        envelope = decode_packet(data, RESCUE_SECRET)
+                    except ValueError as decode_error:
+                        _diag_event("udp_v2_packet_rejected", logging.WARNING,
+                                    source_ip=addr[0], source_port=addr[1],
+                                    bytes=len(data), error_type=type(decode_error).__name__)
+                        continue
+                    packet_type = envelope.get("type", "unknown")
+                    _diag_event("udp_v2_packet_received", source_ip=addr[0],
+                                source_port=addr[1], bytes=len(data), packet_type=packet_type)
+                    if not _V2_PACKET_DISPATCHER.submit(envelope, sock, addr):
+                        _diag_event("udp_v2_dispatch_queue_full", logging.WARNING,
+                                    source_ip=addr[0], source_port=addr[1],
+                                    packet_type=packet_type)
+                        print("⚠️ rescue2 LAN packet queue full; sender retry required: " + str(packet_type))
+                    continue
+        except Exception as listener_error:
             UDP_OK = False
+            _diag_exception("udp_listener_failed", bind="0.0.0.0", port=UDP_PORT,
+                            error_type=type(listener_error).__name__, retry_delay_seconds=10)
             time.sleep(10)
+        finally:
+            if UDP_LISTENER_SOCKET is sock:
+                UDP_LISTENER_SOCKET = None
+            try:
+                sock.close()
+                _diag_event("udp_listener_socket_closed", port=UDP_PORT)
+            except Exception as close_error:
+                _diag_exception("udp_listener_socket_close_failed",
+                                error_type=type(close_error).__name__)
 
 # ===== ARP 查询 / 局域网扫描 =====
 def _try_ip_neigh(prefix):
@@ -508,17 +1332,34 @@ def get_arp_ips(prefix):
     ips.update(_try_proc_net_arp(prefix))
     return list(ips)
 
-def _probe_ips(ips, local_ip):
+def _probe_ips(ips, local_ip, scan_id=None):
     temp_url = f"http://{local_ip}:{LOG_PORT}/api/report"
     cmd = f"FIND_ME_REPORT_TEMP:{RESCUE_SECRET}:{temp_url}"
+    probe_stats = {"sent": 0, "failed": 0}
+    probe_stats_lock = threading.Lock()
     def probe(ip):
+        s = None
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.sendto(cmd.encode(), (ip, UDP_PORT))
-            s.close()
-        except Exception: pass
+            s.sendto(cmd.encode(), (ip, UDP_DEVICE_PORT))
+            with probe_stats_lock:
+                probe_stats["sent"] += 1
+        except Exception:
+            with probe_stats_lock:
+                probe_stats["failed"] += 1
+        finally:
+            if s is not None:
+                try:
+                    s.close()
+                except OSError:
+                    pass
     with concurrent.futures.ThreadPoolExecutor(max_workers=50) as ex:
         list(ex.map(probe, ips))
+    _diag_event("lan_probe_batch_complete", scan_id=scan_id or "unscoped",
+                candidate_count=len(ips),
+                sent_count=probe_stats["sent"], failed_count=probe_stats["failed"],
+                target_port=UDP_DEVICE_PORT)
+    return probe_stats
 
 def scan_lan_devices():
     real_local_ips = [ip for ip in get_all_local_ips() if not ip.startswith("127.")] or ["127.0.0.1"]
@@ -529,6 +1370,9 @@ def scan_lan_devices():
         if p not in seen_prefix:
             seen_prefix.add(p)
             targets.append((p, ip))
+    scan_id = uuid.uuid4().hex[:12]
+    _diag_event("lan_scan_started", scan_id=scan_id, local_ip_count=len(real_local_ips),
+                local_ips=",".join(real_local_ips), network_count=len(targets))
     print(f"\n{I.ping} 正在扫描局域网 ...")
     print(f"   本机 IP: {', '.join(real_local_ips)}")
     print(f"   网段: {', '.join(p + '.x' for p, _ in targets)}")
@@ -539,7 +1383,7 @@ def scan_lan_devices():
         if not arp_ips: continue
         arp_hit = True
         print(f"   [{prefix}.x] ARP 表里找到 {len(arp_ips)} 个 IP，先探测...")
-        _probe_ips(arp_ips, local_ip)
+        _probe_ips(arp_ips, local_ip, scan_id)
         time.sleep(3)
     if not arp_hit: print(f"{I.warn} ARP 表为空")
     with _state_lock:
@@ -548,17 +1392,23 @@ def scan_lan_devices():
         print(f"{I.warn} ARP 未命中，开始全网段扫描 ...")
         for prefix, local_ip in targets:
             all_ips = [f"{prefix}.{i}" for i in range(1, 255) if f"{prefix}.{i}" != local_ip]
-            _probe_ips(all_ips, local_ip)
+            _probe_ips(all_ips, local_ip, scan_id)
     print(f"{I.ping} 等待手机响应（10 秒）...")
     time.sleep(10)
     with _state_lock:
         new_devices = {dev_id: info for dev_id, info in DISCOVERED_DEVICES.items() if info.get("last_seen", 0) >= scan_start}
     if not new_devices:
+        _diag_event("lan_scan_completed", logging.WARNING, scan_id=scan_id,
+                    discovered_count=0, duration_ms=int((time.time()-scan_start)*1000))
         print(f"\n{I.err} 未发现任何运行中的手机")
         # v2.0.2 补丁：跨网段提示
         print(f"{I.ping} 提示：如果手机连接的是 4G 或其他网段，局域网扫描无法发现它。")
         print(f"      可以尝试在菜单直接输入手机的公网/局域网 IP 进行定向控制。")
         return
+    _diag_event("lan_scan_completed", scan_id=scan_id,
+                discovered_count=len(new_devices),
+                duration_ms=int((time.time()-scan_start)*1000),
+                device_ids=",".join(list(new_devices.keys())[:20]))
     print(f"\n{I.ok} 发现 {len(new_devices)} 台手机：")
     for dev_id, info in new_devices.items():
         ip = info.get("source_ip_lan") or info.get("source_ip") or info.get("ip", "?")
@@ -1047,6 +1897,59 @@ def install_any_apk(device):
                     print(f"    {I.err} 安装异常: {e}")
             print(f"\n{I.ok} 批量安装完成: 成功 {success_count}/{len(targets)}")
 
+def adb_root_shell_console(device):
+    """Request target-device superuser access through its installed su/root manager."""
+    if not device:
+        return
+    print(f"\n{I.warn} 正在请求设备 {device} 的 Root Shell 授权...")
+    print("如果设备安装了 Magisk 等 Root 管理器，请在设备端处理授权提示。")
+    try:
+        probe = subprocess.run(
+            ["adb", "-s", device, "shell", "su -c " + shlex.quote("id")],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            encoding="utf-8", errors="replace", timeout=30)
+    except subprocess.TimeoutExpired:
+        print(f"{I.err} Root 授权等待超时；请检查设备端授权提示。")
+        return
+    except Exception as exc:
+        print(f"{I.err} Root 请求失败: {exc}")
+        return
+
+    probe_output = (probe.stdout or "").strip()
+    if probe_output:
+        print(probe_output)
+    if probe.returncode != 0 or "uid=0" not in probe_output:
+        print(f"{I.warn} 未获得 Root 权限（可能未 Root、授权被拒绝或 su 不可用）。")
+        return
+
+    print(f"{I.ok} 已获得目标设备 Root Shell。")
+    print("输入任意 Shell 命令执行；输入 exit / quit 返回。")
+    while True:
+        try:
+            command = input(f"root@{device}:# ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n退出 Root Shell。")
+            return
+        if command.lower() in ("exit", "quit"):
+            return
+        if not command:
+            continue
+        try:
+            remote_command = "su -c " + shlex.quote(command)
+            result = subprocess.run(
+                ["adb", "-s", device, "shell", remote_command],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                encoding="utf-8", errors="replace", timeout=300)
+            if result.stdout:
+                print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+            if result.returncode != 0:
+                print(f"{I.warn} 命令退出码: {result.returncode}")
+        except subprocess.TimeoutExpired:
+            print(f"{I.err} 命令执行超时（300 秒）。")
+        except Exception as exc:
+            print(f"{I.err} 命令执行失败: {exc}")
+
+
 def menu_e_adb_manager():
     while True:
         print("\n" + "=" * 50)
@@ -1069,7 +1972,7 @@ def menu_e_adb_manager():
         print("  [15] 安装任意第三方 APK (支持 URL/批量)")
         print("  [0] 返回上一级")
         print("=" * 50)
-        c = input("请输入编号 (0-15): ").strip()
+        c = input("请输入编号 (0-16): ").strip()
         if c == '0': return
         if c == '1':
             device = choose_adb_device()
@@ -1262,7 +2165,6 @@ def menu_c_message_cleanup(local_ip):
             msg = input("悬浮文字内容: ").strip()
             if msg:
                 send_udp(f"FIND_ME_FLOAT:{RESCUE_SECRET}:{msg}", choose_targets_multi())
-                if ":" not in msg: send_udp(f"FIND_ME_MSG:{RESCUE_SECRET}:{msg}", choose_targets_multi())
         elif c == '2': send_udp(f"FIND_ME_CLEAR_HISTORY:{RESCUE_SECRET}", choose_targets_multi())
         elif c == '3':
             num = input("报警短信手机号: ").strip()
@@ -1291,6 +2193,29 @@ def menu_f_todo():
     print("\n" + "=" * 50 + "\n  未来功能规划 (TODO)\n" + "=" * 50)
     print("  [已完成] H1b 串行化离线补发\n  [已完成] ADB 一键保活与设备控制\n  [计划中] FMD 定位降级\n  [计划中] Cell 基站双源反查\n  [计划中] Veto 紧急宏指令\n  [计划中] Traccar 运动状态机\n  [计划中] HealthMonitor 手环化\n" + "=" * 50)
     input("按回车返回...")
+
+def menu_g_admin_identity():
+    """Manage the independent Rescue2 administrator identity; never touches RESCUE_SECRET."""
+    print("\n" + "=" * 50 + "\n  G. Rescue2 超级管理员身份\n" + "=" * 50)
+    try:
+        from rescue2_admin_identity import Rescue2AdminIdentity
+        identity = Rescue2AdminIdentity(Rescue2AdminIdentity.default_key_path()).load_or_create()
+        print("  管理员密钥已就绪（Windows 当前用户 DPAPI 保护）")
+        print(f"  SHA-256 指纹: {identity.fingerprint}")
+        print("  [1] 导出公钥信任文件（可复制到 Android 导入）")
+        print("  [0] 返回")
+        choice = input("请选择: ").strip()
+        if choice == "1":
+            export_dir = os.path.abspath("admin_identity_exports")
+            filename = "rescue2_admin_" + time.strftime("%Y%m%d_%H%M%S") + ".json"
+            path = identity.export_public_identity_file(os.path.join(export_dir, filename))
+            print(f"{I.ok} 已导出公钥文件: {path}")
+            print("  文件仅包含公钥、指纹和协议版本，不包含私钥。")
+    except Exception as exc:
+        print(f"{I.err} 管理员身份不可用: {type(exc).__name__}: {exc}")
+        print("  不会回退到 RESCUE_SECRET，也不会降低旧版救援功能。")
+    input("按回车返回...")
+
 
 # ===== 主菜单 =====
 def show_devices():
@@ -1341,7 +2266,7 @@ def print_main_menu(local_ip):
     print("  [7] 注入 ADB 保活   [8] 紧急寻找")
     
     print("\n【 设备管理与规划 】")
-    print("  [E] ADB 控制台      [T] 未来规划 (TODO)")
+    print("  [E] ADB 控制台      [G] Rescue2 管理员身份\n  [T] 未来规划 (TODO)")
     
     print("\n【 更多分类 】")
     if is_termux():
@@ -1380,7 +2305,7 @@ def main():
     local_ip = get_local_ip()
     while True:
         print_main_menu(local_ip)
-        choice = input("请输入 (0-8, A-E, T, X): ").strip().upper().rstrip(".、,，")
+        choice = input("请输入 (0-8, A-G, T, X): ").strip().upper().rstrip(".、,，")
         if choice == '0': print("退出。"); break
         elif choice == 'X': scan_lan_devices()
         elif choice == 'A': menu_a_server_config()
@@ -1406,8 +2331,7 @@ def main():
         elif choice == '6':
             chat = input("对讲消息内容: ").strip()
             if chat:
-                send_udp(f"FIND_ME_CHAT:{RESCUE_SECRET}:PC_Terminal:{chat}", choose_targets_multi())
-                send_udp(f"FIND_ME_MSG:{RESCUE_SECRET}:PC_Terminal:{chat}", choose_targets_multi())
+                send_chat_v2(chat, choose_targets_multi())
         # 2026-11-20 ：1:45 精准插入以下独立特权流处理分支：
         elif choice == 'P':
             input_val = input("\n请输入远程陪伴媒体 URL / 直播源 / H5 网页地址: ").strip()
@@ -1445,13 +2369,23 @@ def main():
                 for cmd in cmds: subprocess.run(["adb", "-s", device, "shell"] + cmd)
                 print(f"{I.ok} 权限已注入。")
         elif choice == '8': send_emergency()
-        else: print(f"{I.err} 无效输入: {choice!r}，请输入 0-8, A-E, T, X")
+        else: print(f"{I.err} 无效输入: {choice!r}，请输入 0-8, A-G, T, X")
 
 if __name__ == "__main__":
     print(f"[RS] rescue2.py Ultimate {BUILD_VERSION} (协议 v{PROTOCOL_VERSION})")
     print("\n正在启动内置服务...")
     print(f"   环境: {env_name()}")
     print(f"   本机 IP: {get_local_ip()}")
+    print(f"   运行日志: {_DIAG_LOG_PATH}")
+    _diag_event("rescue2_startup", build_version=BUILD_VERSION,
+                protocol_version=PROTOCOL_VERSION, environment=env_name(),
+                local_ip=get_local_ip(), pid=os.getpid(), log_path=_DIAG_LOG_PATH)
+    restored_chat = _restore_chat_history()
+    if restored_chat:
+        print(f"\n{I.chat} 已恢复最近 {len(restored_chat)} 条本机对讲记录：")
+        for msg_time, sender, content in restored_chat:
+            print(f"  [{msg_time}] [{sender}] {content}")
+
 
     if is_termux():
         print("\n" + "!" * 50)

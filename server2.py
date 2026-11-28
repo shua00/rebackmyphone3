@@ -2,10 +2,11 @@
 ============================================================
 server2.py — 全功能同步服务（v2 协议稳定版）
 ------------------------------------------------------------
-构建批次 : 20261121-0930
-协议版本 : v2 / v2.1 网络与指令反馈扩展（向后兼容）
-最后修改 : 2026-11-21（v2.5.13-r1 网络状态采集与指令反馈闭环（按 v2.5.12 服务端基线重建））
+构建批次 : 20261122-P2P-r3
+协议版本 : v2-only / v2.7 LAN P2P peer discovery and per-peer ACK
+最后修改 : 2026-11-22（v2-only 信令；消息 ACK 闭环；跨进程重启持久化去重）
 ------------------------------------------------------------
+本轮改动 : v2-only；custom_msg 保留独立 FIND_ME_FLOAT 悬浮留言；LAN chat_msg 使用 v2 JSON chat.message/chat.ack 和稳定 message_id，并与 HTTP 兜底共用消息身份；响应 Android peer challenge 与逐设备 ACK；SQLite 持久化稳定服务 peer ID。
 改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
   2026-11-21 09:30  v2.5.13-r1 重建：服务端严格以 v2.5.12 为基线，增加网络前缀/接口/传输状态落库、command_feedback 持久化与幂等处理；修正 Cloudflare HTTP source_ip 不得作为设备 UDP 目标；兼容旧 executed_ids。
   2026-11-21 09:15  v2.5.12 设备管理整合：统一离线阈值并支持持久化自定义；设备列表增加在线/离线/异常筛选；在线/离线设备均可删除；待执行指令数直接跳转到该设备队列；删除前阻止遗留待确认指令；时间格式人类可读；保留最后有效 IP 与定位采集时间；增加删除审计。
@@ -45,6 +46,7 @@ import json
 import datetime
 import threading
 import time
+import uuid
 import sqlite3
 import gzip
 import os
@@ -56,6 +58,11 @@ import ipaddress
 from urllib.parse import urlparse, parse_qs
 # ★ 新增ThreadPoolExecutor 补丁： 2026-11-05 13:50
 from concurrent.futures import ThreadPoolExecutor
+from lan_p2p_network_paths import enumerate_ipv4_paths, directed_broadcast_addresses
+
+from lan_p2p_core import LanP2PStorageError, assemble_chat_fragments, store_incoming_chat_fragment, load_incoming_chat_fragments, record_outgoing_fragment_ack, load_outgoing_fragment_targets_for_peer, send_outgoing_fragment_window, build_authenticated_chat_fragment_packets, send_discovery_fragment_window, build_chat_discovery_destinations, load_outgoing_message, MAX_PEER_ID_BYTES, max_peer_id_budget_probe, load_stable_peer_id, record_peer, decode_packet, encode_packet, persist_outgoing_message, acknowledge_outgoing_message, load_pending_outgoing_for_peer, mark_outgoing_attempt, send_outgoing_packet, BoundedPacketDispatcher, peer_endpoint_matches, outgoing_ack_endpoint_matches, list_known_peer_snapshot, encode_chat_http_fallback_payload, decode_chat_http_fallback_payload, send_startup_peer_beacon, complete_peer_challenge, send_directed_peer_challenge, add_discovery_targets_for_peer, validate_incoming_message_claim, is_outgoing_discovery_pending, send_outbox_to_active_peers, send_broadcast_packet_with_retries, send_discovery_broadcast_with_retries, begin_outgoing_discovery_window, ensure_outbox_retry_schema, prepare_outgoing_peer_recovery, next_peer_recovery_eligible_at_ms, list_due_outgoing_peers, packet_service_identity_matches
+UDP_LISTEN_PORT = 8887  # server2 独立监听端口；发往 Android 的指令仍使用 8888
+PEER_NODE_ID = load_stable_peer_id(os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3"), "server2")
 
 """
 ============================================================
@@ -196,8 +203,57 @@ CONTROL_IP_ALLOWLIST = [x.strip() for x in os.environ.get("DF_CONTROL_ALLOW_IPS"
 USING_DEFAULT_CREDENTIALS = (CONTROL_TOKEN == DEFAULT_DEVICE_TOKEN)
 DEVICE_TOKEN_IS_DEFAULT = (AUTH_TOKEN == DEFAULT_DEVICE_TOKEN and RESCUE_SECRET == DEFAULT_DEVICE_TOKEN)
 
+def _claim_chat_message(sender, message_id, content):
+    """Persist body and ID atomically in a receiver-specific namespace before ACK."""
+    key = str(message_id or content or "")
+    if not key: return None
+    now = time.time()
+    display_time = datetime.datetime.now().strftime("%H:%M:%S")
+    try:
+        with CHAT_DEDUP_LOCK:
+            conn = sqlite3.connect(CHAT_DEDUP_DB, timeout=5)
+            try:
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("""CREATE TABLE IF NOT EXISTS received_chat_messages (
+                    receiver_scope TEXT NOT NULL, sender TEXT NOT NULL, message_key TEXT NOT NULL,
+                    content TEXT NOT NULL, received_at REAL NOT NULL, display_time TEXT NOT NULL,
+                    PRIMARY KEY(receiver_scope, sender, message_key))""")
+                conn.execute("BEGIN IMMEDIATE")
+                cur = conn.execute("""INSERT OR IGNORE INTO received_chat_messages
+                    (receiver_scope,sender,message_key,content,received_at,display_time) VALUES(?,?,?,?,?,?)""",
+                    ("server2", str(sender), key, str(content), now, display_time))
+                claim = validate_incoming_message_claim(
+                    conn, cur.rowcount, "server2", str(sender), key, str(content))
+                if claim is None:
+                    conn.rollback()
+                    with print_lock:
+                        print("⚠️ server2 message_id payload conflict; refusing stored ACK")
+                    return None
+                conn.commit()
+                return claim
+            finally: conn.close()
+    except Exception as e:
+        with print_lock: print(f"⚠️ 聊天消息持久化失败，本条不确认: {type(e).__name__}")
+        return None
+def _restore_chat_history():
+    """Restore only this receiver's last 100 persisted chat messages."""
+    try:
+        conn = sqlite3.connect(CHAT_DEDUP_DB, timeout=5)
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("""CREATE TABLE IF NOT EXISTS received_chat_messages (
+                receiver_scope TEXT NOT NULL, sender TEXT NOT NULL, message_key TEXT NOT NULL,
+                content TEXT NOT NULL, received_at REAL NOT NULL, display_time TEXT NOT NULL,
+                PRIMARY KEY(receiver_scope, sender, message_key))""")
+            rows = conn.execute("SELECT display_time,sender,content FROM received_chat_messages WHERE receiver_scope=? ORDER BY received_at DESC LIMIT 100", ("server2",)).fetchall()
+            return [{"time": r[0], "sender": r[1], "content": r[2]} for r in reversed(rows)]
+        finally: conn.close()
+    except Exception as e:
+        with print_lock: print(f"⚠️ 对讲历史恢复失败: {type(e).__name__}")
+        return []
+
 # ===== 版本 =====
-BUILD_VERSION = "20261121-0930"
+BUILD_VERSION = "20261122-1200-r3"
 PROTOCOL_VERSION = 2
 
 GLOBAL_DEFAULT_CONFIG = {
@@ -219,6 +275,52 @@ db_write_lock = threading.Lock()
 LAST_MSG_INFO = {}
 LAST_MSG_INFO_MAX = 100
 LAST_MSG_INFO_TTL = 10.0
+CHAT_DEDUP_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_dedup.sqlite3")
+CHAT_DEDUP_LOCK = threading.Lock()
+UDP_LISTENER_SOCKET = None
+
+_ACTIVE_PEER_DISCOVERY_LOCK = threading.Lock()
+_LAST_ACTIVE_PEER_DISCOVERY_AT = 0.0
+_ACTIVE_PEER_DISCOVERY_COOLDOWN_S = 5.0
+
+
+def request_active_peer_discovery():
+    """Send one throttled LAN HELLO burst when the talk page is opened/refreshed."""
+    global _LAST_ACTIVE_PEER_DISCOVERY_AT
+    with _ACTIVE_PEER_DISCOVERY_LOCK:
+        now = time.monotonic()
+        if now - _LAST_ACTIVE_PEER_DISCOVERY_AT < _ACTIVE_PEER_DISCOVERY_COOLDOWN_S:
+            return {"status": "throttled", "sent": 0}
+        sock = UDP_LISTENER_SOCKET
+        if sock is None:
+            return {"status": "not_ready", "sent": 0}
+        try:
+            if sock.fileno() < 0:
+                return {"status": "not_ready", "sent": 0}
+        except Exception:
+            return {"status": "not_ready", "sent": 0}
+        # Use only explicit interface broadcast addresses; limited broadcast is a
+        # bounded fallback when interface enumeration is unavailable.
+        addresses = directed_broadcast_addresses(enumerate_ipv4_paths())
+        if not addresses:
+            addresses = ("255.255.255.255",)
+        sent = send_startup_peer_beacon(
+            sock, PEER_NODE_ID, "server2", PEER_NODE_ID, RESCUE_SECRET,
+            UDP_LISTEN_PORT, [8888, 8889, 8890], addresses,
+            db_path=CHAT_DEDUP_DB, receiver_scope="server2")
+        _LAST_ACTIVE_PEER_DISCOVERY_AT = now
+        return {"status": "ok" if sent else "unavailable", "sent": sent}
+UDP_CHAT_SEND_LOCK = threading.Lock()
+_V2_RECOVERY_RETRY_PEERS = set()
+_V2_FRAGMENT_WINDOW_PEERS = set()
+_V2_RECOVERY_RETRY_LOCK = threading.Lock()
+_V2_RECOVERY_WAKE_EVENT = threading.Event()
+_V2_RECOVERY_INFLIGHT = set()
+_V2_RECOVERY_WORKER_STARTED = False
+_V2_RECOVERY_SCHEMA_READY = False
+
+
+CHAT_MESSAGES.extend(_restore_chat_history())
 
 UPLOAD_LOG_DIR = "uploads/logs"
 os.makedirs(UPLOAD_LOG_DIR, exist_ok=True)
@@ -253,7 +355,6 @@ UDP_ROUNDS_BROADCAST = 2      # 广播/子网广播 每目标重发轮次（原 
 UDP_ROUNDS_UNICAST   = 1      # 单播 每目标重发轮次（原 2）
 UDP_TOTAL_PACKET_BUDGET = 4   # 单次 smart_send 总包数上限，超过则退化为一次广播
 CMD_MAX_PER_DEVICE = 50
-CMD_SEQ = 0
 _cmd_lock = threading.Lock()
 
 HTTP_SUPPORTED_ACTIONS = {
@@ -811,47 +912,67 @@ def resolve_target_devices(target_ip):
 
 # ★ 2026-11-07 [P4.1]: 版本感知前缀生成
 def get_target_protocol(dev_id):
-    """查设备协议版本，旧设备默认 v1"""
+    """v2-only：协议版本仅用于诊断，不再选择旧版信令。"""
     with state_lock:
         info = ALL_DEVICES_STATUS.get(dev_id, {})
         v = info.get("protocol_version")
         return int(v) if isinstance(v, (int, str)) and str(v).isdigit() else 1
 
 
-def _build_version_aware_commands(target_devs, action_name, payload):
-    """
-    版本感知前缀（2026-11-07 [P4.1]）:
-    - custom_msg: 全 v2→FLOAT; 全 v1→MSG(不含冒号); 混合/广播→FLOAT(含冒号只FLOAT)
-    - chat_msg:   CHAT + MSG 双发
-    """
+def _build_version_aware_commands(target_devs, action_name, payload, message_id=None):
+    """Build v2-only LAN packets; a caller may share message_id with the HTTP fallback."""
     if action_name == "custom_msg":
-        versions = set(get_target_protocol(d) for d in target_devs) if target_devs else set()
-        has_colon = ":" in payload
-        # ★ FIX-C 2026-11-19：versions 为空 == "版本未知"，不是"混合"。
-        #   触发场景（高频）：target_ip 指定了某台设备，但它尚未上报 / 重连换了 IP，
-        #   resolve_target_devices 以 IP 为设备主键匹配不到 -> target_devs=[] ->
-        #   versions=set() 落到下面的兜底分支，对一台纯 v2 的手机同时下发
-        #   FIND_ME_FLOAT 与 FIND_ME_MSG，屏幕上多弹一个对话框。
-        #   版本未知时只发 v2 悬浮（v2 是能力超集，且不会重复弹窗）；真混合 {1,2} 仍双发。
-        if not versions:
-            return [f"FIND_ME_FLOAT:{RESCUE_SECRET}:{payload}"]
-        if versions == {2}:
-            return [f"FIND_ME_FLOAT:{RESCUE_SECRET}:{payload}"]
-        if versions == {1}:
-            # ★ FIX-3 2026-11-18：旧版此处 return []，使 /api/control 回 status=error；
-            #   但第 1377~1380 行早已把这条 custom_msg 入队 —— 前端提示"失败"，
-            #   设备下次上报却照样收到并弹屏，返回码与实际行为相反。
-            #   改为把半角冒号降级成全角冒号：v1 用首个冒号切字段，全角冒号不会被截断，
-            #   消息不丢、返回码也恢复真实。
-            safe_payload = payload.replace(":", "：") if has_colon else payload
-            return [f"FIND_ME_MSG:{RESCUE_SECRET}:{safe_payload}"]
-        cmds = [f"FIND_ME_FLOAT:{RESCUE_SECRET}:{payload}"]
-        if not has_colon:
-            cmds.append(f"FIND_ME_MSG:{RESCUE_SECRET}:{payload}")
-        return cmds
+        return [f"FIND_ME_FLOAT:{RESCUE_SECRET}:{payload}"]
     if action_name == "chat_msg":
-        return [f"FIND_ME_CHAT:{RESCUE_SECRET}:Web_Console:{payload}",
-                f"FIND_ME_MSG:{RESCUE_SECRET}:Web_Console:{payload}"]
+        message_id = str(message_id or uuid.uuid4().hex)
+        created_at_ms = int(time.time() * 1000)
+        packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
+                  "sender_peer_type": "server2", "service_id": PEER_NODE_ID,
+                  "target_peer_id": "*", "message_id": message_id,
+                  "created_at_ms": created_at_ms,
+                  "display_name": "Web_Console", "body": str(payload)}
+        try:
+            try:
+                encoded = encode_packet(packet, RESCUE_SECRET)
+                long_message = False
+                # Preserve worst-case recipient preflight on the short-message fast path.
+                if target_devs:
+                    for peer_id in target_devs:
+                        targeted_packet = dict(packet)
+                        targeted_packet["target_peer_id"] = str(peer_id)
+                        encode_packet(targeted_packet, RESCUE_SECRET)
+                else:
+                    budget_packet = dict(packet)
+                    budget_packet["target_peer_id"] = max_peer_id_budget_probe()
+                    encode_packet(budget_packet, RESCUE_SECRET)
+            except ValueError:
+                # Validate all actual recipient IDs (or the maximum discovery ID budget)
+                # against every fragment before committing the immutable Outbox row.
+                if target_devs:
+                    for peer_id in target_devs:
+                        build_authenticated_chat_fragment_packets(
+                            message_id, str(peer_id), str(payload), created_at_ms,
+                            PEER_NODE_ID, "server2", PEER_NODE_ID, RESCUE_SECRET,
+                            "Web_Console")
+                else:
+                    build_authenticated_chat_fragment_packets(
+                        message_id, max_peer_id_budget_probe(), str(payload), created_at_ms,
+                        PEER_NODE_ID, "server2", PEER_NODE_ID, RESCUE_SECRET,
+                        "Web_Console")
+                long_message = True
+                packet["_outbox_long"] = True
+                packet["body"] = ""
+                encoded = encode_packet(packet, RESCUE_SECRET)
+        except ValueError as e:
+            with print_lock:
+                print(f"⚠️ Web chat UDP path unavailable; retain HTTP fallback: {e}")
+            return []
+        if not persist_outgoing_message(CHAT_DEDUP_DB, "server2", PEER_NODE_ID,
+                                        message_id, str(payload), target_devs, created_at_ms):
+            with print_lock:
+                print("⚠️ Web chat P2P outbox persistence failed; retain HTTP fallback only")
+            return []
+        return [encoded.decode("utf-8")]
     return []
 
 
@@ -872,6 +993,41 @@ def _persist_command_queue_locked(dev_id):
             conn.commit()
         finally:
             conn.close()
+
+
+def _remove_chat_fallback_for_message(dev_id, message_id):
+    """Remove only the HTTP fallback for a LAN chat already confirmed over v2 P2P."""
+    if not dev_id or not message_id:
+        return False
+    with _cmd_lock:
+        old_queue = list(PENDING_COMMANDS.get(dev_id, []))
+        kept = []
+        removed = 0
+        for command in old_queue:
+            if command.get("type") == "chat_msg":
+                envelope = decode_chat_http_fallback_payload(command.get("payload"))
+                if envelope and envelope["message_id"] == message_id:
+                    removed += 1
+                    continue
+            kept.append(command)
+        if not removed:
+            return False
+        if kept:
+            PENDING_COMMANDS[dev_id] = kept
+        else:
+            PENDING_COMMANDS.pop(dev_id, None)
+        try:
+            _persist_command_queue_locked(dev_id)
+        except Exception as exc:
+            if old_queue:
+                PENDING_COMMANDS[dev_id] = old_queue
+            else:
+                PENDING_COMMANDS.pop(dev_id, None)
+            with print_lock:
+                print(f"⚠️ server2 chat fallback cleanup rolled back for {dev_id}: {type(exc).__name__}")
+            return False
+    return True
+
 
 
 def _load_pending_commands():
@@ -908,8 +1064,7 @@ def _load_pending_commands():
 
 
 def enqueue_command(dev_id, action, payload, require_device=False):
-    global CMD_SEQ
-    if not dev_id: return
+    if not dev_id: return False
     now = time.time()
     payload_str = payload if payload is not None else ""
     with _cmd_lock:
@@ -919,26 +1074,53 @@ def enqueue_command(dev_id, action, payload, require_device=False):
                 if dev_id not in ALL_DEVICES_STATUS:
                     return False
         queue = PENDING_COMMANDS.setdefault(dev_id, [])
-        for i, c in enumerate(queue):
-            if c["type"] == action and c["payload"] == payload_str:
-                queue[i] = {"id": c["id"], "type": action, "payload": payload_str, "ts": now}
-                _persist_command_queue_locked(dev_id)
+        old_queue = list(queue)
+        for i, command in enumerate(queue):
+            if command["type"] == action and command["payload"] == payload_str:
+                queue[i] = {"id": command["id"], "type": action, "payload": payload_str, "ts": now}
+                try:
+                    _persist_command_queue_locked(dev_id)
+                except Exception as exc:
+                    PENDING_COMMANDS[dev_id] = old_queue
+                    with print_lock:
+                        print(f"⚠️ HTTP queue update rolled back for {dev_id}: {type(exc).__name__}")
+                    return False
                 with print_lock:
-                    print(f"📋 [HTTP队列] {dev_id} ~{action}({c['id']}) 去重（延后过期）")
+                    print(f"📋 [HTTP队列] {dev_id} ~{action}({command['id']}) 去重（延后过期）")
                 return True
-        CMD_SEQ += 1
-        cmd_id = f"c_{int(now)}_{CMD_SEQ}"
+
+        # Reliable chat fallbacks are never evicted by ordinary commands.
         dropped = 0
-        while len(queue) >= CMD_MAX_PER_DEVICE:
-            queue.pop(0); dropped += 1
+        if len(queue) >= CMD_MAX_PER_DEVICE:
+            evictable = next((index for index, item in enumerate(queue)
+                              if item.get("type") != "chat_msg"), None)
+            if evictable is None:
+                with print_lock:
+                    print(f"⚠️ HTTP queue full of reliable chat fallbacks; reject new {action}: {dev_id}")
+                if not old_queue:
+                    PENDING_COMMANDS.pop(dev_id, None)
+                return False
+            queue.pop(evictable)
+            dropped = 1
+
+        # UUIDs remain collision-resistant across process restarts and devices.
+        cmd_id = f"c_{uuid.uuid4().hex}"
         queue.append({"id": cmd_id, "type": action, "payload": payload_str, "ts": now})
-        _persist_command_queue_locked(dev_id)
+        try:
+            _persist_command_queue_locked(dev_id)
+        except Exception as exc:
+            PENDING_COMMANDS[dev_id] = old_queue
+            with print_lock:
+                print(f"⚠️ HTTP queue enqueue rolled back for {dev_id}: {type(exc).__name__}")
+            return False
+
     with print_lock:
         if dropped:
-            print(f"📋 [HTTP队列] {dev_id} +{action}({cmd_id}) 队列满丢弃 {dropped} 条旧指令")
+            print(f"📋 [HTTP队列] {dev_id} +{action}({cmd_id}) 队列满，淘汰 1 条最旧的非聊天指令")
         else:
             print(f"📋 [HTTP队列] {dev_id} +{action}({cmd_id})")
     return True
+
 
 
 def process_executed_commands(dev_id, executed_ids):
@@ -949,14 +1131,47 @@ def process_executed_commands(dev_id, executed_ids):
     with _cmd_lock:
         queue = PENDING_COMMANDS.get(dev_id, [])
         if not queue: return
-        new_queue = [c for c in queue if c["id"] not in id_set]
-        removed = len(queue) - len(new_queue)
-        if new_queue: PENDING_COMMANDS[dev_id] = new_queue
-        else: PENDING_COMMANDS.pop(dev_id, None)
-        _persist_command_queue_locked(dev_id)
+        completed = [c for c in queue if c.get("id") in id_set]
+        # A chat_msg executed ID is not enough by itself to retire the HTTP
+        # fallback: its shared-ID LAN outbox ACK must commit first.
+        removable_ids = set()
+        for command in completed:
+            command_id = command.get("id")
+            if command.get("type") != "chat_msg":
+                removable_ids.add(command_id)
+                continue
+            envelope = decode_chat_http_fallback_payload(command.get("payload"))
+            if not envelope:
+                with print_lock:
+                    print(f"⚠️ executed HTTP chat fallback payload invalid; retain: {dev_id}")
+                continue
+            if acknowledge_outgoing_message(
+                    CHAT_DEDUP_DB, "server2", envelope["message_id"], dev_id):
+                removable_ids.add(command_id)
+            else:
+                with print_lock:
+                    print(f"⚠️ executed HTTP chat ACK reconcile deferred; fallback retained: {dev_id}")
+
+        if not removable_ids:
+            return
+        old_queue = queue
+        new_queue = [c for c in queue if c.get("id") not in removable_ids]
+        removed = len(old_queue) - len(new_queue)
+        try:
+            if new_queue: PENDING_COMMANDS[dev_id] = new_queue
+            else: PENDING_COMMANDS.pop(dev_id, None)
+            _persist_command_queue_locked(dev_id)
+        except Exception as exc:
+            # Keep the in-memory queue consistent with the durable queue on DB failure.
+            PENDING_COMMANDS[dev_id] = old_queue
+            with print_lock:
+                print(f"⚠️ executed command queue commit failed; restored in-memory rows: {type(exc).__name__}")
+            return
+
     if removed > 0:
         with print_lock:
             print(f"✅ [HTTP队列] {dev_id} 已确认执行 {removed} 条")
+
 
 
 def process_command_feedback(dev_id, feedback_items):
@@ -971,6 +1186,15 @@ def process_command_feedback(dev_id, feedback_items):
     # accepted/uncertain 可结束重复下发，但后续异步回调仍可把状态细化为 succeeded/failed。
     # succeeded/failed 才是最终结果，终态之间不允许被迟到的旧反馈互相覆盖。
     terminal_statuses = {"accepted", "uncertain", "succeeded", "failed"}
+    # The pending command row is authoritative when older or malformed clients omit
+    # the action field. In particular, never treat a chat_msg fallback as an ordinary
+    # command: it may only be retired after its shared-ID LAN outbox ACK is durable.
+    with _cmd_lock:
+        pending_actions = {
+            command.get("id"): command.get("type")
+            for command in PENDING_COMMANDS.get(dev_id, [])
+            if command.get("id")
+        }
     valid = []
     now = time.time()
     for item in feedback_items[:100]:
@@ -982,12 +1206,29 @@ def process_command_feedback(dev_id, feedback_items):
             continue
         if status not in accepted_statuses:
             continue
-        action = item.get("action") if isinstance(item.get("action"), str) else None
+        supplied_action = item.get("action") if isinstance(item.get("action"), str) else None
+        pending_action = pending_actions.get(command_id)
+        action = pending_action or supplied_action
         detail = item.get("detail") if isinstance(item.get("detail"), str) else ""
         valid.append((command_id, dev_id, action, status, detail[:500], now, now))
     if not valid:
         return 0
+
+    # Capture the shared v2 fallback envelope before terminal feedback removes its command row.
+    chat_fallback_candidates = []
+    with _cmd_lock:
+        pending_by_id = {c.get("id"): c for c in PENDING_COMMANDS.get(dev_id, [])}
+        for row in valid:
+            command_id, _, action, status = row[:4]
+            if action == "chat_msg" and status in ("accepted", "succeeded"):
+                command = pending_by_id.get(command_id)
+                if command:
+                    envelope = decode_chat_http_fallback_payload(command.get("payload"))
+                    if envelope:
+                        chat_fallback_candidates.append((command_id, envelope))
+
     # 先持久化反馈，再清理队列；任何 DB 失败都保留原队列等待下次上报。
+    persisted_chat_acks = []
     with db_write_lock:
         conn = sqlite3.connect('track_history.db', timeout=10)
         try:
@@ -998,32 +1239,73 @@ def process_command_feedback(dev_id, feedback_items):
                 ON CONFLICT(command_id, device_id) DO UPDATE SET
                   action=COALESCE(excluded.action, command_feedback.action),
                   status=CASE
+                    WHEN command_feedback.action='chat_msg' AND command_feedback.status='succeeded' THEN 'succeeded'
+                    WHEN command_feedback.action='chat_msg' AND excluded.status='accepted' THEN 'accepted'
                     WHEN command_feedback.status IN ('succeeded','failed') THEN command_feedback.status
                     WHEN command_feedback.status IN ('accepted','uncertain') AND excluded.status IN ('received','executing','retry_wait','accepted','uncertain')
                       THEN command_feedback.status
                     ELSE excluded.status END,
                   detail=CASE
+                    WHEN command_feedback.action='chat_msg' AND command_feedback.status='succeeded' THEN command_feedback.detail
+                    WHEN command_feedback.action='chat_msg' AND excluded.status='accepted' THEN excluded.detail
                     WHEN command_feedback.status IN ('succeeded','failed') THEN command_feedback.detail
                     WHEN command_feedback.status IN ('accepted','uncertain') AND excluded.status IN ('received','executing','retry_wait','accepted','uncertain')
                       THEN command_feedback.detail
                     ELSE excluded.detail END,
                   updated_at=CASE
+                    WHEN command_feedback.action='chat_msg' AND command_feedback.status='succeeded' THEN command_feedback.updated_at
+                    WHEN command_feedback.action='chat_msg' AND excluded.status='accepted' THEN excluded.updated_at
                     WHEN command_feedback.status IN ('succeeded','failed') THEN command_feedback.updated_at
                     WHEN command_feedback.status IN ('accepted','uncertain') AND excluded.status IN ('received','executing','retry_wait','accepted','uncertain')
                       THEN command_feedback.updated_at
                     ELSE excluded.updated_at END""", valid)
             conn.commit()
+            for command_id, envelope in chat_fallback_candidates:
+                saved = conn.execute(
+                    "SELECT status FROM command_feedback WHERE command_id=? AND device_id=?",
+                    (command_id, dev_id)
+                ).fetchone()
+                if saved and saved[0] in ("accepted", "succeeded"):
+                    persisted_chat_acks.append(envelope)
         finally:
             conn.close()
-    terminal_ids = {row[0] for row in valid if row[3] in terminal_statuses}
+
+    # Only a persisted accepted status means dispatchHttpCommand committed the Android Inbox.
+    # Retire the HTTP fallback only after the matching shared-ID outbox ACK is durable.
+    reconciled_chat_command_ids = set()
+    for command_id, envelope in [
+            (command_id, envelope)
+            for command_id, envelope in chat_fallback_candidates]:
+        if acknowledge_outgoing_message(
+                CHAT_DEDUP_DB, "server2", envelope["message_id"], dev_id):
+            reconciled_chat_command_ids.add(command_id)
+        else:
+            with print_lock:
+                print(f"⚠️ HTTP chat accepted but outbox ACK reconcile deferred; fallback retained: {dev_id}")
+
+    
+    # chat_msg is idempotently replayable, so uncertain/failed results must remain queued.
+    terminal_ids = {
+        row[0] for row in valid
+        if row[3] in terminal_statuses
+        and not (row[2] == "chat_msg" and row[3] in ("uncertain", "failed"))
+        and not (row[2] == "chat_msg" and row[0] not in reconciled_chat_command_ids)
+    }
     if terminal_ids:
         with _cmd_lock:
             queue = PENDING_COMMANDS.get(dev_id, [])
             new_queue = [c for c in queue if c.get("id") not in terminal_ids]
             if len(new_queue) != len(queue):
+                old_queue = list(queue)
                 if new_queue: PENDING_COMMANDS[dev_id] = new_queue
                 else: PENDING_COMMANDS.pop(dev_id, None)
-                _persist_command_queue_locked(dev_id)
+                try:
+                    _persist_command_queue_locked(dev_id)
+                except Exception as exc:
+                    if old_queue: PENDING_COMMANDS[dev_id] = old_queue
+                    else: PENDING_COMMANDS.pop(dev_id, None)
+                    with print_lock:
+                        print(f"⚠️ terminal command cleanup rolled back for {dev_id}: {type(exc).__name__}")
     return len(valid)
 
 
@@ -1148,61 +1430,568 @@ def cmd_cleaner():
 
 # ==================== UDP 监听 ====================
 
+def _resume_pending_v2_for_peer(sock, peer_id, addr, recovery_event=False):
+    """Replay due durable rows; verified peer recovery is throttled and finite."""
+    with _V2_RECOVERY_RETRY_LOCK:
+        # Consume a queued event only when this invocation can own the work.
+        # If another invocation is active, put it back for the next worker pass.
+        queued_recovery_event = peer_id in _V2_RECOVERY_RETRY_PEERS
+        _V2_RECOVERY_RETRY_PEERS.discard(peer_id)
+        if peer_id in _V2_RECOVERY_INFLIGHT:
+            _V2_RECOVERY_RETRY_PEERS.add(peer_id)
+            return
+        _V2_RECOVERY_INFLIGHT.add(peer_id)
+        recovery_event = recovery_event or queued_recovery_event
+    try:
+        try:
+            add_discovery_targets_for_peer(CHAT_DEDUP_DB, "server2", peer_id)
+            if recovery_event:
+                prepare_outgoing_peer_recovery(CHAT_DEDUP_DB, "server2", peer_id)
+            pending_rows = load_pending_outgoing_for_peer(
+                CHAT_DEDUP_DB, "server2", peer_id, limit=10)
+            if recovery_event:
+                next_eligible_at = next_peer_recovery_eligible_at_ms(CHAT_DEDUP_DB, "server2", peer_id)
+                if next_eligible_at is not None:
+                    with _V2_RECOVERY_RETRY_LOCK:
+                        _V2_RECOVERY_RETRY_PEERS.add(peer_id)
+        except Exception as e:
+            with print_lock:
+                print(f"⚠️ server2 LAN outbox recovery deferred; durable ledger read failed: {type(e).__name__}")
+            if recovery_event:
+                with _V2_RECOVERY_RETRY_LOCK:
+                    _V2_RECOVERY_RETRY_PEERS.add(peer_id)
+            return
+        for pending in pending_rows:
+            chat_packet = {"type": "chat.message", "sender_peer_id": PEER_NODE_ID,
+                           "sender_peer_type": "server2", "service_id": PEER_NODE_ID,
+                           "target_peer_id": peer_id, "message_id": pending["message_id"],
+                           "created_at_ms": pending["created_at_ms"],
+                           "display_name": "Web_Console", "body": pending["body"]}
+            try:
+                target_port = int(pending.get("endpoint_port") or addr[1])
+                try:
+                    raw = encode_packet(chat_packet, RESCUE_SECRET)
+                    long_message = False
+                except ValueError:
+                    raw = None
+                    long_message = True
+            except Exception as e:
+                with print_lock:
+                    print(f"⚠️ server2 pending chat retry payload preparation failed peer={peer_id}: {type(e).__name__}")
+                return
+            # Let the fragment sender admit long-message retries only after
+            # it has selected a missing flight; short-message admission is unchanged.
+            if not long_message:
+                try:
+                    attempt_admitted = mark_outgoing_attempt(
+                        CHAT_DEDUP_DB, pending["message_id"], peer_id,
+                        pending["endpoint_ip"], target_port, allow_fast_retry=False)
+                except LanP2PStorageError as e:
+                    if recovery_event:
+                        with _V2_RECOVERY_RETRY_LOCK:
+                            _V2_RECOVERY_RETRY_PEERS.add(peer_id)
+                    with print_lock:
+                        print(f"⚠️ server2 pending chat attempt admission failed; recovery retained: {type(e).__name__}")
+                    return
+                if not attempt_admitted:
+                    continue
+            try:
+                if long_message:
+                    send_outgoing_fragment_window(
+                        sock, CHAT_DEDUP_DB, "server2", pending["message_id"], peer_id,
+                        pending["body"], pending["created_at_ms"],
+                        (pending["endpoint_ip"], target_port), PEER_NODE_ID, "server2",
+                        PEER_NODE_ID, RESCUE_SECRET, send_lock=UDP_CHAT_SEND_LOCK,
+                        display_name="Web_Console", mark_attempt=True, allow_fast_retry=False)
+                else:
+                    send_outgoing_packet(
+                        sock, raw, (pending["endpoint_ip"], target_port),
+                        CHAT_DEDUP_DB, "server2", pending["message_id"], peer_id,
+                        send_lock=UDP_CHAT_SEND_LOCK)
+            except LanP2PStorageError as e:
+                # The durable attempt is already consumed; let normal persisted backoff
+                # take over instead of force-reopening the same retry epoch.
+                with print_lock:
+                    print(f"⚠️ server2 pending chat send stopped; backoff retained: {type(e).__name__}")
+                return
+            except Exception as e:
+                with print_lock:
+                    print(f"⚠️ server2 pending chat retry failed peer={peer_id}: {type(e).__name__}")
+                return
+    finally:
+        with _V2_RECOVERY_RETRY_LOCK:
+            # A new event may have arrived during this batch; never erase it here.
+            _V2_RECOVERY_INFLIGHT.discard(peer_id)
+
+
+def _advance_v2_fragment_windows(sock, peer_id, fallback_addr=None, retry_round=False):
+    """Advance a completed 8-fragment flight without consuming a retry epoch."""
+    try:
+        rows = load_outgoing_fragment_targets_for_peer(
+            CHAT_DEDUP_DB, "server2", peer_id, limit=50)
+    except Exception as exc:
+        with print_lock:
+            print(f"⚠️ server2 fragment window load failed: {type(exc).__name__}")
+        return
+    for row in rows:
+        endpoint_ip = row.get("endpoint_ip") or ""
+        endpoint_port = int(row.get("endpoint_port") or 0)
+        if (not endpoint_ip or endpoint_port not in (8887, 8888, 8889, 8890)) and fallback_addr:
+            endpoint_ip, endpoint_port = fallback_addr[0], int(fallback_addr[1])
+        if not endpoint_ip or endpoint_port not in (8887, 8888, 8889, 8890):
+            continue
+        try:
+            send_outgoing_fragment_window(
+                sock, CHAT_DEDUP_DB, "server2", row["message_id"], peer_id,
+                row["body"], row["created_at_ms"], (endpoint_ip, endpoint_port),
+                PEER_NODE_ID, "server2", PEER_NODE_ID, RESCUE_SECRET,
+                send_lock=UDP_CHAT_SEND_LOCK, display_name="Web_Console",
+                mark_attempt=retry_round, allow_fast_retry=False)
+        except Exception as exc:
+            with print_lock:
+                print(f"⚠️ server2 fragment window send failed: {type(exc).__name__}")
+
+
+def _retry_deferred_v2_peer_recoveries():
+    """One process-wide worker handles ACK-timeout retries and deferred storage failures."""
+    global _V2_RECOVERY_SCHEMA_READY
+    while True:
+        _V2_RECOVERY_WAKE_EVENT.wait(1.0)
+        _V2_RECOVERY_WAKE_EVENT.clear()
+        if not _V2_RECOVERY_SCHEMA_READY:
+            try:
+                ensure_outbox_retry_schema(CHAT_DEDUP_DB)
+                _V2_RECOVERY_SCHEMA_READY = True
+            except Exception as exc:
+                with print_lock:
+                    print(f"⚠️ server2 LAN retry schema initialization still deferred: {type(exc).__name__}")
+                time.sleep(4)
+                continue
+        with _V2_RECOVERY_RETRY_LOCK:
+            recovery_event_peers = set(_V2_RECOVERY_RETRY_PEERS)
+            fragment_window_peers = set(_V2_FRAGMENT_WINDOW_PEERS)
+            _V2_RECOVERY_RETRY_PEERS.clear()
+            _V2_FRAGMENT_WINDOW_PEERS.clear()
+            pending_peer_ids = set(recovery_event_peers)
+        sock = UDP_LISTENER_SOCKET
+        if sock is None:
+            with _V2_RECOVERY_RETRY_LOCK:
+                _V2_RECOVERY_RETRY_PEERS.update(recovery_event_peers)
+                _V2_FRAGMENT_WINDOW_PEERS.update(fragment_window_peers)
+            continue
+        try:
+            if sock.fileno() < 0:
+                with _V2_RECOVERY_RETRY_LOCK:
+                    _V2_RECOVERY_RETRY_PEERS.update(recovery_event_peers)
+                    _V2_FRAGMENT_WINDOW_PEERS.update(fragment_window_peers)
+                continue
+            pending_peer_ids.update(list_due_outgoing_peers(CHAT_DEDUP_DB, "server2", limit=500))
+            if not pending_peer_ids and not fragment_window_peers:
+                continue
+            known_peers = {row["peer_id"]: row for row in list_known_peer_snapshot(CHAT_DEDUP_DB, "server2", limit=500)}
+        except Exception as exc:
+            with _V2_RECOVERY_RETRY_LOCK:
+                _V2_RECOVERY_RETRY_PEERS.update(recovery_event_peers)
+                _V2_FRAGMENT_WINDOW_PEERS.update(fragment_window_peers)
+            with print_lock:
+                print(f"⚠️ server2 LAN recovery retry scan deferred: {type(exc).__name__}")
+            continue
+        for fragment_peer_id in fragment_window_peers:
+            peer = known_peers.get(fragment_peer_id)
+            fallback_addr = ((peer["endpoint_ip"], int(peer.get("endpoint_port") or 0))
+                             if peer and peer.get("endpoint_ip") else None)
+            _advance_v2_fragment_windows(sock, fragment_peer_id, fallback_addr)
+        unresolved_recovery_peers = recovery_event_peers - set(known_peers)
+        with _V2_RECOVERY_RETRY_LOCK:
+            _V2_RECOVERY_RETRY_PEERS.update(unresolved_recovery_peers)
+        for peer_id in pending_peer_ids:
+            peer = known_peers.get(peer_id)
+            if not peer or not peer.get("endpoint_ip"):
+                _advance_v2_fragment_windows(sock, peer_id, retry_round=True)
+                if peer_id in recovery_event_peers:
+                    unresolved_recovery_peers.add(peer_id)
+                continue
+            try:
+                target_port = int(peer.get("endpoint_port") or 0)
+            except (TypeError, ValueError):
+                target_port = 0
+            if target_port not in (8887, 8888, 8889, 8890):
+                _advance_v2_fragment_windows(sock, peer_id, retry_round=True)
+                if peer_id in recovery_event_peers:
+                    unresolved_recovery_peers.add(peer_id)
+                continue
+            _resume_pending_v2_for_peer(
+                sock, peer_id, (peer["endpoint_ip"], target_port),
+                recovery_event=peer_id in recovery_event_peers)
+        if unresolved_recovery_peers:
+            with _V2_RECOVERY_RETRY_LOCK:
+                _V2_RECOVERY_RETRY_PEERS.update(unresolved_recovery_peers)
+
+
+def _run_v2_recovery_retry_worker():
+    """Supervise the long-lived retry loop so transient failures do not strand the worker."""
+    global _V2_RECOVERY_WORKER_STARTED
+    try:
+        while True:
+            try:
+                _retry_deferred_v2_peer_recoveries()
+            except Exception as exc:
+                with print_lock:
+                    print(f"⚠️ server2 LAN recovery worker recovered from unexpected failure: {type(exc).__name__}")
+            # The retry loop is expected to block forever; a return is treated as
+            # an unexpected exit and restarted after a bounded pause.
+            time.sleep(1.0)
+    finally:
+        # BaseException / interpreter shutdown must not leave a stale singleton flag.
+        with _V2_RECOVERY_RETRY_LOCK:
+            _V2_RECOVERY_WORKER_STARTED = False
+
+
+def _start_v2_recovery_retry_worker():
+    """Start one worker even if schema migration is temporarily locked; it retries migration."""
+    global _V2_RECOVERY_WORKER_STARTED, _V2_RECOVERY_SCHEMA_READY
+    try:
+        ensure_outbox_retry_schema(CHAT_DEDUP_DB)
+        _V2_RECOVERY_SCHEMA_READY = True
+    except Exception as exc:
+        _V2_RECOVERY_SCHEMA_READY = False
+        with print_lock:
+            print(f"⚠️ server2 LAN retry schema initialization deferred to recovery worker: {type(exc).__name__}")
+    with _V2_RECOVERY_RETRY_LOCK:
+        if _V2_RECOVERY_WORKER_STARTED:
+            return
+        _V2_RECOVERY_WORKER_STARTED = True
+    worker = threading.Thread(target=_run_v2_recovery_retry_worker, daemon=True,
+                               name="lan-v2-recovery-retry")
+    try:
+        worker.start()
+    except Exception:
+        # A failed Thread.start() must not leave the singleton guard stuck true.
+        with _V2_RECOVERY_RETRY_LOCK:
+            _V2_RECOVERY_WORKER_STARTED = False
+        raise
+
+
+def _handle_authenticated_v2_packet(envelope, sock, addr):
+    packet_type = envelope.get("type")
+    sender = str(envelope.get("sender_peer_id") or "")
+    if sender == PEER_NODE_ID:
+        return
+    display_sender = str(envelope.get("display_name") or sender)
+    if packet_type == "peer.hello":
+        nonce = str(envelope.get("nonce") or "")
+        if (not sender or not nonce
+                or int(addr[1]) not in (8887, 8888, 8889, 8890)):
+            return
+        # Receipt proves inbound reachability only. Keep the route suspect until
+        # our own nonce-bound challenge receives a matching peer.ack.
+        if not record_peer(CHAT_DEDUP_DB, "server2", sender,
+                           envelope.get("sender_peer_type", "unknown"),
+                           envelope.get("service_id", ""), addr[0], addr[1], "suspect"):
+            print(f"⚠️ server2 peer HELLO persistence failed; withholding peer.ack")
+            return
+        reply = {"type": "peer.ack", "sender_peer_id": PEER_NODE_ID,
+                 "sender_peer_type": "server2", "service_id": PEER_NODE_ID,
+                 "reply_nonce": nonce, "listen_port": UDP_LISTEN_PORT}
+        try:
+            sock.sendto(encode_packet(reply, RESCUE_SECRET), addr)
+        except OSError:
+            return
+        # Normal HELLO triggers a reverse challenge. challenge_only receives only
+        # the response; it must not activate the source endpoint on this side.
+        if not envelope.get("challenge_only", False):
+            send_directed_peer_challenge(
+                sock, CHAT_DEDUP_DB, "server2", PEER_NODE_ID, "server2",
+                PEER_NODE_ID, RESCUE_SECRET, UDP_LISTEN_PORT,
+                sender, addr[0], addr[1])
+        return
+    if packet_type == "peer.ack":
+        reply_nonce = str(envelope.get("reply_nonce") or "")
+        if reply_nonce and complete_peer_challenge(
+                CHAT_DEDUP_DB, "server2", reply_nonce, sender, addr[0], addr[1],
+                envelope.get("sender_peer_type", "unknown"),
+                envelope.get("service_id", "")):
+            # Keep the UDP receive loop free for incoming messages and ACKs.
+            with _V2_RECOVERY_RETRY_LOCK:
+                _V2_RECOVERY_RETRY_PEERS.add(sender)
+            _V2_RECOVERY_WAKE_EVENT.set()
+        return
+    if packet_type == "chat.fragment.ack":
+        if not packet_service_identity_matches(envelope, sender):
+            return
+        message_id = str(envelope.get("message_id") or "")
+        target = str(envelope.get("target_peer_id") or "")
+        fragment_index = envelope.get("fragment_index")
+        if (target != PEER_NODE_ID or envelope.get("status") != "received"
+                or not sender or type(fragment_index) is not int
+                or int(addr[1]) not in (8887, 8888, 8889, 8890)):
+            return
+        active_route = peer_endpoint_matches(CHAT_DEDUP_DB, "server2", sender, addr[0], addr[1])
+        sent_endpoint_route = outgoing_ack_endpoint_matches(
+            CHAT_DEDUP_DB, "server2", message_id, sender, addr[0], addr[1])
+        discovery_flight = fragment_index < 8 and is_outgoing_discovery_pending(
+            CHAT_DEDUP_DB, "server2", message_id)
+        if not (active_route or sent_endpoint_route or discovery_flight):
+            return
+        try:
+            bitmap = record_outgoing_fragment_ack(
+                CHAT_DEDUP_DB, "server2", message_id, sender, fragment_index,
+                addr[0], int(addr[1]))
+        except LanP2PStorageError as exc:
+            with print_lock:
+                print(f"⚠️ server2 fragment ACK persistence failed: {type(exc).__name__}")
+            return
+        if bitmap is not None:
+            with _V2_RECOVERY_RETRY_LOCK:
+                _V2_FRAGMENT_WINDOW_PEERS.add(sender)
+            _V2_RECOVERY_WAKE_EVENT.set()
+        return
+    if packet_type == "chat.ack":
+        if not packet_service_identity_matches(envelope, sender):
+            return
+        message_id = str(envelope.get("message_id") or "")
+        target = str(envelope.get("target_peer_id") or "")
+        active_route = peer_endpoint_matches(CHAT_DEDUP_DB, "server2", sender, addr[0], addr[1])
+        sent_endpoint_route = outgoing_ack_endpoint_matches(
+            CHAT_DEDUP_DB, "server2", message_id, sender, addr[0], addr[1])
+        if (target == PEER_NODE_ID and envelope.get("status") == "stored"
+                and sender and (active_route or sent_endpoint_route)):
+            if acknowledge_outgoing_message(CHAT_DEDUP_DB, "server2", message_id, sender):
+                if active_route:
+                    record_peer(CHAT_DEDUP_DB, "server2", sender, "android", "android-main",
+                                addr[0], addr[1], "active")
+                # Only a verified peer route may complete the recipient's HTTP fallback.
+                _remove_chat_fallback_for_message(sender, message_id)
+        return
+    if packet_type == "chat.fragment":
+        target = envelope.get("target_peer_id", "*")
+        message_id = str(envelope.get("message_id") or "")
+        if (target not in ("*", PEER_NODE_ID) or not sender or not message_id
+                or int(addr[1]) not in (8887, 8888, 8889, 8890)):
+            return
+        try:
+            stored = store_incoming_chat_fragment(CHAT_DEDUP_DB, "server2", sender, envelope)
+        except LanP2PStorageError as exc:
+            with print_lock:
+                print(f"⚠️ server2 fragment persistence failed: {type(exc).__name__}")
+            return
+        if stored == "rejected":
+            return
+        fragment_index = int(envelope.get("fragment_index", -1))
+        fragment_ack = {"type": "chat.fragment.ack", "sender_peer_id": PEER_NODE_ID,
+                        "sender_peer_type": "server2", "service_id": PEER_NODE_ID,
+                        "target_peer_id": sender, "message_id": message_id,
+                        "fragment_index": fragment_index, "status": "received"}
+        if stored != "complete_duplicate":
+            try:
+                sock.sendto(encode_packet(fragment_ack, RESCUE_SECRET), addr)
+            except OSError:
+                return
+        cached = load_incoming_chat_fragments(CHAT_DEDUP_DB, "server2", sender, message_id)
+        if not cached or len(cached) != int(envelope.get("fragment_count", -1)):
+            return
+        try:
+            body = assemble_chat_fragments(cached)
+        except ValueError as exc:
+            with print_lock:
+                print(f"⚠️ server2 fragment reassembly failed: {type(exc).__name__}")
+            return
+        claim_result = _claim_chat_message(sender, message_id, body)
+        if claim_result is None:
+            return
+        record_peer(CHAT_DEDUP_DB, "server2", sender,
+                    envelope.get("sender_peer_type", "unknown"),
+                    envelope.get("service_id", ""), addr[0], addr[1], "suspect")
+        final_ack = {"type": "chat.ack", "sender_peer_id": PEER_NODE_ID,
+                     "sender_peer_type": "server2", "service_id": PEER_NODE_ID,
+                     "target_peer_id": sender, "message_id": message_id, "status": "stored"}
+        try:
+            sock.sendto(encode_packet(final_ack, RESCUE_SECRET), addr)
+        except OSError:
+            return
+        if not claim_result:
+            return
+        now_ms = int(datetime.datetime.now().timestamp() * 1000)
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        with state_lock:
+            if sender not in ALL_DEVICES_STATUS:
+                ALL_DEVICES_STATUS[sender] = {"device_id": sender, "received_at": now_ms,
+                    "network": {}, "battery": {"level": "?"}}
+            info = ALL_DEVICES_STATUS[sender]
+            if not info.get("network"): info["network"] = {}
+            info["udp_source_ip"] = addr[0]
+            info["received_at"] = now_ms
+            info.pop("offline_alerted", None)
+            info["last_chat"] = now_ms
+            CHAT_MESSAGES.append({"time": ts, "sender": display_sender, "content": body})
+            if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
+        with print_lock:
+            print(f"\\n🗣️ [对讲机] {display_sender} (来自IP: {addr[0]}) 说: {body}")
+        return
+    if packet_type != "chat.message":
+        return
+    target = envelope.get("target_peer_id", "*")
+    if target not in ("*", PEER_NODE_ID):
+        return
+    message_id = str(envelope.get("message_id") or "")
+    body = str(envelope.get("body") or "")
+    if not sender or not message_id:
+        return
+    # Every authenticated v2 message is persisted before it can receive a stored ACK.
+    # Display names are presentation metadata, never sender identity or a persistence bypass.
+    claim_result = _claim_chat_message(sender, message_id, body)
+    if claim_result is None:
+        return
+    record_peer(CHAT_DEDUP_DB, "server2", sender, envelope.get("sender_peer_type", "unknown"),
+                envelope.get("service_id", ""), addr[0], addr[1], "suspect")
+    ack_packet = {"type": "chat.ack", "sender_peer_id": PEER_NODE_ID,
+                  "sender_peer_type": "server2", "service_id": PEER_NODE_ID,
+                  "target_peer_id": sender, "message_id": message_id, "status": "stored"}
+    try: sock.sendto(encode_packet(ack_packet, RESCUE_SECRET), addr)
+    except OSError: pass
+    if not claim_result:
+        return
+    now_ms = int(datetime.datetime.now().timestamp() * 1000)
+    ts = datetime.datetime.now().strftime("%H:%M:%S")
+    with state_lock:
+        if sender not in ALL_DEVICES_STATUS:
+            ALL_DEVICES_STATUS[sender] = {"device_id": sender, "received_at": now_ms,
+                "network": {}, "battery": {"level": "?"}}
+        info = ALL_DEVICES_STATUS[sender]
+        if not info.get("network"): info["network"] = {}
+        info["udp_source_ip"] = addr[0]
+        info["received_at"] = now_ms
+        info.pop("offline_alerted", None)
+        info["last_chat"] = now_ms
+        CHAT_MESSAGES.append({"time": ts, "sender": display_sender, "content": body})
+        if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
+    with print_lock:
+        print(f"\\n🗣️ [对讲机] {display_sender} (来自IP: {addr[0]}) 说: {body}")
+
+
+def send_udp_chat_from_listener(command_str, target_ip):
+    """Send chat from the bound 8887 socket so recipient ACKs return to udp_listener."""
+    sock = UDP_LISTENER_SOCKET
+    if sock is None or sock.fileno() < 0:
+        return 0
+    try:
+        data = command_str.encode("utf-8")
+        with UDP_CHAT_SEND_LOCK:
+            sock.sendto(data, (target_ip, 8888))
+        return 1
+    except OSError as e:
+        with print_lock:
+            print(f"⚠️ server2 chat UDP send failed to {target_ip}: {type(e).__name__}")
+        return 0
+
+
+def send_server2_v2_chat_from_outbox(command_str, fixed_target_ids):
+    """Send persisted server2 chat via the short packet fast path or selective fragments."""
+    sock = UDP_LISTENER_SOCKET
+    if sock is None or sock.fileno() < 0:
+        return 0
+    try:
+        envelope = decode_packet(command_str.encode("utf-8"), RESCUE_SECRET)
+        message_id = str(envelope.get("message_id") or "")
+        if not message_id or envelope.get("type") != "chat.message":
+            return 0
+        stored = load_outgoing_message(CHAT_DEDUP_DB, "server2", message_id)
+        if stored is None:
+            return 0
+        body = stored["body"]
+        created = stored["created_at_ms"]
+        packet = dict(envelope)
+        packet.pop("_outbox_long", None)
+        packet["body"] = body
+        try:
+            raw = encode_packet(packet, RESCUE_SECRET)
+            long_message = False
+        except ValueError:
+            long_message = True
+
+        if fixed_target_ids:
+            if long_message:
+                peer_snapshot = {
+                    row["peer_id"]: row
+                    for row in list_known_peer_snapshot(CHAT_DEDUP_DB, "server2", limit=500)
+                }
+                sent = 0
+                for peer_id in fixed_target_ids:
+                    peer = peer_snapshot.get(str(peer_id))
+                    if not peer or not peer.get("endpoint_ip"):
+                        continue
+                    port = int(peer.get("endpoint_port") or 0)
+                    if port not in (8887, 8888, 8889, 8890):
+                        continue
+                    sent += send_outgoing_fragment_window(
+                        sock, CHAT_DEDUP_DB, "server2", message_id, str(peer_id),
+                        body, created, (peer["endpoint_ip"], port), PEER_NODE_ID,
+                        "server2", PEER_NODE_ID, RESCUE_SECRET,
+                        send_lock=UDP_CHAT_SEND_LOCK, display_name="Web_Console",
+                        mark_attempt=True, allow_fast_retry=True)
+                return sent
+            return send_outbox_to_active_peers(
+                sock, CHAT_DEDUP_DB, "server2", message_id, packet, RESCUE_SECRET,
+                send_lock=UDP_CHAT_SEND_LOCK, attempts=1, retry_delay_seconds=0.25)
+
+        subnet = get_subnet_broadcast()
+        destinations = build_chat_discovery_destinations(
+            [subnet, "255.255.255.255"], UDP_LISTEN_PORT)
+        if long_message:
+            return send_discovery_fragment_window(
+                sock, CHAT_DEDUP_DB, "server2", message_id, body, created,
+                destinations, PEER_NODE_ID, "server2", PEER_NODE_ID,
+                RESCUE_SECRET, send_lock=UDP_CHAT_SEND_LOCK,
+                display_name="Web_Console")
+        return send_discovery_broadcast_with_retries(
+            sock, CHAT_DEDUP_DB, "server2", message_id, raw, destinations,
+            send_lock=UDP_CHAT_SEND_LOCK, attempts=3, retry_delay_seconds=0.25)
+    except Exception as e:
+        with print_lock:
+            print(f"⚠️ server2 v2 chat send retained in Outbox: {type(e).__name__}")
+        return 0
+
+
+_V2_PACKET_DISPATCHER = BoundedPacketDispatcher(
+    _handle_authenticated_v2_packet,
+    "server2",
+    on_error=lambda exc, lane: print(
+        "LAN packet handler failed (server2/" + lane + "): " + type(exc).__name__))
+
+
 def udp_listener():
-    global UDP_LISTENING
+    global UDP_LISTENING, UDP_LISTENER_SOCKET
     while True:
         udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         try:
-            udp_sock.bind(('0.0.0.0', 8888))
+            udp_sock.bind(('0.0.0.0', UDP_LISTEN_PORT))
+            UDP_LISTENER_SOCKET = udp_sock
+            _start_v2_recovery_retry_worker()
             UDP_LISTENING = True
-            print("🎧 UDP 监听已启动，等待局域网对讲机消息...")
+            announced = send_startup_peer_beacon(
+                udp_sock, PEER_NODE_ID, "server2", PEER_NODE_ID, RESCUE_SECRET,
+                UDP_LISTEN_PORT, [8888, 8889, 8890], ["255.255.255.255"],
+                db_path=CHAT_DEDUP_DB, receiver_scope="server2")
+            print(f"🎧 UDP 监听已启动 port={UDP_LISTEN_PORT}，等待局域网对讲机消息...")
+            print(f"📡 server2 startup peer beacon sent={announced}")
             while True:
                 try:
                     data, addr = udp_sock.recvfrom(4096)
                 except Exception as recv_err:
-                    print(f"⚠️ UDP recvfrom 异常: {recv_err}")
-                    time.sleep(1)
-                    continue
-                msg = data.decode('utf-8', errors='ignore')
-                source_ip = addr[0]
-                # ★ 2026-11-07 [P4.6 修正]: v2 CHAT + legacy MSG
-                if msg.startswith("FIND_ME_CHAT:") or msg.startswith("FIND_ME_MSG:"):
-                    parts = msg.split(":", 3)
-                    if len(parts) == 4 and parts[1] == RESCUE_SECRET:
-                        sender = parts[2]
-                        content = parts[3]
-                        if sender not in ["Web_Console", "PC_Terminal"]:
-                            dedup_key = sender + ":" + content
-                            now_ts = time.time()
-                            if now_ts - LAST_MSG_INFO.get(dedup_key, 0) < 3.0:
-                                continue
-                            LAST_MSG_INFO[dedup_key] = now_ts
-                            if len(LAST_MSG_INFO) > LAST_MSG_INFO_MAX:
-                                cutoff = now_ts - LAST_MSG_INFO_TTL
-                                stale = [k for k, v in list(LAST_MSG_INFO.items()) if v < cutoff]
-                                for k in stale: LAST_MSG_INFO.pop(k, None)
-                            now_ms = int(datetime.datetime.now().timestamp() * 1000)
-                            ts = datetime.datetime.now().strftime("%H:%M:%S")
-                            # ★ 合并为单个锁块，消除一切嵌套疑虑
-                            with state_lock:
-                                if sender not in ALL_DEVICES_STATUS:
-                                    ALL_DEVICES_STATUS[sender] = {
-                                        "device_id": sender, "received_at": now_ms,
-                                        "network": {}, "battery": {"level": "?"}
-                                    }
-                                info = ALL_DEVICES_STATUS[sender]
-                                if not info.get('network'): info['network'] = {}
-                                info['udp_source_ip'] = source_ip
-                                info["received_at"] = now_ms
-                                info.pop("offline_alerted", None)
-                                info["last_chat"] = now_ms
-                                
-                                CHAT_MESSAGES.append({"time": ts, "sender": sender, "content": content})
-                                if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
-                                
-                            with print_lock:
-                                print(f"\n🗣️ [对讲机] {sender} (来自IP: {source_ip}) 说: {content}")
+                    # A failed recvfrom may indicate a closed/broken socket. Leave the
+                    # receive loop so the outer handler/finally closes it and rebinds.
+                    print(f"⚠️ UDP recvfrom 异常，退出当前 socket 并重新绑定: {recv_err}")
+                    raise
+                # Decode/authenticate here; durable handling runs on bounded lanes.
+                if data[:1] == b"{":
+                    try: envelope = decode_packet(data, RESCUE_SECRET)
+                    except ValueError: envelope = None
+                    if envelope is not None:
+                        if not _V2_PACKET_DISPATCHER.submit(envelope, udp_sock, addr):
+                            print("⚠️ server2 LAN packet queue full; sender retry required: " + str(envelope.get("type")))
+                        continue
         except OSError as e:
             if e.errno in (98, 10048) or "Address already in use" in str(e):
                 print(f"❌ udp 8888 bind 失败: {e}，10s 后重试")
@@ -1220,6 +2009,8 @@ def udp_listener():
             continue
         finally:
             UDP_LISTENING = False
+            if UDP_LISTENER_SOCKET is udp_sock:
+                UDP_LISTENER_SOCKET = None
             try: udp_sock.close()
             except Exception: pass
 
@@ -1680,6 +2471,11 @@ def handle_client(client_conn, client_addr):
                     return
 
                 now_ms = int(datetime.datetime.now().timestamp() * 1000)
+                # Batch-level app metadata belongs to the currently installed client.
+                # Offline report items may predate the current build and omit these fields.
+                batch_build_version = batch_data.get("build_version")
+                batch_protocol_version = batch_data.get("protocol_version")
+
                 batch_dev_id = batch_data.get("device_id")
                 if not batch_dev_id and reports_list and isinstance(reports_list[0], dict):
                     batch_dev_id = reports_list[0].get("device_id")
@@ -1697,6 +2493,11 @@ def handle_client(client_conn, client_addr):
                 for item in reports_list:
                     if not isinstance(item, dict):
                         break
+                    item = dict(item)
+                    if not item.get("build_version") and batch_build_version:
+                        item["build_version"] = batch_build_version
+                    if not item.get("protocol_version") and batch_protocol_version:
+                        item["protocol_version"] = batch_protocol_version
                     item_token = item.get("token") or batch_data.get("token")
                     if item_token != AUTH_TOKEN:
                         break
@@ -1758,8 +2559,10 @@ def handle_client(client_conn, client_addr):
                         if valid_ip:
                             item["last_valid_ip"] = valid_ip
                         # ★ 2026-11-07 [P4.4]
-                        item["build_version"] = item.get("build_version") or "旧版"
-                        item["protocol_version"] = item.get("protocol_version") or 1
+                        item["build_version"] = (item.get("build_version")
+                                                or prev_info.get("build_version") or "旧版")
+                        item["protocol_version"] = (item.get("protocol_version")
+                                                    or prev_info.get("protocol_version") or 1)
                         if prev_udp_ip:
                             item["udp_source_ip"] = prev_udp_ip
                         if prev_info.get("last_chat"):
@@ -1849,9 +2652,9 @@ def handle_client(client_conn, client_addr):
                 if not save_report(dev_id, data, client_addr[0]):
                     client_conn.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                     return
+                feedback_accepted = process_command_feedback(dev_id, command_feedback) if command_feedback else 0
                 if executed_ids:
                     process_executed_commands(dev_id, executed_ids)
-                feedback_accepted = process_command_feedback(dev_id, command_feedback) if command_feedback else 0
 
                 with state_lock:
                     if dev_id not in ALL_DEVICES_STATUS:
@@ -1873,8 +2676,10 @@ def handle_client(client_conn, client_addr):
                     if valid_ip:
                         data["last_valid_ip"] = valid_ip
                     # ★ 2026-11-07 [P4.4]
-                    data["build_version"] = data.get("build_version") or "旧版"
-                    data["protocol_version"] = data.get("protocol_version") or 1
+                    data["build_version"] = (data.get("build_version")
+                                              or prev_info.get("build_version") or "旧版")
+                    data["protocol_version"] = (data.get("protocol_version")
+                                                or prev_info.get("protocol_version") or 1)
                     if prev_udp_ip:
                         data["udp_source_ip"] = prev_udp_ip
                     if prev_info.get("last_chat"):
@@ -2288,16 +3093,35 @@ def handle_client(client_conn, client_addr):
                 target_ip = cmd_data.get("target_ip", "255.255.255.255")
                 success = False
                 extra_msg = ""
+                queued_count = 0
+                queue_rejected_count = 0
 
                 target_devs = []
                 if action in HTTP_SUPPORTED_ACTIONS:
                     target_devs = resolve_target_devices(target_ip)
+                    if action == "chat_msg":
+                        # The web chat's fixed target snapshot includes known offline members.
+                        # Use historical IDs for recipients, but keep UDP routing to current IPs only.
+                        historical = list_known_peer_snapshot(CHAT_DEDUP_DB, "server2")
+                        if target_ip in ("all", "255.255.255.255") or not target_ip:
+                            historical_ids = [peer["peer_id"] for peer in historical
+                                              if peer.get("peer_type") == "android"]
+                        else:
+                            selected_ips = set(target_ip if isinstance(target_ip, list) else [target_ip])
+                            historical_ids = [peer["peer_id"] for peer in historical
+                                              if peer["endpoint_ip"] in selected_ips]
+                        target_devs = sorted(set(target_devs) | set(historical_ids))
                     for dev_id in target_devs:
-                        enqueue_command(dev_id, action, payload)
+                        if action != "chat_msg":
+                            if enqueue_command(dev_id, action, payload):
+                                queued_count += 1
+                            else:
+                                queue_rejected_count += 1
 
                 def smart_send(cmd_prefix):
                     nonlocal extra_msg          # ★ 2026-11-18：必须声明，否则下面赋值只改到局部变量
                     sent_pkts = 0
+                    send_func = send_udp_chat_from_listener if action == "chat_msg" else send_udp_broadcast
                     try:
                         local_ip = get_local_ip()
                     except Exception:
@@ -2305,7 +3129,7 @@ def handle_client(client_conn, client_addr):
                     if isinstance(target_ip, list):
                         for ip in target_ip:
                             if ip and ip != '0.0.0.0':
-                                sent_pkts += send_udp_broadcast(cmd_prefix, ip)
+                                sent_pkts += send_func(cmd_prefix, ip)
                     elif target_ip == "all" or target_ip == "255.255.255.255":
                         # ★ 2026-11-07 修复：改用 state_lock，与 /api/report、clean_device 等写方互斥
                         # ★ 2026-11-18 补丁B：先聚合去重、再一次性发送，总包数受 UDP_TOTAL_PACKET_BUDGET 约束
@@ -2322,20 +3146,20 @@ def handle_client(client_conn, client_addr):
                                 remote_ips.append(observed_udp_target)
                         need_broadcast = (not unicast_ips) or (len(unicast_ips) > UDP_TOTAL_PACKET_BUDGET)
                         if need_broadcast:
-                            sent_pkts += send_udp_broadcast(cmd_prefix, "255.255.255.255")
+                            sent_pkts += send_func(cmd_prefix, "255.255.255.255")
                         else:
                             for ip in unicast_ips:
-                                sent_pkts += send_udp_broadcast(cmd_prefix, ip)
+                                sent_pkts += send_func(cmd_prefix, ip)
                         if remote_ips and (len(unicast_ips) + len(remote_ips)) <= UDP_TOTAL_PACKET_BUDGET:
                             for ip in remote_ips:
                                 # 仅对 UDP listener 实际观测到的来源地址尝试跨网段单播；HTTP 代理地址不参与。
-                                sent_pkts += send_udp_broadcast(cmd_prefix, ip)
+                                sent_pkts += send_func(cmd_prefix, ip)
                         if not unicast_ips and not remote_ips:
                             # ★ 2026-11-18 修复（自 server2_2.py 移植）：无在线设备时旧版直接回"指令执行失败"，
                             #   家属以为是推送逻辑坏了；实际包已广播，只是设备不在列表/不在同网段。
                             extra_msg = "已向子网广播，但当前设备列表为空：请确认手机已在同一 WiFi 下且已成功上报（走流量时 UDP 不可达）"
                     else:
-                        sent_pkts += send_udp_broadcast(cmd_prefix, target_ip)
+                        sent_pkts += send_func(cmd_prefix, target_ip)
                     return sent_pkts > 0
 
                 # ★ 插件挂载：远程陪伴控制
@@ -2352,25 +3176,68 @@ def handle_client(client_conn, client_addr):
                 elif action == "force_report": success = smart_send(f"FIND_ME_REPORT:{RESCUE_SECRET}")
                 elif action == "play_alarm": success = smart_send(f"FIND_ME_ALARM:{RESCUE_SECRET}")
                 elif action == "custom_msg":
-                    # ★ 2026-11-07 [P4.5]: 版本感知双发
+                    # 留言优先：先前已写入持久化 HTTP 队列，再发送原有 FLOAT UDP 信令。
+                    # 随后触发一次现有 REPORT 指令，促使设备尽快拉取队列；
+                    # 若 FLOAT 丢包，HTTP 队列仍可补发；若 FLOAT 已到，设备端内容去重避免重复显示。
+                    # REPORT 仅是加速兜底，不作为留言送达确认，也不改变 FLOAT 的独立消息通道。
                     success = False
                     cmds = _build_version_aware_commands(target_devs, "custom_msg", payload)
                     for cmd_prefix in cmds:
                         if smart_send(cmd_prefix):
                             success = True
-                    # ★ FIX-3 2026-11-18：v1+冒号已改为全角冒号降级下发，cmds 不再为空；
-                    #   这里只保留"确实构造不出信令"的兜底提示。
+                        smart_send(f"FIND_ME_REPORT:{RESCUE_SECRET}")
+                    # v2-only：仅保留原有"确实构造不出信令"的兜底提示。
                     if not cmds:
                         success = False
-                        extra_msg = "未能构造下行信令，指令已写入队列，等手机下次上报时下发"
+                        extra_msg = "未能构造下行信令，留言已写入队列，等手机下次上报时下发"
                 elif action == "chat_msg":
-                    # ★ 2026-11-07 [P4.5]: CHAT + MSG 双发
+                    # LAN v2 and the existing HTTP command fallback share one message_id.
                     success = False
-                    for cmd_prefix in _build_version_aware_commands(target_devs, "chat_msg", payload):
-                        if smart_send(cmd_prefix):
+                    chat_message_id = uuid.uuid4().hex
+                    fallback_payload = encode_chat_http_fallback_payload(
+                        chat_message_id, PEER_NODE_ID, "Web_Console", str(payload))
+                    # Try the durable P2P Outbox first; a failure or >1200-byte packet does not
+                    # disable the existing authenticated HTTP fallback.
+                    chat_packets = _build_version_aware_commands(
+                        target_devs, "chat_msg", payload, message_id=chat_message_id)
+
+                    fallback_queued_count = 0
+                    for dev_id in target_devs:
+                        if enqueue_command(dev_id, "chat_msg", fallback_payload):
+                            fallback_queued_count += 1
+                        else:
+                            queue_rejected_count += 1
+                            with print_lock:
+                                print(f"⚠️ Web chat HTTP fallback queue rejected for {dev_id}")
+                    queued_count = fallback_queued_count
+
+                    # Queue fallback before UDP send so a fast stored ACK can cancel that exact row.
+                    # Do not route chat through generic smart_send(): its broadcast fallback
+                    # could expose an old fixed-recipient message to a late-joining device.
+                    for cmd_prefix in chat_packets:
+                        sent = send_server2_v2_chat_from_outbox(cmd_prefix, target_devs)
+                        if sent > 0:
                             success = True
+                    # A returned packet means the shared-ID LAN Outbox was durably
+                    # persisted, even when no currently active peer could be reached.
+                    if chat_packets:
+                        success = True
+                    if queue_rejected_count:
+                        if chat_packets:
+                            extra_msg = (f"LAN消息已持久化；{queue_rejected_count}台设备的HTTP兜底未入队，"
+                                         f"当前HTTP兜底覆盖 {fallback_queued_count}/{len(target_devs)} 台")
+                        elif fallback_queued_count:
+                            extra_msg = (f"仅{fallback_queued_count}/{len(target_devs)}台设备的HTTP兜底入队成功，"
+                                         "其余设备未建立持久化投递路径")
+                        else:
+                            extra_msg = "HTTP兜底入队失败，且LAN Outbox未能持久化"
+
                     if success:
                         ts = datetime.datetime.now().strftime("%H:%M:%S")
+                        local_saved = _claim_chat_message("Web_Console", "web-" + chat_message_id, payload)
+                        if local_saved is None:
+                            with print_lock:
+                                print("⚠️ 网页对讲已尝试发送，但本机历史持久化失败")
                         with state_lock:
                             CHAT_MESSAGES.append({"time": ts, "sender": "Web_Console", "content": payload})
                             if len(CHAT_MESSAGES) > 100: CHAT_MESSAGES.pop(0)
@@ -2460,7 +3327,9 @@ def handle_client(client_conn, client_addr):
                     success = ok
                     extra_msg = f"已撤回指令 {c_id}" if ok else "未找到对应的待发指令（可能已执行或已过期）"
 
-                queued_count = len(target_devs) if action in HTTP_SUPPORTED_ACTIONS else 0
+                if queue_rejected_count and action != "chat_msg" and not extra_msg:
+                    extra_msg = (f"UDP已尝试发送，但{queue_rejected_count}/{len(target_devs)}台设备"
+                                 "的HTTP兜底未能持久化；离线补发不完整")
                 # ★ FIX-7 2026-11-18：UDP 无送达确认，"包发出去了" != "设备执行了"。
                 #   旧版只要 smart_send 返回真就报"指令发送成功"，且 queued_count>0 的
                 #   排队提示因 success 恒真而永不显示。现在如实回传链路状态。
@@ -2522,17 +3391,66 @@ def handle_client(client_conn, client_addr):
                 try: client_conn.sendall(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 except Exception: pass
 
+        # ===== POST /api/discovery/refresh =====
+        elif "POST /api/discovery/refresh" in header_text:
+            try:
+                request_data = json.loads(body_part.decode("utf-8", errors="ignore"))
+                if not isinstance(request_data, dict):
+                    client_conn.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    return
+                if CONTROL_AUTH_ENABLED:
+                    if CONTROL_IP_ALLOWLIST and not any(
+                            str(client_addr[0]).startswith(prefix) for prefix in CONTROL_IP_ALLOWLIST):
+                        client_conn.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        return
+                    if request_data.get("token") != CONTROL_TOKEN:
+                        client_conn.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        return
+                result = request_active_peer_discovery()
+                status_code = 200 if result["status"] in ("ok", "throttled") else 503
+                body = json.dumps(result, ensure_ascii=False).encode("utf-8")
+                client_conn.sendall(
+                    f"HTTP/1.1 {status_code} {'OK' if status_code == 200 else 'Service Unavailable'}\r\n"
+                    f"Content-Type: application/json; charset=utf-8\r\n"
+                    f"Access-Control-Allow-Origin: *\r\nContent-Length: {len(body)}\r\n"
+                    f"Connection: close\r\n\r\n".encode("utf-8") + body)
+            except Exception as e:
+                with print_lock:
+                    print(f"LAN peer discovery refresh failed: {type(e).__name__}")
+                try:
+                    client_conn.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                except Exception:
+                    pass
+
         # ===== GET /api/chat_history =====
         elif "GET /api/chat_history" in header_text:
             try:
                 with state_lock:
                     devices_snapshot = {k: dict(v) for k, v in ALL_DEVICES_STATUS.items()}
                     messages_snapshot = list(CHAT_MESSAGES)
-                devices_list = []
+                devices_by_id = {}
                 for dev_id, info in devices_snapshot.items():
-                    ip = (info.get("source_ip") or info.get("udp_source_ip") or (info.get("network") or {}).get("local_ip"))
-                    if ip and ip != '0.0.0.0':
-                        devices_list.append({"id": dev_id, "ip": ip})
+                    ip = (info.get("source_ip") or info.get("udp_source_ip")
+                          or (info.get("network") or {}).get("local_ip"))
+                    if ip and ip != "0.0.0.0":
+                        devices_by_id[dev_id] = ip
+                # Include currently authenticated Android peers learned by LAN discovery,
+                # not only devices that have recently posted an HTTP tracking report.
+                try:
+                    now = time.time()
+                    for peer in list_known_peer_snapshot(CHAT_DEDUP_DB, "server2", limit=500):
+                        ip = str(peer.get("endpoint_ip") or "")
+                        if (peer.get("peer_type") == "android"
+                                and peer.get("status") == "active"
+                                and float(peer.get("lease_expires_at") or 0) > now
+                                and ip and ip != "0.0.0.0"):
+                            devices_by_id[str(peer["peer_id"])] = ip
+                except Exception as peer_snapshot_error:
+                    with print_lock:
+                        print("LAN chat peer snapshot temporarily unavailable: "
+                              + type(peer_snapshot_error).__name__)
+                devices_list = [{"id": dev_id, "ip": ip}
+                                for dev_id, ip in sorted(devices_by_id.items())]
                 data_to_send = {"messages": messages_snapshot, "devices": devices_list}
                 with print_lock: resp = json.dumps(data_to_send)
                 resp_bytes = resp.encode('utf-8')
@@ -2955,6 +3873,9 @@ td button.btn-sm:nth-child(3n) { margin-right: 0; }
 <div id="chatBox">
     <div class="device-selector" id="deviceSelector">
         """ + chat_options + """
+    </div>
+    <div style="display:flex;justify-content:flex-end;margin:6px 0;">
+        <button type="button" onclick="refreshLanPeerDiscovery(true)">主动发现设备</button>
     </div>
     <div id="chatMessages"></div>
     <div class="chat-input-area">
@@ -3389,7 +4310,12 @@ function showToast(msg) {
 function openTalkPage() {
     showAdminPage('talk');
     var panel = document.getElementById('chatBox');
-    if (panel && !isChatVisible) { isChatVisible = true; panel.style.display = 'flex'; fetchChatHistory(); }
+    if (panel && !isChatVisible) {
+        isChatVisible = true;
+        panel.style.display = 'flex';
+        refreshLanPeerDiscovery(false);
+        fetchChatHistory();
+    }
 }
 
 function toggleChatBox() {
@@ -3398,6 +4324,7 @@ function toggleChatBox() {
     isChatVisible = !isChatVisible;
     if (isChatVisible) {
         chatBox.style.display = 'flex';
+        refreshLanPeerDiscovery(false);
         fetchChatHistory();
     } else {
         chatBox.style.display = 'none';
@@ -3427,6 +4354,30 @@ function toggleCompanionBox() {
     isCompanionVisible = !isCompanionVisible;
     box.style.display = isCompanionVisible ? 'block' : 'none';
     if (isCompanionVisible) fetchDeviceTargets();
+}
+
+var lastLanPeerDiscoveryRequestAt = 0;
+function refreshLanPeerDiscovery(showFeedback) {
+    var now = Date.now();
+    if (now - lastLanPeerDiscoveryRequestAt < 5000) return;
+    lastLanPeerDiscoveryRequestAt = now;
+    fetch('/api/discovery/refresh', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({token: ADMIN_TOKEN})
+    }).then(function(res) {
+        return res.json().then(function(data) {
+            if (!res.ok) throw new Error(data.status || ('HTTP ' + res.status));
+            if (showFeedback) {
+                showToast(data.status === 'throttled'
+                    ? '刚刚已发起发现，请稍候'
+                    : '已主动广播发现请求，正在更新设备列表');
+            }
+            setTimeout(fetchChatHistory, 500);
+        });
+    }).catch(function(error) {
+        if (showFeedback) showToast('主动发现失败：' + error.message);
+    });
 }
 
 function handleChatEnter(e) { if (e.key === 'Enter') sendChat(); }
@@ -3572,8 +4523,29 @@ function readChecked(cls) {
     return out;
 }
 
-function buildSelectorHtml(devices, currentChecked, cls) {
-    var tagHtml = '<label class="device-tag"><input type="checkbox" class="' + cls + '" value="all" ' + (currentChecked.indexOf('all') !== -1 || currentChecked.length === 0 ? 'checked' : '') + '><span>所有人 (群发)</span></label>';
+var selectorTouched = {chat: false, companion: false};
+
+document.addEventListener('change', function(event) {
+    var input = event.target;
+    if (!input || input.type !== 'checkbox' || !input.classList) return;
+    var cls = input.classList.contains(SEL_CHAT) ? SEL_CHAT
+        : (input.classList.contains(SEL_COMPANION) ? SEL_COMPANION : '');
+    if (!cls) return;
+    var isChat = cls === SEL_CHAT;
+    selectorTouched[isChat ? 'chat' : 'companion'] = true;
+    if (!input.checked) return;
+    var container = document.getElementById(isChat ? 'deviceSelector' : 'companionSelector');
+    if (!container) return;
+    container.querySelectorAll('input.' + cls).forEach(function(other) {
+        if (other !== input && (input.value === 'all' || other.value === 'all')) {
+            other.checked = false;
+        }
+    });
+});
+
+function buildSelectorHtml(devices, currentChecked, cls, defaultAll) {
+    var allChecked = currentChecked.indexOf('all') !== -1 || defaultAll;
+    var tagHtml = '<label class="device-tag"><input type="checkbox" class="' + cls + '" value="all" ' + (allChecked ? 'checked' : '') + '><span>所有人 (群发)</span></label>';
     devices.forEach(function(dev) {
         var isChecked = currentChecked.indexOf(dev.ip) !== -1 ? 'checked' : '';
         tagHtml += '<label class="device-tag"><input type="checkbox" class="' + cls + '" value="' + escapeHtml(dev.ip) + '" ' + isChecked + '><span>' + escapeHtml(dev.id) + '</span></label>';
@@ -3586,12 +4558,16 @@ function buildSelectorHtml(devices, currentChecked, cls) {
 function renderSelectors(devices) {
     var el1 = document.getElementById('deviceSelector');
     if (el1) {
-        var h1 = buildSelectorHtml(devices, readChecked(SEL_CHAT), SEL_CHAT);
+        var checkedChat = readChecked(SEL_CHAT);
+        var h1 = buildSelectorHtml(devices, checkedChat, SEL_CHAT,
+            !selectorTouched.chat && checkedChat.length === 0);
         if (el1.innerHTML !== h1) el1.innerHTML = h1;
     }
     var el2 = document.getElementById('companionSelector');
     if (el2) {
-        var h2 = buildSelectorHtml(devices, readChecked(SEL_COMPANION), SEL_COMPANION);
+        var checkedCompanion = readChecked(SEL_COMPANION);
+        var h2 = buildSelectorHtml(devices, checkedCompanion, SEL_COMPANION,
+            !selectorTouched.companion && checkedCompanion.length === 0);
         if (el2.innerHTML !== h2) el2.innerHTML = h2;
     }
     // ★ v2.5.3：高级设置选择器默认不勾选任何设备，避免页面初次打开就隐式全选。
@@ -3617,11 +4593,16 @@ function getSelectedTarget(cls) {
 // 推送类指令取目标；未勾选任何设备时回退全推（保持老行为，不会把功能改坏）
 function mediaTarget() {
     var t = getSelectedTarget(SEL_COMPANION);
-    return t ? t : "all";
+    if (!t) {
+        showToast("请至少选择一个设备，或选择所有人群发");
+        return null;
+    }
+    return t;
 }
 
 function sendCmd(action, payload, target_ip) {
     if (payload === undefined) payload = "";
+    if (target_ip === null) return;
     if (target_ip === undefined) target_ip = 'all'; // ★ v2.5.3：不再隐式继承陪伴面板的设备选择状态
     
     fetch('/api/control', {

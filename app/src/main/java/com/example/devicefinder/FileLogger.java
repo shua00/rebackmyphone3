@@ -75,35 +75,53 @@ public class FileLogger {
             File dir = context.getExternalFilesDir(null);
             if (dir == null) return;
 
-            String today = sdfDate.format(new Date());
-
-            // 跨天轮转：device_log.txt → device_log_yyyy-MM-dd.txt
-            if (currentFileDate != null && !currentFileDate.equals(today)) {
-                File current = new File(dir, LOG_FILE_NAME);
-                if (current.exists()) {
-                    current.renameTo(new File(dir, LOG_FILE_PREFIX + currentFileDate + ".txt"));
-                }
-                cleanOldLogs(dir);
-            }
-            currentFileDate = today;
-
+            Date now = new Date();
+            String today = sdfDate.format(now);
             File logFile = new File(dir, LOG_FILE_NAME);
 
-            if (logFile.exists() && logFile.length() > MAX_FILE_SIZE) {
-                logFile.delete();
-                FileWriter newWriter = new FileWriter(logFile, true);
-                newWriter.write(sdfTime.format(new Date()) + " | SYSTEM | 🧹 单日日志超过5MB，已自动清空重写\n");
-                newWriter.close();
+            // 进程重启后也按文件实际修改日期判断跨天，不能依赖进程内缓存。
+            if (logFile.exists() && logFile.length() > 0
+                    && !today.equals(sdfDate.format(new Date(logFile.lastModified())))) {
+                if (!archiveCurrentLog(dir, logFile, now)) return;
+            }
+
+            byte[] encodedLine = (line + "\\n").getBytes("UTF-8");
+            // 超过单文件预算时先归档旧文件，再创建新文件；绝不 delete 后重写。
+            if (logFile.exists() && logFile.length() > 0
+                    && logFile.length() + encodedLine.length > MAX_FILE_SIZE) {
+                if (!archiveCurrentLog(dir, logFile, now)) return;
             }
 
             FileWriter writer = new FileWriter(logFile, true);
-            writer.write(line + "\n");
+            writer.write(line);
+            writer.write("\\n");
             writer.flush();
             writer.close();
+            cleanOldLogs(dir);
         } catch (Exception e) {
             // ★ 补丁6核心：捕获所有异常（含 SecurityException），防止进程崩溃
             Log.e(TAG, "写入日志失败(已被系统拦截): " + e.getMessage());
         }
+    }
+
+    /**
+     * 将当前日志归档为唯一文件名。归档失败时保留原文件并停止本次写入，
+     * 避免在空间/文件系统异常时覆盖唯一诊断证据。
+     */
+    private static boolean archiveCurrentLog(File dir, File current, Date now) {
+        if (current == null || !current.exists() || current.length() == 0) return true;
+        String stamp = new SimpleDateFormat("yyyy-MM-dd_HHmmss_SSS", Locale.US).format(now);
+        File archived = new File(dir, LOG_FILE_PREFIX + stamp + ".txt");
+        int suffix = 1;
+        while (archived.exists()) {
+            archived = new File(dir, LOG_FILE_PREFIX + stamp + "_" + suffix++ + ".txt");
+        }
+        if (!current.renameTo(archived)) {
+            Log.e(TAG, "日志归档失败，保留原文件并暂停本次写入: " + current.getName());
+            return false;
+        }
+        Log.i(TAG, "日志已归档: " + archived.getName() + " (" + archived.length() + " bytes)");
+        return true;
     }
 
     private static void cleanOldLogs(File dir) {

@@ -1,0 +1,2249 @@
+"""Shared, dependency-free persistence primitives for LAN P2P services."""
+import queue
+import sqlite3
+import threading
+import time
+
+
+_ACK_ENDPOINT_LOCK = threading.RLock()
+# Fixed-size lock striping serializes discovery dispatches for the same message
+# without retaining an unbounded per-message lock registry.
+_DISCOVERY_DISPATCH_LOCKS = tuple(threading.Lock() for _ in range(64))
+
+
+# Must match Android LanChatStore.FIRST_DISCOVERY_WINDOW_MS.
+FIRST_DISCOVERY_WINDOW_MS = 10_000
+MAX_PEER_ID_BYTES = 128
+MAX_DATAGRAM_BYTES = 1200
+MAX_OUTBOX_TARGET_ATTEMPTS = 8
+OUTBOX_RETRY_RECOVERY_COOLDOWN_MS = 60_000
+
+
+class LanP2PStorageError(RuntimeError):
+    """A durable LAN P2P ledger operation failed; callers must not treat it as empty state."""
+
+
+class BoundedPacketDispatcher:
+    """Bounded ACK, peer-control, and chat-message lanes for authenticated LAN packets.
+
+    ACK work cannot queue behind peer discovery or durable chat-message writes.
+    Peer hello/ack retain FIFO ordering in their own lane. Full queues reject the
+    datagram; existing message IDs, duplicate ACKs, and nonce challenges recover it.
+    """
+    PEER_PACKET_TYPES = frozenset(("peer.hello", "peer.ack"))
+
+    def __init__(self, handler, name, on_error=None, ack_capacity=64,
+                 peer_capacity=64, message_capacity=128):
+        if not callable(handler):
+            raise ValueError("packet handler must be callable")
+        if min(int(ack_capacity), int(peer_capacity), int(message_capacity)) < 1:
+            raise ValueError("packet dispatcher capacities must be positive")
+        self._handler = handler
+        self._name = str(name or "lan")
+        self._on_error = on_error
+        self._ack_queue = queue.Queue(maxsize=int(ack_capacity))
+        self._peer_queue = queue.Queue(maxsize=int(peer_capacity))
+        self._message_queue = queue.Queue(maxsize=int(message_capacity))
+        self._start_lock = threading.Lock()
+        self._workers = []
+        self._closed = threading.Event()
+
+    def _start_workers(self):
+        with self._start_lock:
+            if self._closed.is_set():
+                return False
+            if not self._workers:
+                for lane, target_queue in (
+                        ("ack", self._ack_queue),
+                        ("peer", self._peer_queue),
+                        ("message", self._message_queue)):
+                    worker = threading.Thread(
+                        target=self._run_lane,
+                        args=(target_queue, lane),
+                        daemon=True,
+                        name="lan-p2p-" + self._name + "-" + lane)
+                    self._workers.append(worker)
+                    worker.start()
+            return True
+
+    def submit(self, envelope, sock, addr):
+        if not isinstance(envelope, dict) or self._closed.is_set():
+            return False
+        if not self._start_workers():
+            return False
+        packet_type = envelope.get("type")
+        if packet_type in ("chat.ack", "chat.fragment.ack"):
+            target_queue = self._ack_queue
+        elif packet_type in self.PEER_PACKET_TYPES:
+            target_queue = self._peer_queue
+        else:
+            target_queue = self._message_queue
+        try:
+            target_queue.put_nowait((envelope, sock, addr))
+            return True
+        except queue.Full:
+            return False
+
+    def _run_lane(self, target_queue, lane):
+        while not self._closed.is_set() or not target_queue.empty():
+            try:
+                item = target_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                envelope, sock, addr = item
+                self._handler(envelope, sock, addr)
+            except Exception as exc:
+                if self._on_error is not None:
+                    try:
+                        self._on_error(exc, lane)
+                    except Exception:
+                        pass
+            finally:
+                target_queue.task_done()
+
+    def close(self, timeout_seconds=1.0):
+        self._closed.set()
+        for worker in self._workers:
+            worker.join(max(0.0, float(timeout_seconds)))
+
+def _safe_rollback(conn):
+    """Best-effort rollback that never masks the original storage failure."""
+    if conn is not None:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+
+def _safe_close(conn):
+    """Best-effort close; a cleanup failure must not replace the operation result."""
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def record_peer(db_path, receiver_scope, peer_id, peer_type, service_id,
+                endpoint_ip, endpoint_port, status="suspect"):
+    """Persist a discovered peer without treating an unconfirmed HELLO as active."""
+    if not peer_id or not receiver_scope:
+        return False
+    now = time.time()
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        try:
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("""CREATE TABLE IF NOT EXISTS lan_peers (
+                receiver_scope TEXT NOT NULL,
+                peer_id TEXT NOT NULL,
+                peer_type TEXT NOT NULL DEFAULT 'unknown',
+                service_id TEXT NOT NULL DEFAULT '',
+                protocol_version INTEGER NOT NULL DEFAULT 2,
+                capabilities TEXT NOT NULL DEFAULT '',
+                network_scope TEXT NOT NULL DEFAULT '',
+                endpoint_ip TEXT NOT NULL DEFAULT '',
+                endpoint_port INTEGER NOT NULL DEFAULT 0,
+                last_seen_at REAL NOT NULL DEFAULT 0,
+                last_verified_at REAL NOT NULL DEFAULT 0,
+                lease_expires_at REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'suspect',
+                PRIMARY KEY(receiver_scope, peer_id)
+            )""")
+            conn.execute("""INSERT INTO lan_peers
+                (receiver_scope,peer_id,peer_type,service_id,protocol_version,
+                 endpoint_ip,endpoint_port,last_seen_at,last_verified_at,lease_expires_at,status)
+                VALUES(?,?,?,?,2,?,?,?,?,?,?)
+                ON CONFLICT(receiver_scope,peer_id) DO UPDATE SET
+                    peer_type=excluded.peer_type,
+                    service_id=excluded.service_id,
+                    endpoint_ip=excluded.endpoint_ip,
+                    endpoint_port=excluded.endpoint_port,
+                    last_seen_at=excluded.last_seen_at,
+                    last_verified_at=CASE
+                        WHEN excluded.status='active' THEN excluded.last_verified_at
+                        WHEN excluded.status='suspect' AND
+                             (lan_peers.endpoint_ip!=excluded.endpoint_ip OR
+                              lan_peers.endpoint_port!=excluded.endpoint_port) THEN 0
+                        ELSE lan_peers.last_verified_at END,
+                    lease_expires_at=CASE
+                        WHEN excluded.status='active' THEN excluded.lease_expires_at
+                        ELSE lan_peers.lease_expires_at END,
+                    status=CASE
+                        WHEN excluded.status='suspect' AND
+                             (lan_peers.endpoint_ip!=excluded.endpoint_ip OR
+                              lan_peers.endpoint_port!=excluded.endpoint_port) THEN 'suspect'
+                        WHEN lan_peers.status='active' AND excluded.status='suspect'
+                        THEN 'active' ELSE excluded.status END""",
+                (receiver_scope, str(peer_id), peer_type or "unknown", service_id or "",
+                 endpoint_ip or "", int(endpoint_port or 0), now,
+                 now if status == "active" else 0.0, now + 120.0, status))
+            conn.commit()
+            return True
+        finally:
+            _safe_close(conn)
+    except Exception:
+        return False
+
+
+def load_stable_peer_id(db_path, service_name):
+    """Return a durable logical service identity; never a process-session UUID."""
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("""CREATE TABLE IF NOT EXISTS lan_service_identity (
+            service_name TEXT PRIMARY KEY,
+            peer_id TEXT NOT NULL UNIQUE,
+            created_at REAL NOT NULL
+        )""")
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT peer_id FROM lan_service_identity WHERE service_name=?",
+            (service_name,)
+        ).fetchone()
+        if row and row[0]:
+            peer_id = str(row[0])
+        else:
+            import uuid
+            peer_id = service_name + "-" + uuid.uuid4().hex
+            conn.execute(
+                "INSERT INTO lan_service_identity(service_name,peer_id,created_at) VALUES(?,?,?)",
+                (service_name, peer_id, time.time())
+            )
+        conn.commit()
+        return peer_id
+    except Exception:
+        _safe_rollback(conn)
+        raise
+    finally:
+        _safe_close(conn)
+
+
+def _canonical_envelope_bytes(fields):
+    import json
+    return json.dumps(fields, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False).encode("utf-8")
+
+
+def _envelope_key(secret):
+    import hashlib
+    if not isinstance(secret, str) or not secret:
+        raise ValueError("shared secret is required")
+    return hashlib.sha256(b"lan-p2p-v2\x00" + secret.encode("utf-8")).digest()
+
+
+def max_peer_id_budget_probe():
+    """Return a valid maximum-length ID with worst-case JSON quote escaping."""
+    return '"' * MAX_PEER_ID_BYTES
+
+
+def is_valid_peer_id(peer_id):
+    """Shared identity predicate for packet codecs and durable recipient snapshots."""
+    if not isinstance(peer_id, str) or not peer_id:
+        return False
+    try:
+        if len(peer_id.encode("utf-8")) > MAX_PEER_ID_BYTES:
+            return False
+    except UnicodeError:
+        return False
+    return not any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in peer_id)
+
+
+def _validate_peer_id_fields(packet):
+    for field in ("sender_peer_id", "target_peer_id"):
+        if field not in packet and field == "target_peer_id":
+            continue
+        if not is_valid_peer_id(packet.get(field)):
+            raise ValueError("invalid " + field)
+
+
+def _require_packet_string(packet, field, allow_empty=False):
+    value = packet.get(field)
+    if not isinstance(value, str) or (not allow_empty and not value):
+        raise ValueError("invalid or missing " + field)
+
+
+def _require_packet_integer(packet, field, minimum=0, maximum=(1 << 63) - 1):
+    value = packet.get(field)
+    if type(value) is not int or value < minimum or value > maximum:
+        raise ValueError("invalid " + field)
+
+
+def _validate_packet_schema(packet):
+    """Enforce the v2 message-type contract before authentication on both peers."""
+    for field in ("sender_peer_type", "service_id", "network_scope", "display_name"):
+        if field in packet and not isinstance(packet[field], str):
+            raise ValueError("invalid " + field)
+
+    packet_type = packet.get("type")
+    if packet_type == "peer.hello":
+        _require_packet_string(packet, "nonce")
+        if "challenge_only" in packet and type(packet["challenge_only"]) is not bool:
+            raise ValueError("invalid challenge_only")
+        if "listen_port" in packet:
+            _require_packet_integer(packet, "listen_port", 1, 65535)
+        if "capabilities" in packet:
+            capabilities = packet["capabilities"]
+            if not isinstance(capabilities, list) or any(not isinstance(x, str) for x in capabilities):
+                raise ValueError("invalid capabilities")
+    elif packet_type == "peer.ack":
+        _require_packet_string(packet, "reply_nonce")
+        if "listen_port" in packet:
+            _require_packet_integer(packet, "listen_port", 1, 65535)
+    elif packet_type == "chat.message":
+        _require_packet_string(packet, "message_id")
+        _require_packet_string(packet, "target_peer_id")
+        _require_packet_string(packet, "body", allow_empty=True)
+        if "created_at_ms" in packet:
+            _require_packet_integer(packet, "created_at_ms")
+    elif packet_type == "chat.ack":
+        _require_packet_string(packet, "message_id")
+        _require_packet_string(packet, "target_peer_id")
+        if packet.get("status") != "stored":
+            raise ValueError("invalid chat ACK status")
+    elif packet_type == "chat.fragment":
+        _require_packet_string(packet, "message_id")
+        _require_packet_string(packet, "target_peer_id")
+        _require_packet_string(packet, "fragment_data")
+        _require_packet_string(packet, "sha256")
+        if len(packet["message_id"].encode("utf-8")) > 128:
+            raise ValueError("message_id exceeds limit")
+        _require_packet_integer(packet, "fragment_index", 0, 1023)
+        _require_packet_integer(packet, "fragment_count", 1, 1024)
+        _require_packet_integer(packet, "total_bytes", 1, 262144)
+        if packet["fragment_index"] >= packet["fragment_count"]:
+            raise ValueError("fragment index exceeds count")
+        if len(packet["sha256"]) != 64 or any(c not in "0123456789abcdef" for c in packet["sha256"]):
+            raise ValueError("invalid fragment digest")
+        if len(packet["fragment_data"]) > 400:
+            raise ValueError("fragment data exceeds limit")
+        if "created_at_ms" in packet:
+            _require_packet_integer(packet, "created_at_ms")
+    elif packet_type == "chat.fragment.ack":
+        _require_packet_string(packet, "message_id")
+        _require_packet_string(packet, "target_peer_id")
+        _require_packet_integer(packet, "fragment_index", 0, 1023)
+        if packet.get("status") != "received":
+            raise ValueError("invalid fragment ACK status")
+    else:
+        raise ValueError("unsupported LAN P2P packet type")
+
+
+def _validate_unicode_scalars(value):
+    """Reject strings that cannot be encoded as strict UTF-8 on every platform."""
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise ValueError("JSON string contains an unpaired surrogate") from exc
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError("JSON object keys must be strings")
+            _validate_unicode_scalars(key)
+            _validate_unicode_scalars(item)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _validate_unicode_scalars(item)
+
+
+def _validate_canonical_numbers(value):
+    """Reject JSON numbers whose textual form can diverge across Python/Android."""
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return
+    if isinstance(value, int):
+        if value < -(1 << 63) or value > (1 << 63) - 1:
+            raise ValueError("JSON integer is outside signed 64-bit range")
+        return
+    if isinstance(value, float):
+        raise ValueError("non-integer JSON numbers are unsupported")
+    if isinstance(value, dict):
+        for item in value.values():
+            _validate_canonical_numbers(item)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _validate_canonical_numbers(item)
+
+
+def encode_packet(fields, secret, max_bytes=1200):
+    """Encode and authenticate a bounded v2 JSON datagram."""
+    import hashlib
+    import hmac
+    if not isinstance(fields, dict):
+        raise ValueError("packet fields must be a dict")
+    packet = dict(fields)
+    packet.pop("auth", None)
+    _validate_unicode_scalars(packet)
+    _validate_canonical_numbers(packet)
+    packet["v"] = 2
+    packet_type = packet.get("type")
+    if packet_type not in ("peer.hello", "peer.ack", "chat.message", "chat.ack", "chat.fragment", "chat.fragment.ack"):
+        raise ValueError("unsupported LAN P2P packet type")
+    _validate_peer_id_fields(packet)
+    _validate_packet_schema(packet)
+    unsigned = _canonical_envelope_bytes(packet)
+    packet["auth"] = hmac.new(_envelope_key(secret), unsigned, hashlib.sha256).hexdigest()
+    raw = _canonical_envelope_bytes(packet)
+    if len(raw) > int(max_bytes):
+        raise ValueError("LAN P2P datagram exceeds size limit")
+    return raw
+
+
+def decode_packet(data, secret, max_bytes=1200):
+    """Decode and authenticate a v2 datagram; raises ValueError on any invalid packet."""
+    import hashlib
+    import hmac
+    import json
+    if not isinstance(data, (bytes, bytearray)):
+        raise ValueError("packet must be bytes")
+    if len(data) == 0 or len(data) > int(max_bytes):
+        raise ValueError("invalid LAN P2P datagram size")
+    try:
+        packet = json.loads(bytes(data).decode("utf-8", errors="strict"))
+    except Exception as exc:
+        raise ValueError("invalid LAN P2P JSON") from exc
+    if not isinstance(packet, dict):
+        raise ValueError("invalid LAN P2P envelope")
+    _validate_unicode_scalars(packet)
+    _validate_canonical_numbers(packet)
+    if type(packet.get("v")) is not int or packet.get("v") != 2:
+        raise ValueError("unsupported LAN P2P protocol version")
+    if packet.get("type") not in ("peer.hello", "peer.ack", "chat.message", "chat.ack", "chat.fragment", "chat.fragment.ack"):
+        raise ValueError("unsupported LAN P2P packet type")
+    _validate_peer_id_fields(packet)
+    _validate_packet_schema(packet)
+    supplied = packet.get("auth")
+    if not isinstance(supplied, str):
+        raise ValueError("missing packet authentication")
+    unsigned = dict(packet)
+    unsigned.pop("auth", None)
+    expected = hmac.new(_envelope_key(secret), _canonical_envelope_bytes(unsigned),
+                        hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(supplied, expected):
+        raise ValueError("invalid packet authentication")
+    return packet
+
+
+def validate_incoming_message_claim(conn, insert_rowcount, receiver_scope,
+                                    sender_peer_id, message_id, body):
+    """Return True for a new row, False for an identical duplicate, None for payload conflict."""
+    if conn is None or not receiver_scope or not sender_peer_id or not message_id:
+        return None
+    if int(insert_rowcount or 0) == 1:
+        return True
+    row = conn.execute("""SELECT content FROM received_chat_messages
+        WHERE receiver_scope=? AND sender=? AND message_key=?""",
+        (str(receiver_scope), str(sender_peer_id), str(message_id))).fetchone()
+    if row is None or str(row[0]) != str(body):
+        return None
+    return False
+
+
+def persist_outgoing_message(db_path, sender_scope, sender_peer_id, message_id,
+                             body, target_peer_ids, created_at_ms=None):
+    """Atomically persist a Python-originated chat message and its fixed recipient snapshot."""
+    if not sender_scope or not is_valid_peer_id(sender_peer_id) or not message_id or body is None:
+        return False
+    persisted_at_ms = int(time.time() * 1000)
+    now_ms = int(created_at_ms if created_at_ms is not None else persisted_at_ms)
+    targets = sorted(set(str(peer) for peer in (target_peer_ids or []) if peer))
+    if any(not is_valid_peer_id(peer) for peer in targets):
+        return False
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("""CREATE TABLE IF NOT EXISTS lan_outbox (
+            message_id TEXT PRIMARY KEY NOT NULL,
+            sender_scope TEXT NOT NULL,
+            sender_peer_id TEXT NOT NULL,
+            message_type TEXT NOT NULL DEFAULT 'chat',
+            body TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            protocol_version INTEGER NOT NULL DEFAULT 2,
+            state TEXT NOT NULL DEFAULT 'discovery_pending',
+            delivery_deadline_ms INTEGER NOT NULL DEFAULT 0
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS lan_outbox_targets (
+            message_id TEXT NOT NULL,
+            peer_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            last_attempt_at INTEGER NOT NULL DEFAULT 0,
+            last_ack_at INTEGER NOT NULL DEFAULT 0,
+            last_endpoint TEXT NOT NULL DEFAULT '',
+            last_attempt_endpoint TEXT NOT NULL DEFAULT '',
+            last_sent_endpoint TEXT NOT NULL DEFAULT '',
+            last_error TEXT NOT NULL DEFAULT '',
+            last_recovery_at_ms INTEGER NOT NULL DEFAULT 0,
+            fragment_count INTEGER NOT NULL DEFAULT 0,
+            fragment_ack_bitmap TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(message_id, peer_id)
+        )""")
+        target_columns = {row[1] for row in conn.execute("PRAGMA table_info(lan_outbox_targets)")}
+        if "last_recovery_at_ms" not in target_columns:
+            conn.execute("ALTER TABLE lan_outbox_targets ADD COLUMN last_recovery_at_ms INTEGER NOT NULL DEFAULT 0")
+        for column in ("last_attempt_endpoint", "last_sent_endpoint"):
+            if column not in target_columns:
+                conn.execute("ALTER TABLE lan_outbox_targets ADD COLUMN " + column + " TEXT NOT NULL DEFAULT ''")
+        if "fragment_count" not in target_columns:
+            conn.execute("ALTER TABLE lan_outbox_targets ADD COLUMN fragment_count INTEGER NOT NULL DEFAULT 0")
+        if "fragment_ack_bitmap" not in target_columns:
+            conn.execute("ALTER TABLE lan_outbox_targets ADD COLUMN fragment_ack_bitmap TEXT NOT NULL DEFAULT ''")
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT sender_scope,sender_peer_id,body FROM lan_outbox WHERE message_id=?",
+            (message_id,)
+        ).fetchone()
+        if existing is not None:
+            # A retry may resume the original outbox row, but it must never mutate
+            # the original payload or enlarge the frozen recipient snapshot.
+            same_message = (existing[0] == sender_scope
+                            and existing[1] == sender_peer_id
+                            and existing[2] == str(body))
+            if not same_message:
+                _safe_rollback(conn)
+                return False
+            conn.commit()
+            return True
+
+        # Empty-recipient discovery starts only when a real UDP dispatch begins.
+        # A queued message with no ready socket must not burn its discovery window.
+        discovery_deadline_ms = 0
+        conn.execute("""INSERT INTO lan_outbox
+            (message_id,sender_scope,sender_peer_id,message_type,body,created_at_ms,
+             protocol_version,state,delivery_deadline_ms)
+            VALUES(?,?,?,'chat',?,?,2,?,?)""",
+            (message_id, sender_scope, sender_peer_id, str(body), now_ms,
+             "pending" if targets else "discovery_pending", discovery_deadline_ms))
+        for peer_id in targets:
+            conn.execute("""INSERT INTO lan_outbox_targets
+                (message_id,peer_id,status) VALUES(?,?,'pending')""", (message_id, peer_id))
+        conn.commit()
+        return True
+    except Exception:
+        _safe_rollback(conn)
+        return False
+    finally:
+        _safe_close(conn)
+
+
+def ensure_outbox_retry_schema(db_path):
+    """Create/migrate the durable per-target retry ledger before recovery workers start."""
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("""CREATE TABLE IF NOT EXISTS lan_outbox (
+            message_id TEXT PRIMARY KEY NOT NULL, sender_scope TEXT NOT NULL,
+            sender_peer_id TEXT NOT NULL, message_type TEXT NOT NULL DEFAULT 'chat',
+            body TEXT NOT NULL, created_at_ms INTEGER NOT NULL,
+            protocol_version INTEGER NOT NULL DEFAULT 2,
+            state TEXT NOT NULL DEFAULT 'discovery_pending',
+            delivery_deadline_ms INTEGER NOT NULL DEFAULT 0)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS lan_outbox_targets (
+            message_id TEXT NOT NULL, peer_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            last_attempt_at INTEGER NOT NULL DEFAULT 0,
+            last_ack_at INTEGER NOT NULL DEFAULT 0,
+            last_endpoint TEXT NOT NULL DEFAULT '',
+            last_attempt_endpoint TEXT NOT NULL DEFAULT '',
+            last_sent_endpoint TEXT NOT NULL DEFAULT '',
+            last_error TEXT NOT NULL DEFAULT '',
+            last_recovery_at_ms INTEGER NOT NULL DEFAULT 0,
+            fragment_count INTEGER NOT NULL DEFAULT 0,
+            fragment_ack_bitmap TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(message_id, peer_id))""")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(lan_outbox_targets)")}
+        migrations = {
+            "status": "TEXT NOT NULL DEFAULT 'pending'",
+            "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+            "last_attempt_at": "INTEGER NOT NULL DEFAULT 0",
+            "last_ack_at": "INTEGER NOT NULL DEFAULT 0",
+            "last_endpoint": "TEXT NOT NULL DEFAULT ''",
+            "last_attempt_endpoint": "TEXT NOT NULL DEFAULT ''",
+            "last_sent_endpoint": "TEXT NOT NULL DEFAULT ''",
+            "last_error": "TEXT NOT NULL DEFAULT ''",
+            "last_recovery_at_ms": "INTEGER NOT NULL DEFAULT 0",
+            "fragment_count": "INTEGER NOT NULL DEFAULT 0",
+            "fragment_ack_bitmap": "TEXT NOT NULL DEFAULT ''",
+        }
+        for column, declaration in migrations.items():
+            if column not in columns:
+                conn.execute("ALTER TABLE lan_outbox_targets ADD COLUMN " + column + " " + declaration)
+        # The retry worker scans by recipient and due time once per second; keep it indexed.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_lan_outbox_targets_retry "
+                     "ON lan_outbox_targets(peer_id,status,attempt_count,last_attempt_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_lan_outbox_sender_state "
+                     "ON lan_outbox(sender_scope,state)")
+        conn.commit()
+        return True
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        raise LanP2PStorageError("failed to initialize LAN outbox retry schema") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def prepare_outgoing_peer_recovery(db_path, sender_scope, peer_id, now_ms=None):
+    """Throttle verified-route recovery and reopen exhausted targets after cooldown."""
+    if not sender_scope or not peer_id:
+        return 0
+    conn = None
+    now = int(now_ms if now_ms is not None else time.time() * 1000)
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute("""UPDATE lan_outbox_targets
+            SET attempt_count=CASE WHEN attempt_count>=? THEN 0 ELSE attempt_count END,
+                last_attempt_at=CASE WHEN attempt_count>=? THEN 0 ELSE last_attempt_at END,
+                last_error=CASE WHEN attempt_count>=? THEN '' ELSE last_error END,
+                last_recovery_at_ms=?
+            WHERE peer_id=? AND status!='acked' AND attempt_count>=? AND last_recovery_at_ms<=?
+              AND EXISTS (SELECT 1 FROM lan_outbox o
+                          WHERE o.message_id=lan_outbox_targets.message_id
+                            AND o.sender_scope=?
+                            AND o.state NOT IN ('delivered','expired','waiting_peers'))""",
+            (MAX_OUTBOX_TARGET_ATTEMPTS, MAX_OUTBOX_TARGET_ATTEMPTS,
+             MAX_OUTBOX_TARGET_ATTEMPTS, now, str(peer_id), MAX_OUTBOX_TARGET_ATTEMPTS,
+             now - OUTBOX_RETRY_RECOVERY_COOLDOWN_MS, str(sender_scope)))
+        conn.commit()
+        return int(cur.rowcount or 0)
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        raise LanP2PStorageError("failed to prepare LAN peer recovery retry epoch") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def next_peer_recovery_eligible_at_ms(db_path, sender_scope, peer_id, now_ms=None):
+    """Return the persisted cooldown deadline for one exhausted peer, or None."""
+    if not sender_scope or not peer_id:
+        return None
+    conn = None
+    now = int(now_ms if now_ms is not None else time.time() * 1000)
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        row = conn.execute("""SELECT MIN(t.last_recovery_at_ms + ?)
+            FROM lan_outbox_targets t JOIN lan_outbox o ON o.message_id=t.message_id
+            WHERE o.sender_scope=? AND t.peer_id=? AND t.status!='acked'
+              AND t.attempt_count>=? AND t.last_recovery_at_ms>?
+              AND o.state NOT IN ('delivered','expired','waiting_peers')""",
+            (OUTBOX_RETRY_RECOVERY_COOLDOWN_MS, str(sender_scope), str(peer_id),
+             MAX_OUTBOX_TARGET_ATTEMPTS, now - OUTBOX_RETRY_RECOVERY_COOLDOWN_MS)).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+    except Exception as exc:
+        raise LanP2PStorageError("failed to read peer LAN recovery cooldown deadline") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def list_due_outgoing_peers(db_path, sender_scope, limit=500, now_ms=None):
+    """Find active peers with unacked targets whose persisted backoff elapsed."""
+    conn = None
+    now = int(now_ms if now_ms is not None else time.time() * 1000)
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        rows = conn.execute("""SELECT DISTINCT t.peer_id
+            FROM lan_outbox o
+            JOIN lan_outbox_targets t ON t.message_id=o.message_id
+            LEFT JOIN lan_peers p ON p.receiver_scope=? AND p.peer_id=t.peer_id
+            WHERE o.sender_scope=? AND o.state NOT IN ('delivered','expired','waiting_peers')
+              AND t.status!='acked' AND t.attempt_count<?
+              AND (
+                (p.status='active' AND p.lease_expires_at>?
+                 AND (t.attempt_count=0
+                      OR t.last_endpoint != (p.endpoint_ip || ':' || p.endpoint_port)
+                      OR t.last_attempt_at +
+                         CASE t.attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000
+                           WHEN 3 THEN 10000 WHEN 4 THEN 20000 WHEN 5 THEN 40000
+                           ELSE 60000 END <= ?))
+                OR
+                (t.fragment_count>1 AND t.last_endpoint!=''
+                 AND (t.attempt_count=0 OR t.last_attempt_at +
+                      CASE t.attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000
+                        WHEN 3 THEN 10000 WHEN 4 THEN 20000 WHEN 5 THEN 40000
+                        ELSE 60000 END <= ?))
+              )
+            ORDER BY t.peer_id LIMIT ?""",
+            (sender_scope, sender_scope, MAX_OUTBOX_TARGET_ATTEMPTS,
+             now / 1000.0, now, now, max(1, min(500, int(limit))))).fetchall()
+        return [str(row[0]) for row in rows]
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        raise LanP2PStorageError("failed to scan due LAN outbox peer retries") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def encode_chat_http_fallback_payload(message_id, sender_peer_id, display_name, body):
+    """Serialize the HTTP fallback for a v2 LAN chat using the identical message identity."""
+    import json
+    if not message_id or not sender_peer_id or body is None:
+        raise ValueError("chat fallback requires message_id, sender_peer_id and body")
+    envelope = {
+        "transport": "lan-p2p-v2",
+        "message_id": str(message_id),
+        "sender_peer_id": str(sender_peer_id),
+        "display_name": str(display_name or sender_peer_id),
+        "body": str(body),
+    }
+    return json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
+
+
+def decode_chat_http_fallback_payload(payload):
+    """Return a validated shared-ID HTTP fallback envelope, or None for legacy text commands."""
+    import json
+    if not isinstance(payload, str):
+        return None
+    try:
+        envelope = json.loads(payload)
+    except Exception:
+        return None
+    if not isinstance(envelope, dict) or envelope.get("transport") != "lan-p2p-v2":
+        return None
+    message_id = envelope.get("message_id")
+    sender_peer_id = envelope.get("sender_peer_id")
+    body = envelope.get("body")
+    display_name = envelope.get("display_name") or sender_peer_id
+    if not isinstance(message_id, str) or not message_id:
+        return None
+    if not isinstance(sender_peer_id, str) or not sender_peer_id:
+        return None
+    if not isinstance(body, str):
+        return None
+    if not isinstance(display_name, str) or not display_name:
+        return None
+    return {
+        "transport": "lan-p2p-v2",
+        "message_id": message_id,
+        "sender_peer_id": sender_peer_id,
+        "display_name": display_name,
+        "body": body,
+    }
+
+
+def acknowledge_outgoing_message(db_path, sender_scope, message_id, peer_id):
+    """Persist exactly one recipient ACK; unknown/non-target ACKs never complete an outbox row."""
+    if not sender_scope or not message_id or not peer_id:
+        return False
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT state FROM lan_outbox WHERE sender_scope=? AND message_id=?",
+                           (sender_scope, message_id)).fetchone()
+        # Expired is terminal. A delayed ACK must not mutate target rows or
+        # resurrect the aggregate outbox state, matching the Android ledger.
+        if row is None or row[0] == "expired":
+            _safe_rollback(conn)
+            return False
+        now_ms = int(time.time() * 1000)
+        cur = conn.execute("""UPDATE lan_outbox_targets
+            SET status='acked',last_ack_at=?
+            WHERE message_id=? AND peer_id=? AND status!='acked'""",
+            (now_ms, message_id, peer_id))
+        if cur.rowcount == 0:
+            existing = conn.execute(
+                "SELECT status FROM lan_outbox_targets WHERE message_id=? AND peer_id=?",
+                (message_id, peer_id)
+            ).fetchone()
+            if existing and existing[0] == "acked":
+                # Duplicate ACKs are idempotent, including after aggregate delivery.
+                pass
+            else:
+                # With no known members at send time, authenticated ACKs populate the first bounded
+                # discovery snapshot. Once the window closes, non-target ACKs are rejected.
+                row = conn.execute("SELECT state,delivery_deadline_ms FROM lan_outbox WHERE sender_scope=? AND message_id=?",
+                                   (sender_scope, message_id)).fetchone()
+                if row is None or row[0] != "discovery_pending":
+                    _safe_rollback(conn)
+                    return False
+                deadline = int(row[1] or 0)
+                # Unknown ACKs may join only after the first actual UDP dispatch
+                # opened the bounded discovery window; handshakes alone cannot start it.
+                if not deadline or now_ms >= deadline:
+                    _safe_rollback(conn)
+                    return False
+                conn.execute("""INSERT OR IGNORE INTO lan_outbox_targets
+                    (message_id,peer_id,status,last_ack_at) VALUES(?,?,'acked',?)""",
+                    (message_id, peer_id, now_ms))
+        total, acked = conn.execute("""SELECT COUNT(*),
+            SUM(CASE WHEN status='acked' THEN 1 ELSE 0 END)
+            FROM lan_outbox_targets WHERE message_id=?""", (message_id,)).fetchone()
+        row = conn.execute("SELECT state,delivery_deadline_ms FROM lan_outbox WHERE sender_scope=? AND message_id=?",
+                           (sender_scope, message_id)).fetchone()
+        discovery_open = bool(row and row[0] == "discovery_pending"
+                              and row[1] and now_ms < int(row[1]))
+        if discovery_open:
+            pass
+        elif total > 0 and total == (acked or 0):
+            conn.execute("UPDATE lan_outbox SET state='delivered' WHERE message_id=?", (message_id,))
+        else:
+            conn.execute("UPDATE lan_outbox SET state='partial' WHERE message_id=?", (message_id,))
+        conn.commit()
+        return True
+    except Exception:
+        if conn is not None:
+            try:
+                _safe_rollback(conn)
+            except Exception:
+                pass
+        return False
+    finally:
+        if conn is not None:
+            try:
+                _safe_close(conn)
+            except Exception:
+                pass
+
+
+def _finalize_expired_discovery_windows(conn, sender_scope, now_ms):
+    """Settle expired discovery snapshots exactly once, including empty snapshots."""
+    conn.execute("""UPDATE lan_outbox SET state=CASE
+            WHEN EXISTS (SELECT 1 FROM lan_outbox_targets t
+                         WHERE t.message_id=lan_outbox.message_id)
+            THEN CASE
+                WHEN NOT EXISTS (SELECT 1 FROM lan_outbox_targets t
+                                WHERE t.message_id=lan_outbox.message_id AND t.status!='acked')
+                THEN 'delivered'
+                ELSE 'pending'
+            END
+            ELSE 'waiting_peers'
+        END
+        WHERE sender_scope=? AND state='discovery_pending'
+          AND delivery_deadline_ms>0 AND delivery_deadline_ms<=?""",
+        (sender_scope, now_ms))
+
+
+def load_pending_outgoing_for_peer(db_path, sender_scope, peer_id, limit=10):
+    """Load only due unacked targets; recovery resets exhausted budgets before this query."""
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        now_ms = int(time.time() * 1000)
+        _finalize_expired_discovery_windows(conn, sender_scope, now_ms)
+        conn.commit()
+        rows = conn.execute("""SELECT o.message_id,o.sender_peer_id,o.body,o.created_at_ms,
+                    p.endpoint_ip,p.endpoint_port
+            FROM lan_outbox o
+            JOIN lan_outbox_targets t ON t.message_id=o.message_id
+            JOIN lan_peers p ON p.receiver_scope=? AND p.peer_id=t.peer_id
+            WHERE o.sender_scope=? AND t.peer_id=? AND t.status!='acked'
+              AND o.state NOT IN ('delivered','expired','waiting_peers')
+              AND t.attempt_count<?
+              AND (t.attempt_count=0
+                   OR t.last_endpoint != (p.endpoint_ip || ':' || p.endpoint_port)
+                   OR t.last_attempt_at +
+                      CASE t.attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000
+                        WHEN 3 THEN 10000 WHEN 4 THEN 20000 WHEN 5 THEN 40000
+                        ELSE 60000 END <= ?)
+            ORDER BY o.created_at_ms LIMIT ?""",
+            (sender_scope, sender_scope, peer_id, MAX_OUTBOX_TARGET_ATTEMPTS,
+             now_ms, max(1, min(50, int(limit))))).fetchall()
+        return [{"message_id": r[0], "sender_peer_id": r[1], "body": r[2],
+                 "created_at_ms": r[3], "endpoint_ip": r[4], "endpoint_port": r[5]}
+                for r in rows]
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        raise LanP2PStorageError("failed to load pending LAN outbox rows for peer") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def initialize_outgoing_fragment_progress(db_path, message_id, peer_id, fragment_count):
+    """Create a durable zeroed selective-ACK bitmap for one fixed recipient."""
+    if (not db_path or not message_id or not is_valid_peer_id(peer_id)
+            or type(fragment_count) is not int
+            or not 1 <= fragment_count <= MAX_CHAT_MESSAGE_FRAGMENTS):
+        return False
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        ensure_outbox_retry_schema(db_path)
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("""SELECT fragment_count,fragment_ack_bitmap,status
+            FROM lan_outbox_targets WHERE message_id=? AND peer_id=?""",
+            (message_id, peer_id)).fetchone()
+        if row is None:
+            _safe_rollback(conn)
+            return False
+        existing_count, bitmap, status = int(row[0] or 0), row[1] or "", row[2]
+        if status == "acked":
+            conn.commit()
+            return True
+        if existing_count not in (0, fragment_count):
+            _safe_rollback(conn)
+            return False
+        if existing_count == fragment_count and len(bitmap) == fragment_count:
+            conn.commit()
+            return True
+        conn.execute("""UPDATE lan_outbox_targets
+            SET fragment_count=?,fragment_ack_bitmap=?
+            WHERE message_id=? AND peer_id=? AND status!='acked'""",
+            (fragment_count, "0" * fragment_count, message_id, peer_id))
+        conn.commit()
+        return True
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        raise LanP2PStorageError("failed to initialize outgoing fragment ACK bitmap") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def record_outgoing_fragment_ack(db_path, sender_scope, message_id, peer_id,
+                                 fragment_index, endpoint_ip, endpoint_port,
+                                 now_ms=None):
+    """Persist a verified fragment ACK; only the first broadcast flight may admit a new peer."""
+    if (not db_path or not sender_scope or not message_id or not is_valid_peer_id(peer_id)
+            or type(fragment_index) is not int or not 0 <= fragment_index < MAX_CHAT_MESSAGE_FRAGMENTS
+            or not endpoint_ip or type(endpoint_port) is not int or not 1 <= endpoint_port <= 65535):
+        return None
+    now = int(now_ms if now_ms is not None else time.time() * 1000)
+    endpoint = str(endpoint_ip) + ":" + str(endpoint_port)
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        ensure_outbox_retry_schema(db_path)
+        conn.execute("BEGIN IMMEDIATE")
+        message = conn.execute("""SELECT body,state,delivery_deadline_ms
+            FROM lan_outbox WHERE sender_scope=? AND message_id=?""",
+            (sender_scope, message_id)).fetchone()
+        if message is None:
+            _safe_rollback(conn)
+            return None
+        body, state, deadline = message
+        raw_size = len(str(body).encode("utf-8", errors="strict"))
+        count = (raw_size + CHAT_FRAGMENT_RAW_BYTES - 1) // CHAT_FRAGMENT_RAW_BYTES
+        if not 2 <= count <= MAX_CHAT_MESSAGE_FRAGMENTS or fragment_index >= count:
+            _safe_rollback(conn)
+            return None
+        target = conn.execute("""SELECT fragment_count,fragment_ack_bitmap,status
+            FROM lan_outbox_targets WHERE message_id=? AND peer_id=?""",
+            (message_id, peer_id)).fetchone()
+        if target is None:
+            # Unknown broadcast recipients may join only on the first bounded 8-fragment flight.
+            if state != "discovery_pending" or not deadline or now >= int(deadline) or fragment_index >= 8:
+                _safe_rollback(conn)
+                return None
+            target_count = conn.execute(
+                "SELECT COUNT(*) FROM lan_outbox_targets WHERE message_id=?",
+                (message_id,)).fetchone()[0]
+            if int(target_count or 0) >= MAX_FRAGMENT_DISCOVERY_TARGETS:
+                _safe_rollback(conn)
+                return None
+            conn.execute("""INSERT INTO lan_outbox_targets
+                (message_id,peer_id,status,attempt_count,last_attempt_at,last_ack_at,
+                 last_endpoint,last_attempt_endpoint,last_sent_endpoint,
+                 fragment_count,fragment_ack_bitmap)
+                VALUES(?,?,'sent',1,?,?,?,?,?,?,?)""",
+                (message_id, peer_id, now, now, endpoint, endpoint, endpoint, count, "0" * count))
+            target = (count, "0" * count, "sent")
+        existing_count, bitmap, status = int(target[0] or 0), target[1] or "", target[2]
+        if status == "acked":
+            conn.commit()
+            return bitmap if len(bitmap) == count else "1" * count
+        if existing_count not in (0, count):
+            _safe_rollback(conn)
+            return None
+        if existing_count == 0:
+            bitmap = "0" * count
+        if len(bitmap) != count or any(ch not in "01" for ch in bitmap):
+            _safe_rollback(conn)
+            return None
+        updated = bitmap[:fragment_index] + "1" + bitmap[fragment_index + 1:]
+        conn.execute("""UPDATE lan_outbox_targets SET fragment_count=?,fragment_ack_bitmap=?,
+            last_ack_at=?,last_endpoint=?,last_sent_endpoint=?
+            WHERE message_id=? AND peer_id=? AND status!='acked'""",
+            (count, updated, now, endpoint, endpoint, message_id, peer_id))
+        conn.commit()
+        return updated
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        raise LanP2PStorageError("failed to persist outgoing fragment ACK") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def load_outgoing_message(db_path, sender_scope, message_id):
+    """Read the immutable durable Outbox payload for a shared-ID sender path."""
+    if not db_path or not sender_scope or not message_id:
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        row = conn.execute("""SELECT body,created_at_ms,state FROM lan_outbox
+            WHERE sender_scope=? AND message_id=?""",
+            (sender_scope, message_id)).fetchone()
+        if row is None:
+            return None
+        return {"body": row[0], "created_at_ms": int(row[1]), "state": row[2]}
+    except Exception as exc:
+        raise LanP2PStorageError("failed to load durable LAN Outbox payload") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def load_outgoing_fragment_ack_bitmap(db_path, message_id, peer_id):
+    """Return the durable selective-ACK bitmap, or None for a short/uninitialized target."""
+    if not db_path or not message_id or not peer_id:
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        row = conn.execute("""SELECT fragment_count,fragment_ack_bitmap
+            FROM lan_outbox_targets WHERE message_id=? AND peer_id=?""",
+            (message_id, peer_id)).fetchone()
+        if row is None:
+            return None
+        count, bitmap = int(row[0] or 0), row[1] or ""
+        return bitmap if 1 <= count <= MAX_CHAT_MESSAGE_FRAGMENTS and len(bitmap) == count else None
+    except Exception as exc:
+        raise LanP2PStorageError("failed to read outgoing fragment ACK bitmap") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def build_authenticated_chat_fragment_packets(message_id, target_peer_id, body,
+        created_at_ms, sender_peer_id, sender_peer_type, service_id, secret, display_name=""):
+    """Build authenticated, datagram-bounded packets for one fixed target."""
+    fragments = fragment_chat_message(message_id, target_peer_id, body, created_at_ms)
+    packets = []
+    for fields in fragments:
+        fields.update({
+            "sender_peer_id": sender_peer_id,
+            "sender_peer_type": sender_peer_type,
+            "service_id": service_id,
+        })
+        if display_name:
+            fields["display_name"] = str(display_name)
+        raw = encode_packet(fields, secret)
+        if len(raw) > MAX_DATAGRAM_BYTES:
+            raise ValueError("chat fragment datagram exceeds protocol limit")
+        packets.append(raw)
+    return packets
+
+
+def send_outgoing_fragment_window(sock, db_path, sender_scope, message_id, peer_id,
+        body, created_at_ms, endpoint, sender_peer_id, sender_peer_type,
+        service_id, secret, send_lock=None, display_name="", mark_attempt=False,
+        allow_fast_retry=False):
+    """Send one bounded 8-fragment flight or a final-fragment completion probe."""
+    if sock is None or not endpoint or len(endpoint) != 2:
+        return 0
+    packets = build_authenticated_chat_fragment_packets(
+        message_id, peer_id, body, created_at_ms, sender_peer_id,
+        sender_peer_type, service_id, secret, display_name)
+    if not initialize_outgoing_fragment_progress(db_path, message_id, peer_id, len(packets)):
+        return 0
+    bitmap = load_outgoing_fragment_ack_bitmap(db_path, message_id, peer_id)
+    if bitmap is None or len(bitmap) != len(packets):
+        return 0
+    if mark_attempt and not mark_outgoing_attempt(
+            db_path, message_id, peer_id, str(endpoint[0]), int(endpoint[1]),
+            allow_fast_retry=allow_fast_retry):
+        return 0
+    first_missing = bitmap.find("0")
+    if first_missing < 0:
+        # Completion probes are recovery traffic, not ACK-driven window advancement.
+        # Require the same durable retry admission as any other recovery resend.
+        if not mark_attempt:
+            return 0
+        indices = [len(packets) - 1]  # receiver suppresses duplicate fragment ACKs
+    else:
+        if not mark_attempt and first_missing % 8 != 0:
+            return 0  # ACK-driven advancement waits for the current flight to complete
+        window_start = (first_missing // 8) * 8
+        window_end = min(len(packets), window_start + 8)
+        indices = [index for index in range(window_start, window_end)
+                   if bitmap[index] == "0"]
+    sent = 0
+    for index in indices:
+        try:
+            send_outgoing_packet(sock, packets[index], endpoint, db_path,
+                                 sender_scope, message_id, peer_id, send_lock=send_lock)
+            sent += 1
+        except Exception:
+            continue
+    return sent
+
+
+def send_discovery_fragment_window(sock, db_path, sender_scope, message_id,
+        body, created_at_ms, destinations, sender_peer_id, sender_peer_type,
+        service_id, secret, send_lock=None, display_name=""):
+    """Broadcast only the first 8 fragments while the bounded empty-recipient window is open."""
+    if sock is None or not db_path or not sender_scope or not message_id:
+        return 0
+    packets = build_authenticated_chat_fragment_packets(
+        message_id, "*", body, created_at_ms, sender_peer_id,
+        sender_peer_type, service_id, secret, display_name)
+    if not begin_outgoing_discovery_window(db_path, sender_scope, message_id):
+        return 0
+    sent = 0
+    targets = []
+    for destination in (destinations or []):
+        if not isinstance(destination, (tuple, list)) or len(destination) != 2:
+            continue
+        ip, port = str(destination[0]), int(destination[1])
+        if ip and 1 <= port <= 65535:
+            targets.append((ip, port))
+    targets = list(dict.fromkeys(targets))
+    try:
+        for raw in packets[:8]:
+            for destination in targets:
+                try:
+                    if send_lock is None:
+                        sock.sendto(raw, destination)
+                    else:
+                        with send_lock:
+                            sock.sendto(raw, destination)
+                    sent += 1
+                except OSError:
+                    continue
+    finally:
+        if sent == 0:
+            _reset_unsent_discovery_window(db_path, sender_scope, message_id)
+    return sent
+
+
+def load_outgoing_fragment_targets_for_peer(db_path, sender_scope, peer_id, limit=50):
+    """Load persisted long-message recipients for ACK-driven window advancement."""
+    if not db_path or not sender_scope or not peer_id:
+        return []
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        rows = conn.execute("""SELECT o.message_id,o.body,o.created_at_ms,
+                    t.fragment_count,t.fragment_ack_bitmap,p.endpoint_ip,p.endpoint_port,t.last_endpoint,
+                    p.status,p.lease_expires_at,p.last_verified_at
+            FROM lan_outbox o JOIN lan_outbox_targets t ON t.message_id=o.message_id
+            LEFT JOIN lan_peers p ON p.receiver_scope=? AND p.peer_id=t.peer_id
+            WHERE o.sender_scope=? AND t.peer_id=? AND t.status!='acked'
+              AND t.fragment_count>1
+              AND o.state NOT IN ('delivered','expired','waiting_peers')
+            ORDER BY o.created_at_ms LIMIT ?""",
+            (sender_scope, sender_scope, peer_id, max(1, min(100, int(limit))))).fetchall()
+        endpoint_ip = ""
+        endpoint_port = 0
+        result = []
+        for row in rows:
+            saved_endpoint = row[7] or ""
+            peer_route_verified = (row[8] == "active" and float(row[9] or 0) > time.time()
+                                   and float(row[10] or 0) > 0)
+            # A newly verified lease supersedes stale message-scoped routing evidence.
+            # Otherwise keep the endpoint pinned by this message's successful send/ACK.
+            if peer_route_verified and row[5] and row[6]:
+                endpoint_ip, endpoint_port = row[5], int(row[6])
+            elif ":" in saved_endpoint:
+                endpoint_ip, port_text = saved_endpoint.rsplit(":", 1)
+                try:
+                    endpoint_port = int(port_text)
+                except ValueError:
+                    endpoint_ip, endpoint_port = "", 0
+            elif row[5] and row[6]:
+                endpoint_ip, endpoint_port = row[5], int(row[6])
+            else:
+                endpoint_ip, endpoint_port = "", 0
+            result.append({
+                "message_id": row[0], "body": row[1], "created_at_ms": int(row[2]),
+                "fragment_count": int(row[3]), "fragment_ack_bitmap": row[4] or "",
+                "endpoint_ip": endpoint_ip, "endpoint_port": endpoint_port,
+            })
+        return result
+    except Exception as exc:
+        raise LanP2PStorageError("failed to load outgoing fragment targets") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def mark_outgoing_attempt(db_path, message_id, peer_id, endpoint_ip, endpoint_port,
+                         allow_fast_retry=True):
+    """Persist a send attempt before network I/O; this is not ACK evidence.
+
+    Recovery workers must revalidate the persisted backoff.
+
+    The initial bounded burst may retry quickly. Background workers pass
+    allow_fast_retry=False so a peer/message selected by an earlier due scan
+    cannot be sent again after another dispatcher has already advanced its
+    retry timestamp.
+    """
+    conn = None
+    now_ms = int(time.time() * 1000)
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        endpoint = str(endpoint_ip) + ":" + str(endpoint_port)
+        cur = conn.execute("""UPDATE lan_outbox_targets SET status='sent',
+            attempt_count=attempt_count+1,last_attempt_at=?,last_endpoint=?,
+            last_attempt_endpoint=?,last_error=''
+            WHERE message_id=? AND peer_id=? AND status!='acked' AND attempt_count<?
+              AND (?=1 OR attempt_count=0 OR last_endpoint<>? OR last_attempt_at +
+                   CASE attempt_count WHEN 1 THEN 1500 WHEN 2 THEN 4000
+                     WHEN 3 THEN 10000 WHEN 4 THEN 20000 WHEN 5 THEN 40000
+                     ELSE 60000 END <= ?)
+              AND EXISTS (SELECT 1 FROM lan_outbox o
+                          WHERE o.message_id=lan_outbox_targets.message_id
+                            AND o.state NOT IN ('delivered','expired','waiting_peers'))""",
+            (now_ms, endpoint, endpoint, message_id, peer_id, MAX_OUTBOX_TARGET_ATTEMPTS,
+             1 if allow_fast_retry else 0, endpoint, now_ms))
+        conn.commit()
+        return cur.rowcount > 0
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        raise LanP2PStorageError("failed to persist LAN outbox send attempt") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+
+def list_known_peers(db_path, receiver_scope, limit=100):
+    """Return currently leased peers; storage failures must not masquerade as no peers."""
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        rows = conn.execute("""SELECT peer_id,peer_type,service_id,endpoint_ip,endpoint_port,
+                    last_seen_at,lease_expires_at,status
+            FROM lan_peers WHERE receiver_scope=? AND lease_expires_at>?
+              AND status='active'
+            ORDER BY last_seen_at DESC LIMIT ?""",
+            (receiver_scope, time.time(), max(1, min(500, int(limit))))).fetchall()
+        return [{"peer_id": r[0], "peer_type": r[1], "service_id": r[2],
+                 "endpoint_ip": r[3], "endpoint_port": r[4],
+                 "last_seen_at": r[5], "lease_expires_at": r[6], "status": r[7]}
+                for r in rows]
+    except Exception as exc:
+        raise LanP2PStorageError("failed to load known LAN peers") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+def list_known_peer_snapshot(db_path, receiver_scope, limit=500):
+    """Return historical peer identities for immutable recipient snapshots."""
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        rows = conn.execute("""SELECT peer_id,peer_type,service_id,endpoint_ip,endpoint_port,
+                    last_seen_at,lease_expires_at,status
+            FROM lan_peers WHERE receiver_scope=?
+            ORDER BY last_seen_at DESC LIMIT ?""",
+            (receiver_scope, max(1, min(1000, int(limit))))).fetchall()
+        return [{"peer_id": r[0], "peer_type": r[1], "service_id": r[2],
+                 "endpoint_ip": r[3], "endpoint_port": r[4],
+                 "last_seen_at": r[5], "lease_expires_at": r[6], "status": r[7]}
+                for r in rows]
+    except Exception as exc:
+        raise LanP2PStorageError("failed to load LAN peer recipient snapshot") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+def add_discovery_target(db_path, sender_scope, message_id, peer_id):
+    """Add a peer only during the first bounded discovery window of an unknown-recipient message."""
+    if not sender_scope or not message_id or not peer_id:
+        return False
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT state,delivery_deadline_ms FROM lan_outbox "
+                           "WHERE sender_scope=? AND message_id=?",
+                           (sender_scope, message_id)).fetchone()
+        if row is None or row[0] != "discovery_pending":
+            _safe_rollback(conn)
+            return False
+        now_ms = int(time.time() * 1000)
+        deadline = int(row[1] or 0)
+        # Only the first actual UDP dispatch may open this window. A peer
+        # handshake or helper call while the message is merely queued must not.
+        if not deadline or now_ms >= deadline:
+            _safe_rollback(conn)
+            return False
+        conn.execute("""INSERT OR IGNORE INTO lan_outbox_targets
+            (message_id,peer_id,status) VALUES(?,?,'pending')""", (message_id, peer_id))
+        conn.commit()
+        return True
+    except Exception:
+        _safe_rollback(conn)
+        return False
+    finally:
+        _safe_close(conn)
+
+
+def add_discovery_targets_for_peer(db_path, sender_scope, peer_id):
+    """Attach a newly discovered peer to every still-open unknown-recipient message."""
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("BEGIN IMMEDIATE")
+        now_ms = int(time.time() * 1000)
+        _finalize_expired_discovery_windows(conn, sender_scope, now_ms)
+        rows = conn.execute("""SELECT message_id,delivery_deadline_ms FROM lan_outbox
+            WHERE sender_scope=? AND state='discovery_pending'""", (sender_scope,)).fetchall()
+        added = 0
+        for message_id, deadline_value in rows:
+            deadline = int(deadline_value or 0)
+            # A peer handshake before the first message dispatch must not start
+            # or consume this message's bounded discovery window.
+            if not deadline or now_ms >= deadline:
+                continue
+            cur = conn.execute("""INSERT OR IGNORE INTO lan_outbox_targets
+                (message_id,peer_id,status) VALUES(?,?,'pending')""", (message_id, peer_id))
+            added += max(0, cur.rowcount)
+        conn.commit()
+        return added
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        raise LanP2PStorageError("failed to attach peer to LAN discovery snapshots") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+def remember_peer_challenge(db_path, receiver_scope, nonce, expected_peer_id="",
+                            expected_ip="", expected_port=0, ttl_seconds=5):
+    """Persist a short-lived nonce bound to an optional peer identity and UDP endpoint."""
+    if not db_path or not receiver_scope or not nonce:
+        return False
+    try:
+        now = time.time()
+        conn = sqlite3.connect(db_path, timeout=10)
+        try:
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("""CREATE TABLE IF NOT EXISTS lan_peer_challenges (
+                receiver_scope TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                expected_peer_id TEXT NOT NULL DEFAULT '',
+                expected_ip TEXT NOT NULL DEFAULT '',
+                expected_port INTEGER NOT NULL DEFAULT 0,
+                expires_at REAL NOT NULL,
+                PRIMARY KEY(receiver_scope, nonce)
+            )""")
+            conn.execute("DELETE FROM lan_peer_challenges WHERE expires_at<=?", (now,))
+            conn.execute("""INSERT OR REPLACE INTO lan_peer_challenges
+                (receiver_scope,nonce,expected_peer_id,expected_ip,expected_port,expires_at)
+                VALUES(?,?,?,?,?,?)""",
+                (receiver_scope, str(nonce), str(expected_peer_id or ""),
+                 str(expected_ip or ""), int(expected_port or 0),
+                 now + max(1.0, min(30.0, float(ttl_seconds)))))
+            conn.commit()
+            return True
+        finally:
+            _safe_close(conn)
+    except Exception:
+        return False
+
+
+def complete_peer_challenge(db_path, receiver_scope, nonce, peer_id,
+                            endpoint_ip, endpoint_port, peer_type="unknown",
+                            service_id=""):
+    """Atomically consume a directed nonce and activate only its bound peer route."""
+    if (not db_path or not receiver_scope or not nonce or not peer_id
+            or not endpoint_ip or int(endpoint_port or 0) not in (8887, 8888, 8889, 8890)):
+        return False
+    conn = None
+    try:
+        now = time.time()
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("""CREATE TABLE IF NOT EXISTS lan_peer_challenges (
+            receiver_scope TEXT NOT NULL,
+            nonce TEXT NOT NULL,
+            expected_peer_id TEXT NOT NULL DEFAULT '',
+            expected_ip TEXT NOT NULL DEFAULT '',
+            expected_port INTEGER NOT NULL DEFAULT 0,
+            expires_at REAL NOT NULL,
+            PRIMARY KEY(receiver_scope, nonce)
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS lan_peers (
+            receiver_scope TEXT NOT NULL,
+            peer_id TEXT NOT NULL,
+            peer_type TEXT NOT NULL DEFAULT 'unknown',
+            service_id TEXT NOT NULL DEFAULT '',
+            protocol_version INTEGER NOT NULL DEFAULT 2,
+            capabilities TEXT NOT NULL DEFAULT '',
+            network_scope TEXT NOT NULL DEFAULT '',
+            endpoint_ip TEXT NOT NULL DEFAULT '',
+            endpoint_port INTEGER NOT NULL DEFAULT 0,
+            last_seen_at REAL NOT NULL DEFAULT 0,
+            last_verified_at REAL NOT NULL DEFAULT 0,
+            lease_expires_at REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'suspect',
+            PRIMARY KEY(receiver_scope, peer_id)
+        )""")
+        row = conn.execute("""SELECT expected_peer_id,expected_ip,expected_port,expires_at
+            FROM lan_peer_challenges WHERE receiver_scope=? AND nonce=?""",
+            (receiver_scope, str(nonce))).fetchone()
+        if row is None:
+            _safe_rollback(conn)
+            return False
+        expected_peer_id, expected_ip, expected_port, expires_at = row
+        if (float(expires_at) <= now
+                or (expected_peer_id and str(expected_peer_id) != str(peer_id))
+                or (expected_ip and str(expected_ip) != str(endpoint_ip))
+                or (expected_port and int(expected_port) != int(endpoint_port))):
+            _safe_rollback(conn)
+            return False
+        # Validation, route activation, and directed nonce consumption share one
+        # write transaction. Concurrent replay cannot race between SELECT/DELETE.
+        conn.execute("""INSERT INTO lan_peers
+            (receiver_scope,peer_id,peer_type,service_id,protocol_version,
+             endpoint_ip,endpoint_port,last_seen_at,last_verified_at,lease_expires_at,status)
+            VALUES(?,?,?,?,2,?,?,?,?,?,'active')
+            ON CONFLICT(receiver_scope,peer_id) DO UPDATE SET
+                peer_type=excluded.peer_type,
+                service_id=excluded.service_id,
+                endpoint_ip=excluded.endpoint_ip,
+                endpoint_port=excluded.endpoint_port,
+                last_seen_at=excluded.last_seen_at,
+                last_verified_at=excluded.last_verified_at,
+                lease_expires_at=excluded.lease_expires_at,
+                status='active'""",
+            (receiver_scope, str(peer_id), peer_type or "unknown", service_id or "",
+             str(endpoint_ip), int(endpoint_port), now, now, now + 120.0))
+        if expected_peer_id:
+            conn.execute("DELETE FROM lan_peer_challenges WHERE receiver_scope=? AND nonce=?",
+                         (receiver_scope, str(nonce)))
+        conn.commit()
+        return True
+    except Exception:
+        if conn is not None:
+            try:
+                _safe_rollback(conn)
+            except Exception:
+                pass
+        return False
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def send_directed_peer_challenge(sock, db_path, receiver_scope, sender_peer_id,
+                                 sender_peer_type, service_id, secret, listen_port,
+                                 target_peer_id, target_ip, target_port, ttl_seconds=5):
+    """Challenge one observed route; only its matching reply can activate it."""
+    import uuid
+    if (sock is None or not target_peer_id or not target_ip
+            or int(target_port or 0) not in (8887, 8888, 8889, 8890)):
+        return False
+    nonce = uuid.uuid4().hex
+    if not remember_peer_challenge(db_path, receiver_scope, nonce,
+                                   target_peer_id, target_ip, target_port, ttl_seconds):
+        return False
+    packet = {
+        "type": "peer.hello",
+        "sender_peer_id": str(sender_peer_id),
+        "sender_peer_type": str(sender_peer_type or "unknown"),
+        "service_id": str(service_id),
+        "nonce": nonce,
+        "listen_port": int(listen_port),
+        "network_scope": "",
+        "capabilities": ["chat.text", "chat.ack"],
+        "challenge_only": True,
+    }
+    try:
+        sock.sendto(encode_packet(packet, secret), (str(target_ip), int(target_port)))
+        return True
+    except Exception:
+        return False
+
+
+def send_startup_peer_beacon(sock, peer_id, peer_type, service_id, secret,
+                             listen_port, target_ports, broadcast_addresses=None,
+                             db_path=None, receiver_scope=None):
+    """Send one authenticated HELLO burst after a service listener binds; no background scanner."""
+    import uuid
+    if sock is None or not peer_id or not service_id:
+        return 0
+    ports = sorted(set(int(port) for port in (target_ports or [])
+                       if 1 <= int(port) <= 65535))
+    addresses = list(dict.fromkeys(
+        str(address) for address in (broadcast_addresses or ["255.255.255.255"]) if address
+    ))
+    if not ports or not addresses:
+        return 0
+    nonce = uuid.uuid4().hex
+    packet = {
+        "type": "peer.hello",
+        "sender_peer_id": str(peer_id),
+        "sender_peer_type": str(peer_type or "unknown"),
+        "service_id": str(service_id),
+        "nonce": nonce,
+        "listen_port": int(listen_port),
+        "network_scope": "",
+        "capabilities": ["chat.text", "chat.ack"],
+        "challenge_only": False,
+    }
+    try:
+        raw = encode_packet(packet, secret)
+    except Exception:
+        return 0
+    # A peer.ack can activate a route only if its nonce was durably recorded.
+    # Never emit a challenge that this process cannot later authenticate.
+    if db_path and receiver_scope:
+        if not remember_peer_challenge(db_path, receiver_scope, nonce, ttl_seconds=5):
+            return 0
+    sent = 0
+    for address in addresses:
+        for port in ports:
+            try:
+                sock.sendto(raw, (address, port))
+                sent += 1
+            except OSError:
+                continue
+    return sent
+
+
+def begin_outgoing_discovery_window(db_path, sender_scope, message_id,
+                                    window_ms=FIRST_DISCOVERY_WINDOW_MS):
+    """Start an empty-recipient discovery deadline on first actual UDP dispatch."""
+    if not db_path or not sender_scope or not message_id:
+        return False
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT state,delivery_deadline_ms FROM lan_outbox "
+            "WHERE sender_scope=? AND message_id=?",
+            (sender_scope, message_id),
+        ).fetchone()
+        if row is None or row[0] != "discovery_pending":
+            _safe_rollback(conn)
+            return False
+        now_ms = int(time.time() * 1000)
+        deadline = int(row[1] or 0)
+        if deadline > 0:
+            if now_ms >= deadline:
+                _finalize_expired_discovery_windows(conn, sender_scope, now_ms)
+                conn.commit()
+                return False
+            conn.commit()
+            return True  # Already open; never extend the original window.
+        bounded_window = max(1000, min(30000, int(window_ms)))
+        conn.execute(
+            "UPDATE lan_outbox SET delivery_deadline_ms=? "
+            "WHERE sender_scope=? AND message_id=? AND state='discovery_pending' "
+            "AND delivery_deadline_ms=0",
+            (now_ms + bounded_window, sender_scope, message_id),
+        )
+        conn.commit()
+        return True
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        raise LanP2PStorageError("failed to start LAN discovery window") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+
+def _reset_unsent_discovery_window(db_path, sender_scope, message_id):
+    """Re-arm a discovery row only when no peer has joined its recipient ledger."""
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT state,delivery_deadline_ms FROM lan_outbox "
+            "WHERE sender_scope=? AND message_id=?",
+            (sender_scope, message_id),
+        ).fetchone()
+        if row is None or row[0] != "discovery_pending" or int(row[1] or 0) <= 0:
+            conn.commit()
+            return False
+        target_count = conn.execute(
+            "SELECT COUNT(*) FROM lan_outbox_targets WHERE message_id=?",
+            (message_id,),
+        ).fetchone()[0]
+        if target_count:
+            conn.commit()
+            return False
+        changed = conn.execute(
+            "UPDATE lan_outbox SET delivery_deadline_ms=0 "
+            "WHERE sender_scope=? AND message_id=? AND state='discovery_pending' "
+            "AND delivery_deadline_ms=?",
+            (sender_scope, message_id, int(row[1])),
+        ).rowcount
+        conn.commit()
+        return changed == 1
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        # Unknown persistence state must fail closed: leave the deadline in place.
+        raise LanP2PStorageError("failed to re-arm unsent LAN discovery window") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def send_discovery_broadcast_with_retries(
+        sock, db_path, sender_scope, message_id, packet_bytes, destinations,
+        send_lock=None, attempts=3, retry_delay_seconds=0.25):
+    """Open the first-discovery window only for an actual dispatch attempt.
+
+    Dispatches for one message are serialized in-process. If every sendto fails,
+    the deadline is cleared so a later network-ready retry gets a fresh window.
+    Any exception after dispatch starts leaves the deadline intact conservatively,
+    because the caller cannot prove that no datagram escaped.
+    """
+    if sock is None or not packet_bytes or not db_path or not sender_scope or not message_id:
+        return 0
+    lock_index = hash((str(db_path), str(sender_scope), str(message_id))) % len(
+        _DISCOVERY_DISPATCH_LOCKS)
+    with _DISCOVERY_DISPATCH_LOCKS[lock_index]:
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path, timeout=10)
+            conn.execute("PRAGMA busy_timeout=10000")
+            row = conn.execute(
+                "SELECT state,delivery_deadline_ms FROM lan_outbox "
+                "WHERE sender_scope=? AND message_id=?",
+                (sender_scope, message_id),
+            ).fetchone()
+            if row is None or row[0] != "discovery_pending":
+                return 0
+            opened_by_this_dispatch = int(row[1] or 0) <= 0
+        except Exception as exc:
+            raise LanP2PStorageError("failed to inspect LAN discovery dispatch state") from exc
+        finally:
+            if conn is not None:
+                _safe_close(conn)
+        if not begin_outgoing_discovery_window(db_path, sender_scope, message_id):
+            return 0
+        if not is_outgoing_discovery_pending(db_path, sender_scope, message_id):
+            return 0
+        sent = send_broadcast_packet_with_retries(
+            sock, packet_bytes, destinations, send_lock=send_lock,
+            attempts=attempts, retry_delay_seconds=retry_delay_seconds,
+            should_continue=lambda: is_outgoing_discovery_pending(
+                db_path, sender_scope, message_id))
+        # Only the dispatch that opened this deadline may undo it. A later
+        # duplicate dispatch that fails must not erase an earlier successful send.
+        if sent == 0 and opened_by_this_dispatch:
+            _reset_unsent_discovery_window(db_path, sender_scope, message_id)
+        return sent
+
+
+def is_outgoing_discovery_pending(db_path, sender_scope, message_id):
+    """Return true only while this message's bounded first-discovery ACK window is open."""
+    if not db_path or not sender_scope or not message_id:
+        return False
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        _finalize_expired_discovery_windows(conn, sender_scope, int(time.time() * 1000))
+        conn.commit()
+        row = conn.execute("""SELECT state,delivery_deadline_ms FROM lan_outbox
+            WHERE sender_scope=? AND message_id=?""",
+            (sender_scope, message_id)).fetchone()
+        if row is None or row[0] != "discovery_pending":
+            return False
+        deadline = int(row[1] or 0)
+        return deadline <= 0 or deadline > int(time.time() * 1000)
+    except Exception:
+        return False
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def load_active_pending_targets(db_path, sender_scope, message_id, limit=500):
+    """Load the active, unacked fixed targets for one durable outbox message in one query."""
+    if not db_path or not sender_scope or not message_id:
+        return []
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        rows = conn.execute("""SELECT t.peer_id,p.endpoint_ip,p.endpoint_port
+            FROM lan_outbox o
+            JOIN lan_outbox_targets t ON t.message_id=o.message_id
+            JOIN lan_peers p ON p.receiver_scope=? AND p.peer_id=t.peer_id
+            WHERE o.sender_scope=? AND o.message_id=?
+              AND o.state NOT IN ('delivered','expired','waiting_peers')
+              AND t.status!='acked' AND t.attempt_count<?
+              AND p.status='active' AND p.lease_expires_at>?
+            ORDER BY t.peer_id LIMIT ?""",
+            (sender_scope, sender_scope, message_id, MAX_OUTBOX_TARGET_ATTEMPTS,
+             time.time(), max(1, min(1000, int(limit))))).fetchall()
+        return [{"peer_id": row[0], "endpoint_ip": row[1],
+                 "endpoint_port": row[2]} for row in rows]
+    except Exception as exc:
+        raise LanP2PStorageError("failed to load active LAN outbox targets") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+
+def load_pending_fixed_targets(db_path, sender_scope, message_id, limit=500):
+    """Load all immutable unacked recipients with persisted endpoints, regardless of lease state."""
+    if not db_path or not sender_scope or not message_id:
+        return []
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        rows = conn.execute("""SELECT t.peer_id,COALESCE(p.endpoint_ip,''),COALESCE(p.endpoint_port,0),
+                    COALESCE(p.status,'unknown')
+            FROM lan_outbox o
+            JOIN lan_outbox_targets t ON t.message_id=o.message_id
+            LEFT JOIN lan_peers p ON p.receiver_scope=? AND p.peer_id=t.peer_id
+            WHERE o.sender_scope=? AND o.message_id=?
+              AND o.state NOT IN ('delivered','expired','waiting_peers')
+              AND t.status!='acked' AND t.attempt_count<?
+            ORDER BY t.peer_id LIMIT ?""",
+            (sender_scope, sender_scope, message_id, MAX_OUTBOX_TARGET_ATTEMPTS,
+             max(1, min(1000, int(limit))))).fetchall()
+        return [{"peer_id": row[0], "endpoint_ip": row[1],
+                 "endpoint_port": row[2], "peer_status": row[3]} for row in rows]
+    except Exception as exc:
+        raise LanP2PStorageError("failed to load fixed LAN outbox targets") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+
+def record_successful_send_endpoint(db_path, sender_scope, message_id, peer_id,
+                                     endpoint_ip, endpoint_port):
+    """Persist ACK provenance only after the UDP socket accepted the datagram."""
+    if (not db_path or not sender_scope or not message_id or not peer_id
+            or not endpoint_ip or not 1 <= int(endpoint_port or 0) <= 65535):
+        return False
+    conn = None
+    endpoint = str(endpoint_ip) + ":" + str(int(endpoint_port))
+    try:
+        with _ACK_ENDPOINT_LOCK:
+            conn = sqlite3.connect(db_path, timeout=10)
+            conn.execute("PRAGMA busy_timeout=10000")
+            cur = conn.execute("""UPDATE lan_outbox_targets
+                SET last_sent_endpoint=?
+                WHERE message_id=? AND peer_id=?
+                  AND EXISTS (SELECT 1 FROM lan_outbox o
+                              WHERE o.message_id=lan_outbox_targets.message_id
+                                AND o.sender_scope=?
+                                AND o.state NOT IN ('expired','waiting_peers'))""",
+                (endpoint, message_id, peer_id, sender_scope))
+            conn.commit()
+            return cur.rowcount == 1
+    except Exception:
+        if conn is not None:
+            _safe_rollback(conn)
+        return False
+    finally:
+        _safe_close(conn)
+
+
+def send_outgoing_packet(sock, packet_bytes, destination, db_path, sender_scope,
+                         message_id, peer_id, send_lock=None):
+    """Send one fixed-target datagram and commit success evidence atomically vs ACK reads.
+
+    The attempt row must already be committed. The process-local lock prevents the
+    receive thread from observing the attempt-only interval between sendto() and the
+    post-send SQLite write; a failed send never creates last_sent_endpoint evidence.
+    """
+    if sock is None or not destination or len(destination) != 2:
+        raise ValueError("invalid LAN outgoing datagram destination")
+    endpoint_ip, endpoint_port = str(destination[0]), int(destination[1])
+    with _ACK_ENDPOINT_LOCK:
+        if send_lock is None:
+            sock.sendto(packet_bytes, (endpoint_ip, endpoint_port))
+        else:
+            with send_lock:
+                sock.sendto(packet_bytes, (endpoint_ip, endpoint_port))
+        if not record_successful_send_endpoint(
+                db_path, sender_scope, message_id, peer_id, endpoint_ip, endpoint_port):
+            raise LanP2PStorageError("failed to persist successful LAN UDP send endpoint")
+    return True
+
+
+def send_outbox_to_active_peers(sock, db_path, sender_scope, message_id,
+                                packet_template, secret, send_lock=None,
+                                attempts=3, retry_delay_seconds=0.25):
+    """Send to all fixed targets with persisted endpoints, even if their lease is suspect or expired."""
+    if sock is None or not db_path or not sender_scope or not message_id:
+        return 0
+    max_attempts = max(1, min(3, int(attempts)))
+    delay = max(0.0, min(1.0, float(retry_delay_seconds)))
+    sent_total = 0
+    for attempt in range(max_attempts):
+        targets = load_pending_fixed_targets(db_path, sender_scope, message_id)
+        if not targets:
+            break
+        for target in targets:
+            packet = dict(packet_template or {})
+            packet["target_peer_id"] = target["peer_id"]
+            destination = (target["endpoint_ip"], int(target["endpoint_port"]))
+            try:
+                raw = encode_packet(packet, secret)
+                # Commit the retry attempt before network I/O. A ledger failure
+                # must fail closed; a crash after send must not erase the attempt.
+                if not mark_outgoing_attempt(db_path, message_id, target["peer_id"],
+                                             destination[0], destination[1]):
+                    continue
+                send_outgoing_packet(sock, raw, destination, db_path, sender_scope,
+                                     message_id, target["peer_id"], send_lock=send_lock)
+                sent_total += 1
+            except LanP2PStorageError:
+                raise
+            except Exception:
+                continue
+        if attempt + 1 < max_attempts and delay > 0:
+            # Recheck once per round: do not sleep/retry when every target ACKed.
+            if load_pending_fixed_targets(db_path, sender_scope, message_id):
+                time.sleep(delay)
+    return sent_total
+
+
+
+def send_broadcast_packet_with_retries(sock, packet_bytes, destinations,
+                                       send_lock=None, attempts=3,
+                                       retry_delay_seconds=0.25,
+                                       should_continue=None):
+    """Bounded broadcast; an optional durable gate is rechecked before every send."""
+    if sock is None or not packet_bytes:
+        return 0
+    max_attempts = max(1, min(3, int(attempts)))
+    delay = max(0.0, min(1.0, float(retry_delay_seconds)))
+    targets = []
+    for destination in (destinations or []):
+        if not isinstance(destination, (tuple, list)) or len(destination) != 2:
+            continue
+        ip, port = str(destination[0]), int(destination[1])
+        if ip and 1 <= port <= 65535:
+            targets.append((ip, port))
+    targets = list(dict.fromkeys(targets))
+    sent_total = 0
+    for attempt in range(max_attempts):
+        if should_continue is not None and not should_continue():
+            break
+        for destination in targets:
+            # The first-discovery window may expire during a retry round. Recheck
+            # before each destination so no later peer receives an out-of-window replay.
+            if should_continue is not None and not should_continue():
+                break
+            try:
+                if send_lock is None:
+                    sock.sendto(packet_bytes, destination)
+                else:
+                    with send_lock:
+                        sock.sendto(packet_bytes, destination)
+                sent_total += 1
+            except OSError:
+                continue
+        if attempt + 1 < max_attempts and delay > 0:
+            if should_continue is not None and not should_continue():
+                break
+            time.sleep(delay)
+    return sent_total
+
+
+
+def packet_service_identity_matches(packet, sender_peer_id):
+    """Require ACK service identity to remain bound to its authenticated peer ID."""
+    if not isinstance(packet, dict) or not is_valid_peer_id(sender_peer_id):
+        return False
+    peer_type = packet.get("sender_peer_type")
+    if not isinstance(peer_type, str) or not peer_type.strip():
+        return False
+    expected_service_id = "android-main" if peer_type == "android" else sender_peer_id
+    return (packet.get("sender_peer_id") == sender_peer_id
+            and packet.get("service_id") == expected_service_id)
+
+
+def peer_endpoint_matches(db_path, receiver_scope, peer_id, endpoint_ip, endpoint_port):
+    """Return true only when an ACK comes from the currently recorded route for its target peer."""
+    if not receiver_scope or not peer_id or not endpoint_ip or not endpoint_port:
+        return False
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        row = conn.execute("""SELECT endpoint_ip,endpoint_port,lease_expires_at,status
+            FROM lan_peers WHERE receiver_scope=? AND peer_id=?""",
+            (receiver_scope, peer_id)).fetchone()
+        return bool(row and str(row[0]) == str(endpoint_ip)
+                    and int(row[1]) == int(endpoint_port)
+                    and float(row[2]) > time.time()
+                    and str(row[3]) == "active")
+    except Exception:
+        return False
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def outgoing_ack_endpoint_matches(db_path, sender_scope, message_id, peer_id,
+                                 endpoint_ip, endpoint_port):
+    """Match an ACK only to the endpoint where this fixed target was successfully sent."""
+    if not db_path or not sender_scope or not message_id or not peer_id or not endpoint_ip:
+        return False
+    try:
+        with _ACK_ENDPOINT_LOCK:
+            conn = sqlite3.connect(db_path, timeout=10)
+            try:
+                conn.execute("PRAGMA busy_timeout=10000")
+                row = conn.execute("""SELECT 1 FROM lan_outbox o
+                    JOIN lan_outbox_targets t ON t.message_id=o.message_id
+                    WHERE o.sender_scope=? AND o.message_id=? AND t.peer_id=?
+                      AND o.state NOT IN ('expired','waiting_peers')
+                      AND t.status='sent' AND t.attempt_count>0
+                      AND t.last_sent_endpoint=? LIMIT 1""",
+                    (sender_scope, message_id, peer_id,
+                     str(endpoint_ip) + ":" + str(int(endpoint_port)))).fetchone()
+                return row is not None
+            finally:
+                _safe_close(conn)
+    except Exception:
+        return False
+
+
+# Long chat messages remain one logical message. Fragment payloads are Base64 so
+# UTF-8 code points may safely cross fragment boundaries and be validated after reassembly.
+MAX_CHAT_MESSAGE_BYTES = 256 * 1024
+CHAT_FRAGMENT_RAW_BYTES = 300
+MAX_CHAT_MESSAGE_FRAGMENTS = 1024
+
+
+def fragment_chat_message(message_id, target_peer_id, body, created_at_ms=0):
+    """Build bounded authenticated-envelope fields for one logical long message."""
+    import base64
+    import hashlib
+    if not isinstance(message_id, str) or not message_id or len(message_id.encode("utf-8", errors="strict")) > 128:
+        raise ValueError("invalid message_id")
+    if type(created_at_ms) is not int or created_at_ms < 0:
+        raise ValueError("invalid created_at_ms")
+    if not is_valid_peer_id(target_peer_id):
+        raise ValueError("invalid target_peer_id")
+    if not isinstance(body, str):
+        raise ValueError("message body must be text")
+    raw = body.encode("utf-8", errors="strict")
+    if not raw or len(raw) > MAX_CHAT_MESSAGE_BYTES:
+        raise ValueError("long chat message size is outside supported range")
+    digest = hashlib.sha256(raw).hexdigest()
+    count = (len(raw) + CHAT_FRAGMENT_RAW_BYTES - 1) // CHAT_FRAGMENT_RAW_BYTES
+    if count > MAX_CHAT_MESSAGE_FRAGMENTS:
+        raise ValueError("too many chat fragments")
+    result = []
+    for index in range(count):
+        chunk = raw[index * CHAT_FRAGMENT_RAW_BYTES:(index + 1) * CHAT_FRAGMENT_RAW_BYTES]
+        result.append({
+            "type": "chat.fragment",
+            "message_id": message_id,
+            "target_peer_id": target_peer_id,
+            "created_at_ms": int(created_at_ms),
+            "fragment_index": index,
+            "fragment_count": count,
+            "total_bytes": len(raw),
+            "sha256": digest,
+            "fragment_data": base64.b64encode(chunk).decode("ascii"),
+        })
+    return result
+
+
+def assemble_chat_fragments(fragments):
+    """Validate and reassemble fragments; return one UTF-8 body or raise ValueError."""
+    import base64
+    import hashlib
+    if not isinstance(fragments, (list, tuple)) or not fragments:
+        raise ValueError("no chat fragments")
+    first = fragments[0]
+    required = ("message_id", "target_peer_id", "fragment_count", "total_bytes", "sha256")
+    if not isinstance(first, dict) or any(key not in first for key in required):
+        raise ValueError("invalid fragment metadata")
+    if (not isinstance(first["message_id"], str) or not first["message_id"]
+            or len(first["message_id"].encode("utf-8", errors="strict")) > 128
+            or not is_valid_peer_id(first["target_peer_id"])):
+        raise ValueError("invalid fragment identity")
+    count = first["fragment_count"]
+    total = first["total_bytes"]
+    digest = first["sha256"]
+    if type(count) is not int or not 1 <= count <= MAX_CHAT_MESSAGE_FRAGMENTS:
+        raise ValueError("invalid fragment count")
+    if type(total) is not int or not 1 <= total <= MAX_CHAT_MESSAGE_BYTES:
+        raise ValueError("invalid total message size")
+    expected_count = (total + CHAT_FRAGMENT_RAW_BYTES - 1) // CHAT_FRAGMENT_RAW_BYTES
+    if count != expected_count or len(fragments) != count:
+        raise ValueError("incomplete or inconsistent chat fragment count")
+    if (not isinstance(digest, str) or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)):
+        raise ValueError("invalid fragment digest")
+    if "created_at_ms" in first and (
+            type(first["created_at_ms"]) is not int or first["created_at_ms"] < 0):
+        raise ValueError("invalid fragment timestamp")
+    chunks = {}
+    for packet in fragments:
+        if not isinstance(packet, dict):
+            raise ValueError("invalid fragment")
+        if any(packet.get(key) != first[key] for key in required):
+            raise ValueError("inconsistent fragment metadata")
+        if ("created_at_ms" in first) != ("created_at_ms" in packet):
+            raise ValueError("inconsistent fragment timestamp presence")
+        if "created_at_ms" in first and packet["created_at_ms"] != first["created_at_ms"]:
+            raise ValueError("inconsistent fragment timestamp")
+        index = packet.get("fragment_index")
+        if type(index) is not int or not 0 <= index < count or index in chunks:
+            raise ValueError("duplicate or invalid fragment index")
+        encoded = packet.get("fragment_data")
+        if not isinstance(encoded, str) or len(encoded) > 400:
+            raise ValueError("invalid fragment data")
+        try:
+            chunk = base64.b64decode(encoded.encode("ascii"), validate=True)
+        except Exception as exc:
+            raise ValueError("invalid fragment base64") from exc
+        expected_length = (CHAT_FRAGMENT_RAW_BYTES if index < count - 1
+                           else total - CHAT_FRAGMENT_RAW_BYTES * (count - 1))
+        if len(chunk) != expected_length:
+            raise ValueError("invalid fragment byte length")
+        chunks[index] = chunk
+    raw = b"".join(chunks[index] for index in range(count))
+    if len(raw) != total or hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError("chat message digest or length mismatch")
+    try:
+        return raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError("reassembled chat message is not valid UTF-8") from exc
+
+
+CHAT_FRAGMENT_SESSION_TTL_MS = 30 * 60 * 1000
+MAX_CHAT_FRAGMENT_SESSIONS = 32
+MAX_CHAT_FRAGMENT_CACHE_CHARS = 2 * 1024 * 1024
+MAX_FRAGMENT_DISCOVERY_TARGETS = 64
+
+
+def _ensure_chat_fragment_schema(conn):
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("""CREATE TABLE IF NOT EXISTS lan_chat_fragment_sessions (
+        receiver_scope TEXT NOT NULL,
+        sender_peer_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        fragment_count INTEGER NOT NULL,
+        total_bytes INTEGER NOT NULL,
+        sha256 TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        first_seen_at_ms INTEGER NOT NULL,
+        expires_at_ms INTEGER NOT NULL,
+        PRIMARY KEY(receiver_scope,sender_peer_id,message_id))""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS lan_chat_fragments (
+        receiver_scope TEXT NOT NULL,
+        sender_peer_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        fragment_index INTEGER NOT NULL,
+        fragment_data TEXT NOT NULL,
+        PRIMARY KEY(receiver_scope,sender_peer_id,message_id,fragment_index),
+        FOREIGN KEY(receiver_scope,sender_peer_id,message_id)
+            REFERENCES lan_chat_fragment_sessions(receiver_scope,sender_peer_id,message_id)
+            ON DELETE CASCADE)""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_lan_chat_fragment_expiry "
+                 "ON lan_chat_fragment_sessions(expires_at_ms)")
+
+
+def store_incoming_chat_fragment(db_path, receiver_scope, sender_peer_id,
+                                 packet, now_ms=None):
+    """Persist one authenticated fragment before ACK; completed sessions remain as short-lived
+    tombstones so a duplicate tail fragment can trigger another final chat.ack after ACK loss.
+    """
+    import base64
+    if not db_path or not isinstance(receiver_scope, str) or not receiver_scope:
+        return "rejected"
+    if not is_valid_peer_id(sender_peer_id) or not isinstance(packet, dict):
+        return "rejected"
+    if packet.get("type") != "chat.fragment":
+        return "rejected"
+    message_id = packet.get("message_id")
+    target_peer_id = packet.get("target_peer_id")
+    count = packet.get("fragment_count")
+    total = packet.get("total_bytes")
+    index = packet.get("fragment_index")
+    digest = packet.get("sha256")
+    created = packet.get("created_at_ms", 0)
+    encoded = packet.get("fragment_data")
+    if (not isinstance(message_id, str) or not message_id
+            or len(message_id.encode("utf-8", errors="strict")) > 128
+            or not isinstance(target_peer_id, str) or not target_peer_id
+            or type(count) is not int or not 1 <= count <= MAX_CHAT_MESSAGE_FRAGMENTS
+            or type(total) is not int or not 1 <= total <= MAX_CHAT_MESSAGE_BYTES
+            or type(index) is not int or not 0 <= index < count
+            or count != (total + CHAT_FRAGMENT_RAW_BYTES - 1) // CHAT_FRAGMENT_RAW_BYTES
+            or type(created) is not int or created < 0
+            or not isinstance(digest, str) or len(digest) != 64
+            or any(ch not in "0123456789abcdef" for ch in digest)
+            or not isinstance(encoded, str) or not encoded or len(encoded) > 400):
+        return "rejected"
+    try:
+        raw = base64.b64decode(encoded.encode("ascii"), validate=True)
+        if base64.b64encode(raw).decode("ascii") != encoded:
+            return "rejected"
+        expected = (CHAT_FRAGMENT_RAW_BYTES if index < count - 1
+                    else total - CHAT_FRAGMENT_RAW_BYTES * (count - 1))
+        if len(raw) != expected:
+            return "rejected"
+    except Exception:
+        return "rejected"
+
+    now = int(now_ms if now_ms is not None else time.time() * 1000)
+    if now < 0:
+        return "rejected"
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        _ensure_chat_fragment_schema(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM lan_chat_fragment_sessions WHERE expires_at_ms<=?", (now,))
+        session = conn.execute("""SELECT fragment_count,total_bytes,sha256,created_at_ms
+            FROM lan_chat_fragment_sessions
+            WHERE receiver_scope=? AND sender_peer_id=? AND message_id=?""",
+            (receiver_scope, sender_peer_id, message_id)).fetchone()
+        if session is not None and session != (count, total, digest, created):
+            _safe_rollback(conn)
+            return "rejected"
+        if session is None:
+            sessions = conn.execute(
+                "SELECT COUNT(*) FROM lan_chat_fragment_sessions").fetchone()[0]
+            if int(sessions or 0) >= MAX_CHAT_FRAGMENT_SESSIONS:
+                _safe_rollback(conn)
+                return "rejected"
+            conn.execute("""INSERT INTO lan_chat_fragment_sessions
+                (receiver_scope,sender_peer_id,message_id,fragment_count,total_bytes,sha256,
+                 created_at_ms,first_seen_at_ms,expires_at_ms)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (receiver_scope, sender_peer_id, message_id, count, total, digest,
+                 created, now, now + CHAT_FRAGMENT_SESSION_TTL_MS))
+        existing = conn.execute("""SELECT fragment_data FROM lan_chat_fragments
+            WHERE receiver_scope=? AND sender_peer_id=? AND message_id=? AND fragment_index=?""",
+            (receiver_scope, sender_peer_id, message_id, index)).fetchone()
+        if existing is not None:
+            if existing[0] != encoded:
+                _safe_rollback(conn)
+                return "rejected"
+            received = conn.execute("""SELECT COUNT(*) FROM lan_chat_fragments
+                WHERE receiver_scope=? AND sender_peer_id=? AND message_id=?""",
+                (receiver_scope, sender_peer_id, message_id)).fetchone()[0]
+            conn.commit()
+            return "complete_duplicate" if int(received) == count else "duplicate"
+        cached_chars = conn.execute(
+            "SELECT COALESCE(SUM(LENGTH(fragment_data)),0) FROM lan_chat_fragments").fetchone()[0]
+        if int(cached_chars or 0) + len(encoded) > MAX_CHAT_FRAGMENT_CACHE_CHARS:
+            _safe_rollback(conn)
+            return "rejected"
+        conn.execute("""INSERT INTO lan_chat_fragments
+            (receiver_scope,sender_peer_id,message_id,fragment_index,fragment_data)
+            VALUES(?,?,?,?,?)""",
+            (receiver_scope, sender_peer_id, message_id, index, encoded))
+        received = conn.execute("""SELECT COUNT(*) FROM lan_chat_fragments
+            WHERE receiver_scope=? AND sender_peer_id=? AND message_id=?""",
+            (receiver_scope, sender_peer_id, message_id)).fetchone()[0]
+        conn.commit()
+        return "completed" if int(received) == count else "stored"
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        raise LanP2PStorageError("failed to persist incoming LAN chat fragment") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+def load_incoming_chat_fragments(db_path, receiver_scope, sender_peer_id,
+                                 message_id, now_ms=None):
+    """Load a durable partial or complete fragment session in index order."""
+    if not db_path or not receiver_scope or not sender_peer_id or not message_id:
+        return []
+    now = int(now_ms if now_ms is not None else time.time() * 1000)
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        _ensure_chat_fragment_schema(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM lan_chat_fragment_sessions WHERE expires_at_ms<=?", (now,))
+        rows = conn.execute("""SELECT s.fragment_count,s.total_bytes,s.sha256,s.created_at_ms,
+                    f.fragment_index,f.fragment_data
+            FROM lan_chat_fragment_sessions s
+            JOIN lan_chat_fragments f ON f.receiver_scope=s.receiver_scope
+                AND f.sender_peer_id=s.sender_peer_id AND f.message_id=s.message_id
+            WHERE s.receiver_scope=? AND s.sender_peer_id=? AND s.message_id=?
+              AND s.expires_at_ms>? ORDER BY f.fragment_index""",
+            (receiver_scope, sender_peer_id, message_id, now)).fetchall()
+        conn.commit()
+        if not rows:
+            return []
+        first = rows[0]
+        return [{
+            "type": "chat.fragment",
+            "message_id": message_id,
+            "target_peer_id": "*",
+            "fragment_count": int(first[0]),
+            "total_bytes": int(first[1]),
+            "sha256": first[2],
+            "created_at_ms": int(first[3]),
+            "fragment_index": int(row[4]),
+            "fragment_data": row[5],
+        } for row in rows]
+    except Exception as exc:
+        if conn is not None:
+            _safe_rollback(conn)
+        raise LanP2PStorageError("failed to load incoming LAN chat fragments") from exc
+    finally:
+        if conn is not None:
+            _safe_close(conn)
+
+
+LAN_CHAT_DISCOVERY_PORTS = (8888, 8887, 8889, 8890)
+
+
+def build_chat_discovery_destinations(ip_addresses, own_port):
+    """Build deduplicated discovery destinations for every other LAN chat listener."""
+    try:
+        excluded_port = int(own_port)
+    except (TypeError, ValueError):
+        return []
+    ips = []
+    for value in (ip_addresses or []):
+        ip = str(value or "").strip()
+        if ip and ip not in ips:
+            ips.append(ip)
+    return [(ip, port) for ip in ips for port in LAN_CHAT_DISCOVERY_PORTS
+            if port != excluded_port]

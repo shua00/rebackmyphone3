@@ -2,20 +2,29 @@
  * ============================================================
  *  TrackingService.java — 设备同步与可靠通信服务
  * ------------------------------------------------------------
- *  构建批次 : 20261122-0210-r4
- *  源码版本 : v2.5.13-r4（基于 r3；协议 v2 / v2.2，向后兼容）
- *  最后修改 : 2026-11-22 2:10
+ *  构建批次 : 20261122-P2P-r21
+ *  源码版本 : v2.5.21-r21（协议 v2-only / broadcast ACK completion and diagnostics）
+ *  最后修改 : 2026-11-22
  *  体积目标 : 以现有约 140 KB APK 为基线；本轮不新增第三方库/运行时依赖
  *  性能原则 : 复用系统 API、既有回调/线程/上报链；无新增高频轮询、扫描或常驻线程
  * ------------------------------------------------------------
- *  本轮网络路由轻量化：
+ *  本轮 LAN P2P 路由：
  *    - 复用 ConnectivityManager.NetworkCallback 与现有网络快照，不引入 Tailscale/Pion/libp2p/WebRTC。
- *    - 网络快照增加 network_generation：网络关键指纹变化时递增，供服务端识别旧路径失效。
- *    - 网络指纹仅用于诊断/候选筛选，不证明 UDP 可达；不以私网 IP、CIDR、SSID/BSSID 授权单播。
- *    - UDP Challenge/Response、跨 NAT ICE、TURN/Relay 仅预留扩展约定，本版本不启动探测、不增加流量。
- *    - 路由不可确认时由服务端使用现有 HTTP 持久队列；不影响定位、离线补发、聊天监听及其他业务。
+ *    - 首次或缓存失效时广播随机 nonce challenge，只有收到对应 response 才记录对端 UDP endpoint；租约 120 秒；有效租约直接复用。
+ *    - 已验证 endpoint 优先单播；无已验证 peer 时仅向当前子网广播一次；仅实际默认网络路径签名变化时清空 peer 表。
+ *    - 网络指纹仅用于诊断，不授权单播；不以私网 IP、CIDR、SSID/BSSID 作为可达证明。
+ *    - 当前验证仅适用于同一可互通 LAN；跨 NAT ICE、TURN/Relay 仍为未来扩展。
+ *  本轮约束 : 移除 FIND_ME_MSG v1 双发/接收；保留现有 UDP 8888 监听、广播发送与所有非聊天业务。
+ *  P2P 状态 : 按需 PEER_HELLO/PEER_ACK 挑战；缓存 120 秒验证过的 8888 endpoint，仅默认网络身份/IP/前缀/接口/网关等关键路径签名变化时清空；已验证成员逐成员单播；CHAT_ACK 必须匹配已验证 peer 的 ID/IP/端口；无 peer 时子网广播一次并保留待确认队列；消息接收先过滤自身 sender，再 ACK/去重；实机验证仍待完成。
+ *  本轮改动 : 修复无已验证 peer 时广播 ACK 无法完成待确认消息的问题；广播 ACK 仅对当前 messageId 接受首个共享密钥认证的 8888 来源，不将其升级为已验证单播 peer；保留重试队列与逐 peer 严格 ACK。增加握手结果诊断。
  *  改动记录（倒序，仅列最近 3 条，更早见 CHANGELOG.txt）:
- *    2026-11-22 r4 轻量网络状态代数：网络快照关键字段变化时递增 network_generation；补齐头部架构/依赖/扩展边界说明，无新增第三方依赖。
+ *    - 2026-11-22 r21 广播 ACK 闭环：无 peer 时等待一个匹配 messageId 的认证 ACK，确认后回收该条待确认消息；未确认继续保留；不把广播 ACK 伪装成已验证 peer。
+ *    - 2026-11-22 r20 发送路径诊断：记录异常 socket 锁等待、UDP send 耗时和 ACK 等待轮数/总耗时，不改变发送策略。
+ *    - 2026-11-22 r19 聊天收包快路径：CHAT_MSG 提前到实时分发，先 ACK 后去重并异步处理历史/UI。
+ *    - 2026-11-22 r18 接收循环减负：去掉普通包逐包 logcat；聊天 ACK 立即回包后再 FIFO 处理历史/UI；陪伴与警报命令转主线程串行执行。
+ *    - 2026-11-22 r17 实时 ACK 快路径：握手/聊天 ACK 优先处理；移除完整 UDP 包日志，防止协议认证字段和聊天内容进入日志。
+ *    - 2026-11-22 r16 LAN P2P 修复：单子网广播；自身回环包提前过滤；ACK 空成员计数修正；按真实网络路径代数失效 peer；UDP 慢分支诊断。
+ *    2026-11-22 r15 后台持久化与时延诊断：同步 commit 移出 Service 主线程，增加持久化、UDP发送、ACK、接收时间日志。\n *    2026-11-22 r14 LAN P2P 快速发送：复用 120 秒已验证 peer endpoint，连续消息跳过重复 500ms 发现窗口；ACK 等待缩短为 250ms/轮，失败后撤销旧路由并在后续消息重新发现。\n *    2026-11-22 r4 轻量网络状态代数：网络快照关键字段变化时递增 network_generation；补齐头部架构/依赖/扩展边界说明，无新增第三方依赖。
  *    2026-11-21 09:30  网络与反馈扩展：默认网络快照（类型/IP/CIDR/接口/验证状态）；command_feedback 本地持久化、断网补交与服务端明确确认后回收；保留旧 executed_ids 和原离线补发机制
  *    2026-11-20 21:10  可靠性修复：[B1] 离线补发>FLUSH_BATCH_MAX 条时自我续跑（不再等网络状态变化）；
  *                      [B3] 批量下行响应解析由主线程 handler.post 移回工作线程（消除 ANR 风险）；
@@ -163,6 +172,26 @@ public class TrackingService extends Service implements LocationListener {
     private LocationManager locationManager;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private ConnectivityManager.NetworkCallback networkCallback;
+    // Observe Wi-Fi LAN separately: the default route may remain on cellular.
+    private ConnectivityManager.NetworkCallback wifiLanNetworkCallback;
+    // OEM hotspot/AP transitions may not surface as ConnectivityManager Wi-Fi Networks.
+    // This receiver is event-only: it refreshes candidate metadata, never starts workers itself.
+    private BroadcastReceiver lanHotspotStateReceiver;
+    private volatile String wifiLanFingerprint;
+    // Runtime ownership registry; currently mirrors the selected Wi-Fi listener only.
+    // It is deliberately dormant when no usable LAN fingerprint/listener exists.
+    private final LanChatPathRegistry lanChatPathRegistry = new LanChatPathRegistry();
+    // Path-keyed lease owner; no worker/timer is created by this registry wrapper.
+    private final LanChatListenerRuntime lanChatListenerRuntime =
+            new LanChatListenerRuntime(lanChatPathRegistry);
+    // Shared across every chat ingress path: legacy UDP commands must not execute once per listener.
+    private final LanUdpCommandDeduplicator lanUdpCommandDeduplicator =
+            new LanUdpCommandDeduplicator();
+    private volatile String rescueSocketPathFingerprint;
+    // Exact Network that owns the currently published UDP listener socket.
+    private volatile Network lanChatBoundWifiNetwork;
+    // Event-driven immutable path plan; it creates no sockets, workers, timers, or probes.
+    private volatile LanChatListenerPathPlan lanChatListenerPathPlan;
     private AlarmManager alarmManager;
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
@@ -193,7 +222,12 @@ public class TrackingService extends Service implements LocationListener {
             new java.util.concurrent.atomic.AtomicBoolean(false);
     private static final Object reportLock = new Object();
     private static volatile int consecutiveFailures = 0;
-    private static volatile boolean isListeningForRescue = false;
+    // Listener ownership is per Service instance; an old instance must not block a recreated one.
+    // rescueLock remains process-wide only to serialize socket publication/revocation across instances.
+    private volatile boolean isListeningForRescue = false;
+    private volatile Thread rescueListenerThread = null;
+    // Identity token ties the single-listener worker/socket to one immutable generation.
+    private volatile LanChatListenerInstance activeLanChatListenerInstance = null;
 
     private static long lastNotificationClickTime = 0;
     private static int notificationClickCount = 0;
@@ -211,11 +245,6 @@ public class TrackingService extends Service implements LocationListener {
     // ===== 协议前缀（P0-1 拆分）=====
     /** v2 悬浮文字：FIND_ME_FLOAT:secret:content（content 可含冒号） */
     private static final String FIND_ME_FLOAT_MSG = "FIND_ME_FLOAT";
-    /** v2 聊天：FIND_ME_CHAT:secret:sender:content */
-    private static final String FIND_ME_CHAT_MSG  = "FIND_ME_CHAT";
-    // [COMPAT-20261105-v1] 旧前缀常量，v1 全部下线后删除本行
-    private static final String FIND_ME_MSG_LEGACY = "FIND_ME_MSG";
-    // [/COMPAT-20261105-v1]
 
     private static long lastConfigFetchTime = 0;
     private static final String PREF_BUBBLE = "bubble_pos_prefs";
@@ -233,19 +262,288 @@ public class TrackingService extends Service implements LocationListener {
     public static volatile int GLOBAL_BATTERY_LEVEL = -1;
 
     private volatile boolean serviceDestroyed = false;
+    // Hidden/OEM hotspot AP interfaces may not produce ConnectivityManager Network callbacks.
+    // Reconcile the selected LAN path periodically while the independent transfer feature is on.
+    private final Runnable lanTransferPathRefreshRunnable = () -> {
+        if (!serviceDestroyed && LanTransferFeature.isEnabled(this))
+            refreshLanTransferTcpListener("periodic LAN path reconciliation");
+    };
     // 每个进程只生成一次；进程被系统杀死后重启会得到新的 Session。
     private static final String PROCESS_SESSION_ID = java.util.UUID.randomUUID().toString();
     private static final long PROCESS_START_WALL_TIME_MS = System.currentTimeMillis();
     // 每次 TrackingService 实例创建时生成，用于区分同一进程内的服务重建。
     private final String serviceInstanceId = java.util.UUID.randomUUID().toString();
     private volatile DatagramSocket rescueSocketRef = null;
-    private final Object rescueLock = new Object();
+    // LAN P2P v2：消息 ACK 等待表。每条消息只保留一个短时 latch，不启动常驻线程。
+    // Coalesce one bounded recheck when a broadcast ACK races its peer-route handshake.
+    private final java.util.Set<String> pendingChatAckRouteRechecks =
+            java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CountDownLatch> pendingChatAcks =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.Set<String>> pendingChatAckPeers =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> pendingChatAckStartedAt =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    // 防止发送端重试/多端口重复广播时，同一消息在持久化完成前重复占用后台队列。
+    private final java.util.concurrent.atomic.AtomicBoolean lanChatInboxProjectionInFlight =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    // Preserve projection requests that arrive while another inbox batch is in flight.
+    private final java.util.concurrent.atomic.AtomicBoolean lanChatInboxProjectionRequested =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final java.util.Set<String> pendingLanChatReceives =
+            java.util.Collections.newSetFromMap(
+                    new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+    // A single durable inbox commit may satisfy duplicate deliveries received on several paths.
+    // Keep each ingress socket/path lease so every still-current path can receive its own ACK.
+    private static final class PendingLanChatAckTarget {
+        final DatagramSocket socket;
+        final java.net.InetAddress address;
+        final int port;
+        final String pathFingerprint;
+        final long generation;
+
+        PendingLanChatAckTarget(DatagramSocket socket, java.net.InetAddress address, int port,
+                String pathFingerprint, long generation) {
+            this.socket = socket;
+            this.address = address;
+            this.port = port;
+            this.pathFingerprint = pathFingerprint;
+            this.generation = generation;
+        }
+    }
+
+    private static final class PendingLanChatReceive {
+        static final int MAX_ACK_TARGETS = 8;
+        final java.util.List<PendingLanChatAckTarget> ackTargets = new java.util.ArrayList<>();
+        boolean completed;
+        boolean stored;
+
+        /** Caller holds this receive object's monitor. */
+        boolean addAckTarget(PendingLanChatAckTarget candidate) {
+            if (completed || candidate == null) return false;
+            for (PendingLanChatAckTarget existing : ackTargets) {
+                if (existing.socket == candidate.socket
+                        && existing.generation == candidate.generation
+                        && existing.port == candidate.port
+                        && existing.address.equals(candidate.address)
+                        && java.util.Objects.equals(existing.pathFingerprint, candidate.pathFingerprint)) {
+                    return true;
+                }
+            }
+            if (ackTargets.size() >= MAX_ACK_TARGETS) return false;
+            ackTargets.add(candidate);
+            return true;
+        }
+    }
+
+    private final java.util.concurrent.ConcurrentHashMap<String, PendingLanChatReceive>
+            pendingLanChatV2Receives = new java.util.concurrent.ConcurrentHashMap<>();
+    // LAN 对讲先持久化消息正文与消息 ID，再发 ACK；防止进程在 ACK 后、历史写入前退出。
+    private final Object lanChatReceiveLock = new Object();
+    private static final String PREF_LAN_CHAT_RECEIVED_IDS = "lan_chat_received_message_ids";
+    // 本地 LAN 聊天待确认队列：持久化 Outbox 最多 200 条、正文合计 8 MiB。
+    private static final String PREF_LAN_CHAT_QUEUE = "lan_p2p_pending_messages";
+    private static final int LAN_CHAT_QUEUE_MAX = LanChatRetryPolicy.MAX_PENDING_MESSAGES;
+    private static final long LAN_CHAT_DISCOVERY_WINDOW_MS = LanChatRetryPolicy.FIRST_DISCOVERY_WINDOW_MS;
+    // Keep route refresh responsive without broadcasting once per keystroke/message.
+    private static final long LAN_PEER_DISCOVERY_COOLDOWN_MS = LanChatRetryPolicy.PEER_DISCOVERY_COOLDOWN_MS;
+    // Keep discovery nonces valid long enough for bounded persistence/ACK work to finish.
+    private static final long LAN_PEER_CHALLENGE_TIMEOUT_MS = LanChatRetryPolicy.PEER_CHALLENGE_TIMEOUT_MS;
+    private final Object lanChatQueueLock = new Object();
+    private volatile LanChatStore lanChatStore;
+    // File-transfer transport has its own durable ledger and lifecycle; it never shares chat Outbox.
+    private volatile LanTransferStore lanTransferStore;
+    private volatile LanTransferFilesystem lanTransferFilesystem;
+    // One independent data listener per verified LAN path fingerprint (STA/AP may coexist).
+    private final java.util.concurrent.ConcurrentHashMap<String, LanTransferTcpListener> lanTransferTcpListeners = new java.util.concurrent.ConcurrentHashMap<>();
+    // Each STA/AP path owns an independent pairing control server and provisional sessions.
+    private final java.util.concurrent.ConcurrentHashMap<String, LanTransferPairingControlHost>
+            lanTransferPairingControlHosts = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, LanTransferPairingInitiator>
+            lanTransferPairingInitiators = new java.util.concurrent.ConcurrentHashMap<>();
+    // Initiator ceremonies are pinned to the exact path used for their first authenticated exchange.
+    private final java.util.concurrent.ConcurrentHashMap<String, String>
+            lanTransferPairingInitiatorFingerprints = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Set<String> lanTransferPairingCommitRetries =
+            java.util.Collections.newSetFromMap(
+                    new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+    private final java.util.Set<String> lanTransferPairingCommitPending =
+            java.util.Collections.newSetFromMap(
+                    new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+    private volatile String lanTransferCredentialsFingerprint;
+    // Discovery and file-data sockets are independently owned per STA/AP path.
+    private final java.util.concurrent.ConcurrentHashMap<String, LanTransferDiscovery> lanTransferDiscoveries = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Object lanTransferListenerLock = new Object();
+    private final java.util.concurrent.atomic.AtomicBoolean lanChatRetryInFlight =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    // Coalesce a recovery event that arrives while a retry batch is already in flight.
+    private final java.util.concurrent.atomic.AtomicBoolean lanChatRecoveryEventPending =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    // Authenticated peer recovery must not reopen other peers' exhausted retry budgets.
+    private final java.util.Set<String> lanChatPeerRecoveryEvents =
+            java.util.Collections.newSetFromMap(
+                    new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+    // Per-peer cooldown deadlines keep peer verification from becoming a global retry reset.
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>
+            lanChatPeerRecoveryCooldownWakeAtMs = new java.util.concurrent.ConcurrentHashMap<>();
+    // One earliest-deadline wake preserves recovery events across independently cooling targets.
+    // The timestamp is also a callback generation token: stale timers may run, but cannot consume
+    // a newer deadline unless their exact scheduled timestamp still owns this slot.
+    private final java.util.concurrent.atomic.AtomicLong lanChatRecoveryCooldownWakeAtMs =
+            new java.util.concurrent.atomic.AtomicLong(Long.MAX_VALUE);
+    // A route refresh is an ordinary retry wake, not permission to reopen an exhausted epoch.
+    private final java.util.concurrent.atomic.AtomicBoolean lanChatRouteRefreshPending =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final java.util.concurrent.atomic.AtomicBoolean lanChatRetryWakeScheduled =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    // Coalesce delayed/outstanding Outbox planning requests across all message IDs.
+    private final java.util.concurrent.atomic.AtomicBoolean lanChatRetryPlanPending =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    // One timer services every durable first-discovery deadline; never one timer per message.
+    private final java.util.concurrent.atomic.AtomicBoolean lanChatDiscoveryFinalizerScheduled =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    // One coalesced timer services all durable Outbox TTL deadlines independently of discovery windows.
+    private final java.util.concurrent.atomic.AtomicBoolean lanChatOutboxExpiryScheduled =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final java.util.Set<String> activeLanChatTransmissions =
+            java.util.Collections.newSetFromMap(
+                    new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+    // Keep a message active until its asynchronous ACK observation window is reconciled.
+    private final java.util.Set<String> lanChatAckGraceInFlight =
+            java.util.Collections.newSetFromMap(
+                    new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+    // Preserve FIFO send order while discovery/ACK state is shared across messages.
+    // Fair admission prevents a long retry batch from repeatedly barging ahead of fresh user sends.
+    // Keep cross-lane serialization until per-stage measurements identify a safe narrower boundary.
+    private final java.util.concurrent.locks.ReentrantLock lanChatTransmitLock =
+            new java.util.concurrent.locks.ReentrantLock(true);
+    // Invalidates queued sends and listener startups whenever the Wi-Fi LAN path changes.
+    private final java.util.concurrent.atomic.AtomicLong lanSocketGeneration =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+    // 仅缓存经本机 challenge/response 验证的 LAN peer；网络变化时必须清空。
+    private final java.util.concurrent.ConcurrentHashMap<String, java.net.InetSocketAddress> verifiedChatPeers =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> verifiedChatPeerSeen =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.atomic.AtomicLong verifiedChatPeerRouteVersionCounter =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> verifiedChatPeerRouteVersions =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CountDownLatch> pendingPeerChallenges =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    // A challenge nonce is valid only on the exact listener path/socket epoch that sent it.
+    private static final class PendingPeerChallengeIngress {
+        final String pathFingerprint;
+        final DatagramSocket socket;
+        final long generation;
+
+        PendingPeerChallengeIngress(String pathFingerprint, DatagramSocket socket, long generation) {
+            this.pathFingerprint = pathFingerprint;
+            this.socket = socket;
+            this.generation = generation;
+        }
+
+        boolean matches(String path, DatagramSocket ingressSocket, long ingressGeneration) {
+            return pathFingerprint != null && pathFingerprint.equals(path)
+                    && socket == ingressSocket && generation == ingressGeneration;
+        }
+    }
+
+    private final java.util.concurrent.ConcurrentHashMap<String, PendingPeerChallengeIngress>
+            pendingPeerChallengeIngress = new java.util.concurrent.ConcurrentHashMap<>();
+    // Directed challenges are bound to the peer identity and exact source endpoint.
+    // Broadcast discovery challenges intentionally leave both expectations unset.
+    private final java.util.concurrent.ConcurrentHashMap<String, String> pendingPeerChallengeExpectedIds =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, java.net.InetSocketAddress> pendingPeerChallengeExpectedEndpoints =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    // Deduplicate directed challenges while they wait in the peer executor queue.
+    private final java.util.concurrent.ConcurrentHashMap<String, Object> pendingPeerChallengeDispatches =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    // 有效 peer 存在时也定期重新发现，纳入后来上线/加入局域网的设备。
+    private volatile long lastPeerDiscoveryAt = 0L;
+    private static final long PEER_DISCOVERY_REFRESH_MS = 30_000L;
+    // 多条消息并发到达时只允许一个线程执行广播发现，避免重复探测和额外等待。
+    private final java.util.concurrent.atomic.AtomicBoolean peerDiscoveryInFlight =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    // 与 buildNetworkSnapshot 的关键路径代数对齐；普通 capabilities/link 回调不应清空有效 peer。
+    private volatile long lastPeerRouteGeneration = -1L;
+
+    private void refreshPeerRoutesForNetworkChange(String reason) {
+        try {
+            JSONObject snapshot = buildNetworkSnapshot();
+            long generation = snapshot.optLong("network_generation", -1L);
+            long previous = lastPeerRouteGeneration;
+            lastPeerRouteGeneration = generation;
+            if (previous >= 0L && generation >= 0L && generation != previous) {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+                    // API 21-22 cannot bind this DatagramSocket to a secondary Network.
+                    // Their LAN transport is safe only while Wi-Fi remains the default route.
+                    final DatagramSocket oldSocket;
+                    synchronized (rescueLock) {
+                        lanSocketGeneration.incrementAndGet();
+                        LanChatListenerInstance oldInstance = activeLanChatListenerInstance;
+                        if (oldInstance != null) oldInstance.requestStop();
+                        oldSocket = oldInstance != null ? oldInstance.socket() : rescueSocketRef;
+                    }
+                    // The epoch invalidates every path lease, not just the primary one.
+                    // Retire secondary sockets before allowing any new generation to start.
+                    for (LanChatListenerInstance instance : lanChatListenerRuntime.instanceSnapshot()) {
+                        if (instance != null && instance != activeLanChatListenerInstance) {
+                            stopSecondaryLanChatListener(instance);
+                        }
+                    }
+                    reconcileLanChatSecondaryListeners(lanChatListenerPathPlan);
+                    invalidateVerifiedChatPeers("Pre-M default LAN route changed: " + reason);
+                    lastPeerDiscoveryAt = 0L;
+                    FileLogger.log(this, "NETWORK", "Pre-M 默认网络变化，撤销旧 LAN peer 并重绑 UDP listener");
+                    if (oldSocket != null && !oldSocket.isClosed()) {
+                        oldSocket.close();
+                    } else {
+                        triggerRescueListener();
+                    }
+                    return;
+                }
+                // The default Internet route can switch between cellular and Wi-Fi while
+                // the underlying Wi-Fi LAN remains reachable. On API 23+, refreshWifiLanTransport
+                // compares the actual socket-bound Wi-Fi interface/address/routes and owns
+                // LAN route invalidation and socket rebind.
+                FileLogger.logD("CHAT", "默认网络路径变化但保留 LAN peer；等待 Wi-Fi LAN 指纹判断，generation="
+                        + previous + "->" + generation + "，回调=" + reason);
+            } else {
+                FileLogger.logD("CHAT", "LAN P2P 保留已验证 peer：默认网络变化未影响 LAN，generation="
+                        + generation + "，回调=" + reason);
+            }
+        } catch (Exception e) {
+            FileLogger.log(this, "CHAT", "⚠️ 网络回调快照检查失败，保留 LAN peer 等待 Wi-Fi LAN 指纹检查："
+                    + reason + " / " + e.getMessage());
+        }
+    }
+
+    /** 网络路径变化立即撤销旧 LAN endpoint，避免跨子网沿用旧 IP。 */
+    private void invalidateVerifiedChatPeers(String reason) {
+        synchronized (verifiedChatPeerRouteVersions) {
+            verifiedChatPeers.clear();
+            verifiedChatPeerSeen.clear();
+            verifiedChatPeerRouteVersions.clear();
+        }
+        pendingPeerChallenges.clear();
+        pendingPeerChallengeIngress.clear();
+        pendingPeerChallengeExpectedIds.clear();
+        pendingPeerChallengeExpectedEndpoints.clear();
+        pendingPeerChallengeDispatches.clear();
+        FileLogger.log(this, "CHAT", "LAN P2P peer 路由已失效，等待重新发现: " + reason);
+    }
+    // The listener-running flag is process-wide; its guard must be process-wide too.
+    private static final Object rescueLock = new Object();
     // 多路唤醒若从不同线程同时进入自愈，只允许一个自愈检查在途。
     private final java.util.concurrent.atomic.AtomicBoolean selfHealInFlight =
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
     // 看门狗线程
     private Thread watchdogThread;
+    // Retain the one-shot startup worker so Service teardown can cancel it.
+    private volatile Thread startupThread;
 
     // ★ [核心优化] 2026-11-04 全局同步锁与键值，用于持久化“上次成功上报时间”，解决冷启动看门狗失效问题
     private static final Object FILE_LOCK = new Object();
@@ -338,6 +636,180 @@ public class TrackingService extends Service implements LocationListener {
                     new ThreadPoolExecutor.AbortPolicy()
             );
 
+    // Persist newly accepted messages independently from potentially slow UDP dispatch.
+    // A blocked send must not keep later messages out of the durable SQLite outbox.
+    private final java.util.concurrent.ExecutorService lanChatPersistExecutor =
+            new ThreadPoolExecutor(
+                    1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(100),
+                    runnable -> {
+                        Thread thread = new Thread(runnable, "LanChat-Persist");
+                        thread.setPriority(Thread.NORM_PRIORITY);
+                        return thread;
+                    },
+                    new ThreadPoolExecutor.AbortPolicy()
+            );
+
+    // Fresh user messages use a separate bounded transmit lane so durable retries
+    // cannot delay interactive sends. The shared transmit lock still serializes UDP writes.
+    private final java.util.concurrent.ExecutorService lanChatImmediateExecutor =
+            new ThreadPoolExecutor(
+                    1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(100),
+                    runnable -> {
+                        Thread thread = new Thread(runnable, "LanChat-Immediate");
+                        thread.setPriority(Thread.NORM_PRIORITY);
+                        return thread;
+                    },
+                    new ThreadPoolExecutor.AbortPolicy()
+            );
+
+    // Single bounded FIFO lane for durable retry batches; it never owns interactive sends.
+    private final java.util.concurrent.ExecutorService lanChatSendExecutor =
+            new ThreadPoolExecutor(
+                    1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(100),
+                    new ThreadPoolExecutor.AbortPolicy()
+            );
+
+    // Peer route commits only. They may fan out across open outbox rows and must never
+    // occupy the message-ACK lane while a burst of peers is being discovered.
+    private final java.util.concurrent.ExecutorService lanChatControlExecutor =
+            new ThreadPoolExecutor(
+                    1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(128),
+                    runnable -> {
+                        Thread thread = new Thread(runnable, "LanChat-Control");
+                        thread.setPriority(Thread.NORM_PRIORITY);
+                        return thread;
+                    },
+                    new ThreadPoolExecutor.AbortPolicy()
+            );
+
+    // Dedicated message ACK lane: no peer discovery/route persistence jobs are admitted here.
+    // This keeps delivery confirmation latency independent from peer-presence bursts.
+    private final java.util.concurrent.ExecutorService lanChatAckExecutor =
+            new ThreadPoolExecutor(
+                    1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(256),
+                    runnable -> {
+                        Thread thread = new Thread(runnable, "LanChat-Ack");
+                        thread.setPriority(Thread.NORM_PRIORITY);
+                        return thread;
+                    },
+                    new ThreadPoolExecutor.AbortPolicy()
+            );
+
+    // ACK-driven fragment window advancement is isolated from the FIFO sender and ACK lane.
+    // Workers never wait for ACKs; accepted ACKs enqueue bounded continuation work.
+    private final java.util.concurrent.ExecutorService lanChatFragmentSendExecutor =
+            new ThreadPoolExecutor(
+                    2, 2, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(64),
+                    runnable -> {
+                        Thread thread = new Thread(runnable, "LanChat-Fragment-Send");
+                        thread.setPriority(Thread.NORM_PRIORITY);
+                        return thread;
+                    },
+                    new ThreadPoolExecutor.AbortPolicy()
+            );
+    private final java.util.Set<String> activeLanChatFragmentAdvances =
+            java.util.Collections.newSetFromMap(
+                    new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+    private final java.util.Set<String> pendingLanChatFragmentAdvances =
+            java.util.Collections.newSetFromMap(
+                    new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+
+    // Peer presence announcements may perform SQLite work and directed challenges.
+    // Bounded FIFO isolation keeps peer presence bursts from delaying authenticated ACK commits.
+    private final java.util.concurrent.ExecutorService lanChatPeerExecutor =
+            new ThreadPoolExecutor(
+                    1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(128),
+                    runnable -> {
+                        Thread thread = new Thread(runnable, "LanChat-Peer");
+                        thread.setPriority(Thread.NORM_PRIORITY);
+                        return thread;
+                    },
+                    new ThreadPoolExecutor.AbortPolicy()
+            );
+
+    // Outbound discovery/challenge sends are isolated from inbound peer admission.
+    // A slow UDP probe must not stall processing of the peer.ack that restores a route.
+    private final java.util.concurrent.ExecutorService lanChatProbeExecutor =
+            new ThreadPoolExecutor(
+                    1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(64),
+                    runnable -> {
+                        Thread thread = new Thread(runnable, "LanChat-Probe");
+                        thread.setPriority(Thread.NORM_PRIORITY);
+                        return thread;
+                    },
+                    new ThreadPoolExecutor.AbortPolicy()
+            );
+
+    // Keep durable inbox work independent from location/HTTP reporting and control ACKs.
+    private final java.util.concurrent.ExecutorService lanChatIoExecutor =
+            new ThreadPoolExecutor(
+                    2, 2, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(128),
+                    runnable -> {
+                        Thread thread = new Thread(runnable, "LanChat-IO");
+                        thread.setPriority(Thread.NORM_PRIORITY);
+                        return thread;
+                    },
+                    new ThreadPoolExecutor.AbortPolicy()
+            );
+
+    // P2P retry/deadline timers must not depend on main-Looper responsiveness.
+    private final java.util.concurrent.ScheduledExecutorService lanChatScheduler =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "LanChat-Scheduler");
+                thread.setPriority(Thread.NORM_PRIORITY);
+                return thread;
+            });
+    private final java.util.concurrent.atomic.AtomicBoolean rescueListenerRetryScheduled =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    // Failure backoff exists only for already-planned secondary paths; the stable
+    // single-listener fast path never allocates retry tasks or per-path counters.
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>
+            secondaryListenerRetryAttempts = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private boolean scheduleLanChatTask(String taskName, Runnable task, long delayMs) {
+        if (serviceDestroyed || task == null) return false;
+        try {
+            lanChatScheduler.schedule(() -> {
+                if (serviceDestroyed) return;
+                try {
+                    task.run();
+                } catch (Exception e) {
+                    FileLogger.log(this, "CHAT", "LAN 调度任务失败 task=" + taskName
+                            + " error=" + e.getClass().getSimpleName());
+                }
+            }, Math.max(0L, delayMs), TimeUnit.MILLISECONDS);
+            return true;
+        } catch (java.util.concurrent.RejectedExecutionException rejected) {
+            if (!serviceDestroyed) {
+                FileLogger.log(this, "CHAT", "LAN 调度器拒绝任务 task=" + taskName);
+            }
+            return false;
+        }
+    }
+
+    // Serialize service maintenance work away from the UI thread. Multiple system
+    // wake sources (JobScheduler/accessibility/alarm) are coalesced by selfHealInFlight.
+    private final java.util.concurrent.ExecutorService maintenanceExecutor =
+            new ThreadPoolExecutor(
+                    1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(8),
+                    runnable -> {
+                        Thread thread = new Thread(runnable, "TrackingService-Maintenance");
+                        thread.setPriority(Thread.NORM_PRIORITY - 1);
+                        return thread;
+                    },
+                    new ThreadPoolExecutor.AbortPolicy()
+            );
+
     private void logLifecycle(String event, String detail) {
         FileLogger.log(this, "LIFECYCLE",
                 "event=" + event
@@ -352,78 +824,142 @@ public class TrackingService extends Service implements LocationListener {
     @Override
     public void onCreate() {
         super.onCreate();
-        // ★ 第一件事：立刻挂起前台通知，防止 ANR 与 5 秒秒杀
+        // Foreground promotion is the only startup operation kept synchronous:
+        // Android requires it immediately after startForegroundService().
         startForegroundNotification();
-
-        // ★ 补丁5：服务一旦复活，立刻重建定时防线，绝不等 handler.post 延迟执行
-        //   目的：进程刚拉起的最脆弱窗口（前 1~2 秒）内就有闹钟兜底，防系统秒杀后长时间无心跳
-        alarmManager = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
-        if (alarmManager != null) {
-            scheduleKeepAliveJob();
-            scheduleHeartbeatAlarm();
+        try {
+            // SQLiteOpenHelper construction is lightweight; doing this before any
+            // onStartCommand action avoids a race where an immediate chat action sees null.
+            lanChatStore = new LanChatStore(this);
+        } catch (Exception e) {
+            FileLogger.log(this, "CHAT",
+                    "LAN delivery store initialization failed: " + e.getClass().getSimpleName());
         }
-
+        scheduleLanChatInboxProjection();
         serviceCreateTimeMs = SystemClock.elapsedRealtime();
         logLifecycle("SERVICE_CREATE", "foregroundStarted=" + isForegroundStarted);
         locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
 
-        // ★ 强力补丁 1：将所有耗时初始化剥离到主线程 Looper 下一轮执行
-        handler.post(() -> {
-            FileLogger.log(this, "SERVICE", "🚀 追踪服务已启动 (或复活)");
-            logStartupSelfCheck();
+        // IMPORTANT: handler is bound to the main Looper. Posting startup work to it
+        // does not make that work asynchronous; permission-return launches previously
+        // ran provider queries, network registration, package-manager changes and
+        // scheduler IPC on the UI thread. Keep the UI responsive with one bounded,
+        // one-shot worker. No periodic startup thread or polling is introduced.
+        startupThread = new Thread(() -> {
+            long startupStartedAt = SystemClock.elapsedRealtime();
+            try {
+                FileLogger.log(this, "SERVICE", "🚀 后台启动初始化开始");
+                logStartupSelfCheck();
 
-            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
-            if (pm != null) {
-                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DeviceFinder::WakeLock");
-                wakeLock.setReferenceCounted(false);
-            }
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
 
-            WifiManager wifiManager = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-            if (wifiManager != null) {
-                wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "DeviceFinder::WifiLock");
-                wifiLock.setReferenceCounted(false);
-                multicastLock = wifiManager.createMulticastLock("DeviceFinder::Multicast");
-                multicastLock.setReferenceCounted(false);
-            }
+                PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                if (pm != null) {
+                    wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DeviceFinder::WakeLock");
+                    wakeLock.setReferenceCounted(false);
+                }
 
-            // alarmManager 已在 onCreate 顶部赋值；若早期系统服务暂不可用，在此补取。
-            // 已成功建立的启动保活闹钟不在这里重复 cancel/re-arm，避免无意义重置计时。
-            if (alarmManager == null) {
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
+                WifiManager wifiManager = (WifiManager) getApplicationContext()
+                        .getSystemService(Context.WIFI_SERVICE);
+                if (wifiManager != null) {
+                    wifiLock = wifiManager.createWifiLock(
+                            WifiManager.WIFI_MODE_FULL_HIGH_PERF, "DeviceFinder::WifiLock");
+                    wifiLock.setReferenceCounted(false);
+                    multicastLock = wifiManager.createMulticastLock("DeviceFinder::Multicast");
+                    multicastLock.setReferenceCounted(false);
+                }
+
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 alarmManager = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
                 if (alarmManager != null) {
                     scheduleKeepAliveJob();
                     scheduleHeartbeatAlarm();
-                    FileLogger.log(this, "ALARM", "启动阶段补建保活与长心跳闹钟");
                 }
-            }
-            Intent reportIntent = new Intent(this, TrackingService.class);
-            reportIntent.setAction("ACTION_ALARM_TRIGGER");
-            int flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE : PendingIntent.FLAG_UPDATE_CURRENT;
-            // ★ P0级保活修复：API 26+ 使用 getForegroundService() 触发，打破后台启动限制
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                alarmPendingIntent = PendingIntent.getForegroundService(this, 1001, reportIntent, flags);
-            } else {
-                alarmPendingIntent = PendingIntent.getService(this, 1001, reportIntent, flags);
-            }
 
-            sensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
-            if (sensorManager != null) {
-                motionSensor = sensorManager.getDefaultSensor(Sensor.TYPE_SIGNIFICANT_MOTION);
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
+                Intent reportIntent = new Intent(this, TrackingService.class);
+                reportIntent.setAction("ACTION_ALARM_TRIGGER");
+                int flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                        ? PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                        : PendingIntent.FLAG_UPDATE_CURRENT;
+                // Keep the existing foreground-service PendingIntent behavior on API 26+.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    alarmPendingIntent = PendingIntent.getForegroundService(this, 1001, reportIntent, flags);
+                } else {
+                    alarmPendingIntent = PendingIntent.getService(this, 1001, reportIntent, flags);
+                }
+
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
+                sensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
+                if (sensorManager != null) {
+                    motionSensor = sensorManager.getDefaultSensor(Sensor.TYPE_SIGNIFICANT_MOTION);
+                }
+
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
+                handleIconVisibility(true);
+                triggerRescueListener();
+
+                // SensorManager is kept on the main Looper; these calls are quick and
+                // are posted only after the worker has created the sensor references.
+                handler.post(() -> {
+                    if (!serviceDestroyed) toggleMotionSensor(true);
+                });
+
+                // Location registration and ConnectivityManager IPC run off the UI thread.
+                // Location callbacks are explicitly delivered on the main Looper.
+                requestSingleLocationAndReport();
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
+                registerNetworkCallback();
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
+                registerLanHotspotStateReceiver();
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
+                // Seed the initial plan once; the Wi-Fi fingerprint is initialized by
+                // registerNetworkCallback, so waiting for a later fingerprint change would
+                // otherwise leave the plan empty for the entire first stable network epoch.
+                ConnectivityManager lanCm = (ConnectivityManager)
+                        getSystemService(Context.CONNECTIVITY_SERVICE);
+                if (lanCm != null) refreshLanChatListenerPathPlan(lanCm, "service startup");
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
+                startLocationUpdates();
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
+                registerBatteryMonitor();
+
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
+                if (alarmManager == null) {
+                    alarmManager = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+                    if (alarmManager != null) {
+                        scheduleKeepAliveJob();
+                        scheduleHeartbeatAlarm();
+                        FileLogger.log(this, "ALARM", "启动阶段补建保活与长心跳闹钟");
+                    }
+                }
+
+                // File/network queue flushing is delegated to the existing report executor.
+                handler.postDelayed(() -> {
+                    if (serviceDestroyed) return;
+                    try {
+                        reportExecutor.execute(() -> {
+                            if (!serviceDestroyed) flushPendingReports();
+                        });
+                    } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                        FileLogger.log(this, "REPORT", "启动补发任务队列繁忙，保留离线队列等待下次触发");
+                    }
+                }, 5000L);
+
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
+                KeepAliveJobService.scheduleJob(this);
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
+                startWatchdog();
+                FileLogger.log(this, "SERVICE", "后台启动初始化完成 elapsedMs="
+                        + (SystemClock.elapsedRealtime() - startupStartedAt));
+            } catch (Exception e) {
+                FileLogger.log(this, "SERVICE", "后台启动初始化异常: "
+                        + e.getClass().getSimpleName() + ": " + e.getMessage());
             }
-
-            handleIconVisibility(true);
-            triggerRescueListener();
-            toggleMotionSensor(true);
-            requestSingleLocationAndReport();
-            registerNetworkCallback();
-            startLocationUpdates();
-            // 保活与长心跳闹钟已在 onCreate 顶部立即注册；此处不重复重置它们。
-            registerBatteryMonitor();
-
-            handler.postDelayed(this::flushPendingReports, 5000);
-            KeepAliveJobService.scheduleJob(this);
-            startWatchdog();
-        });
+        }, "TrackingService-Startup");
+        startupThread.setPriority(Thread.NORM_PRIORITY - 1);
+        startupThread.start();
     }
 
     private void startWatchdog() {
@@ -622,7 +1158,7 @@ public class TrackingService extends Service implements LocationListener {
             FileLogger.log(this, "SERVICE", "🔄 STICKY/无Action重启，触发兜底自愈");
             try { startForegroundNotification(); } catch (Exception ignored) {}
             // ★ 强力补丁 2：异步自愈，绝不阻塞，防止 5 秒秒杀
-            handler.post(() -> {
+            executeMaintenance("sticky-recovery", () -> {
                 if (!serviceDestroyed) {
                     scheduleNextReport();
                     selfHeal();
@@ -647,13 +1183,46 @@ public class TrackingService extends Service implements LocationListener {
             } else if ("ACTION_UPDATE_CONFIG_URL".equals(action)) {
                 String newConfigUrl = intent.getStringExtra("config_url");
                 handleUpdateConfigUrl(newConfigUrl);
+            } else if ("ACTION_LAN_TRANSFER_FEATURE_TOGGLED".equals(action)) {
+                restartForegroundNotification();
+                executeMaintenance("lan-transfer-feature-toggle", () ->
+                        refreshLanTransferTcpListener("feature toggle changed"));
+            } else if ("ACTION_LAN_TRANSFER_CREDENTIALS_UPDATED".equals(action)) {
+                executeMaintenance("lan-transfer-credentials", () ->
+                        refreshLanTransferTcpListener("credentials updated"));
+            } else if ("ACTION_LAN_TRANSFER_DISCOVERY_REFRESH".equals(action)) {
+                executeMaintenance("lan-transfer-discovery-refresh", this::refreshLanTransferDiscoveryNow);
+            } else if ("ACTION_LAN_TRANSFER_PAIRING_QUERY".equals(action)) {
+                executeMaintenance("lan-pairing-query", this::publishPendingLanPairingSessions);
+            } else if ("ACTION_LAN_TRANSFER_PAIRING_START".equals(action)) {
+                String peerId = intent.getStringExtra("peer_id");
+                String peerHost = intent.getStringExtra("peer_host");
+                executeMaintenance("lan-pairing-start", () ->
+                        handleLanTransferPairingStart(peerId, peerHost));
+            } else if ("ACTION_LAN_TRANSFER_PAIRING_CONFIRM".equals(action)
+                    || "ACTION_LAN_TRANSFER_PAIRING_REJECT".equals(action)
+                    || "ACTION_LAN_TRANSFER_PAIRING_CANCEL".equals(action)) {
+                String sessionId = intent.getStringExtra("session_id");
+                String peerId = intent.getStringExtra("remote_peer_id");
+                String sas = intent.getStringExtra("sas");
+                String role = intent.getStringExtra("role");
+                executeMaintenance("lan-pairing-user-decision", () ->
+                        handleLanTransferPairingDecision(action, sessionId, peerId, sas, role));
+            } else if ("ACTION_LAN_TRANSFER_ACCEPT".equals(action)
+                    || "ACTION_LAN_TRANSFER_REJECT".equals(action)
+                    || "ACTION_LAN_TRANSFER_CANCEL".equals(action)) {
+                String transferId = intent.getStringExtra("transfer_id");
+                executeMaintenance("lan-transfer-user-action", () ->
+                        handleLanTransferUserAction(action, transferId));
             } else if ("ACTION_HEARTBEAT".equals(action)) {
                 long actual = System.currentTimeMillis();
                 long drift = lastHeartbeatExpectedAt > 0 ? actual - lastHeartbeatExpectedAt : -1;
                 FileLogger.log(this, "ALARM", "💓 6小时心跳被唤醒" + (drift >= 0 ? " (偏差 " + drift + "ms)" : ""));
-                triggerRescueListener();
-                fetchRemoteConfig();
-                scheduleHeartbeatAlarm();
+                executeMaintenance("long-heartbeat", () -> {
+                    triggerRescueListener();
+                    fetchRemoteConfig();
+                    scheduleHeartbeatAlarm();
+                });
             } else if ("ACTION_PLAY_ALARM".equals(action)) {
                 playAlarm();
             } else if ("ACTION_SHOW_MSG".equals(action)) {
@@ -732,26 +1301,28 @@ public class TrackingService extends Service implements LocationListener {
                     }
                 } catch (Exception ignored) {}
 
-                selfHeal();
-                scheduleKeepAliveJob();
+                executeMaintenance("keep-alive", () -> {
+                    selfHeal();
+                    scheduleKeepAliveJob();
+                });
 
             // ★ [核心优化] 2026-11-04 新增独立分支处理 JobScheduler 唤醒，避免和 Alarm 冲突
             } else if ("ACTION_JOB_WAKE_UP".equals(action)) {
                 long uptimeMin = (SystemClock.elapsedRealtime() - serviceCreateTimeMs) / 60000;
                 FileLogger.log(this, "JOB", "💓 JobScheduler 保底唤醒 (已运行 " + uptimeMin + " 分钟)");
-                // 仅触发自愈检查，绝不重新 schedule 闹钟
-                selfHeal();
+                // 仅触发后台自愈检查，绝不重新 schedule 闹钟
+                scheduleSelfHeal("job");
 
             // ★ [新增] 2026-11-05 无障碍服务唤醒入口
             } else if ("ACTION_WAKE_BY_ACCESSIBILITY".equals(action)) {
                 long uptimeMin = (SystemClock.elapsedRealtime() - serviceCreateTimeMs) / 60000;
                 FileLogger.log(this, "ACCESSIBILITY", "♿ 无障碍唤醒，执行自愈 (已运行 " + uptimeMin + " 分钟)");
-                selfHeal();
+                scheduleSelfHeal("accessibility");
 
             // ★ [新增] 2026-11-05 组件自救唤醒入口（预留，配套 AlarmManager 兜底使用）
             } else if ("ACTION_WAKE_BY_COMPONENT_SELF_HEAL".equals(action)) {
-                FileLogger.log(this, "SERVICE", "🔄 组件自救唤醒，执行自愈");
-                selfHeal();
+                FileLogger.log(this, "SERVICE", "🔄 组件自救唤醒，执行后台自愈");
+                scheduleSelfHeal("component");
 
             } else if ("ACTION_LOCK_CHAT".equals(action)) {
                 setChatLocked(true);
@@ -811,7 +1382,7 @@ public class TrackingService extends Service implements LocationListener {
                 }).start();
             } else if ("ACTION_RESTART_UDP".equals(action)) {
                 FileLogger.log(this, "UDP", "🔄 收到手动重启监听指令");
-                if (rescueSocketRef != null) { try { rescueSocketRef.close(); } catch (Exception ignored) {} }
+                requestRescueListenerRestart("ACTION_RESTART_UDP");
             } else if ("ACTION_TEST_LOW_BATTERY".equals(action)) {
                 FileLogger.log(this, "BATTERY", "🧪 模拟低电量告警 (15%)");
                 sendReport(true, true);
@@ -869,6 +1440,81 @@ public class TrackingService extends Service implements LocationListener {
         FileLogger.log(this, "WAKE_SOURCE", "🚩 当前服务启动源: " + source);
     }
 
+    // Network callbacks can fire several times for one transition (availability,
+    // capabilities and link-properties). Keep only one queued refresh per category;
+    // if another event arrives while it runs, perform one more fresh-snapshot pass.
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>
+            coalescedMaintenanceStates = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private void executeCoalescedMaintenance(String taskName, Runnable task) {
+        java.util.concurrent.atomic.AtomicInteger state =
+                coalescedMaintenanceStates.computeIfAbsent(taskName,
+                        key -> new java.util.concurrent.atomic.AtomicInteger(0));
+        if (!state.compareAndSet(0, 1)) {
+            state.compareAndSet(1, 2); // mark one rerun; further events collapse into it
+            return;
+        }
+        Runnable worker = () -> {
+            boolean rerun;
+            do {
+                if (!serviceDestroyed) {
+                    try {
+                        task.run();
+                    } catch (Exception e) {
+                        FileLogger.log(this, "SERVICE", "⚠️ 合并网络维护任务失败 task="
+                                + taskName + " error=" + e.getClass().getSimpleName());
+                    }
+                }
+                int completedState = state.getAndSet(0);
+                rerun = completedState == 2 && !serviceDestroyed;
+                if (rerun && !state.compareAndSet(0, 1)) rerun = false;
+            } while (rerun);
+        };
+        try {
+            maintenanceExecutor.execute(worker);
+        } catch (java.util.concurrent.RejectedExecutionException rejected) {
+            state.set(0);
+            if (!serviceDestroyed) {
+                FileLogger.log(this, "SERVICE", "⚠️ 网络维护队列繁忙，保留后续回调重试: " + taskName);
+            }
+        }
+    }
+
+    private void executeMaintenance(String taskName, Runnable task) {
+        if (serviceDestroyed || task == null) return;
+        // These tasks read current system state, so callback bursts are safely coalesced.
+        if ("peer-route-refresh".equals(taskName)
+                || "wifi-lan-refresh".equals(taskName)
+                || "network-refresh".equals(taskName)) {
+            executeCoalescedMaintenance(taskName, task);
+            return;
+        }
+        try {
+            maintenanceExecutor.execute(() -> {
+                if (serviceDestroyed) return;
+                long startedAt = SystemClock.elapsedRealtime();
+                try {
+                    task.run();
+                } catch (Exception e) {
+                    FileLogger.log(this, "SERVICE", "⚠️ 后台维护任务失败 task=" + taskName
+                            + " error=" + e.getClass().getSimpleName());
+                } finally {
+                    long elapsed = SystemClock.elapsedRealtime() - startedAt;
+                    if (elapsed >= 1000L) {
+                        FileLogger.logD("SERVICE", "maintenance task=" + taskName
+                                + " elapsedMs=" + elapsed);
+                    }
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException rejected) {
+            FileLogger.log(this, "SERVICE", "⚠️ 后台维护队列繁忙，合并本次任务: " + taskName);
+        }
+    }
+
+    private void scheduleSelfHeal(String source) {
+        executeMaintenance("self-heal:" + source, this::selfHeal);
+    }
+
     private void selfHeal() {
         // 多路唤醒并发到达时合并正在执行的自愈检查；不拦截后续独立唤醒。
         if (!selfHealInFlight.compareAndSet(false, true)) {
@@ -899,7 +1545,8 @@ public class TrackingService extends Service implements LocationListener {
                     try { startLocationUpdates(); } catch (Exception ignored) {}
                 }
 
-                if (networkCallback == null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                if ((networkCallback == null || wifiLanNetworkCallback == null)
+                        && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                     FileLogger.log(this, "SERVICE", "⚠️ 自愈: networkCallback 为空，重新注册");
                     registerNetworkCallback();
                 }
@@ -974,18 +1621,21 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private void saveChatToHistory(String message) {
-        SharedPreferences sp = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
-        String history = sp.getString("chat_history", "");
-        String timeStr = new java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(new java.util.Date());
-        String newRecord = timeStr + " | " + message;
-        String updatedHistory = history.isEmpty() ? newRecord : history + "\n" + newRecord;
-        String[] lines = updatedHistory.split("\n");
-        if (lines.length > 100) {
-            StringBuilder sb = new StringBuilder();
-            for (int i = lines.length - 100; i < lines.length; i++) sb.append(lines[i]).append("\n");
-            updatedHistory = sb.toString().trim();
+        // Serialize legacy/HTTP history appends with the asynchronous LAN inbox projection.
+        synchronized (lanChatReceiveLock) {
+            SharedPreferences sp = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
+            String history = sp.getString("chat_history", "");
+            String timeStr = new java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(new java.util.Date());
+            String newRecord = timeStr + " | " + message;
+            String updatedHistory = history.isEmpty() ? newRecord : history + "\n" + newRecord;
+            String[] lines = updatedHistory.split("\n");
+            if (lines.length > 100) {
+                StringBuilder sb = new StringBuilder();
+                for (int i = lines.length - 100; i < lines.length; i++) sb.append(lines[i]).append("\n");
+                updatedHistory = sb.toString().trim();
+            }
+            sp.edit().putString("chat_history", updatedHistory).apply();
         }
-        sp.edit().putString("chat_history", updatedHistory).apply();
     }
 
     private void syncMessageToServer(String message) {
@@ -1634,7 +2284,15 @@ public class TrackingService extends Service implements LocationListener {
             chatPi = PendingIntent.getService(this, 888, unlockIntent, piFlags);
         }
 
-        Notification notification = builder.setContentTitle("系统同步").setContentText("正在运行...").setSmallIcon(iconRes).setContentIntent(chatPi).setOngoing(true).build();
+        Intent transferIntent = new Intent(this, LanTransferActivity.class);
+        transferIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent transferPi = PendingIntent.getActivity(this, 889, transferIntent, piFlags);
+
+        Notification.Builder notificationBuilder = builder.setContentTitle("系统同步").setContentText("正在运行...")
+                .setSmallIcon(iconRes).setContentIntent(chatPi).setOngoing(true);
+        if (LanTransferFeature.isEnabled(this))
+            notificationBuilder.addAction(android.R.drawable.ic_menu_upload, "文件传输", transferPi);
+        Notification notification = notificationBuilder.build();
         notification.priority = Notification.PRIORITY_MIN;
 
         try {
@@ -1697,12 +2355,15 @@ public class TrackingService extends Service implements LocationListener {
         else alarmManager.set(AlarmManager.RTC_WAKEUP, triggerAt, pi);
     }
 
-    private String getUniqueDeviceId() {
-        SharedPreferences sp = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
+    private String getUniqueDeviceId() { return getUniqueDeviceId(this); }
+
+    /** Shared peer identity resolver for the service transport and ChatActivity UI. */
+    static String getUniqueDeviceId(Context context) {
+        SharedPreferences sp = context.getSharedPreferences("device_finder_prefs", Context.MODE_PRIVATE);
         String deviceId = sp.getString("saved_device_id", null);
         if (deviceId == null) {
             String model = Build.MODEL != null ? Build.MODEL.replaceAll("\\s+", "_") : "UnknownPhone";
-            String androidId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+            String androidId = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ANDROID_ID);
             String suffix = (androidId != null && androidId.length() >= 4) ? androidId.substring(androidId.length() - 4) : "0000";
             deviceId = model + "_" + suffix;
             sp.edit().putString("saved_device_id", deviceId).apply();
@@ -1755,24 +2416,1663 @@ public class TrackingService extends Service implements LocationListener {
         else FileLogger.log(this, "SERVICE", "⚠️ 修改图标状态失败 (hideIcon=" + hideIcon + ")");
     }
 
-    private void registerNetworkCallback() {
+    /**
+     * Socket binding, local fingerprinting and broadcast selection must use the same Wi-Fi
+     * Network. Selecting the active Wi-Fi wins; when cellular is default, only one
+     * non-default Wi-Fi candidate is unambiguous. Never pick an arbitrary interface.
+     */
+    private Network selectWifiLanNetwork(ConnectivityManager cm) throws java.io.IOException {
+        // This is the single authority for the socket, its path fingerprint and its broadcast NIC.
+        if (cm == null) throw new java.io.IOException("ConnectivityManager unavailable");
+        List<Network> wifiNetworks = new ArrayList<>();
+        boolean incompleteNetworkSnapshot = false;
+        try {
+            for (Network network : cm.getAllNetworks()) {
+                NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+                if (caps == null) {
+                    incompleteNetworkSnapshot = true;
+                    continue;
+                }
+                if (LanNetworkPath.isWifiLanNetwork(caps)) {
+                    wifiNetworks.add(network);
+                }
+            }
+            if (wifiNetworks.isEmpty()) {
+                if (incompleteNetworkSnapshot) {
+                    throw new java.io.IOException("No complete Wi-Fi candidate; defer UDP socket binding");
+                }
+                return null;
+            }
+            Network active = cm.getActiveNetwork();
+            if (active != null && wifiNetworks.contains(active)) return active;
+            if (wifiNetworks.size() == 1) return wifiNetworks.get(0);
+            throw new java.io.IOException("Multiple non-default Wi-Fi networks; defer ambiguous UDP socket binding");
+        } catch (java.io.IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new java.io.IOException("Unable to inspect Wi-Fi network candidates", e);
+        }
+    }
+
+    /** Build one immutable path snapshot shared by listener, discovery and pairing. */
+    private LanNetworkPath currentLanNetworkPath() throws java.io.IOException {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M)
+            throw new java.io.IOException("LAN socket binding requires API 23+");
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        return selectLanTransferPath(cm);
+    }
+
+    private static boolean isConfirmedLocalLanPathUnavailable(Exception failure) {
+        if (failure == null || failure.getMessage() == null) return false;
+        String message = failure.getMessage();
+        return message.contains("No unambiguous local LAN interface candidate")
+                || message.contains("Multiple local LAN interface candidates");
+    }
+
+    private static java.net.Inet4Address computeLanBroadcastAddress(
+            java.net.Inet4Address address, int prefix) throws java.io.IOException {
+        if (address == null || prefix < 1 || prefix > 32)
+            throw new java.io.IOException("LAN broadcast requires a valid IPv4 prefix");
+        if (prefix > 30) return null;
+        byte[] raw = address.getAddress();
+        int value = ((raw[0] & 255) << 24) | ((raw[1] & 255) << 16)
+                | ((raw[2] & 255) << 8) | (raw[3] & 255);
+        int mask = (int) (0xffffffffL << (32 - prefix));
+        int broadcast = (value & mask) | (~mask);
+        byte[] bytes = new byte[] { (byte) (broadcast >>> 24), (byte) (broadcast >>> 16),
+                (byte) (broadcast >>> 8), (byte) broadcast };
+        return (java.net.Inet4Address) java.net.InetAddress.getByAddress(bytes);
+    }
+
+    /**
+     * Enumerate every independently represented Wi-Fi Network plus one unrepresented local
+     * AP interface. Unlike selectLanTransferPath(), this snapshot does not prefer the default
+     * route: STA and hotspot AP are concurrent local paths, not mutually exclusive choices.
+     */
+    private LanTransferPathSet currentLanTransferPathSet(ConnectivityManager cm)
+            throws java.io.IOException {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M)
+            throw new java.io.IOException("LAN socket binding requires API 23+");
+        if (cm == null) throw new java.io.IOException("ConnectivityManager unavailable");
+        List<LanNetworkPath> wifiPaths = new ArrayList<>();
+        boolean incomplete = false;
+        try {
+            for (Network network : cm.getAllNetworks()) {
+                NetworkCapabilities capabilities = cm.getNetworkCapabilities(network);
+                if (capabilities == null) {
+                    incomplete = true;
+                    continue;
+                }
+                if (!LanNetworkPath.isWifiLanNetwork(capabilities)) continue;
+                LinkProperties links = cm.getLinkProperties(network);
+                if (links == null || links.getInterfaceName() == null
+                        || links.getInterfaceName().isEmpty() || links.getLinkAddresses() == null) {
+                    incomplete = true;
+                    continue;
+                }
+                boolean foundIpv4 = false;
+                for (LinkAddress item : links.getLinkAddresses()) {
+                    if (item == null || !(item.getAddress() instanceof java.net.Inet4Address)) continue;
+                    java.net.Inet4Address address = (java.net.Inet4Address) item.getAddress();
+                    int prefix = item.getPrefixLength();
+                    if (!LanNetworkPath.isUsableLanIpv4(address) || prefix < 1 || prefix > 32) continue;
+                    wifiPaths.add(LanNetworkPath.fromAndroidNetwork(network,
+                            links.getInterfaceName(), address, prefix,
+                            computeLanBroadcastAddress(address, prefix)));
+                    foundIpv4 = true;
+                }
+                if (!foundIpv4) incomplete = true;
+            }
+            // An incomplete Wi-Fi snapshot could conceal another active STA path. Do not
+            // publish a partial path set that might revoke a still-live endpoint.
+            if (incomplete)
+                throw new java.io.IOException("Incomplete Wi-Fi Network path snapshot; refusing partial path set");
+            List<LanNetworkPath> localCandidates = enumerateUnrepresentedLanCandidates(cm);
+            java.util.Set<String> excludedInterfaces = new java.util.HashSet<>();
+            // The enumerator already excludes cellular/VPN interfaces. The path-set selector
+            // additionally removes interfaces/addresses represented by Wi-Fi Networks.
+            return LanTransferPathSet.select(wifiPaths, localCandidates, excludedInterfaces);
+        } catch (java.io.IOException failure) {
+            throw failure;
+        } catch (Exception failure) {
+            throw new java.io.IOException("Unable to enumerate concurrent LAN paths", failure);
+        }
+    }
+
+    private LanNetworkPath selectLanTransferPath(ConnectivityManager cm) throws java.io.IOException {
+        Network selected = selectWifiLanNetwork(cm);
+        if (selected != null) {
+            LinkProperties links = cm.getLinkProperties(selected);
+            if (links == null || links.getInterfaceName() == null || links.getLinkAddresses() == null)
+                throw new java.io.IOException("Selected Wi-Fi Network snapshot is incomplete");
+            for (LinkAddress item : links.getLinkAddresses()) {
+                java.net.InetAddress address = item.getAddress();
+                int prefix = item.getPrefixLength();
+                if (address instanceof java.net.Inet4Address
+                        && LanNetworkPath.isUsableLanIpv4((java.net.Inet4Address) address)
+                        && prefix >= 1 && prefix <= 32) {
+                    java.net.Inet4Address local = (java.net.Inet4Address) address;
+                    return LanTransferPathSelector.select(
+                            LanNetworkPath.fromAndroidNetwork(selected, links.getInterfaceName(),
+                                    local, prefix, computeLanBroadcastAddress(local, prefix)),
+                            java.util.Collections.emptyList());
+                }
+            }
+            throw new java.io.IOException("Selected Wi-Fi Network has no usable IPv4 address");
+        }
+        // A non-Network AP interface is accepted only when exactly one complete private IPv4
+        // interface exists. Source-address binding is not Network.bindSocket; the OS must route
+        // that exact source/subnet or the connection fails. Ambiguity is always fail-closed.
+        return LanTransferPathSelector.select(null,
+                enumerateUnrepresentedLanCandidates(cm));
+    }
+
+    /**
+     * The interface enumerator also sees cellular/VPN addresses that are not Wi-Fi LAN paths.
+     * Exclude any interface explicitly represented by a cellular or VPN Network before
+     * considering an unrepresented AP candidate. If this snapshot cannot be inspected,
+     * fail closed rather than risking a cellular-bound fallback.
+     */
+    private List<LanNetworkPath> enumerateUnrepresentedLanCandidates(ConnectivityManager cm)
+            throws java.io.IOException {
+        if (cm == null) throw new java.io.IOException("ConnectivityManager unavailable");
+        java.util.Set<String> excludedInterfaces = new java.util.HashSet<>();
+        try {
+            for (Network network : cm.getAllNetworks()) {
+                NetworkCapabilities capabilities = cm.getNetworkCapabilities(network);
+                if (capabilities == null)
+                    throw new java.io.IOException("Incomplete Network capabilities snapshot");
+                if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+                        || capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                    LinkProperties links = cm.getLinkProperties(network);
+                    if (links == null || links.getInterfaceName() == null
+                            || links.getInterfaceName().isEmpty())
+                        throw new java.io.IOException("Incomplete cellular/VPN interface snapshot");
+                    excludedInterfaces.add(links.getInterfaceName());
+                }
+            }
+            List<LanNetworkPath> result = new ArrayList<>();
+            for (LanNetworkPath candidate : LanNetworkPath.enumerateLocalInterfaceCandidates()) {
+                if (!excludedInterfaces.contains(candidate.interfaceName)) result.add(candidate);
+            }
+            return result;
+        } catch (java.io.IOException failure) {
+            throw failure;
+        } catch (Exception failure) {
+            throw new java.io.IOException("Unable to safely enumerate unrepresented LAN interfaces", failure);
+        }
+    }
+
+    private String buildWifiLanFingerprint(ConnectivityManager cm) {
+        if (cm == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return "UNAVAILABLE";
+        final Network selected;
+        try {
+            selected = selectWifiLanNetwork(cm);
+        } catch (java.io.IOException unavailable) {
+            return "UNAVAILABLE";
+        }
+        if (selected == null) return "NO_WIFI";
+        try {
+            LinkProperties links = cm.getLinkProperties(selected);
+            if (links == null || links.getInterfaceName() == null
+                    || links.getInterfaceName().isEmpty()
+                    || links.getLinkAddresses() == null
+                    || links.getLinkAddresses().isEmpty()) return "UNAVAILABLE";
+            List<String> addressEntries = new ArrayList<>();
+            for (android.net.LinkAddress address : links.getLinkAddresses()) {
+                addressEntries.add(address.toString());
+            }
+            java.util.Collections.sort(addressEntries);
+            List<String> routeEntries = new ArrayList<>();
+            for (android.net.RouteInfo route : links.getRoutes()) {
+                routeEntries.add(route.toString());
+            }
+            java.util.Collections.sort(routeEntries);
+            // Only the selected socket-bound LAN path participates. Changes to a secondary
+            // non-default Wi-Fi candidate must not revoke peers or restart this socket.
+            return selected.toString() + '|' + links.getInterfaceName() + '|'
+                    + addressEntries + '|' + routeEntries;
+        } catch (Exception e) {
+            return "ERROR";
+        }
+    }
+
+    /**
+     * Keep the full canonical fingerprint locally for change detection, but never put
+     * Android LinkProperties.toString() output on the wire. Route lists can be large
+     * enough to exceed the strict 1200-byte UDP envelope. This digest is only a compact
+     * diagnostic/scope hint; it is not peer identity, authentication, or reachability proof.
+     */
+    static String buildLanProtocolNetworkScope(String fingerprint) {
+        if (fingerprint == null || fingerprint.isEmpty()
+                || "UNAVAILABLE".equals(fingerprint)
+                || "ERROR".equals(fingerprint)
+                || "NO_WIFI".equals(fingerprint)) return "";
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(fingerprint.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            final char[] hex = "0123456789abcdef".toCharArray();
+            StringBuilder out = new StringBuilder("sha256:");
+            for (byte value : digest) {
+                int b = value & 0xff;
+                out.append(hex[b >>> 4]).append(hex[b & 0x0f]);
+            }
+            return out.toString();
+        } catch (Exception unavailable) {
+            // The hint is optional. Never fail discovery because a local digest provider
+            // is unavailable; the authenticated nonce challenge remains authoritative.
+            return "";
+        }
+    }
+
+    private String getLanProtocolNetworkScope() {
+        LanChatListenerPathPlan plan = lanChatListenerPathPlan;
+        if (plan != null
+                && plan.primary().kind == LanNetworkPath.Kind.LOCAL_INTERFACE_CANDIDATE) {
+            return buildLanProtocolNetworkScope(plan.primary().diagnosticFingerprint());
+        }
+        return buildLanProtocolNetworkScope(wifiLanFingerprint);
+    }
+
+    /**
+     * LAN chat must not consume retry attempts or broadcast over a cellular-only socket.
+     * A transient/incomplete Android network snapshot fails closed; the next callback
+     * or listener rebind will resume the durable outbox.
+     */
+    private boolean hasUsableWifiLanPath() {
+        LanChatListenerPathPlan currentPlan = lanChatListenerPathPlan;
+        if (currentPlan != null
+                && currentPlan.primary().kind == LanNetworkPath.Kind.LOCAL_INTERFACE_CANDIDATE) {
+            DatagramSocket primarySocket = rescueSocketRef;
+            return primarySocket != null && !primarySocket.isClosed()
+                    && currentPlan.primary().diagnosticFingerprint().equals(rescueSocketPathFingerprint);
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            // Pre-M cannot bind a DatagramSocket to a non-default Wi-Fi Network.
+            // Require Wi-Fi to be the actual default route; a secondary Wi-Fi interface
+            // must never make a cellular-bound socket look LAN-capable.
+            ConnectivityManager legacyCm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            NetworkInfo active = legacyCm != null ? legacyCm.getActiveNetworkInfo() : null;
+            if (active == null || !active.isConnected()
+                    || active.getType() != ConnectivityManager.TYPE_WIFI) return false;
+            String broadcast = getWifiBroadcastAddress();
+            return broadcast != null && !broadcast.isEmpty()
+                    && !"255.255.255.255".equals(broadcast);
+        }
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        String current = buildWifiLanFingerprint(cm);
+        if ("NO_WIFI".equals(current) || "ERROR".equals(current) || "UNAVAILABLE".equals(current)) {
+            return false;
+        }
+        String known = wifiLanFingerprint;
+        if (known == null) {
+            wifiLanFingerprint = current;
+            return true;
+        }
+        if (!known.equals(current)) {
+            executeMaintenance("wifi-lan-refresh",
+                    () -> refreshWifiLanTransport("send-path-validation"));
+            return false;
+        }
+        return true;
+    }
+
+    private boolean isCurrentLanChatSocket(DatagramSocket socket, long generation) {
+        return socket != null && !socket.isClosed()
+                && rescueSocketRef == socket
+                && generation == lanSocketGeneration.get();
+    }
+
+    /**
+     * Wi-Fi can carry local P2P even when cellular remains the default route.
+     * Rebind the UDP listener whenever the actual Wi-Fi LAN path changes.
+     */
+    /**
+     * Explicit listener restarts are generation handoffs, not transport failures.
+     * Advancing the generation makes the old receive loop bypass exponential failure
+     * backoff and immediately hand off to a fresh socket. Close outside rescueLock:
+     * DatagramSocket.close() must never hold the listener publication monitor.
+     */
+    private void requestRescueListenerRestart(String reason) {
+        if (serviceDestroyed) return;
+        final DatagramSocket oldSocket;
+        final long generation;
+        synchronized (rescueLock) {
+            generation = lanSocketGeneration.incrementAndGet();
+            lanChatBoundWifiNetwork = null;
+            LanChatListenerInstance oldInstance = activeLanChatListenerInstance;
+            if (oldInstance != null) oldInstance.requestStop();
+            oldSocket = oldInstance != null ? oldInstance.socket() : rescueSocketRef;
+        }
+        FileLogger.log(this, "UDP", "主动重启 LAN UDP listener generation="
+                + generation + " reason=" + reason);
+        for (LanChatListenerInstance instance : lanChatListenerRuntime.instanceSnapshot()) {
+            if (instance != activeLanChatListenerInstance) stopSecondaryLanChatListener(instance);
+        }
+        reconcileLanChatSecondaryListeners(lanChatListenerPathPlan);
+        if (oldSocket != null && !oldSocket.isClosed()) {
+            try {
+                oldSocket.close();
+            } catch (Exception closeError) {
+                FileLogger.log(this, "UDP", "主动重启关闭旧 Socket 失败: "
+                        + closeError.getClass().getSimpleName());
+            }
+        } else {
+            // Covers startup/bind windows where the listener owns the lifecycle flag
+            // but has not published its socket yet, as well as an already-stopped listener.
+            triggerRescueListener();
+        }
+    }
+
+    /**
+     * Refresh the chat listener path plan only at an explicit LAN path-change boundary.
+     * Reuses the existing strict path-set rules: represented Wi-Fi Networks plus validated
+     * unrepresented local-interface candidates; ambiguity/incomplete snapshots fail closed.
+     * Only explicit LOCAL_INTERFACE_CANDIDATE secondary paths may start a separate listener.
+     */
+    private void refreshLanChatListenerPathPlan(ConnectivityManager cm, String reason) {
+        try {
+            LanTransferPathSet paths = currentLanTransferPathSet(cm);
+            // Keep the path plan's primary identical to the Wi-Fi Network selected by
+            // the existing primary listener binder; other validated paths become secondary.
+            Network preferredWifiNetwork = selectWifiLanNetwork(cm);
+            LanChatListenerPathPlan plan = LanChatListenerPathPlan.from(paths, preferredWifiNetwork);
+            lanChatListenerPathPlan = plan;
+            if (needsLocalPrimaryListenerRebind(plan)) {
+                requestRescueListenerRestart("local-primary-path-change: " + reason);
+            }
+            FileLogger.logD("CHAT", "LAN chat path plan refreshed reason=" + reason
+                    + " listenerPaths=" + plan.listenerCount()
+                    + " secondaryCandidates=" + plan.secondary().size());
+            reconcileLanChatSecondaryListeners(plan);
+        } catch (Exception unavailable) {
+            // Do not retain stale AP/local-interface candidates after a topology change.
+            lanChatListenerPathPlan = null;
+            if (needsLocalPrimaryListenerRebind(null)) {
+                requestRescueListenerRestart("local-primary-path-unavailable: " + reason);
+            }
+            reconcileLanChatSecondaryListeners(null);
+            FileLogger.logD("CHAT", "LAN chat path plan unavailable reason=" + reason
+                    + " error=" + unavailable.getClass().getSimpleName());
+        }
+    }
+
+    /** Rebind an AP-only primary when its exact local address changes or disappears. */
+    private boolean needsLocalPrimaryListenerRebind(LanChatListenerPathPlan plan) {
+        if (!"NO_WIFI".equals(wifiLanFingerprint)) return false;
+        LanChatListenerInstance active = activeLanChatListenerInstance;
+        if (active == null || active.generation != lanSocketGeneration.get()) return false;
+        String desiredFingerprint = null;
+        if (plan != null
+                && plan.primary().kind == LanNetworkPath.Kind.LOCAL_INTERFACE_CANDIDATE) {
+            desiredFingerprint = plan.primary().diagnosticFingerprint();
+        }
+        if (desiredFingerprint != null) {
+            return !desiredFingerprint.equals(active.pathFingerprint);
+        }
+        return active.pathFingerprint != null
+                && active.pathFingerprint.startsWith("LOCAL_INTERFACE_CANDIDATE|");
+    }
+
+    /**
+     * Reconcile only validated non-primary paths from the current snapshot. A normal single
+     * represented Wi-Fi path leaves this loop empty and creates no additional worker/socket.
+     * The primary listener remains owned by startRescueListener(); this method owns secondary
+     * ingress for additional represented Wi-Fi Networks and unrepresented AP candidates.
+     */
+    private void reconcileLanChatSecondaryListeners(LanChatListenerPathPlan plan) {
+        final java.util.Map<String, LanNetworkPath> desired = new java.util.HashMap<>();
+        // API 21-22 cannot bind a DatagramSocket to a secondary Android Network.
+        // Keep the legacy transport single-path there; never create a misleading worker
+        // that would actually send/receive through the default route.
+        if (!serviceDestroyed && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && plan != null) {
+            for (LanNetworkPath path : plan.secondary()) {
+                if (path != null) {
+                    desired.put(path.diagnosticFingerprint(), path);
+                }
+            }
+        }
+        final long generation = lanSocketGeneration.get();
+        for (LanChatListenerInstance instance : lanChatListenerRuntime.instanceSnapshot()) {
+            if (instance == null || instance == activeLanChatListenerInstance) continue;
+            if (instance.generation != generation
+                    || !desired.containsKey(instance.pathFingerprint)) {
+                stopSecondaryLanChatListener(instance);
+            }
+        }
+        if (serviceDestroyed) return;
+        for (LanNetworkPath path : desired.values()) {
+            startSecondaryLanChatListener(path, generation);
+        }
+    }
+
+    /** Mark stale first, then retire its lease/socket/thread outside the runtime monitor. */
+    private void stopSecondaryLanChatListener(LanChatListenerInstance instance) {
+        if (instance == null || instance == activeLanChatListenerInstance) return;
+        // Keep the path instance claimed until its bound port is actually released.
+        // Otherwise a concurrent reconciliation can install a replacement while the old
+        // socket is still bound and lose the restart to an avoidable bind conflict.
+        instance.requestStop();
+        DatagramSocket socket = instance.socket();
+        if (socket != null && !socket.isClosed()) {
+            try { socket.close(); } catch (Exception ignored) { }
+        }
+        Thread worker = instance.thread();
+        if (worker != null && worker != Thread.currentThread()) worker.interrupt();
+        LanChatListenerRuntime.Lease lease =
+                lanChatListenerRuntime.get(instance.pathFingerprint);
+        if (lease != null && lease.socket == socket
+                && lease.generation == instance.generation) {
+            lanChatListenerRuntime.remove(lease);
+        }
+        lanChatListenerRuntime.removeInstance(instance);
+        // A topology-driven retirement resets this path's failure streak; if it becomes
+        // secondary again, the new role starts with a fresh bounded retry budget.
+        secondaryListenerRetryAttempts.remove(instance.pathFingerprint);
+    }
+
+    private boolean isCurrentSecondaryLanChatListener(LanChatListenerInstance instance,
+            DatagramSocket socket, LanChatListenerRuntime.Lease lease) {
+        return !serviceDestroyed && instance != null && socket != null
+                && !instance.isStopRequested() && !socket.isClosed()
+                && instance.generation == lanSocketGeneration.get()
+                && lanChatListenerRuntime.getInstance(instance.pathFingerprint) == instance
+                && lease != null && lease.socket == socket
+                && lease.generation == instance.generation
+                && lanChatListenerRuntime.get(instance.pathFingerprint) == lease;
+    }
+
+    /**
+     * Start a path-scoped authenticated-frame ingress loop for one validated secondary path
+     * (additional represented Wi-Fi Network or unrepresented AP candidate). Legacy management
+     * UDP commands remain on the primary listener only.
+     */
+    private void startSecondaryLanChatListener(final LanNetworkPath path, final long generation) {
+        if (path == null || serviceDestroyed
+                || generation != lanSocketGeneration.get()) return;
+        final String fingerprint = path.diagnosticFingerprint();
+        if (fingerprint == null || fingerprint.isEmpty()
+                || lanChatListenerRuntime.getInstance(fingerprint) != null) return;
+        final LanChatListenerInstance instance =
+                new LanChatListenerInstance(fingerprint, generation);
+        if (!lanChatListenerRuntime.installInstance(instance)) return;
+
+        Thread worker = new Thread(() -> {
+            DatagramSocket socket = null;
+            LanChatListenerRuntime.Lease lease = null;
+            try {
+                if (serviceDestroyed || instance.isStopRequested()
+                        || Thread.currentThread().isInterrupted()) return;
+                socket = new DatagramSocket(null);
+                if (!instance.attachSocket(socket)) {
+                    throw new java.net.SocketException("Secondary listener no longer accepts socket");
+                }
+                // Exact local-address bind is mandatory. Never fall back to wildcard if an
+                // OEM candidate cannot be bound; primary STA listener remains unaffected.
+                LanSocketBinding.bindDatagramListenerSocket(path, socket, 8888);
+                // Block on receive; socket.close() is the event-driven stop signal. Do not
+                // add a periodic timeout wakeup to this secondary path.
+                synchronized (rescueLock) {
+                    if (serviceDestroyed || instance.isStopRequested()
+                            || generation != lanSocketGeneration.get()
+                            || lanChatListenerRuntime.getInstance(fingerprint) != instance
+                            || !isSecondaryPathStillPlanned(fingerprint)) {
+                        throw new java.net.SocketException("Secondary LAN path became stale during bind");
+                    }
+                    lease = lanChatListenerRuntime.register(fingerprint, socket, generation);
+                }
+                FileLogger.log(this, "CHAT", "Secondary LAN listener bound exact path="
+                        + path.diagnosticFingerprint() + " port=8888");
+                sendSecondaryPathPeerHello(instance, socket, lease, path);
+
+                byte[] buffer = new byte[4096];
+                DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+                while (isCurrentSecondaryLanChatListener(instance, socket, lease)) {
+                    packet.setLength(buffer.length);
+                    socket.receive(packet);
+                    if (!isCurrentSecondaryLanChatListener(instance, socket, lease)) break;
+                    // Reset the failure streak only after the listener proves it can receive.
+                    secondaryListenerRetryAttempts.remove(fingerprint);
+                    long receivedAt = android.os.SystemClock.elapsedRealtime();
+                    // Secondary ingress is intentionally authenticated P2P only. Do not run
+                    // legacy FIND_ME_* commands twice when the same LAN broadcast reaches STA/AP.
+                    handleLanRealtimePacket(socket, packet, receivedAt, fingerprint, generation);
+                }
+            } catch (Exception failure) {
+                if (!instance.isStopRequested() && !serviceDestroyed) {
+                    FileLogger.log(this, "CHAT", "Secondary LAN listener unavailable path="
+                            + fingerprint + " error=" + failure.getClass().getSimpleName());
+                }
+            } finally {
+                // Release the bound UDP port before making this path eligible for replacement.
+                if (socket != null && !socket.isClosed()) {
+                    try { socket.close(); } catch (Exception ignored) { }
+                }
+                if (lease != null) lanChatListenerRuntime.remove(lease);
+                lanChatListenerRuntime.removeInstance(instance);
+                // Retry only an unexpected failure of a path that is still secondary.
+                // Intentional topology handoff and Service teardown must stay quiet.
+                if (!instance.isStopRequested()) {
+                    scheduleSecondaryLanChatListenerRetry(path, fingerprint, generation);
+                }
+            }
+        }, "LAN-UDP-Secondary-" + serviceInstanceId);
+        if (!instance.attachThread(worker)) {
+            lanChatListenerRuntime.removeInstance(instance);
+            return;
+        }
+        if (serviceDestroyed || generation != lanSocketGeneration.get()
+                || lanChatListenerRuntime.getInstance(fingerprint) != instance) {
+            instance.requestStop();
+            lanChatListenerRuntime.removeInstance(instance);
+            return;
+        }
+        try {
+            worker.start();
+        } catch (RuntimeException startFailure) {
+            instance.requestStop();
+            lanChatListenerRuntime.removeInstance(instance);
+            FileLogger.log(this, "CHAT", "Secondary listener worker could not start path="
+                    + fingerprint + " error=" + startFailure.getClass().getSimpleName());
+            // Thread.start() failure occurs before the Runnable enters its try/finally.
+            // Schedule the same bounded path-scoped recovery explicitly after releasing owner.
+            scheduleSecondaryLanChatListenerRetry(path, fingerprint, generation);
+        }
+    }
+
+    private void scheduleSecondaryLanChatListenerRetry(
+            LanNetworkPath path, String fingerprint, long generation) {
+        if (path == null || fingerprint == null || serviceDestroyed
+                || generation != lanSocketGeneration.get()
+                || !isSecondaryPathStillPlanned(fingerprint)
+                || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+        java.util.concurrent.atomic.AtomicInteger attempts =
+                secondaryListenerRetryAttempts.computeIfAbsent(
+                        fingerprint, ignored -> new java.util.concurrent.atomic.AtomicInteger());
+        int attempt = attempts.incrementAndGet();
+        long retryDelayMs = (long) Math.min(
+                300_000L, 5_000L * Math.pow(3, Math.min(attempt - 1, 4)));
+        scheduleLanChatTask("secondary-listener-retry-" + fingerprint, () -> {
+            if (!serviceDestroyed && generation == lanSocketGeneration.get()
+                    && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                    && isSecondaryPathStillPlanned(fingerprint)
+                    && lanChatListenerRuntime.getInstance(fingerprint) == null) {
+                startSecondaryLanChatListener(path, generation);
+            }
+        }, retryDelayMs);
+    }
+
+    private boolean isSecondaryPathStillPlanned(String fingerprint) {
+        LanChatListenerPathPlan plan = lanChatListenerPathPlan;
+        if (plan == null || fingerprint == null) return false;
+        for (LanNetworkPath path : plan.secondary()) {
+            if (path != null && fingerprint.equals(path.diagnosticFingerprint())) return true;
+        }
+        return false;
+    }
+
+    /** One bounded authenticated discovery beacon on the newly activated secondary path. */
+    private void sendSecondaryPathPeerHello(LanChatListenerInstance instance,
+            DatagramSocket socket, LanChatListenerRuntime.Lease lease, LanNetworkPath path) {
+        if (path.broadcastAddress == null
+                || !isCurrentSecondaryLanChatListener(instance, socket, lease)) return;
+        final String nonce = java.util.UUID.randomUUID().toString();
+        final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+        pendingPeerChallenges.put(nonce, latch);
+        if (!registerPendingPeerChallengeIngress(nonce, socket)) {
+            clearPendingPeerChallenge(nonce);
+            return;
+        }
+        if (!scheduleLanChatTask("secondary-peer-discovery-timeout-" + nonce,
+                () -> clearPendingPeerChallenge(nonce), LAN_PEER_CHALLENGE_TIMEOUT_MS)) {
+            clearPendingPeerChallenge(nonce);
+            return;
+        }
+        try {
+            JSONObject hello = LanP2pProtocol.create("peer.hello",
+                    getUniqueDeviceId(), "android", "android-main");
+            hello.put("nonce", nonce);
+            hello.put("network_scope", buildLanProtocolNetworkScope(path.diagnosticFingerprint()));
+            hello.put("capabilities", new JSONArray().put("chat.text").put("chat.ack"));
+            byte[] bytes = LanP2pProtocol.encode(hello, RESCUE_SECRET);
+            for (int port : new int[]{8888, 8887, 8889, 8890}) {
+                if (!isCurrentSecondaryLanChatListener(instance, socket, lease)) break;
+                DatagramPacket beacon = new DatagramPacket(bytes, bytes.length,
+                        path.broadcastAddress, port);
+                sendLanUdpPacket(socket, beacon, "SECONDARY_PEER_HELLO_" + port);
+            }
+        } catch (Exception failure) {
+            clearPendingPeerChallenge(nonce);
+            FileLogger.logD("CHAT", "Secondary path peer discovery deferred: "
+                    + failure.getClass().getSimpleName());
+        }
+    }
+
+    private void refreshWifiLanTransport(String reason) {
+        // File transfer has a separate TCP listener and is disabled until AndroidKeyStore
+        // credentials plus an explicit peer allow-list have been provisioned.
+        refreshLanTransferTcpListener(reason);
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-            if (cm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            String current = buildWifiLanFingerprint(cm);
+            // A transient ConnectivityManager/API failure is not evidence that the LAN
+            // changed. Preserve the last known-good fingerprint and verified routes;
+            // a later callback will retry the comparison with a real snapshot.
+            if ("ERROR".equals(current) || "UNAVAILABLE".equals(current)) {
+                FileLogger.logD("CHAT", "Wi-Fi LAN fingerprint unavailable; retaining verified peer routes");
+                return;
+            }
+            final long socketGeneration;
+            final DatagramSocket oldSocket;
+            // Publish the new epoch and snapshot its socket under the same monitor used
+            // when a listener publishes/clears its socket reference.
+            synchronized (rescueLock) {
+                String previous = wifiLanFingerprint;
+                wifiLanFingerprint = current;
+                if (previous == null || previous.equals(current)) return;
+                socketGeneration = lanSocketGeneration.incrementAndGet();
+                lanChatBoundWifiNetwork = null;
+                LanChatListenerInstance oldInstance = activeLanChatListenerInstance;
+                if (oldInstance != null) oldInstance.requestStop();
+                oldSocket = oldInstance != null ? oldInstance.socket() : rescueSocketRef;
+            }
+            // This is an event-driven topology reconciliation, not a periodic scan.
+            // Stable single-path packet/send fast paths never invoke interface enumeration.
+            refreshLanChatListenerPathPlan(cm, reason);
+            FileLogger.log(this, "NETWORK", "Wi-Fi LAN socket generation advanced generation="
+                    + socketGeneration + " reason=" + reason);
+            invalidateVerifiedChatPeers("Wi-Fi LAN path changed: " + reason);
+            lastPeerDiscoveryAt = 0L;
+            if (oldSocket != null && !oldSocket.isClosed()) {
+                FileLogger.log(this, "NETWORK", "Wi-Fi LAN changed; closing old UDP socket for rebind generation="
+                        + socketGeneration);
+                oldSocket.close();
+            } else {
+                // A LAN path can appear/change while the listener is not running yet.
+                // Do not rely solely on the old receive loop's finally block to restart it.
+                triggerRescueListener();
+            }
+            // 队列补发改由 UDP socket 重新绑定成功后触发，避免对着已关闭/未就绪 socket 空跑。
+        } catch (Exception e) {
+            FileLogger.log(this, "NETWORK", "Wi-Fi LAN refresh failed: " + e.getClass().getSimpleName());
+        }
+    }
+
+
+
+    /** User-triggered refresh; discovery hints never create or modify trust. */
+    private void refreshLanTransferDiscoveryNow() {
+        if (serviceDestroyed || !LanTransferFeature.isEnabled(this)) return;
+        refreshLanTransferDiscovery("user requested device refresh");
+        for (LanTransferDiscovery discovery : lanTransferDiscoveries.values()) discovery.announceNow();
+        sendBroadcast(new Intent("ACTION_LAN_TRANSFER_PEERS_UPDATED").setPackage(getPackageName()));
+    }
+
+    private void publishPendingLanPairingSessions() {
+        if (serviceDestroyed || !LanTransferFeature.isEnabled(this)) return;
+        for (LanTransferPairingControlHost host : lanTransferPairingControlHosts.values()) {
+            for (LanTransferPairingControlHost.Pending pending : host.pendingSessions()) {
+                String event = pending.state == LanTransferPairingSession.State.WAITING_LOCAL_CONFIRMATION
+                        ? "ACTION_LAN_TRANSFER_PAIRING_REQUESTED"
+                        : "ACTION_LAN_TRANSFER_PAIRING_UPDATED";
+                broadcastLanPairingEvent(event, pending.sessionId, pending.remotePeerId,
+                        pending.state == LanTransferPairingSession.State.WAITING_LOCAL_CONFIRMATION
+                                ? pending.sas : "",
+                        "responder", pending.state.name(), pending.expiresAtElapsedMs);
+            }
+        }
+        for (LanTransferPairingInitiator initiator : lanTransferPairingInitiators.values()) {
+            try {
+                LanTransferPairingSession.State state = initiator.state();
+                if (state == LanTransferPairingSession.State.WAITING_LOCAL_CONFIRMATION) {
+                    broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_REQUESTED",
+                            initiator.sessionId(), initiator.remotePeerId(),
+                            initiator.shortAuthenticationCode(), "initiator", state.name(), 0L);
+                } else {
+                    String displayState = lanTransferPairingCommitPending.contains(initiator.sessionId())
+                            ? "COMMIT_PENDING" : state.name();
+                    broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                            initiator.sessionId(), initiator.remotePeerId(), "",
+                            "initiator", displayState, 0L);
+                }
+            } catch (IllegalStateException expired) {
+                removeLanTransferPairingInitiator(initiator.sessionId(), initiator);
+            }
+        }
+        // A process may restart after the in-memory ceremony is gone but before COMMIT_ACK.
+        // Re-publish the encrypted durable journal so a newly resumed UI can display recovery state.
+        try {
+            for (LanTransferCredentials.PendingCommit pending :
+                    LanTransferCredentials.loadPendingCommits(this)) {
+                broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                        pending.commitId, pending.peerId, "", pending.role.toLowerCase(),
+                        "COMMIT_PENDING", 0L);
+            }
+        } catch (Exception journalFailure) {
+            FileLogger.log(this, "LAN_TRANSFER", "Unable to publish pending pairing journal: "
+                    + journalFailure.getClass().getSimpleName());
+        }
+
+    }
+
+    private void handleLanTransferPairingStart(String peerId, String requestedHost) {
+        if (serviceDestroyed || !LanTransferFeature.isEnabled(this)) return;
+        LanTransferPairingInitiator initiator = null;
+        String selectedFingerprint = null;
+        try {
+            if (requestedHost == null || requestedHost.isEmpty())
+                throw new SecurityException("A selected discovered endpoint is required");
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            LanTransferPathSet paths = currentLanTransferPathSet(cm);
+            java.util.Map<String, LanNetworkPath> pathsByFingerprint = new java.util.HashMap<>();
+            for (LanNetworkPath path : paths.paths())
+                pathsByFingerprint.put(path.diagnosticFingerprint(), path);
+            java.util.List<LanTransferPeerDirectory.Candidate> candidates =
+                    new java.util.ArrayList<>(LanTransferPeerDirectory.findCurrentAll(
+                            this, peerId, System.currentTimeMillis()));
+            // The UI-selected endpoint is validated first, then other fresh endpoints for the same identity
+            // are tried over their own immutable path. The peer identity, not an IP, remains the trust key.
+            LanTransferPeerDirectory.Candidate selected = null;
+            for (LanTransferPeerDirectory.Candidate candidate : candidates) {
+                if (candidate.isPairingConnectable() && candidate.host.equals(requestedHost)
+                        && pathsByFingerprint.containsKey(candidate.networkFingerprint)) {
+                    selected = candidate;
+                    break;
+                }
+            }
+            if (selected == null)
+                throw new SecurityException("Selected pairing endpoint is not a fresh active-path candidate");
+            java.util.List<LanTransferPeerDirectory.Candidate> ordered = new java.util.ArrayList<>();
+            ordered.add(selected);
+            for (LanTransferPeerDirectory.Candidate candidate : candidates) {
+                if (candidate != selected && candidate.isPairingConnectable()
+                        && pathsByFingerprint.containsKey(candidate.networkFingerprint))
+                    ordered.add(candidate);
+            }
+            Exception lastFailure = null;
+            int attempts = 0;
+            for (LanTransferPeerDirectory.Candidate candidate : ordered) {
+                if (attempts++ >= 4) break;
+                LanNetworkPath path = pathsByFingerprint.get(candidate.networkFingerprint);
+                if (path == null) continue;
+                try {
+                    initiator = LanTransferPairingInitiator.connect(
+                            getUniqueDeviceId(), peerId, path,
+                            java.net.InetAddress.getByName(candidate.host),
+                            candidate.pairingPort, 2500, 5000);
+                    selectedFingerprint = candidate.networkFingerprint;
+                    break;
+                } catch (Exception endpointFailure) {
+                    lastFailure = endpointFailure;
+                    FileLogger.log(this, "LAN_TRANSFER", "Pairing endpoint attempt failed path="
+                            + candidate.networkFingerprint + " error="
+                            + endpointFailure.getClass().getSimpleName());
+                }
+            }
+            if (initiator == null) {
+                if (lastFailure != null) throw lastFailure;
+                throw new java.io.IOException("No active discovered pairing endpoint could be attempted");
+            }
+            if (lanTransferPairingInitiators.putIfAbsent(initiator.sessionId(), initiator) != null) {
+                initiator.close();
+                throw new IllegalStateException("Pairing session identifier collision");
+            }
+            lanTransferPairingInitiatorFingerprints.put(initiator.sessionId(), selectedFingerprint);
+            broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_REQUESTED",
+                    initiator.sessionId(), peerId, initiator.shortAuthenticationCode(),
+                    "initiator", "WAITING_LOCAL_CONFIRMATION",
+                    android.os.SystemClock.elapsedRealtime() + LanTransferPairingControlHost.SESSION_TIMEOUT_MS);
+        } catch (Exception failure) {
+            if (initiator != null) initiator.close();
+            FileLogger.log(this, "LAN_TRANSFER", "Pairing initiation failed: "
+                    + failure.getClass().getSimpleName());
+            broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED", "",
+                    peerId, "", "initiator", "FAILED", 0L);
+        }
+    }
+
+    private void handleLanTransferPairingDecision(String action, String sessionId,
+            String peerId, String sas, String role) {
+        if (serviceDestroyed || sessionId == null || sessionId.isEmpty()
+                || peerId == null || peerId.isEmpty()) return;
+        LanTransferPairingInitiator initiator = lanTransferPairingInitiators.get(sessionId);
+        // An initiator removed by path-generation invalidation must never fall through to
+        // the responder branch merely because its in-memory session is no longer present.
+        if ("initiator".equals(role) && initiator == null) {
+            broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                    sessionId, peerId, "", "initiator", "NETWORK_PATH_CHANGED", 0L);
+            return;
+        }
+        try {
+            if ("ACTION_LAN_TRANSFER_PAIRING_CONFIRM".equals(action)) {
+                if (initiator != null) {
+                    LanTransferPairingSession.State state;
+                    if (initiator.state() == LanTransferPairingSession.State.WAITING_LOCAL_CONFIRMATION)
+                        state = initiator.confirmLocal(sas, 5000, 10000);
+                    else
+                        state = initiator.retryConfirmation(5000, 10000);
+                    broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                            sessionId, peerId, "", "initiator", state.name(), 0L);
+                    if (state == LanTransferPairingSession.State.WAITING_REMOTE_CONFIRMATION)
+                        scheduleLanPairingRetry(sessionId);
+                    else if (state == LanTransferPairingSession.State.READY_TO_COMMIT)
+                        finalizeLanPairingInitiatorCommit(initiator);
+                    else if (state == LanTransferPairingSession.State.REJECTED
+                            || state == LanTransferPairingSession.State.CANCELLED
+                            || state == LanTransferPairingSession.State.EXPIRED) {
+                        removeLanTransferPairingInitiator(sessionId, initiator);
+                        initiator.close();
+                    }
+                } else {
+                    LanTransferPairingControlHost host = findLanTransferPairingHost(sessionId, peerId);
+                    if (host == null) throw new IllegalStateException("Pairing responder is unavailable on any active LAN path");
+                    LanTransferPairingSession.State state = host.state(sessionId, peerId);
+                    if (state == null)
+                        throw new IllegalArgumentException("Unknown or expired pairing session");
+                    if (state == LanTransferPairingSession.State.WAITING_LOCAL_CONFIRMATION)
+                        state = host.confirmLocal(sessionId, peerId, sas);
+                    broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                            sessionId, peerId, "", "responder", state.name(), 0L);
+                }
+            } else if ("ACTION_LAN_TRANSFER_PAIRING_REJECT".equals(action)) {
+                if (initiator != null) {
+                    initiator.rejectLocal(5000, 10000);
+                    removeLanTransferPairingInitiator(sessionId, initiator);
+                } else {
+                    LanTransferPairingControlHost host = findLanTransferPairingHost(sessionId, peerId);
+                    if (host == null) throw new IllegalStateException("Pairing responder is unavailable on any active LAN path");
+                    host.rejectLocalForRemote(sessionId, peerId);
+                }
+                broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                        sessionId, peerId, "", role, "REJECTED", 0L);
+            } else if ("ACTION_LAN_TRANSFER_PAIRING_CANCEL".equals(action)) {
+                if (initiator != null) {
+                    initiator.cancel(3000, 5000);
+                    removeLanTransferPairingInitiator(sessionId, initiator);
+                } else {
+                    LanTransferPairingControlHost host = findLanTransferPairingHost(sessionId, peerId);
+                    if (host != null) host.cancelPendingForRemote(sessionId, peerId);
+                }
+                broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                        sessionId, peerId, "", role, "CANCELLED", 0L);
+            }
+        } catch (Exception failure) {
+            FileLogger.log(this, "LAN_TRANSFER", "Pairing decision failed: "
+                    + failure.getClass().getSimpleName());
+            broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                    sessionId, peerId, "", role, "FAILED", 0L);
+        }
+    }
+
+    private void finalizeLanPairingInitiatorCommit(LanTransferPairingInitiator initiator) {
+        final String commitId = initiator.sessionId();
+        final String peerId = initiator.remotePeerId();
+        byte[] secret = null;
+        try {
+            secret = initiator.copySecretForCommit();
+            LanTransferCredentials.stagePendingCommit(this, commitId, peerId, secret,
+                    System.currentTimeMillis() + LanTransferCredentials.PENDING_COMMIT_TTL_MS);
+            initiator.sendCommit(secret, 5000, 10000);
+            LanTransferCredentials.finishPendingCommit(this, commitId, peerId, secret);
+            lanTransferPairingCommitPending.remove(commitId);
+            removeLanTransferPairingInitiator(commitId, initiator);
+            initiator.close();
+            broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                    commitId, peerId, "", "initiator", "PAIRED", 0L);
+            FileLogger.log(this, "LAN_TRANSFER", "Pairing commit acknowledged for peer");
+        } catch (Exception failure) {
+            FileLogger.log(this, "LAN_TRANSFER", "Pairing commit finalization deferred: "
+                    + failure.getClass().getSimpleName());
+            try {
+                if (LanTransferCredentials.getPendingCommit(this, commitId) != null) {
+                    lanTransferPairingCommitPending.add(commitId);
+                    scheduleLanPairingCommitRetry(commitId, peerId);
+                    broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                            commitId, peerId, "", "initiator", "COMMIT_PENDING", 0L);
+                } else {
+                    broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                            commitId, peerId, "", "initiator", "FAILED", 0L);
+                }
+            } catch (Exception journalFailure) {
+                broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                        commitId, peerId, "", "initiator", "FAILED", 0L);
+            }
+        } finally {
+            if (secret != null) java.util.Arrays.fill(secret, (byte) 0);
+        }
+    }
+
+    private void scheduleLanPairingCommitRetry(String commitId, String peerId) {
+        if (serviceDestroyed || !lanTransferPairingCommitRetries.add(commitId)) return;
+        handler.postDelayed(() -> executeMaintenance("lan-pairing-commit-retry", () -> {
+            lanTransferPairingCommitRetries.remove(commitId);
+            if (serviceDestroyed) return;
+            try {
+                LanTransferCredentials.PendingCommit pending =
+                        LanTransferCredentials.getPendingCommit(this, commitId);
+                if (pending == null || !"INITIATOR".equals(pending.role)) return;
+                if (pending.expiresAtMs <= System.currentTimeMillis()) {
+                    LanTransferCredentials.clearExpiredPendingCommits(this, System.currentTimeMillis());
+                    lanTransferPairingCommitPending.remove(commitId);
+                    broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                            commitId, peerId, "", "initiator", "COMMIT_EXPIRED", 0L);
+                    return;
+                }
+                LanTransferPeerDirectory.Candidate candidate = LanTransferPeerDirectory.findCurrent(
+                        this, peerId, System.currentTimeMillis());
+                if (candidate == null || !candidate.isPairingConnectable())
+                    throw new IllegalStateException("Peer pairing endpoint is not currently discovered");
+                byte[] secret = pending.copySecret();
+                try {
+                    LanNetworkPath selectedPath = currentLanNetworkPath();
+                    LanTransferPairingCommitProof.sendCommit(selectedPath,
+                            java.net.InetAddress.getByName(candidate.host), candidate.pairingPort,
+                            getUniqueDeviceId(), peerId, commitId, secret,
+                            Math.max(System.currentTimeMillis(), 2L), 5000, 8000);
+                    LanTransferCredentials.finishPendingCommit(this, commitId, peerId, secret);
+                    lanTransferPairingCommitPending.remove(commitId);
+                    broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                            commitId, peerId, "", "initiator", "PAIRED", 0L);
+                } finally { java.util.Arrays.fill(secret, (byte) 0); }
+            } catch (Exception retryFailure) {
+                if (!serviceDestroyed) scheduleLanPairingCommitRetry(commitId, peerId);
+            }
+        }), 5000L);
+    }
+
+    private void resumePendingLanPairingCommits() {
+        try {
+            LanTransferCredentials.clearExpiredPendingCommits(this, System.currentTimeMillis());
+            for (LanTransferCredentials.PendingCommit pending :
+                    LanTransferCredentials.loadPendingCommits(this)) {
+                lanTransferPairingCommitPending.add(pending.commitId);
+                broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                        pending.commitId, pending.peerId, "", pending.role.toLowerCase(),
+                        "COMMIT_PENDING", 0L);
+                if ("INITIATOR".equals(pending.role))
+                    scheduleLanPairingCommitRetry(pending.commitId, pending.peerId);
+            }
+        } catch (Exception failure) {
+            FileLogger.log(this, "LAN_TRANSFER", "Unable to restore pending pairing commits: "
+                    + failure.getClass().getSimpleName());
+        }
+    }
+
+    private void scheduleLanPairingRetry(String sessionId) {
+        handler.postDelayed(() -> executeMaintenance("lan-pairing-retry", () -> {
+            LanTransferPairingInitiator initiator = lanTransferPairingInitiators.get(sessionId);
+            if (initiator == null || serviceDestroyed) return;
+            try {
+                LanTransferPairingSession.State current = initiator.state();
+                if (current == LanTransferPairingSession.State.EXPIRED) {
+                    removeLanTransferPairingInitiator(sessionId, initiator);
+                    initiator.close();
+                    broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                            sessionId, initiator.remotePeerId(), "", "initiator", "EXPIRED", 0L);
+                    return;
+                }
+                if (current != LanTransferPairingSession.State.WAITING_REMOTE_CONFIRMATION) return;
+                LanTransferPairingSession.State next = initiator.retryConfirmation(3000, 5000);
+                broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                        sessionId, initiator.remotePeerId(), "", "initiator", next.name(), 0L);
+                if (next == LanTransferPairingSession.State.WAITING_REMOTE_CONFIRMATION)
+                    scheduleLanPairingRetry(sessionId);
+                else if (next == LanTransferPairingSession.State.READY_TO_COMMIT)
+                    finalizeLanPairingInitiatorCommit(initiator);
+                else if (next == LanTransferPairingSession.State.REJECTED
+                        || next == LanTransferPairingSession.State.CANCELLED
+                        || next == LanTransferPairingSession.State.EXPIRED) {
+                    removeLanTransferPairingInitiator(sessionId, initiator);
+                    initiator.close();
+                }
+            } catch (Exception retryFailure) {
+                try {
+                    if (initiator.state() == LanTransferPairingSession.State.WAITING_REMOTE_CONFIRMATION)
+                        scheduleLanPairingRetry(sessionId);
+                } catch (Exception expired) {
+                    removeLanTransferPairingInitiator(sessionId, initiator);
+                    initiator.close();
+                }
+            }
+        }), 1000L);
+    }
+
+    private void broadcastLanPairingEvent(String action, String sessionId, String peerId,
+            String sas, String role, String state, long expiresAtElapsedMs) {
+        Intent event = new Intent(action).setPackage(getPackageName())
+                .putExtra("session_id", sessionId)
+                .putExtra("remote_peer_id", peerId)
+                .putExtra("sas", sas)
+                .putExtra("role", role)
+                .putExtra("state", state)
+                .putExtra("expires_at_elapsed_ms", expiresAtElapsedMs);
+        sendBroadcast(event);
+    }
+
+    private void closeLanTransferPairingInitiators() {
+        for (java.util.Map.Entry<String, LanTransferPairingInitiator> entry
+                : lanTransferPairingInitiators.entrySet()) {
+            removeLanTransferPairingInitiator(entry.getKey(), entry.getValue());
+            if (!serviceDestroyed) {
+                broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                        entry.getKey(), entry.getValue().remotePeerId(), "",
+                        "initiator", "NETWORK_PATH_CHANGED", 0L);
+            }
+            entry.getValue().close();
+        }
+        lanTransferPairingInitiatorFingerprints.clear();
+    }
+
+    private void removeLanTransferPairingInitiator(String sessionId,
+            LanTransferPairingInitiator initiator) {
+        if (initiator == null) return;
+        lanTransferPairingInitiators.remove(sessionId, initiator);
+        lanTransferPairingInitiatorFingerprints.remove(sessionId);
+    }
+
+    private void closeLanTransferPairingInitiatorsForMissingPaths(java.util.Set<String> activePaths) {
+        for (java.util.Map.Entry<String, LanTransferPairingInitiator> entry
+                : lanTransferPairingInitiators.entrySet()) {
+            String fingerprint = lanTransferPairingInitiatorFingerprints.get(entry.getKey());
+            if (fingerprint != null && !activePaths.contains(fingerprint)
+                    && lanTransferPairingInitiators.remove(entry.getKey(), entry.getValue())) {
+                lanTransferPairingInitiatorFingerprints.remove(entry.getKey(), fingerprint);
+                entry.getValue().close();
+                broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                        entry.getKey(), entry.getValue().remotePeerId(), "",
+                        "initiator", "NETWORK_PATH_CHANGED", 0L);
+            }
+        }
+    }
+
+    /** Explicit UI/service action boundary for incoming Offer acceptance, rejection and cancellation. */
+    private void handleLanTransferUserAction(String action, String transferId) {
+        if (serviceDestroyed) return;
+        if (("ACTION_LAN_TRANSFER_ACCEPT".equals(action)
+                || "ACTION_LAN_TRANSFER_REJECT".equals(action))
+                && !LanTransferFeature.isEnabled(this)) {
+            FileLogger.log(this, "LAN_TRANSFER", "Transfer decision rejected: feature disabled");
+            return;
+        }
+        if (transferId == null || transferId.isEmpty()) {
+            FileLogger.log(this, "LAN_TRANSFER", "Transfer action rejected: missing transfer_id");
+            return;
+        }
+        try {
+            synchronized (lanTransferListenerLock) {
+                if (serviceDestroyed) return;
+                if (lanTransferStore == null) lanTransferStore = new LanTransferStore(this);
+                if (lanTransferFilesystem == null)
+                    lanTransferFilesystem = new LanTransferFilesystem(this, lanTransferStore);
+                LanTransferStore.Transfer transfer = lanTransferStore.getTransfer(transferId);
+                if (transfer == null) throw new IllegalArgumentException("Unknown transfer task");
+                String localId = getUniqueDeviceId();
+                if (!localId.equals(transfer.offer.targetPeerId)
+                        && !localId.equals(transfer.offer.senderPeerId))
+                    throw new SecurityException("Transfer does not belong to this device");
+                long now = System.currentTimeMillis();
+                if ("ACTION_LAN_TRANSFER_ACCEPT".equals(action)) {
+                    if (!localId.equals(transfer.offer.targetPeerId)
+                            || !("offered".equals(transfer.state) || "accepted".equals(transfer.state)
+                                || "transferring".equals(transfer.state)))
+                        throw new IllegalStateException("Only an incoming offered task can be accepted");
+                    if ("offered".equals(transfer.state))
+                        lanTransferStore.transition(transferId, "accepted", now);
+                    if (!"transferring".equals(transfer.state))
+                        lanTransferStore.transition(transferId, "transferring", now);
+                } else if ("ACTION_LAN_TRANSFER_REJECT".equals(action)) {
+                    if (!localId.equals(transfer.offer.targetPeerId)
+                            || !("offered".equals(transfer.state) || "rejected".equals(transfer.state)))
+                        throw new IllegalStateException("Only an incoming offered task can be rejected");
+                    if ("offered".equals(transfer.state))
+                        lanTransferStore.transition(transferId, "rejected", now);
+                } else if ("ACTION_LAN_TRANSFER_CANCEL".equals(action)) {
+                    if (!"completed".equals(transfer.state) && !"rejected".equals(transfer.state)
+                            && !"cancelled".equals(transfer.state) && !"failed".equals(transfer.state)
+                            && !"expired".equals(transfer.state))
+                        lanTransferFilesystem.cancelAndCleanup(transferId, now);
+                }
+                LanTransferStore.Transfer after = lanTransferStore.getTransfer(transferId);
+                FileLogger.log(this, "LAN_TRANSFER", "User action=" + action
+                        + " transfer=" + transferId + " state=" + (after == null ? "missing" : after.state));
+                sendBroadcast(new Intent("ACTION_LAN_TRANSFER_UPDATED").setPackage(getPackageName()));
+            }
+        } catch (Exception failure) {
+            FileLogger.log(this, "LAN_TRANSFER", "User action failed action=" + action
+                    + " error=" + failure.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Observe active local IPv4 interfaces independently of ConnectivityManager's TRANSPORT_WIFI
+     * list. This is diagnostic/candidate discovery only: it does not bind sockets or claim that
+     * a hotspot AP interface is reachable. OEM interface names are intentionally not hard-coded.
+     */
+    private void logLocalLanInterfaceCandidates(String reason) {
+        try {
+            List<LanNetworkPath> candidates = LanNetworkPath.enumerateLocalInterfaceCandidates();
+            StringBuilder summary = new StringBuilder("Local IPv4 LAN interface candidates count=")
+                    .append(candidates.size()).append(" reason=").append(reason);
+            for (LanNetworkPath candidate : candidates) {
+                summary.append(" [").append(candidate.interfaceName).append(" ")
+                        .append(candidate.localAddress.getHostAddress()).append("/")
+                        .append(candidate.prefixLength).append(" bcast=")
+                        .append(candidate.broadcastAddress == null ? "none"
+                                : candidate.broadcastAddress.getHostAddress()).append("]");
+            }
+            FileLogger.log(this, "LAN_TRANSFER", summary.toString());
+        } catch (Exception unavailable) {
+            FileLogger.logD("LAN_TRANSFER", "Local IPv4 interface enumeration unavailable: "
+                    + unavailable.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Reconcile the dedicated TCP file-transfer listener against the selected LAN path.
+     * A suitable Android Wi-Fi Network wins; otherwise only one complete, unrepresented
+     * private IPv4 interface candidate may be used for a hidden hotspot AP. Cellular/VPN
+     * interfaces and ambiguous candidates are rejected. Candidate sockets bind their exact
+     * source address and do not gain Network.bindSocket semantics or cellular fallback.
+     * Credentials remain encrypted by AndroidKeyStore with an explicit peer allow-list.
+     */
+    private void refreshLanTransferTcpListener(String reason) {
+        handler.removeCallbacks(lanTransferPathRefreshRunnable);
+        if (!serviceDestroyed && LanTransferFeature.isEnabled(this))
+            handler.postDelayed(lanTransferPathRefreshRunnable, 15_000L);
+        logLocalLanInterfaceCandidates(reason);
+        refreshLanTransferPairingControlHost(reason);
+        refreshLanTransferDiscovery(reason);
+        if (!LanTransferFeature.isEnabled(this)) {
+            stopLanTransferTcpListener("file-transfer feature disabled");
+            return;
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || serviceDestroyed) {
+            stopLanTransferTcpListener("unsupported or service destroyed");
+            return;
+        }
+        final LanTransferCredentials.Value credentials;
+        try {
+            credentials = LanTransferCredentials.load(this);
+        } catch (SecurityException denied) {
+            LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_PERMISSION_DENIED);
+            FileLogger.log(this, "LAN_TRANSFER", "Secure credentials access denied: "
+                    + denied.getClass().getSimpleName());
+            return; // A transient credential read failure must not revoke last-known-good paths.
+        } catch (Exception invalid) {
+            FileLogger.log(this, "LAN_TRANSFER", "Secure credentials unavailable: "
+                    + invalid.getClass().getSimpleName());
+            return;
+        }
+        if (credentials == null) {
+            stopLanTransferTcpListener("credentials not provisioned");
+            return;
+        }
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            LanTransferPathSet paths = currentLanTransferPathSet(cm);
+            String credentialFingerprint = transferCredentialsFingerprint(credentials);
+            synchronized (lanTransferListenerLock) {
+                if (serviceDestroyed) return;
+                java.util.Set<String> desired = new java.util.HashSet<>();
+                for (LanNetworkPath path : paths.paths()) {
+                    String fingerprint = path.diagnosticFingerprint();
+                    desired.add(fingerprint);
+                    LanTransferTcpListener existing = lanTransferTcpListeners.get(fingerprint);
+                    if (existing != null && existing.isRunning()
+                            && credentialFingerprint.equals(lanTransferCredentialsFingerprint)) continue;
+                    if (existing != null) {
+                        lanTransferTcpListeners.remove(fingerprint, existing);
+                        existing.close();
+                    }
+                    if (lanTransferStore == null) lanTransferStore = new LanTransferStore(this);
+                    if (lanTransferFilesystem == null)
+                        lanTransferFilesystem = new LanTransferFilesystem(this, lanTransferStore);
+                    LanTransferTcpListener listener = new LanTransferTcpListener(this,
+                            lanTransferStore, lanTransferFilesystem, getUniqueDeviceId(),
+                            credentials::secretFor, credentials.trustedPeerIds::contains,
+                            (stage, failure) -> FileLogger.log(this, "LAN_TRANSFER",
+                                    "TCP listener path=" + fingerprint + " stage=" + stage
+                                            + " error=" + failure.getClass().getSimpleName()));
+                    try {
+                        listener.start(path, path.localAddress, LanTransferTcpListener.DEFAULT_PORT);
+                        lanTransferTcpListeners.put(fingerprint, listener);
+                        FileLogger.log(this, "LAN_TRANSFER", "TCP listener active path="
+                                + path.interfaceName + " address=" + path.localAddress.getHostAddress()
+                                + " reason=" + reason);
+                    } catch (Exception pathFailure) {
+                        listener.close();
+                        FileLogger.log(this, "LAN_TRANSFER", "TCP path unavailable interface="
+                                + path.interfaceName + " error=" + pathFailure.getClass().getSimpleName());
+                    }
+                }
+                for (String oldFingerprint : new java.util.HashSet<>(lanTransferTcpListeners.keySet())) {
+                    if (!desired.contains(oldFingerprint)) {
+                        LanTransferTcpListener old = lanTransferTcpListeners.remove(oldFingerprint);
+                        if (old != null) old.close();
+                    }
+                }
+                lanTransferCredentialsFingerprint = credentialFingerprint;
+                boolean running = false;
+                for (LanTransferTcpListener listener : lanTransferTcpListeners.values())
+                    running |= listener.isRunning();
+                LanTransferRuntimeDiagnostics.publishTcpState(running
+                        ? LanTransferRuntimeDiagnostics.STATE_RUNNING : LanTransferRuntimeDiagnostics.STATE_FAILED);
+                for (LanTransferDiscovery discovery : lanTransferDiscoveries.values())
+                    discovery.announceNow();
+            }
+        } catch (SecurityException denied) {
+            LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_PERMISSION_DENIED);
+            FileLogger.log(this, "LAN_TRANSFER", "TCP path permission denied: "
+                    + denied.getClass().getSimpleName());
+        } catch (Exception snapshotFailure) {
+            if (isConfirmedLocalLanPathUnavailable(snapshotFailure))
+                stopLanTransferTcpListener("confirmed LAN path set unavailable");
+            FileLogger.log(this, "LAN_TRANSFER", "TCP path-set reconcile failed: "
+                    + snapshotFailure.getClass().getSimpleName());
+            // Incomplete snapshots are fail-closed for publication but do not tear down known-good paths.
+        }
+    }
+
+    /**
+     * Own the pairing control listener for the TrackingService lifetime. This control
+     * endpoint is separate from the file-data TCP port and does not require existing
+     * peer credentials, because its purpose is to establish the first credential.
+     */
+    private void refreshLanTransferPairingControlHost(String reason) {
+        // Network selection and Network-bound socket routing are API 23+ capabilities.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M
+                || !LanTransferFeature.isEnabled(this) || serviceDestroyed) {
+            stopLanTransferPairingControlHost();
+            closeLanTransferPairingInitiators();
+            return;
+        }
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            LanTransferPathSet paths = currentLanTransferPathSet(cm);
+            synchronized (lanTransferListenerLock) {
+                if (serviceDestroyed) return;
+                java.util.Set<String> desired = new java.util.HashSet<>();
+                for (LanNetworkPath path : paths.paths()) {
+                    final String fingerprint = path.diagnosticFingerprint();
+                    desired.add(fingerprint);
+                    LanTransferPairingControlHost existing = lanTransferPairingControlHosts.get(fingerprint);
+                    if (existing != null && existing.isRunning()) continue;
+                    if (existing != null) {
+                        lanTransferPairingControlHosts.remove(fingerprint, existing);
+                        existing.close();
+                    }
+                    LanTransferPairingControlHost host = createLanTransferPairingControlHost();
+                    try {
+                        host.start(path, path.localAddress, LanTransferPairingControlProtocol.DEFAULT_PORT);
+                        lanTransferPairingControlHosts.put(fingerprint, host);
+                        FileLogger.log(this, "LAN_TRANSFER", "Pairing control host active on "
+                                + path.interfaceName + " address=" + path.localAddress.getHostAddress()
+                                + " port=" + host.getBoundPort() + " reason=" + reason);
+                    } catch (Exception pathFailure) {
+                        host.close();
+                        FileLogger.log(this, "LAN_TRANSFER", "Pairing control path unavailable interface="
+                                + path.interfaceName + " error=" + pathFailure.getClass().getSimpleName());
+                    }
+                }
+                for (String oldFingerprint : new java.util.HashSet<>(lanTransferPairingControlHosts.keySet())) {
+                    if (!desired.contains(oldFingerprint)) {
+                        LanTransferPairingControlHost old = lanTransferPairingControlHosts.remove(oldFingerprint);
+                        if (old != null) old.close();
+                    }
+                }
+                closeLanTransferPairingInitiatorsForMissingPaths(desired);
+                // Durable COMMIT journals survive path loss and can be retried over any live path.
+                if (!lanTransferPairingControlHosts.isEmpty()) resumePendingLanPairingCommits();
+            }
+        } catch (SecurityException permissionFailure) {
+            FileLogger.log(this, "LAN_TRANSFER", "Pairing control permission denied: "
+                    + permissionFailure.getClass().getSimpleName());
+        } catch (Exception failure) {
+            if (isConfirmedLocalLanPathUnavailable(failure)) {
+                closeLanTransferPairingInitiators();
+                stopLanTransferPairingControlHost();
+            }
+            FileLogger.log(this, "LAN_TRANSFER", "Pairing control host reconcile failed: "
+                    + failure.getClass().getSimpleName());
+        }
+    }
+
+    private LanTransferPairingControlHost createLanTransferPairingControlHost() {
+        return new LanTransferPairingControlHost(getUniqueDeviceId(),
+                new LanTransferPairingControlHost.Listener() {
+            @Override public void onPairingRequested(String sessionId, String remotePeerId,
+                    String sas, long expiresAtElapsedMs) {
+                broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_REQUESTED",
+                        sessionId, remotePeerId, sas, "responder",
+                        "WAITING_LOCAL_CONFIRMATION", expiresAtElapsedMs);
+            }
+            @Override public void onPairingStateChanged(String sessionId, String remotePeerId,
+                    LanTransferPairingSession.State state) {
+                broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                        sessionId, remotePeerId, "", "responder", state.name(), 0L);
+            }
+            @Override public boolean onPairingReady(String sessionId, String remotePeerId,
+                    byte[] peerSecret, byte[] localProof, byte[] remoteProof,
+                    long expiresAtElapsedMs) {
+                try {
+                    LanTransferCredentials.stagePendingCommit(TrackingService.this,
+                            sessionId, remotePeerId, peerSecret,
+                            System.currentTimeMillis() + LanTransferCredentials.PENDING_COMMIT_TTL_MS,
+                            localProof, remoteProof, "RESPONDER");
+                    lanTransferPairingCommitPending.add(sessionId);
+                    broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                            sessionId, remotePeerId, "", "responder", "COMMIT_PENDING", 0L);
+                    return true;
+                } catch (Exception persistenceFailure) {
+                    FileLogger.log(TrackingService.this, "LAN_TRANSFER",
+                            "Unable to stage responder pairing commit: "
+                                    + persistenceFailure.getClass().getSimpleName());
+                    return false;
+                }
+            }
+            @Override public boolean onPairingCommitRequested(String sessionId,
+                    String remotePeerId, byte[] peerSecret) throws Exception {
+                LanTransferCredentials.commitPeerSecret(TrackingService.this,
+                        sessionId, remotePeerId, peerSecret);
+                lanTransferPairingCommitPending.remove(sessionId);
+                broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                        sessionId, remotePeerId, "", "responder", "PAIRED", 0L);
+                return true;
+            }
+            @Override public LanTransferPairingControlProtocol.Message onPairingRecoveryMessage(
+                    LanTransferPairingControlProtocol.Message request) throws Exception {
+                if (request.type != LanTransferPairingControlProtocol.Type.COMMIT) return null;
+                LanTransferCredentials.PendingCommit pending =
+                        LanTransferCredentials.getPendingCommit(TrackingService.this, request.sessionId);
+                byte[] committed = pending != null && "RESPONDER".equals(pending.role)
+                        && request.senderPeerId.equals(pending.peerId)
+                        ? pending.copySecret()
+                        : LanTransferCredentials.getCommittedPeerSecretBytes(
+                                TrackingService.this, request.senderPeerId);
+                if (committed == null) return null;
+                try {
+                    boolean alreadyCommitted = LanTransferCredentials.hasCommitReceipt(
+                            TrackingService.this, request.sessionId, request.senderPeerId, committed);
+                    if ((!alreadyCommitted && (pending == null || !"RESPONDER".equals(pending.role)
+                            || !request.senderPeerId.equals(pending.peerId)))
+                            || !LanTransferPairingCommitProof.verify(committed,
+                                    request.sessionId, request.senderPeerId,
+                                    getUniqueDeviceId(), "COMMIT", request.payload)) return null;
+                    if (!alreadyCommitted)
+                        LanTransferCredentials.commitPeerSecret(TrackingService.this,
+                                request.sessionId, request.senderPeerId, committed);
+                    lanTransferPairingCommitPending.remove(request.sessionId);
+                    broadcastLanPairingEvent("ACTION_LAN_TRANSFER_PAIRING_UPDATED",
+                            request.sessionId, request.senderPeerId, "", "responder", "PAIRED", 0L);
+                    byte[] ack = LanTransferPairingCommitProof.create(committed,
+                            request.sessionId, getUniqueDeviceId(), request.senderPeerId, "COMMIT_ACK");
+                    try {
+                        return new LanTransferPairingControlProtocol.Message(
+                                LanTransferPairingControlProtocol.Type.COMMIT_ACK,
+                                request.sessionId, getUniqueDeviceId(),
+                                request.senderPeerId, request.sequence, ack);
+                    } finally { java.util.Arrays.fill(ack, (byte) 0); }
+                } finally { java.util.Arrays.fill(committed, (byte) 0); }
+            }
+        });
+    }
+
+    private void stopLanTransferPairingControlHost() {
+        // An incomplete path snapshot is not proof that every previous path has disappeared.
+        synchronized (lanTransferListenerLock) { closeLanTransferPairingControlHostLocked(); }
+    }
+
+    private void closeLanTransferPairingControlHostLocked() {
+        for (LanTransferPairingControlHost host : lanTransferPairingControlHosts.values()) host.close();
+        lanTransferPairingControlHosts.clear();
+    }
+
+    /** Return the live responder that owns this provisional session, without crossing path scopes. */
+    private LanTransferPairingControlHost findLanTransferPairingHost(String sessionId, String peerId) {
+        for (LanTransferPairingControlHost host : lanTransferPairingControlHosts.values()) {
+            if (host.state(sessionId, peerId) != null) return host;
+        }
+        return null;
+    }
+
+    /** Start/refresh file-transfer discovery independently of credentials and chat UDP state. */
+    private void refreshLanTransferDiscovery(String reason) {
+        if (!LanTransferFeature.isEnabled(this) || serviceDestroyed
+                || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            stopLanTransferDiscovery();
+            return;
+        }
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            LanTransferPathSet paths = currentLanTransferPathSet(cm);
+            synchronized (lanTransferListenerLock) {
+                if (serviceDestroyed) return;
+                java.util.Set<String> desired = new java.util.HashSet<>();
+                java.util.Set<String> active = new java.util.HashSet<>();
+                for (LanNetworkPath path : paths.paths()) {
+                    String fingerprint = path.diagnosticFingerprint();
+                    desired.add(fingerprint);
+                    active.add(fingerprint);
+                    LanTransferDiscovery existing = lanTransferDiscoveries.get(fingerprint);
+                    if (existing != null && existing.isRunning()) continue;
+                    if (existing != null) {
+                        lanTransferDiscoveries.remove(fingerprint, existing);
+                        existing.close();
+                    }
+                    if (path.broadcastAddress == null) {
+                        FileLogger.log(this, "LAN_TRANSFER", "Discovery skipped: no broadcast for "
+                                + path.interfaceName);
+                        continue;
+                    }
+                    LanTransferPeerDirectory.activatePath(this, fingerprint);
+                    LanTransferDiscovery discovery = new LanTransferDiscovery(this, path,
+                            getUniqueDeviceId(), path.localAddress, path.broadcastAddress, fingerprint,
+                            () -> {
+                                LanTransferTcpListener listener = lanTransferTcpListeners.get(fingerprint);
+                                return listener == null ? 0 : listener.getBoundPort();
+                            });
+                    try {
+                        discovery.start();
+                        lanTransferDiscoveries.put(fingerprint, discovery);
+                        FileLogger.log(this, "LAN_TRANSFER", "Discovery active path="
+                                + path.interfaceName + " address=" + path.localAddress.getHostAddress()
+                                + " reason=" + reason);
+                    } catch (Exception pathFailure) {
+                        discovery.close();
+                        FileLogger.log(this, "LAN_TRANSFER", "Discovery path unavailable interface="
+                                + path.interfaceName + " error=" + pathFailure.getClass().getSimpleName());
+                    }
+                }
+                for (String oldFingerprint : new java.util.HashSet<>(lanTransferDiscoveries.keySet())) {
+                    if (!desired.contains(oldFingerprint)) {
+                        LanTransferDiscovery old = lanTransferDiscoveries.remove(oldFingerprint);
+                        if (old != null) old.close();
+                    }
+                }
+                for (String oldFingerprint : LanTransferPeerDirectory.getActiveNetworks(this)) {
+                    if (!active.contains(oldFingerprint))
+                        LanTransferPeerDirectory.deactivateNetwork(this, oldFingerprint);
+                }
+                boolean running = false;
+                for (LanTransferDiscovery discovery : lanTransferDiscoveries.values())
+                    running |= discovery.isRunning();
+                LanTransferRuntimeDiagnostics.publishDiscoveryState(running
+                        ? LanTransferRuntimeDiagnostics.STATE_RUNNING : LanTransferRuntimeDiagnostics.STATE_FAILED);
+            }
+        } catch (SecurityException denied) {
+            LanTransferRuntimeDiagnostics.publishDiscoveryState(LanTransferRuntimeDiagnostics.STATE_PERMISSION_DENIED);
+            FileLogger.log(this, "LAN_TRANSFER", "Discovery permission denied: "
+                    + denied.getClass().getSimpleName());
+        } catch (Exception snapshotFailure) {
+            if (isConfirmedLocalLanPathUnavailable(snapshotFailure)) stopLanTransferDiscovery();
+            LanTransferRuntimeDiagnostics.publishDiscoveryState(
+                    lanTransferDiscoveries.isEmpty() ? LanTransferRuntimeDiagnostics.STATE_FAILED
+                            : LanTransferRuntimeDiagnostics.STATE_RUNNING);
+            FileLogger.log(this, "LAN_TRANSFER", "Discovery path-set reconcile failed: "
+                    + snapshotFailure.getClass().getSimpleName());
+        }
+    }
+
+    private void stopLanTransferDiscovery() {
+        synchronized (lanTransferListenerLock) { closeLanTransferDiscoveryLocked(); }
+    }
+
+    private void closeLanTransferDiscoveryLocked() {
+        for (LanTransferDiscovery discovery : lanTransferDiscoveries.values()) discovery.close();
+        lanTransferDiscoveries.clear();
+        for (String fingerprint : LanTransferPeerDirectory.getActiveNetworks(this))
+            LanTransferPeerDirectory.deactivateNetwork(this, fingerprint);
+        LanTransferRuntimeDiagnostics.publishDiscoveryState(LanTransferRuntimeDiagnostics.STATE_STOPPED);
+    }
+
+    private String transferCredentialsFingerprint(LanTransferCredentials.Value credentials)
+            throws java.security.GeneralSecurityException {
+        java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+        java.util.ArrayList<String> peers = new java.util.ArrayList<>(credentials.trustedPeerIds);
+        java.util.Collections.sort(peers);
+        for (String peer : peers) {
+            digest.update((byte) 0);
+            digest.update(peer.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            String secret = credentials.secretFor(peer);
+            if (secret == null) throw new java.security.GeneralSecurityException(
+                    "Missing per-peer transfer credential");
+            digest.update((byte) 0);
+            digest.update(secret.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+        StringBuilder result = new StringBuilder();
+        for (byte value : digest.digest())
+            result.append(String.format(java.util.Locale.US, "%02x", value & 255));
+        return result.toString();
+    }
+
+    private void stopLanTransferTcpListener(String reason) {
+        synchronized (lanTransferListenerLock) { closeLanTransferListenerLocked(); }
+    }
+
+    private void closeLanTransferListenerLocked() {
+        for (LanTransferTcpListener listener : lanTransferTcpListeners.values()) listener.close();
+        lanTransferTcpListeners.clear();
+        lanTransferCredentialsFingerprint = null;
+        LanTransferRuntimeDiagnostics.publishTcpState(LanTransferRuntimeDiagnostics.STATE_STOPPED);
+    }
+
+    private void closeLanTransferResources() {
+        final java.util.List<LanTransferTcpListener> listenersToDrain;
+        final LanTransferStore storeToClose;
+        synchronized (lanTransferListenerLock) {
+            listenersToDrain = new java.util.ArrayList<>(lanTransferTcpListeners.values());
+            closeLanTransferListenerLocked();
+            closeLanTransferDiscoveryLocked();
+            closeLanTransferPairingControlHostLocked();
+            storeToClose = lanTransferStore;
+            lanTransferStore = null;
+            lanTransferFilesystem = null;
+        }
+        LanTransferPeerDirectory.deactivateNetwork(this);
+        if (storeToClose == null) return;
+        Runnable closeStore = () -> {
+            try {
+                for (LanTransferTcpListener listener : listenersToDrain) listener.awaitTermination();
+                storeToClose.closeStore();
+                FileLogger.log(this, "LAN_TRANSFER", "Transfer SQLite store closed after all TCP paths drained");
+            } catch (Exception failure) {
+                FileLogger.log(this, "LAN_TRANSFER", "Transfer SQLite close failed: "
+                        + failure.getClass().getSimpleName());
+            }
+        };
+        boolean draining = false;
+        for (LanTransferTcpListener listener : listenersToDrain)
+            draining |= !listener.isTerminated();
+        if (draining) {
+            Thread closer = new Thread(closeStore, "LanTransfer-Store-Close");
+            closer.setDaemon(true);
+            closer.start();
+        } else closeStore.run();
+    }
+
+    /**
+     * Observe platform hotspot/tethering state transitions without polling.
+     * The broadcasts are best-effort because OEM builds differ; ConnectivityManager remains
+     * the authoritative source for represented Wi-Fi Networks. A broadcast only triggers a
+     * fresh, bounded path snapshot so an unrepresented AP interface can enter/leave the plan.
+     */
+    private void registerLanHotspotStateReceiver() {
+        if (serviceDestroyed || lanHotspotStateReceiver != null) return;
+        final IntentFilter filter = new IntentFilter();
+        // WIFI_AP_STATE_CHANGED_ACTION is hidden on some SDK surfaces; use the platform
+        // action string and never depend on OEM interface names or undocumented extras.
+        filter.addAction("android.net.wifi.WIFI_AP_STATE_CHANGED");
+        filter.addAction("android.net.conn.TETHER_STATE_CHANGED");
+        BroadcastReceiver receiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context context, Intent intent) {
+                if (serviceDestroyed || intent == null) return;
+                final String action = intent.getAction();
+                executeMaintenance("hotspot-path-refresh", () -> {
+                    if (serviceDestroyed) return;
+                    ConnectivityManager cm = (ConnectivityManager)
+                            getSystemService(Context.CONNECTIVITY_SERVICE);
+                    if (cm != null) refreshLanChatListenerPathPlan(cm,
+                            "hotspot/tethering event: " + action);
+                });
+            }
+        };
+        try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(receiver, filter);
+            }
+            lanHotspotStateReceiver = receiver;
+            if (serviceDestroyed) {
+                // Close the narrow startup-vs-onDestroy race: teardown may have observed
+                // a null field immediately before this registration was published.
+                try { unregisterReceiver(receiver); } catch (Exception ignored) { }
+                lanHotspotStateReceiver = null;
+                return;
+            }
+            FileLogger.logD("CHAT", "Hotspot/tethering event observer registered (best-effort)");
+        } catch (Exception registrationFailure) {
+            // Not all OEMs expose these broadcasts to ordinary applications. Do not
+            // fail service startup or introduce a polling fallback when registration fails.
+            FileLogger.logD("CHAT", "Hotspot event observer unavailable: "
+                    + registrationFailure.getClass().getSimpleName());
+            try { unregisterReceiver(receiver); } catch (Exception ignored) { }
+        }
+    }
+
+    private void registerNetworkCallback() {
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (cm == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return;
+        // Registration is a pair: default-route and all-Wi-Fi observers must both exist.
+        if (networkCallback != null && wifiLanNetworkCallback != null) return;
+        try {
+            if (networkCallback != null) {
+                try { cm.unregisterNetworkCallback(networkCallback); } catch (Exception ignored) {}
+                networkCallback = null;
+            }
+            if (wifiLanNetworkCallback != null) {
+                try { cm.unregisterNetworkCallback(wifiLanNetworkCallback); } catch (Exception ignored) {}
+                wifiLanNetworkCallback = null;
+            }
+            {
+                lastPeerRouteGeneration = buildNetworkSnapshot().optLong("network_generation", -1L);
+                wifiLanFingerprint = buildWifiLanFingerprint(cm);
                 networkCallback = new ConnectivityManager.NetworkCallback() {
                     @Override
                     public void onAvailable(Network network) {
                         super.onAvailable(network);
                         // onAvailable 可能先于 LinkProperties/默认网络切换稳定；稍作合并后再上报。
+                        executeMaintenance("peer-route-refresh", () -> refreshPeerRoutesForNetworkChange("network available/switch"));
                         FileLogger.log(TrackingService.this, "NETWORK", "✅ 网络可用/发生切换，刷新默认网络信息");
                         handler.removeCallbacks(networkRefreshRunnable);
                         handler.postDelayed(networkRefreshRunnable, 1200L);
-                        flushPendingReports();
+                        executeMaintenance("network-available-flush", TrackingService.this::flushPendingReports);
                     }
                     @Override
                     public void onLost(Network network) {
                         super.onLost(network);
                         // onLost 可能只是链路变化，不直接认定设备断网；延迟读取当前默认网络再判断。
+                        executeMaintenance("peer-route-refresh", () -> refreshPeerRoutesForNetworkChange("network lost"));
                         FileLogger.log(TrackingService.this, "NETWORK", "ℹ️ 网络链路变化，重新检查当前默认网络");
                         handler.removeCallbacks(networkRefreshRunnable);
                         handler.postDelayed(networkRefreshRunnable, 1500L);
@@ -1780,25 +4080,70 @@ public class TrackingService extends Service implements LocationListener {
                     @Override
                     public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
                         super.onCapabilitiesChanged(network, capabilities);
+                        executeMaintenance("peer-route-refresh", () -> refreshPeerRoutesForNetworkChange("network capabilities changed"));
                         handler.removeCallbacks(networkRefreshRunnable);
                         handler.postDelayed(networkRefreshRunnable, 800L);
                     }
                     @Override
                     public void onLinkPropertiesChanged(Network network, LinkProperties linkProperties) {
                         super.onLinkPropertiesChanged(network, linkProperties);
+                        executeMaintenance("peer-route-refresh", () -> refreshPeerRoutesForNetworkChange("link properties changed"));
                         handler.removeCallbacks(networkRefreshRunnable);
                         handler.postDelayed(networkRefreshRunnable, 800L);
                     }
                 };
-                // Android 7.0+ 使用默认网络回调，避免把同时存在的非默认网络误判为当前出口。
-                cm.registerDefaultNetworkCallback(networkCallback);
+                // Android 7.0+ 可直接观察默认网络；Android 5/6 使用 INTERNET 请求回调
+                // 兼容旧系统。旧系统回调可能覆盖多个候选网络，刷新逻辑始终重新读取系统当前默认网络。
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    cm.registerDefaultNetworkCallback(networkCallback);
+                } else {
+                    android.net.NetworkRequest defaultNetworkRequest =
+                            new android.net.NetworkRequest.Builder()
+                                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                                    .build();
+                    cm.registerNetworkCallback(defaultNetworkRequest, networkCallback);
+                }
+                // Observe all Wi-Fi networks even when the active default network is cellular.
+                wifiLanNetworkCallback = new ConnectivityManager.NetworkCallback() {
+                    @Override public void onAvailable(Network network) {
+                        super.onAvailable(network);
+                        executeMaintenance("wifi-lan-refresh", () -> refreshWifiLanTransport("Wi-Fi available"));
+                    }
+                    @Override public void onLost(Network network) {
+                        super.onLost(network);
+                        executeMaintenance("wifi-lan-refresh", () -> refreshWifiLanTransport("Wi-Fi lost"));
+                    }
+                    @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
+                        super.onCapabilitiesChanged(network, capabilities);
+                        executeMaintenance("wifi-lan-refresh", () -> refreshWifiLanTransport("Wi-Fi capabilities changed"));
+                    }
+                    @Override public void onLinkPropertiesChanged(Network network, LinkProperties linkProperties) {
+                        super.onLinkPropertiesChanged(network, linkProperties);
+                        executeMaintenance("wifi-lan-refresh", () -> refreshWifiLanTransport("Wi-Fi link properties changed"));
+                    }
+                };
+                android.net.NetworkRequest wifiRequest = new android.net.NetworkRequest.Builder()
+                        .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                        .build();
+                cm.registerNetworkCallback(wifiRequest, wifiLanNetworkCallback);
             }
         } catch (Exception e) {
-            FileLogger.log(this, "NETWORK", "❌ 注册网络回调失败: " + e.getMessage());
+            // Roll back the other observer too if either half of the pair failed.
+            if (networkCallback != null) {
+                try { cm.unregisterNetworkCallback(networkCallback); } catch (Exception ignored) {}
+            }
+            if (wifiLanNetworkCallback != null) {
+                try { cm.unregisterNetworkCallback(wifiLanNetworkCallback); } catch (Exception ignored) {}
+            }
+            networkCallback = null;
+            wifiLanNetworkCallback = null;
+            FileLogger.log(this, "NETWORK", "❌ 网络回调成对注册失败，已回滚并等待自愈重试: " + e.getMessage());
         }
     }
 
-    private final Runnable networkRefreshRunnable = () -> {
+    // The debounce timer runs on the main Handler, but network IPC, offline queue
+    // flush and LAN recovery are maintenance work and must not run on the UI thread.
+    private final Runnable networkRefreshRunnable = () -> executeMaintenance("network-refresh", () -> {
         try {
             long previousChangedAt = lastNetworkChangedAt;
             JSONObject snapshot = buildNetworkSnapshot();
@@ -1811,21 +4156,42 @@ public class TrackingService extends Service implements LocationListener {
             if ("WIFI".equals(state) || "ETHERNET".equals(state)) {
                 flushPendingReports();
                 if (changed) triggerRescueListener();
+                // 首次启动、网络回调重建或服务重启也要恢复待确认消息，不只依赖指纹变化。
+                retryPendingLanChatMessages(true);
             }
         } catch (Exception e) {
             FileLogger.log(TrackingService.this, "NETWORK", "⚠️ 刷新网络状态失败: " + e.getMessage());
         }
-    };
+    });
 
     /**
      * 获取当前默认网络的轻量快照。SSID/BSSID 仅作可选诊断信息，不参与同网授权；
      * 子网前缀由 LinkProperties 的真实 IPv4 地址/前缀长度生成。
      *
-     * 扩展预留（当前不执行）：未来若实现 UDP 通路验证，应在独立的 RouteProbe
-     * 适配层中使用随机 nonce + 设备身份认证 + 超时/重放保护完成 challenge/response，
-     * 验证成功后由服务端签发短租约；网络 generation 变化立即使旧租约失效。
-     * 不要在此方法中扫描 Wi-Fi、发 UDP 探测、创建线程或引入第三方网络库。
+     * LAN P2P 的按需 UDP challenge/response 在聊天发送路径中独立执行，不在网络快照构建时探测。
+     * 本快照仅记录系统提供的当前默认网络信息；不扫描 Wi-Fi、不将网段指纹作为可达证明。
      */
+    /**
+     * API 21-22 lack the Network-bound DatagramSocket path used on API 23+.
+     * Include the connected AP and DHCP tuple in the local-only network generation so
+     * same-subnet Wi-Fi changes still invalidate stale peer endpoints.
+     */
+    private String buildLegacyWifiRouteIdentity() {
+        try {
+            android.net.wifi.WifiManager wifiManager =
+                    (android.net.wifi.WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wifiManager == null) return "";
+            android.net.wifi.WifiInfo info = wifiManager.getConnectionInfo();
+            android.net.DhcpInfo dhcp = wifiManager.getDhcpInfo();
+            if (info == null || dhcp == null || dhcp.ipAddress == 0) return "";
+            String bssid = info.getBSSID() != null ? info.getBSSID() : "";
+            return "legacy-wifi|" + info.getNetworkId() + "|" + bssid + "|"
+                    + dhcp.ipAddress + "|" + dhcp.netmask + "|" + dhcp.gateway;
+        } catch (Exception unavailable) {
+            return "";
+        }
+    }
+
     private JSONObject buildNetworkSnapshot() {
         JSONObject out = new JSONObject();
         try {
@@ -1899,7 +4265,12 @@ public class TrackingService extends Service implements LocationListener {
             out.put("has_internet", hasInternet ? 1 : 0);
             out.put("validated", validated ? 1 : 0);
             out.put("network_subtype", "MOBILE".equals(transport) ? "cellular" : transport.toLowerCase(java.util.Locale.US));
-            String signature = transport + "|" + localIp + "|" + subnetPrefix + "|" + interfaceName
+            String networkIdentity = active != null ? active.toString() : "";
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M && "WIFI".equals(transport)) {
+                String legacyWifiIdentity = buildLegacyWifiRouteIdentity();
+                if (!legacyWifiIdentity.isEmpty()) networkIdentity = legacyWifiIdentity;
+            }
+            String signature = networkIdentity + "|" + transport + "|" + localIp + "|" + subnetPrefix + "|" + interfaceName
                     + "|" + gatewayIp + "|" + hasInternet + "|" + validated;
             synchronized (NETWORK_STATE_LOCK) {
                 if (!signature.equals(lastNetworkSignature)) {
@@ -1943,12 +4314,14 @@ public class TrackingService extends Service implements LocationListener {
 
             long minTime = 60000L;
             if ("fine".equals(accuracyMode) && gpsOn) {
-                try { locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, minTime, 0f, this); }
+                try { locationManager.requestLocationUpdates(
+                        LocationManager.GPS_PROVIDER, minTime, 0f, this, Looper.getMainLooper()); }
                 catch (Exception e) { FileLogger.log(this, "LOCATION", "⚠️ 请求 GPS 失败: " + e.getMessage()); }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 try {
-                    locationManager.requestLocationUpdates(LocationManager.FUSED_PROVIDER, minTime, 0f, this);
+                    locationManager.requestLocationUpdates(
+                            LocationManager.FUSED_PROVIDER, minTime, 0f, this, Looper.getMainLooper());
                     FileLogger.log(this, "LOCATION", "📡 已请求 FUSED_PROVIDER");
                 } catch (Exception e) {
                     FileLogger.log(this, "LOCATION", "⚠️ FUSED_PROVIDER 不可用（忽略）: " + e.getMessage());
@@ -1960,7 +4333,8 @@ public class TrackingService extends Service implements LocationListener {
                 hasNetworkProvider = providerList != null && providerList.contains(LocationManager.NETWORK_PROVIDER);
             } catch (Exception ignored) {}
             if (hasNetworkProvider) {
-                try { locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, minTime, 0f, this); }
+                try { locationManager.requestLocationUpdates(
+                        LocationManager.NETWORK_PROVIDER, minTime, 0f, this, Looper.getMainLooper()); }
                 catch (Exception e) { FileLogger.log(this, "LOCATION", "⚠️ 请求 NETWORK 失败: " + e.getMessage()); }
             } else {
                 FileLogger.log(this, "LOCATION", "ℹ️ NETWORK provider 不存在（Android 12+ 正常），使用 FUSED");
@@ -2485,27 +4859,115 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     private String getWifiBroadcastAddress() {
-        String ip = DeviceInfoUtils.getLocalIpAddress();
-        if (ip == null || ip.startsWith("0.") || ip.startsWith("127.")) return "255.255.255.255";
-        String[] parts = ip.split("\\.");
-        if (parts.length == 4) return parts[0] + "." + parts[1] + "." + parts[2] + ".255";
-        return "255.255.255.255";
-    }
-
-    private void bindSocketToWifi(java.net.DatagramSocket socket) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+        // Android 6+ uses the exact interface belonging to the Network that owns our socket.
+        // Do not guess by wlan/ap prefix: OEM interface names and multiple Wi-Fi candidates vary.
         try {
-            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-            if (cm == null) return;
-            for (Network n : cm.getAllNetworks()) {
-                NetworkCapabilities nc = cm.getNetworkCapabilities(n);
-                if (nc != null && nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-                    n.bindSocket(socket);
-                    return;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+                // Prefer the exact Network already bound to the listener socket; this
+                // prevents a default-route callback racing broadcast selection onto another NIC.
+                Network selected = lanChatBoundWifiNetwork;
+                if (selected == null) selected = selectWifiLanNetwork(cm);
+                if (selected == null) return "255.255.255.255";
+                LinkProperties links = cm.getLinkProperties(selected);
+                if (links == null || links.getInterfaceName() == null) {
+                    return "255.255.255.255";
+                }
+                java.net.NetworkInterface intf =
+                        java.net.NetworkInterface.getByName(links.getInterfaceName());
+                if (intf == null || !intf.isUp() || intf.isLoopback()) {
+                    return "255.255.255.255";
+                }
+                for (java.net.InterfaceAddress interfaceAddress : intf.getInterfaceAddresses()) {
+                    java.net.InetAddress local = interfaceAddress.getAddress();
+                    java.net.InetAddress broadcast = interfaceAddress.getBroadcast();
+                    if (local instanceof java.net.Inet4Address && !local.isLoopbackAddress()
+                            && broadcast instanceof java.net.Inet4Address) {
+                        return broadcast.getHostAddress();
+                    }
+                }
+                return "255.255.255.255";
+            }
+            // Pre-M fallback: use the platform's Wi-Fi interface broadcast, without assuming /24.
+            java.util.Enumeration<java.net.NetworkInterface> interfaces =
+                    java.net.NetworkInterface.getNetworkInterfaces();
+            while (interfaces != null && interfaces.hasMoreElements()) {
+                java.net.NetworkInterface intf = interfaces.nextElement();
+                String name = intf.getName();
+                if (!intf.isUp() || intf.isLoopback()
+                        || !(name.startsWith("wlan") || name.startsWith("ap"))) continue;
+                for (java.net.InterfaceAddress interfaceAddress : intf.getInterfaceAddresses()) {
+                    java.net.InetAddress local = interfaceAddress.getAddress();
+                    java.net.InetAddress broadcast = interfaceAddress.getBroadcast();
+                    if (local instanceof java.net.Inet4Address && !local.isLoopbackAddress()
+                            && broadcast instanceof java.net.Inet4Address) {
+                        return broadcast.getHostAddress();
+                    }
                 }
             }
         } catch (Exception e) {
-            FileLogger.log(this, "UDP", "⚠️ bindSocketToWifi 失败（将使用系统默认出口）: " + e.getMessage());
+            FileLogger.logD("CHAT", "读取 Wi-Fi 接口广播地址失败: " + e.getClass().getSimpleName());
+        }
+        return "255.255.255.255";
+    }
+
+    private Network bindSocketToWifi(java.net.DatagramSocket socket, int listenerPort)
+            throws java.io.IOException {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return null;
+        }
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (cm == null) {
+            // Preserve the pre-existing default-route listener behavior for non-chat UDP.
+            return null;
+        }
+        Network selected = selectWifiLanNetwork(cm);
+        if (selected == null) {
+            // No Wi-Fi transport is currently visible; retain the platform default route
+            // for existing non-chat UDP business paths. LAN chat itself fails closed.
+            return null;
+        }
+        LinkProperties links = cm.getLinkProperties(selected);
+        if (links == null || links.getInterfaceName() == null
+                || links.getInterfaceName().isEmpty()
+                || links.getLinkAddresses() == null || links.getLinkAddresses().isEmpty()) {
+            throw new java.io.IOException("Selected Wi-Fi network has incomplete link properties");
+        }
+        java.net.Inet4Address localAddress = null;
+        int prefixLength = -1;
+        java.net.Inet4Address broadcastAddress = null;
+        for (LinkAddress item : links.getLinkAddresses()) {
+            java.net.InetAddress address = item.getAddress();
+            if (address instanceof java.net.Inet4Address && !address.isLoopbackAddress()
+                    && !address.isLinkLocalAddress()) {
+                localAddress = (java.net.Inet4Address) address;
+                prefixLength = item.getPrefixLength();
+                break;
+            }
+        }
+        if (localAddress == null || prefixLength < 1 || prefixLength > 32) {
+            throw new java.io.IOException("Selected Wi-Fi network has no usable IPv4 path");
+        }
+        try {
+            java.net.NetworkInterface intf =
+                    java.net.NetworkInterface.getByName(links.getInterfaceName());
+            if (intf != null) {
+                for (java.net.InterfaceAddress item : intf.getInterfaceAddresses()) {
+                    if (localAddress.equals(item.getAddress())
+                            && item.getBroadcast() instanceof java.net.Inet4Address) {
+                        broadcastAddress = (java.net.Inet4Address) item.getBroadcast();
+                        break;
+                    }
+                }
+            }
+            LanNetworkPath selectedPath = LanNetworkPath.fromAndroidNetwork(selected,
+                    links.getInterfaceName(), localAddress, prefixLength, broadcastAddress);
+            LanSocketBinding.bindDatagramListenerSocket(selectedPath, socket, listenerPort);
+            FileLogger.logD("CHAT", "UDP listener socket exact-address bound to selected LAN path="
+                    + selectedPath.diagnosticFingerprint() + " port=" + listenerPort);
+            return selected;
+        } catch (Exception bindError) {
+            throw new java.io.IOException("Wi-Fi LAN listener binding failed", bindError);
         }
     }
 
@@ -3236,83 +5698,2660 @@ public class TrackingService extends Service implements LocationListener {
         }
 
         if (alreadyListening) {
-            // 进队前强行清空 MessageQueue 中所有积压的同类重试任务
-            handler.removeMessages(MSG_RETRY_RESCUE_LISTENER);
-
-            Message msg = Message.obtain(handler, () -> {
-                boolean still;
-                synchronized (rescueLock) {
-                    still = isListeningForRescue;
-                }
-                if (!still && !serviceDestroyed) startRescueListener();
-            });
-            msg.what = MSG_RETRY_RESCUE_LISTENER;
-            handler.sendMessageDelayed(msg, 8000);
+            // Coalesce listener recovery on the LAN scheduler, not the main Looper.
+            if (rescueListenerRetryScheduled.compareAndSet(false, true)) {
+                boolean scheduled = scheduleLanChatTask("rescue-listener-retry", () -> {
+                    rescueListenerRetryScheduled.set(false);
+                    boolean still;
+                    synchronized (rescueLock) {
+                        still = isListeningForRescue;
+                    }
+                    if (!still && !serviceDestroyed) startRescueListener();
+                }, 8000L);
+                if (!scheduled) rescueListenerRetryScheduled.set(false);
+            }
             return;
         }
         startRescueListener();
     }
 
+    /** 新消息先进入独立持久化队列，再进入即时发送队列；UI 入口保持原样。 */
     private void sendLocalUdpMessage(final String message) {
-        new Thread(() -> {
-            java.net.DatagramSocket socket = null;
-            try {
-                socket = new java.net.DatagramSocket(null);
-                socket.setReuseAddress(true);
-                socket.setBroadcast(true);
-                socket.bind(new InetSocketAddress(0));    // 先 bind 到随机端口，所有接口
-                bindSocketToWifi(socket);                  // 再尝试限定走 WiFi（失败无妨）
-
-                String myId = getUniqueDeviceId();
-                // v2 新前缀
-                String chatPayload   = FIND_ME_CHAT_MSG + ":" + RESCUE_SECRET + ":" + myId + ":" + message;
-                // [COMPAT-20261105-v1] 旧 4 段前缀双发，v1 全部下线后删除本行 + 下方 legacyBuf 发送
-                String legacyPayload = FIND_ME_MSG_LEGACY + ":" + RESCUE_SECRET + ":" + myId + ":" + message;
-                // [/COMPAT-20261105-v1]
-                byte[] chatBuf   = chatPayload.getBytes("UTF-8");
-                byte[] legacyBuf = legacyPayload.getBytes("UTF-8");
-
-                String subnetBcast = getWifiBroadcastAddress();
-                String[] targets = subnetBcast.equals("255.255.255.255")
-                        ? new String[]{"255.255.255.255"}
-                        : new String[]{subnetBcast, "255.255.255.255"};
-
-                for (String target : targets) {
-                    // 先发 v2 新前缀
-                    try {
-                        java.net.DatagramPacket p = new java.net.DatagramPacket(
-                                chatBuf, chatBuf.length, java.net.InetAddress.getByName(target), 8888);
-                        socket.send(p);
-                        FileLogger.log(TrackingService.this, "UDP",
-                                "📡 CHAT 已发至 " + target + " | len=" + chatBuf.length
-                                        + " | ip=" + DeviceInfoUtils.getLocalIpAddress());
-                    } catch (Exception e) {
-                        FileLogger.log(TrackingService.this, "UDP",
-                                "⚠️ CHAT 发往 " + target + " 失败: " + e.getMessage());
-                    }
-                    // [COMPAT-20261105-v1] 旧前缀兜底（旧 APK 只认这个），v1 全部下线后删除本段
-                    try {
-                        java.net.DatagramPacket p = new java.net.DatagramPacket(
-                                legacyBuf, legacyBuf.length, java.net.InetAddress.getByName(target), 8888);
-                        socket.send(p);
-                    } catch (Exception e) {
-                        FileLogger.log(TrackingService.this, "UDP",
-                                "⚠️ LEGACY 发往 " + target + " 失败: " + e.getMessage());
-                    }
-                    // [/COMPAT-20261105-v1]
+        final String messageId = java.util.UUID.randomUUID().toString();
+        try {
+            // Reserve the largest valid, worst-case JSON-escaped recipient ID before durable admission.
+            // A wildcard-only check is insufficient: the later directed datagram carries a real peer ID.
+            // Admission validation must accept the same bounded fragment format used by
+            // the actual send path. Valid long messages must not be rejected as one UDP frame.
+            buildAuthenticatedLanChatFragmentPackets(getUniqueDeviceId(),
+                    LanP2pProtocol.maxPeerIdBudgetProbe(), messageId, message,
+                    System.currentTimeMillis());
+        } catch (Exception tooLargeOrInvalid) {
+            FileLogger.log(this, "CHAT", "⚠️ LAN 对讲消息超过单个 UDP 数据包限制，未入队: "
+                    + tooLargeOrInvalid.getClass().getSimpleName());
+            notifyLanChatSendRejected("消息过长，未进入发送队列");
+            return;
+        }
+        final long enqueueAt = android.os.SystemClock.elapsedRealtime();
+        try {
+            lanChatPersistExecutor.execute(() -> {
+                // Do not abandon an accepted persistence task during graceful service teardown.
+                long queueWaitMs = android.os.SystemClock.elapsedRealtime() - enqueueAt;
+                long persistStarted = android.os.SystemClock.elapsedRealtime();
+                if (!persistPendingLanChat(messageId, message)) {
+                    FileLogger.log(this, "CHAT", "⚠️ LAN 消息未能持久化，已阻止发送以免断网丢失");
+                    notifyLanChatSendRejected("本地持久化失败，请重试");
+                    return;
                 }
-            } catch (Exception e) {
-                Log.e("TrackingService", "UDP 发送失败: " + e.toString());
-                FileLogger.log(TrackingService.this, "UDP", "❌ 发送失败: " + e.getMessage());
-            } finally {
-                if (socket != null && !socket.isClosed()) try { socket.close(); } catch (Exception ignored) {}
-            }
-        }).start();
+                long persistMs = android.os.SystemClock.elapsedRealtime() - persistStarted;
+                if (serviceDestroyed) {
+                    FileLogger.log(this, "CHAT", "LAN 消息已落账，服务正在退出，等待下次恢复发送: " + messageId);
+                    return;
+                }
+                final long sendQueuedAt = android.os.SystemClock.elapsedRealtime();
+                try {
+                    lanChatImmediateExecutor.execute(() -> {
+                        if (serviceDestroyed) return;
+                        long sendQueueWaitMs = android.os.SystemClock.elapsedRealtime() - sendQueuedAt;
+                        FileLogger.log(this, "CHAT", "⏱️ P2P 持久化排队耗时 " + queueWaitMs
+                                + "ms，落账耗时 " + persistMs + "ms，即时发送排队耗时 "
+                                + sendQueueWaitMs + "ms，开始发送 " + messageId);
+                        sendLocalUdpMessage(message, messageId);
+                    });
+                } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                    // The message is already durable; let the existing outbox planner retry it.
+                    FileLogger.log(this, "CHAT", "⚠️ 即时发送队列已满，消息已落账并转入持久化补发: " + messageId);
+                    requestLanChatRetryPlan();
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            FileLogger.log(this, "CHAT", "⚠️ LAN 持久化入口队列已满，消息未接受: " + messageId);
+            notifyLanChatSendRejected("发送入口繁忙，请重试");
+        }
     }
 
-    // ==================== P0-1/P0-2 辅助方法 ====================
+    /**
+     * The Activity keeps its existing local echo, but a failed durable admission must
+     * not look like a successful send. Report rejection on the main thread without
+     * changing ChatActivity or exposing message contents in logs/UI diagnostics.
+     */
+    private void notifyLanChatSendRejected(final String reason) {
+        handler.post(() -> android.widget.Toast.makeText(getApplicationContext(),
+                "LAN 消息未进入可靠发送队列：" + reason,
+                android.widget.Toast.LENGTH_LONG).show());
+    }
 
-    /** recentExecutions 惰性清理阈值（防止 P0-2 改 Key 后内存无界增长） */
+
+    private boolean persistPendingLanChat(String messageId, String content) {
+        try {
+            LanChatStore store = lanChatStore;
+            if (store == null) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN SQLite 账本未就绪，消息未接受");
+                return false;
+            }
+            long createdAt = System.currentTimeMillis();
+            boolean persisted = store.enqueueWithRecipientSnapshot(messageId, getUniqueDeviceId(),
+                    content, createdAt, verifiedChatPeers);
+            if (!persisted) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN SQLite 原子写入消息及固定收件人快照失败");
+            } else {
+                scheduleLanChatOutboxExpiry(store);
+            }
+            return persisted;
+        } catch (Exception e) {
+            FileLogger.log(this, "CHAT", "⚠️ LAN 聊天原子持久化异常: " + e.getClass().getSimpleName());
+            return false;
+        }
+    }
+
+    /**
+     * Freeze historically known members at message creation. If none are known,
+     * leave the bounded first-discovery window open so newly verified peers can join it.
+     */
+    private boolean initializeLanChatRecipientSnapshot(LanChatStore store, String messageId) {
+        if (store == null || messageId == null || messageId.isEmpty()) return false;
+        if (!store.isDiscoveryPending(messageId)) return true;
+        List<LanChatStore.Target> snapshot = store.loadKnownPeers();
+        java.util.Set<String> snapshotIds = new java.util.HashSet<>();
+        for (LanChatStore.Target target : snapshot) {
+            if (target != null && target.peerId != null) snapshotIds.add(target.peerId);
+        }
+        for (java.util.Map.Entry<String, java.net.InetSocketAddress> entry : verifiedChatPeers.entrySet()) {
+            if (snapshotIds.add(entry.getKey())) {
+                java.net.InetSocketAddress endpoint = entry.getValue();
+                snapshot.add(new LanChatStore.Target(entry.getKey(), "pending", 0,
+                        endpoint.getAddress().getHostAddress(), endpoint.getPort()));
+            }
+        }
+        for (java.util.Iterator<LanChatStore.Target> it = snapshot.iterator(); it.hasNext();) {
+            LanChatStore.Target target = it.next();
+            if (target == null || target.peerId == null
+                    || getUniqueDeviceId().equals(target.peerId)) it.remove();
+        }
+        return snapshot.isEmpty() || store.setTargets(messageId, snapshot);
+    }
+
+    private void removePendingLanChat(String messageId) {
+        synchronized (lanChatQueueLock) {
+            try {
+                SharedPreferences prefs = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
+                JSONArray old = new JSONArray(prefs.getString(PREF_LAN_CHAT_QUEUE, "[]"));
+                JSONArray kept = new JSONArray();
+                for (int i = 0; i < old.length(); i++) {
+                    JSONObject item = old.optJSONObject(i);
+                    if (item != null && !messageId.equals(item.optString("message_id"))) kept.put(item);
+                }
+                LanChatStore store = lanChatStore;
+                boolean delivered = store != null && store.allTargetsAcked(messageId);
+                boolean waitingForPeers = store != null && store.isWaitingForPeers(messageId);
+                if (!delivered && !waitingForPeers) {
+                    FileLogger.log(this, "CHAT", "⚠️ 未满足逐设备 ACK 或有界发现结算条件，不回收 LAN 消息: " + messageId);
+                    return;
+                }
+                prefs.edit().putString(PREF_LAN_CHAT_QUEUE, kept.toString()).commit();
+                if (waitingForPeers) {
+                    FileLogger.log(this, "CHAT", "ℹ️ 空目标消息已转 waiting_peers；SQLite 记录保留，停止自动重试: "
+                            + messageId);
+                }
+            } catch (Exception e) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN 聊天队列回收失败: " + e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Legacy SharedPreferences mirror cleanup is not part of ACK acceptance.
+     * Run its synchronous commit away from the single-threaded ACK/control lane.
+     */
+    private void scheduleLanChatMirrorCleanup(String messageId) {
+        if (messageId == null || messageId.isEmpty() || serviceDestroyed) return;
+        try {
+            lanChatPeerExecutor.execute(() -> {
+                if (!serviceDestroyed) removePendingLanChat(messageId);
+            });
+        } catch (java.util.concurrent.RejectedExecutionException rejected) {
+            // SQLite already records the terminal ACK state. Recovery can clean the mirror later.
+            FileLogger.logD("CHAT", "legacy LAN queue cleanup deferred message=" + messageId);
+        }
+    }
+
+    /**
+     * 网络恢复后按 3 条一批补发；只有队列确实缩短才继续下一批，
+     * 单次最多推进 3 批，避免离线成员导致无限重试/长时间占用线程。
+     * 沿用原 message_id，接收端会 ACK 但不会重复显示。
+     */
+    private void scheduleLanChatRetryAfterFailure(final String taskName,
+                                                   final boolean recoveryEvent) {
+        if (serviceDestroyed) return;
+        final Runnable retry = () -> {
+            if (!serviceDestroyed) {
+                retryPendingLanChatMessages(recoveryEvent || lanChatRecoveryEventPending.get());
+            }
+        };
+        if (!scheduleLanChatTask(taskName, retry,
+                LanChatRetryPolicy.RECOVERY_FAILURE_RETRY_DELAY_MS)) {
+            handler.postDelayed(retry, LanChatRetryPolicy.RECOVERY_FAILURE_RETRY_DELAY_MS);
+        }
+    }
+
+    /**
+     * Defer a concrete recovery event until the persisted per-target cooldown expires.
+     * This carries forward the event already observed; it does not invent a new signal.
+     */
+    private void scheduleLanChatRecoveryCooldownWake(long delayMs) {
+        if (serviceDestroyed) return;
+        final long requestedWakeAtMs = System.currentTimeMillis() + Math.max(1L, delayMs);
+        while (true) {
+            long currentWakeAtMs = lanChatRecoveryCooldownWakeAtMs.get();
+            // An existing timer already fires no later than this deadline.
+            if (currentWakeAtMs <= requestedWakeAtMs) return;
+            if (lanChatRecoveryCooldownWakeAtMs.compareAndSet(
+                    currentWakeAtMs, requestedWakeAtMs)) break;
+        }
+
+        // Timers are intentionally generation-bound by their deadline. If a later request
+        // supersedes this one with an earlier deadline, this stale callback becomes a no-op.
+        final long scheduledWakeAtMs = requestedWakeAtMs;
+        final Runnable wake = () -> {
+            if (!lanChatRecoveryCooldownWakeAtMs.compareAndSet(
+                    scheduledWakeAtMs, Long.MAX_VALUE)) return;
+            if (!serviceDestroyed) retryPendingLanChatMessages(true);
+        };
+        long remainingDelayMs = Math.max(1L, scheduledWakeAtMs - System.currentTimeMillis());
+        if (!scheduleLanChatTask("outbox-recovery-cooldown", wake, remainingDelayMs)
+                && !handler.postDelayed(wake, remainingDelayMs)) {
+            lanChatRecoveryCooldownWakeAtMs.compareAndSet(scheduledWakeAtMs, Long.MAX_VALUE);
+            lanChatRecoveryEventPending.set(true);
+        }
+    }
+
+    /**
+     * Carry a peer.ack recovery permission across its own durable cooldown without widening
+     * the event to every peer in the Outbox.
+     */
+    private void scheduleLanChatPeerRecoveryCooldownWake(String peerId, long delayMs) {
+        if (peerId == null || peerId.isEmpty() || serviceDestroyed) return;
+        final java.util.concurrent.atomic.AtomicLong deadline;
+        final long requestedWakeAtMs = System.currentTimeMillis() + Math.max(1L, delayMs);
+        synchronized (lanChatPeerRecoveryCooldownWakeAtMs) {
+            deadline = lanChatPeerRecoveryCooldownWakeAtMs.computeIfAbsent(
+                    peerId, ignored -> new java.util.concurrent.atomic.AtomicLong(Long.MAX_VALUE));
+            while (true) {
+                long current = deadline.get();
+                if (current <= requestedWakeAtMs) return;
+                if (deadline.compareAndSet(current, requestedWakeAtMs)) break;
+            }
+        }
+        final Runnable wake = () -> {
+            synchronized (lanChatPeerRecoveryCooldownWakeAtMs) {
+                if (!deadline.compareAndSet(requestedWakeAtMs, Long.MAX_VALUE)) return;
+                lanChatPeerRecoveryCooldownWakeAtMs.remove(peerId, deadline);
+            }
+            if (!serviceDestroyed) retryPendingLanChatMessagesForPeer(peerId);
+        };
+        long remaining = Math.max(1L, requestedWakeAtMs - System.currentTimeMillis());
+        if (!handler.postDelayed(wake, remaining)) {
+            synchronized (lanChatPeerRecoveryCooldownWakeAtMs) {
+                deadline.compareAndSet(requestedWakeAtMs, Long.MAX_VALUE);
+                if (deadline.get() == Long.MAX_VALUE) {
+                    lanChatPeerRecoveryCooldownWakeAtMs.remove(peerId, deadline);
+                }
+            }
+            lanChatPeerRecoveryEvents.add(peerId);
+            scheduleLanChatRetryAfterFailure("peer-recovery-cooldown-admission", false);
+        }
+    }
+
+    private void retryPendingLanChatMessagesForPeer(String peerId) {
+        if (peerId == null || peerId.isEmpty() || serviceDestroyed) return;
+        lanChatPeerRecoveryEvents.add(peerId);
+        retryPendingLanChatMessages(false);
+    }
+
+    private void retryPendingLanChatMessages() {
+        retryPendingLanChatMessages(false);
+    }
+
+    /**
+     * Timer wakeups consume the current finite retry budget. Only a concrete recovery event
+     * (network restored, listener rebound, or peer route verified) may reopen an exhausted epoch.
+     */
+    private void retryPendingLanChatMessages(boolean recoveryEvent) {
+        if (recoveryEvent) lanChatRecoveryEventPending.set(true);
+        if (serviceDestroyed || !lanChatRetryInFlight.compareAndSet(false, true)) return;
+        // Capture the route-refresh wake, but restore it if executor admission or this batch fails.
+        // Events arriving after this snapshot remain set for the next serialized batch.
+        final boolean routeRefreshCaptured = lanChatRouteRefreshPending.getAndSet(false);
+        try {
+            lanChatSendExecutor.execute(() -> {
+                boolean retryBatchCompleted = false;
+                boolean recoveryEventCaptured = false;
+                java.util.Set<String> peerRecoveryEventsCaptured = new java.util.HashSet<>();
+                try {
+                    LanChatStore store = lanChatStore;
+                    if (store == null) return;
+                    int finalizedDiscovery = store.finalizeExpiredDiscoveryWindows(System.currentTimeMillis());
+                    int expiredOutbox = store.expireOutboxMessages(System.currentTimeMillis());
+                    if (expiredOutbox > 0) {
+                        FileLogger.log(this, "CHAT", "LAN Outbox TTL expired messages=" + expiredOutbox);
+                    }
+                    if (finalizedDiscovery > 0) {
+                        FileLogger.log(this, "CHAT", "LAN 恢复时结算已过期发现窗口 messages=" + finalizedDiscovery);
+                    }
+                    synchronized (lanChatQueueLock) {
+                        JSONArray legacy = new JSONArray(getSharedPreferences("device_finder_prefs", MODE_PRIVATE)
+                                .getString(PREF_LAN_CHAT_QUEUE, "[]"));
+                        for (int i = 0; i < legacy.length(); i++) {
+                            JSONObject item = legacy.optJSONObject(i);
+                            if (item == null) continue;
+                            String id = item.optString("message_id", "");
+                            String body = item.optString("content", "");
+                            if (!id.isEmpty()) {
+                                if (!store.enqueue(id, getUniqueDeviceId(), body,
+                                        item.optLong("created_at", System.currentTimeMillis()))) {
+                                    FileLogger.log(this, "CHAT", "⚠️ SQLite outbox 补偿迁移失败，保留旧队列");
+                                    return;
+                                }
+                                if (!initializeLanChatRecipientSnapshot(store, id)) {
+                                    FileLogger.log(this, "CHAT", "⚠️ SQLite 旧队列收件人快照补偿失败，保留旧队列");
+                                    return;
+                                }
+                                if (store.isTerminalForLegacyMirror(id)) {
+                                    // Recover either terminal state without blocking the Outbox lane
+                                    // on synchronous SharedPreferences compatibility-file I/O.
+                                    scheduleLanChatMirrorCleanup(id);
+                                }
+                            }
+                        }
+                    }
+                    scheduleLanChatOutboxExpiry(store);
+                    // Consume the recovery event only after legacy migration succeeds. If any
+                    // later Outbox operation fails, the outer catch restores this captured event.
+                    recoveryEventCaptured = lanChatRecoveryEventPending.getAndSet(false);
+                    peerRecoveryEventsCaptured.addAll(lanChatPeerRecoveryEvents);
+                    lanChatPeerRecoveryEvents.removeAll(peerRecoveryEventsCaptured);
+                    if (recoveryEventCaptured) {
+                        int resumed = store.resumeExhaustedRetriesForRecoveryEvent(System.currentTimeMillis());
+                        if (resumed > 0) {
+                            FileLogger.log(this, "CHAT", "LAN 恢复事件重新开启有限补发预算 messages=" + resumed);
+                        }
+                        // Schedule the next cooldown even when this event resumed some rows:
+                        // other exhausted targets may still be inside their independent cooldown.
+                        long nextEligibleAt = store.nextRecoveryEventEligibleAtMs(System.currentTimeMillis());
+                        if (nextEligibleAt != Long.MAX_VALUE) {
+                            scheduleLanChatRecoveryCooldownWake(
+                                    Math.max(1L, nextEligibleAt - System.currentTimeMillis()));
+                        }
+                    }
+                    for (String recoveredPeerId : peerRecoveryEventsCaptured) {
+                        long recoveryNow = System.currentTimeMillis();
+                        int resumed = store.resumeExhaustedRetriesForPeerRecoveryEvent(
+                                recoveredPeerId, recoveryNow);
+                        if (resumed > 0) {
+                            FileLogger.log(this, "CHAT", "LAN 单设备恢复事件重新开启有限补发预算 peer="
+                                    + recoveredPeerId + " targets=" + resumed);
+                        }
+                        if (!recoveryEventCaptured) {
+                            long nextEligibleAt = store.nextPeerRecoveryEventEligibleAtMs(
+                                    recoveredPeerId, recoveryNow);
+                            if (nextEligibleAt != Long.MAX_VALUE) {
+                                scheduleLanChatPeerRecoveryCooldownWake(
+                                        recoveredPeerId, Math.max(1L, nextEligibleAt - recoveryNow));
+                            }
+                        }
+                    }
+                    // Peer-scoped recovery never arms the global recovery timer: that timer
+                    // intentionally reopens every eligible peer and is reserved for global events.
+                    final int batchSize = LanChatRetryPolicy.RETRY_BATCH_SIZE;
+                    final int maxBatchesPerWake = LanChatRetryPolicy.MAX_RETRY_BATCHES_PER_WAKE;
+                    // Store owns durable rows and per-target attempt budgets; this service only
+                    // snapshots a bounded work set and dispatches it through the FIFO send lane.
+                    // One stable snapshot per wake prevents a stalled first batch from hiding later rows.
+                    List<LanChatStore.PendingMessage> pending = store.loadPending(LanChatRetryPolicy.MAX_PENDING_MESSAGES);
+                    int queuedBefore = pending.size();
+                    for (int batchNo = 0; batchNo < maxBatchesPerWake && !serviceDestroyed; batchNo++) {
+                        int startIndex = batchNo * batchSize;
+                        if (startIndex >= pending.size()) break;
+                        int endIndex = Math.min(startIndex + batchSize, pending.size());
+
+                        for (int i = startIndex; i < endIndex && !serviceDestroyed; i++) {
+                            LanChatStore.PendingMessage item = pending.get(i);
+                            String id = item.messageId;
+                            String content = item.body;
+                            if (id == null || id.isEmpty() || content == null || content.isEmpty()) continue;
+                            if (store.allTargetsAcked(id)) {
+                                // Recover the crash window without doing compatibility-file I/O
+                                // on the serialized Outbox retry lane.
+                                scheduleLanChatMirrorCleanup(id);
+                                continue;
+                            }
+                            transmitLocalUdpMessage(content, id);
+                            if (store.allTargetsAcked(id)) {
+                                // Reclaim only after every fixed target is ACKed; keep the
+                                // serialized transmit/retry lane free of synchronous file commits.
+                                scheduleLanChatMirrorCleanup(id);
+                            }
+                        }
+
+                        int queuedAfter = store.loadPending(LanChatRetryPolicy.MAX_PENDING_MESSAGES).size();
+                        FileLogger.log(this, "CHAT", "LAN SQLite Outbox 补发批次 " + (batchNo + 1)
+                                + "，处理 " + (endIndex - startIndex) + " 条，待确认账本变化 "
+                                + queuedBefore + "->" + queuedAfter);
+                    }
+                    scheduleLanChatRetryFromOutbox();
+                    retryBatchCompleted = true;
+                } catch (Exception e) {
+                    // Keep the recovery permission until the entire batch has completed;
+                    // a later read/dispatch failure must not strand an already reopened epoch.
+                    if (recoveryEventCaptured) lanChatRecoveryEventPending.set(true);
+                    lanChatPeerRecoveryEvents.addAll(peerRecoveryEventsCaptured);
+                    FileLogger.log(this, "CHAT", "⚠️ LAN 聊天补发失败: " + e.getMessage());
+                } finally {
+                    if (routeRefreshCaptured && !retryBatchCompleted) {
+                        lanChatRouteRefreshPending.set(true);
+                    }
+                    lanChatRetryInFlight.set(false);
+                    // Preserve events arriving during this batch. A failed batch must back off;
+                    // immediately resubmitting a still-failing SQLite operation would spin.
+                    if (lanChatRecoveryEventPending.get() || lanChatRouteRefreshPending.get()
+                            || !lanChatPeerRecoveryEvents.isEmpty()) {
+                        if (!retryBatchCompleted) {
+                            scheduleLanChatRetryAfterFailure(
+                                    "outbox-retry-after-failure", lanChatRecoveryEventPending.get());
+                        } else if (LanChatRetryPolicy.shouldImmediatelyRetryForRecovery(
+                                lanChatRecoveryEventPending.get(), !lanChatPeerRecoveryEvents.isEmpty())) {
+                            // Real network/listener or authenticated peer recovery may wake
+                            // immediately. An ACK-timeout route refresh is not a recovery event.
+                            retryPendingLanChatMessages(lanChatRecoveryEventPending.get());
+                        } else {
+                            // Route refreshes are coalesced into the normal persisted Outbox
+                            // cadence; do not turn ACK timeouts into immediate full-queue scans.
+                            scheduleLanChatRetryFromOutbox();
+                        }
+                    } else {
+                        // Re-arm after releasing the in-flight guard. A delayed callback may
+                        // have fired while this batch was still running and been coalesced.
+                        scheduleLanChatRetryFromOutbox();
+                    }
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            if (routeRefreshCaptured) lanChatRouteRefreshPending.set(true);
+            lanChatRetryInFlight.set(false);
+            FileLogger.log(this, "CHAT", "⚠️ LAN 补发队列暂时已满，安排延迟重试");
+            // Queue saturation is not a network-recovery event. Preserve the pending
+            // recovery flag above and retry admission after the current queue drains.
+            scheduleLanChatRetryAfterFailure("outbox-retry-admission-fallback", recoveryEvent);
+        }
+    }
+
+    // 仅由 lanChatSendExecutor 调用的补发工作线程入口结束；即时发送走独立队列。
+    // Terminal legacy-mirror file commits are dispatched to the peer maintenance lane.
+    // Both the immediate and retry lanes enter the same guarded transmission path;
+    // the active-message set and shared transmit lock prevent duplicate concurrent sends.
+    private void sendLocalUdpMessage(final String message, final String messageId) {
+        transmitLocalUdpMessage(message, messageId);
+    }
+
+    private void transmitLocalUdpMessage(final String message, final String messageId) {
+        if (!activeLanChatTransmissions.add(messageId)) {
+            FileLogger.log(this, "CHAT", "ℹ️ 同一 message_id 已在发送/补发，跳过并发副本: " + messageId);
+            return;
+        }
+        boolean attemptAdmitted = false;
+        int attemptNumber = -1;
+        LanChatStore store = lanChatStore;
+        try {
+            if (serviceDestroyed) return;
+            DatagramSocket socket = rescueSocketRef;
+            long socketGeneration = lanSocketGeneration.get();
+            if (socket == null || socket.isClosed() || store == null) {
+                FileLogger.log(this, "CHAT", "ℹ️ LAN 监听或账本尚未就绪，消息保留待恢复");
+                return;
+            }
+            if (!hasUsableWifiLanPath()) {
+                FileLogger.log(this, "CHAT", "ℹ️ 当前没有可确认的 Wi-Fi LAN 路径，消息保留账本且不消耗发送预算");
+                return;
+            }
+            // Read the durable recipient snapshot before FIFO admission. This is read-only:
+            // ACK races are still closed by markAttempt() immediately before each UDP send.
+            // Keeping SQLite target enumeration outside the shared sender lock prevents a slow
+            // database read from delaying a fresh interactive message behind a retry batch.
+            final long targetLoadStartedAt = android.os.SystemClock.elapsedRealtime();
+            final List<LanChatStore.Target> preparedTargets;
+            try {
+                preparedTargets = store.loadTargets(messageId);
+            } catch (Exception targetReadFailure) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN 目标账本读取失败，消息保留待重试: "
+                        + targetReadFailure.getClass().getSimpleName());
+                scheduleLanChatRetryPlan(500L);
+                return;
+            }
+            final long targetLoadMs = android.os.SystemClock.elapsedRealtime() - targetLoadStartedAt;
+            // Fixed-recipient attempt progress is a read-only aggregate. Resolve it before
+            // FIFO admission; markAttempt() remains the transactional per-peer send gate.
+            final boolean hasFixedTargetSnapshot = !preparedTargets.isEmpty();
+            final int preparedAttemptNumber;
+            if (hasFixedTargetSnapshot) {
+                try {
+                    preparedAttemptNumber = store.readFixedTargetAttemptProgress(messageId);
+                } catch (Exception attemptReadFailure) {
+                    FileLogger.log(this, "CHAT", "⚠️ LAN 固定目标发送预算读取失败，消息保留待重试: "
+                            + attemptReadFailure.getClass().getSimpleName());
+                    scheduleLanChatRetryPlan(500L);
+                    return;
+                }
+                if (preparedAttemptNumber < 0) {
+                    FileLogger.log(this, "CHAT", "ℹ️ LAN 固定目标均已确认或发送预算耗尽，跳过本轮: "
+                            + messageId);
+                    return;
+                }
+            } else {
+                preparedAttemptNumber = -1;
+            }
+            // Build immutable authenticated datagrams before FIFO admission. Packet contents depend
+            // only on the durable message/peer snapshot, not on the selected route. This keeps JSON
+            // canonicalization and HMAC work out of the shared sender lock and before attempt charging.
+            final String senderPeerId = getUniqueDeviceId();
+            final long messageCreatedAtMs = store.getMessageCreatedAtMs(messageId);
+            if (messageCreatedAtMs <= 0L) {
+                FileLogger.log(this, "CHAT", "⚠️ 无法读取消息稳定创建时间，拒绝构建分片以避免会话元数据漂移 message="
+                        + messageId);
+                return;
+            }
+            final java.util.Map<String, byte[]> preparedPeerPackets = new java.util.HashMap<>();
+            final java.util.Map<String, java.util.List<byte[]>> preparedPeerFragmentPackets =
+                    new java.util.HashMap<>();
+            int pendingSnapshotTargets = 0;
+            for (LanChatStore.Target target : preparedTargets) {
+                if (target != null && target.peerId != null && !"acked".equals(target.status)) {
+                    pendingSnapshotTargets++;
+                }
+            }
+            final long packetBuildStartedAt = android.os.SystemClock.elapsedRealtime();
+            byte[] preparedBroadcastData;
+            java.util.List<byte[]> preparedBroadcastFragments;
+            try {
+                if (pendingSnapshotTargets == 0) {
+                    try {
+                        preparedBroadcastData = buildAuthenticatedLanChatPacket(
+                                senderPeerId, "*", messageId, message);
+                        preparedBroadcastFragments = null;
+                    } catch (Exception oversizedSinglePacket) {
+                        preparedBroadcastData = null;
+                        preparedBroadcastFragments = buildAuthenticatedLanChatFragmentPackets(
+                                senderPeerId, "*", messageId, message, messageCreatedAtMs);
+                    }
+                } else {
+                    preparedBroadcastData = null;
+                    preparedBroadcastFragments = null;
+                    for (LanChatStore.Target target : preparedTargets) {
+                        if (target == null || target.peerId == null || "acked".equals(target.status)) continue;
+                        try {
+                            preparedPeerPackets.put(target.peerId,
+                                    buildAuthenticatedLanChatPacket(senderPeerId, target.peerId, messageId, message));
+                        } catch (Exception oversizedSinglePacket) {
+                            preparedPeerFragmentPackets.put(target.peerId,
+                                    buildAuthenticatedLanChatFragmentPackets(
+                                            senderPeerId, target.peerId, messageId, message, messageCreatedAtMs));
+                        }
+                    }
+                }
+            } catch (Exception packetBuildFailure) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN v2 消息预编码失败，保留账本且不消耗发送预算: "
+                        + packetBuildFailure.getClass().getSimpleName());
+                return;
+            }
+            final long packetBuildMs = android.os.SystemClock.elapsedRealtime() - packetBuildStartedAt;
+            if (packetBuildMs >= 50L) {
+                FileLogger.log(this, "CHAT", "P2P authenticated packet prebuild message="
+                        + messageId + " targets=" + pendingSnapshotTargets
+                        + " buildMs=" + packetBuildMs);
+            }
+            final long preLockBroadcastLookupStartedAt = android.os.SystemClock.elapsedRealtime();
+            final String preparedBroadcastAddress = pendingSnapshotTargets == 0
+                    ? getWifiBroadcastAddress() : null;
+            final long preLockBroadcastLookupMs = android.os.SystemClock.elapsedRealtime()
+                    - preLockBroadcastLookupStartedAt;
+            if (preLockBroadcastLookupMs >= 50L) {
+                FileLogger.log(this, "CHAT", "P2P first-discovery broadcast address pre-resolution message="
+                        + messageId + " lookupMs=" + preLockBroadcastLookupMs);
+            }
+            // Persisted endpoints remain discovery candidates; no address resolution is
+            // needed here because directed challenges resolve them on the probe executor.
+            // Wait for the FIFO transmit turn before charging this message's retry epoch.
+            // Time spent queued behind another sender is not a delivery attempt.
+            long lockRequestedAt = android.os.SystemClock.elapsedRealtime();
+            int queueDepthAtRequest = lanChatTransmitLock.getQueueLength();
+            lanChatTransmitLock.lock();
+            long lockAcquiredAt = android.os.SystemClock.elapsedRealtime();
+            try {
+                long lockWaitMs = lockAcquiredAt - lockRequestedAt;
+                if (lockWaitMs >= 150L) {
+                    FileLogger.log(this, "CHAT", "P2P 发送串行锁等待 message="
+                            + messageId + " waitMs=" + lockWaitMs
+                            + " queuedAtRequest=" + queueDepthAtRequest
+                            + " thread=" + Thread.currentThread().getName());
+                }
+                if (serviceDestroyed) return;
+                if (!isCurrentLanChatSocket(socket, socketGeneration)) {
+                    FileLogger.log(this, "CHAT", "ℹ️ LAN socket generation changed while queued; message remains pending: "
+                            + messageId);
+                    return;
+                }
+                if (hasFixedTargetSnapshot) {
+                    // This was a read-only pre-lock snapshot. Every real target dispatch
+                    // still revalidates ACK and retry budget in markAttempt() below.
+                    attemptNumber = preparedAttemptNumber;
+                } else {
+                    long outboxAttemptDbStartedAt = android.os.SystemClock.elapsedRealtime();
+                    try {
+                        attemptNumber = store.recordOutboxAttempt(messageId);
+                    } finally {
+                        long outboxAttemptDbMs = android.os.SystemClock.elapsedRealtime() - outboxAttemptDbStartedAt;
+                        if (outboxAttemptDbMs >= 50L) {
+                            FileLogger.log(this, "CHAT", "P2P SQLite outbox attempt message="
+                                    + messageId + " dbMs=" + outboxAttemptDbMs);
+                        }
+                    }
+                }
+                if (attemptNumber < 0) {
+                    FileLogger.log(this, "CHAT", "⚠️ LAN SQLite 发送尝试记账失败或本轮预算已耗尽，停止发送");
+                    return;
+                }
+                attemptAdmitted = true;
+                if (!serviceDestroyed) {
+                    transmitLocalUdpMessageInternal(message, messageId, socket, socketGeneration,
+                            preparedTargets, targetLoadMs, senderPeerId, preparedPeerPackets,
+                            preparedPeerFragmentPackets, preparedBroadcastData, preparedBroadcastFragments,
+                            packetBuildMs, preparedBroadcastAddress,
+                            preLockBroadcastLookupMs);
+                }
+            } finally {
+                long lockHoldMs = android.os.SystemClock.elapsedRealtime() - lockAcquiredAt;
+                if (lockHoldMs >= 150L) {
+                    FileLogger.log(this, "CHAT", "P2P 发送串行锁持有 message=" + messageId
+                            + " holdMs=" + lockHoldMs
+                            + " queueDepthAfter=" + lanChatTransmitLock.getQueueLength()
+                            + " thread=" + Thread.currentThread().getName());
+                }
+                lanChatTransmitLock.unlock();
+            }
+        } catch (Exception e) {
+            FileLogger.log(this, "CHAT", "⚠️ LAN 对讲发送/恢复异常: " + e.getClass().getSimpleName());
+            if (!attemptAdmitted && !serviceDestroyed) {
+                // Unexpected pre-admission failures have not armed the normal ACK/backoff
+                // path yet. Re-scan the durable outbox once after a short settling delay.
+                scheduleLanChatRetryPlan(500L);
+            }
+        } finally {
+            if (!lanChatAckGraceInFlight.contains(messageId)) {
+                activeLanChatTransmissions.remove(messageId);
+            }
+        }
+        if (attemptAdmitted) {
+            if (attemptNumber >= LanChatRetryPolicy.MAX_AUTOMATIC_RETRY_ATTEMPTS
+                    && !store.allTargetsAcked(messageId)) {
+                FileLogger.log(this, "CHAT", "LAN 自动补发预算已耗尽，SQLite 消息及未 ACK 目标继续保留，等待网络/peer 恢复事件: "
+                        + messageId + " attempts=" + attemptNumber);
+            }
+            // The ACK observation window owns retry planning. Scheduling here would
+            // arm a stale 1.5s wake before the 250ms fast-retry burst has settled.
+            if (!lanChatAckGraceInFlight.contains(messageId)) {
+                requestLanChatRetryPlan();
+            }
+        }
+    }
+
+    /**
+     * A fresh send must not perform the outbox-wide retry scan on the interactive
+     * sender thread. Retry batches re-arm their own timer after releasing the
+     * single-flight guard; immediate sends hand planning to the retry executor.
+     */
+    private void requestLanChatRetryPlan() {
+        scheduleLanChatRetryPlan(0L);
+    }
+
+    /**
+     * Coalesce delayed preflight/queue-saturation wakeups into one Outbox planning task.
+     * The planner scans the durable ledger, so a per-message timer is neither necessary
+     * nor useful. The pending flag covers both the delay and executor admission.
+     */
+    private void scheduleLanChatRetryPlan(long delayMs) {
+        if (serviceDestroyed || lanChatRetryInFlight.get()
+                || !lanChatRetryPlanPending.compareAndSet(false, true)) return;
+        Runnable submitPlan = () -> {
+            if (serviceDestroyed) {
+                lanChatRetryPlanPending.set(false);
+                return;
+            }
+            try {
+                lanChatSendExecutor.execute(() -> {
+                    try {
+                        scheduleLanChatRetryFromOutbox();
+                    } finally {
+                        lanChatRetryPlanPending.set(false);
+                    }
+                });
+            } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                lanChatRetryPlanPending.set(false);
+                if (!serviceDestroyed) scheduleLanChatRetryPlan(500L);
+            }
+        };
+        if (delayMs <= 0L) {
+            submitPlan.run();
+        } else if (!scheduleLanChatTask("outbox-retry-plan", submitPlan, delayMs)) {
+            // Keep the coalesced planning request alive when the service scheduler rejects it.
+            if (!handler.postDelayed(submitPlan, delayMs)) {
+                lanChatRetryPlanPending.set(false);
+            }
+        }
+    }
+
+    /**
+     * Persisted retry wakeups use exponential backoff and a finite per-epoch attempt budget.
+     * Exhausted rows remain durable in SQLite but are not timer-polled; a real recovery event
+     * may reopen one bounded epoch after the persisted cooldown. waiting_peers stays frozen.
+     */
+    private void scheduleLanChatRetryFromOutbox() {
+        // The active batch re-arms the scheduler from its finally block after releasing this guard.
+        // Do not enqueue timer callbacks that will only fail the single-flight CAS.
+        if (serviceDestroyed || lanChatRetryInFlight.get() || lanChatRetryWakeScheduled.get()) return;
+        if (!hasUsableWifiLanPath()) return;
+        DatagramSocket socket = rescueSocketRef;
+        LanChatStore store = lanChatStore;
+        if (socket == null || socket.isClosed() || store == null) return;
+        try {
+            List<LanChatStore.PendingMessage> pending = store.loadPending(LanChatRetryPolicy.MAX_PENDING_MESSAGES);
+            int minimumAttempts = Integer.MAX_VALUE;
+            boolean hasUnattemptedRouteTargets = false;
+            for (LanChatStore.PendingMessage item : pending) {
+                if (item.retryAttempts > 0) {
+                    minimumAttempts = Math.min(minimumAttempts, item.retryAttempts);
+                } else if (store.hasUnattemptedTargets(item.messageId)) {
+                    // No route means markAttempt() has correctly not consumed a delivery attempt.
+                    // Still schedule a bounded re-challenge, otherwise a lost first peer.ack can
+                    // strand a durable fixed target until an unrelated network event occurs.
+                    hasUnattemptedRouteTargets = true;
+                }
+            }
+            if (minimumAttempts == Integer.MAX_VALUE && !hasUnattemptedRouteTargets) return;
+            // loadPending() excludes messages that exhausted this epoch's finite send budget.
+            // Their SQLite rows and unacked target records remain intact for recovery events.
+            // Empty discovery snapshots are finalized separately as waiting_peers.
+            // Scheduler wake cadence is a policy decision, not a durable delivery attempt.
+            // Fixed targets without a verified route get a bounded route-probe wake.
+            final long delayMs = LanChatRetryPolicy.outboxRetryWakeDelayMs(
+                    minimumAttempts, hasUnattemptedRouteTargets);
+            if (!lanChatRetryWakeScheduled.compareAndSet(false, true)) return;
+            boolean scheduled = scheduleLanChatTask("outbox-retry", () -> {
+                lanChatRetryWakeScheduled.set(false);
+                retryPendingLanChatMessages();
+            }, delayMs);
+            if (!scheduled) lanChatRetryWakeScheduled.set(false);
+        } catch (Exception e) {
+            FileLogger.log(this, "CHAT", "⚠️ 无法安排 LAN 持久化补发: " + e.getClass().getSimpleName());
+            // A transient SQLite read failure must not silently disarm the durable Outbox.
+            scheduleLanChatRetryAfterFailure("outbox-plan-read-failure", false);
+        }
+    }
+
+    /**
+     * Close the first-discovery ledger window even when the send executor is saturated.
+     * A rejected close task is retried independently; all-ACKed discovery rows are not
+     * present in loadPending(), so they cannot rely on a later ordinary Outbox retry.
+     */
+    /**
+     * One coalesced timer finalizes all expired discovery rows in one SQLite transaction.
+     * It is re-armed for the earliest remaining deadline and recovers from send-queue
+     * saturation or transient storage failures without allocating per-message timers.
+     */
+    private void scheduleLanChatDiscoveryFinalizer(final LanChatStore store, long delayMs) {
+        if (serviceDestroyed || store == null
+                || !lanChatDiscoveryFinalizerScheduled.compareAndSet(false, true)) return;
+        boolean scheduled = scheduleLanChatTask("discovery-window-finalizer", () -> {
+            if (serviceDestroyed) {
+                lanChatDiscoveryFinalizerScheduled.set(false);
+                return;
+            }
+            try {
+                lanChatSendExecutor.execute(() -> {
+                    boolean finalizationFailed = false;
+                    try {
+                        long now = System.currentTimeMillis();
+                        List<String> finalizedIds = store.finalizeExpiredDiscoveryWindowIds(now);
+                        if (!finalizedIds.isEmpty()) {
+                            FileLogger.log(this, "CHAT", "LAN discovery finalization settled messages="
+                                    + finalizedIds.size());
+                            // Reclaim only mirrors for rows settled by this transaction. Do not
+                            // wake the full Outbox planner merely to perform compatibility cleanup.
+                            for (String finalizedId : finalizedIds) {
+                                scheduleLanChatMirrorCleanup(finalizedId);
+                            }
+                        }
+                    } catch (Exception storageFailure) {
+                        finalizationFailed = true;
+                        FileLogger.log(this, "CHAT", "LAN discovery finalization deferred: "
+                                + storageFailure.getClass().getSimpleName());
+                    } finally {
+                        lanChatDiscoveryFinalizerScheduled.set(false);
+                        if (!serviceDestroyed) {
+                            if (finalizationFailed) {
+                                // The deadline is already elapsed. Re-arming from it would
+                                // schedule an immediate DB retry loop while SQLite is failing.
+                                scheduleLanChatDiscoveryFinalizer(store, 500L);
+                            } else {
+                                try {
+                                    long nextDiscoveryDeadline = store.getNextDiscoveryDeadlineMs();
+                                    if (nextDiscoveryDeadline > 0L) {
+                                        scheduleLanChatDiscoveryFinalizer(store,
+                                                Math.max(0L, nextDiscoveryDeadline - System.currentTimeMillis() + 100L));
+                                    }
+                                } catch (Exception storageFailure) {
+                                    scheduleLanChatDiscoveryFinalizer(store, 500L);
+                                }
+                            }
+                        }
+                    }
+                });
+            } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                lanChatDiscoveryFinalizerScheduled.set(false);
+                if (!serviceDestroyed) scheduleLanChatDiscoveryFinalizer(store, 500L);
+            }
+        }, delayMs);
+        if (!scheduled) lanChatDiscoveryFinalizerScheduled.set(false);
+    }
+
+    /** Schedule the earliest pending-message TTL without interfering with discovery-window deadlines. */
+    private void scheduleLanChatOutboxExpiry(final LanChatStore store) {
+        if (serviceDestroyed || store == null
+                || !lanChatOutboxExpiryScheduled.compareAndSet(false, true)) return;
+        final long deadline;
+        try {
+            deadline = store.getNextOutboxExpiryMs();
+        } catch (Exception e) {
+            lanChatOutboxExpiryScheduled.set(false);
+            FileLogger.log(this, "CHAT", "LAN Outbox expiry deadline lookup deferred: "
+                    + e.getClass().getSimpleName());
+            if (!serviceDestroyed) scheduleLanChatOutboxExpiryRetry(store);
+            return;
+        }
+        if (deadline <= 0L) {
+            lanChatOutboxExpiryScheduled.set(false);
+            return;
+        }
+        long delay = Math.max(0L, deadline - System.currentTimeMillis() + 100L);
+        Runnable expireAndRearm = () -> {
+            if (serviceDestroyed) {
+                lanChatOutboxExpiryScheduled.set(false);
+                return;
+            }
+            boolean failed = false;
+            try {
+                LanChatStore current = lanChatStore;
+                if (current != null) {
+                    int expired = current.expireOutboxMessages(System.currentTimeMillis());
+                    if (expired > 0) {
+                        FileLogger.log(this, "CHAT", "LAN Outbox TTL expired messages=" + expired);
+                    }
+                }
+            } catch (Exception e) {
+                failed = true;
+                FileLogger.log(this, "CHAT", "LAN Outbox TTL expiry deferred: "
+                        + e.getClass().getSimpleName());
+            } finally {
+                lanChatOutboxExpiryScheduled.set(false);
+                if (!serviceDestroyed) {
+                    if (failed) scheduleLanChatOutboxExpiryRetry(lanChatStore);
+                    else scheduleLanChatOutboxExpiry(lanChatStore);
+                }
+            }
+        };
+        if (!scheduleLanChatTask("outbox-ttl-expiry", expireAndRearm, delay)) {
+            lanChatOutboxExpiryScheduled.set(false);
+            FileLogger.log(this, "CHAT", "LAN Outbox TTL scheduler unavailable");
+        }
+    }
+
+    private void scheduleLanChatOutboxExpiryRetry(final LanChatStore store) {
+        if (serviceDestroyed || store == null) return;
+        if (!scheduleLanChatTask("outbox-ttl-expiry-retry",
+                () -> scheduleLanChatOutboxExpiry(store), 500L)) {
+            FileLogger.log(this, "CHAT", "LAN Outbox TTL retry scheduler unavailable");
+        }
+    }
+
+    private void transmitLocalUdpMessageInternal(final String message, final String messageId,
+            DatagramSocket socket, long socketGeneration,
+            final List<LanChatStore.Target> savedTargets, long targetLoadMs,
+            final String myId, final java.util.Map<String, byte[]> preparedPeerPackets,
+            final java.util.Map<String, java.util.List<byte[]>> preparedPeerFragmentPackets,
+            final byte[] preparedBroadcastData, final java.util.List<byte[]> preparedBroadcastFragments,
+            long packetBuildMs,
+            final String preparedBroadcastAddress, long preLockBroadcastLookupMs) {
+        final long preparationStartedAt = android.os.SystemClock.elapsedRealtime();
+        if (!isCurrentLanChatSocket(socket, socketGeneration)) {
+            FileLogger.log(this, "CHAT", "ℹ️ P2P send rejected for stale UDP socket generation message=" + messageId);
+            return;
+        }
+        long broadcastLookupMs = preLockBroadcastLookupMs;
+        long routeProbeMs = 0L;
+        if (!isCurrentLanChatSocket(socket, socketGeneration)) {
+            FileLogger.log(this, "CHAT", "⚠️ P2P UDP socket epoch expired before preparation message=" + messageId);
+            return;
+        }
+        LanChatStore store = lanChatStore;
+        if (store == null) {
+            FileLogger.log(this, "CHAT", "⚠️ LAN SQLite 账本尚未就绪，消息保留待恢复");
+            return;
+        }
+        long stageStartedAt = android.os.SystemClock.elapsedRealtime();
+
+        // The durable recipient snapshot was loaded before FIFO admission. It is read-only;
+        // every actual recipient send is still revalidated transactionally by markAttempt().
+        // This keeps SQLite target enumeration out of the shared transmission critical section.
+        java.util.Set<String> pendingTargetIds = new java.util.HashSet<>();
+        for (LanChatStore.Target target : savedTargets) {
+            if (!"acked".equals(target.status)) pendingTargetIds.add(target.peerId);
+        }
+        if (pendingTargetIds.isEmpty()) {
+            // One ledger transaction starts/observes/settles the discovery window. Avoid
+            // separate begin/query/waiting-state round trips and their intervening race.
+            final int discoveryWindowState = store.beginOrReadDiscoveryWindow(messageId);
+            if (discoveryWindowState == LanChatStore.DISCOVERY_WINDOW_ERROR) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN 发现窗口账本操作失败，停止本轮发送以防扩大收件人范围: "
+                        + messageId);
+                return;
+            }
+            if (discoveryWindowState == LanChatStore.DISCOVERY_WINDOW_WAITING) {
+                FileLogger.log(this, "CHAT", "P2P 空目标消息已结算为 waiting_peers，不向晚加入设备广播: "
+                        + messageId);
+                // This method runs under the FIFO transmit lock. SharedPreferences commit
+                // is synchronous, so move terminal mirror cleanup to the peer maintenance lane.
+                scheduleLanChatMirrorCleanup(messageId);
+                return;
+            }
+            final boolean discoveryWindowOpen =
+                    discoveryWindowState == LanChatStore.DISCOVERY_WINDOW_OPEN
+                    || discoveryWindowState == LanChatStore.DISCOVERY_WINDOW_STARTED;
+            if (!discoveryWindowOpen) return;
+            final boolean firstDispatch =
+                    discoveryWindowState == LanChatStore.DISCOVERY_WINDOW_STARTED;
+            if (firstDispatch) {
+                FileLogger.log(this, "CHAT", "P2P 首次发现窗口开始，限时 "
+                        + LAN_CHAT_DISCOVERY_WINDOW_MS + "ms，消息 " + messageId);
+                scheduleLanChatDiscoveryFinalizer(store, LAN_CHAT_DISCOVERY_WINDOW_MS + 100L);
+            }
+        }
+
+        stageStartedAt = android.os.SystemClock.elapsedRealtime();
+        final long routeProbeStartedAt = stageStartedAt;
+        // 先清理过期租约；同一网络内仍有已验证成员时直接复用单播路由，
+        // 不再让每条聊天消息都额外等待一次 500ms 广播发现窗口。
+        long now = System.currentTimeMillis();
+        boolean expiredPeerRouteRemoved = false;
+        for (java.util.Map.Entry<String, Long> e : verifiedChatPeerSeen.entrySet()) {
+            if (now - e.getValue() > 120_000L) {
+                synchronized (verifiedChatPeerRouteVersions) {
+                    if (verifiedChatPeerSeen.remove(e.getKey(), e.getValue())) {
+                        verifiedChatPeers.remove(e.getKey());
+                        verifiedChatPeerRouteVersions.remove(e.getKey());
+                        expiredPeerRouteRemoved = true;
+                    }
+                }
+            }
+        }
+        if (expiredPeerRouteRemoved && verifiedChatPeers.isEmpty()) {
+            // A genuinely expired final route should trigger one fresh discovery immediately.
+            lastPeerDiscoveryAt = 0L;
+        }
+
+        // Revalidate persisted endpoints off the FIFO transmit lock. A slow challenge
+        // must never hold up an ordinary chat message or unrelated ACK/control traffic.
+        int directedChallenges = 0;
+        for (LanChatStore.Target target : savedTargets) {
+            if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
+            if (target == null || target.peerId == null || "acked".equals(target.status)
+                    || hasFreshLanChatPeerRoute(target.peerId)
+                    || target.endpointIp == null || target.endpointIp.isEmpty()
+                    || !(target.endpointPort == 8888 || target.endpointPort == 8887
+                         || target.endpointPort == 8889 || target.endpointPort == 8890)) {
+                continue;
+            }
+            final String challengePeerId = target.peerId;
+            final Object challengeDispatchToken = new Object();
+            if (pendingPeerChallengeDispatches.putIfAbsent(challengePeerId, challengeDispatchToken) != null) {
+                continue;
+            }
+            final String challengeIp = target.endpointIp;
+            final int challengePort = target.endpointPort;
+            final long challengeQueuedAt = android.os.SystemClock.elapsedRealtime();
+            try {
+                lanChatProbeExecutor.execute(() -> {
+                    try {
+                        long queueMs = android.os.SystemClock.elapsedRealtime() - challengeQueuedAt;
+                        if (serviceDestroyed || !isCurrentLanChatSocket(socket, socketGeneration)
+                                || hasFreshLanChatPeerRoute(challengePeerId)) return;
+                        java.net.InetAddress savedAddress = java.net.InetAddress.getByName(challengeIp);
+                        if (!(savedAddress instanceof java.net.Inet4Address)
+                                || !savedAddress.isSiteLocalAddress()
+                                || savedAddress.isLoopbackAddress()
+                                || savedAddress.isAnyLocalAddress()) return;
+                        long dispatchStartedAt = android.os.SystemClock.elapsedRealtime();
+                        sendDirectedPeerChallenge(socket, challengePeerId, savedAddress, challengePort);
+                        long dispatchMs = android.os.SystemClock.elapsedRealtime() - dispatchStartedAt;
+                        if (queueMs >= 150L || dispatchMs >= 150L) {
+                            FileLogger.log(this, "CHAT", "P2P directed challenge queued message="
+                                    + messageId + " peer=" + challengePeerId
+                                    + " queueMs=" + queueMs + " dispatchMs=" + dispatchMs);
+                        }
+                    } catch (Exception staleEndpoint) {
+                        FileLogger.logD("CHAT", "persisted peer endpoint challenge skipped peer="
+                                + challengePeerId + " reason=" + staleEndpoint.getClass().getSimpleName());
+                    } finally {
+                        pendingPeerChallengeDispatches.remove(challengePeerId, challengeDispatchToken);
+                    }
+                });
+                directedChallenges++;
+            } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                pendingPeerChallengeDispatches.remove(challengePeerId, challengeDispatchToken);
+                FileLogger.log(this, "CHAT", "P2P directed challenge queue full peer=" + challengePeerId);
+            }
+        }
+        if (directedChallenges > 0) {
+            FileLogger.log(this, "CHAT", "P2P 已排队验证已保存目标路由 count="
+                    + directedChallenges + " message=" + messageId);
+        }
+
+        // Discovery is deliberately non-blocking: probe dispatch runs away from the FIFO
+        // sender and peer-admission lane. The chat packet below remains ordered on the
+        // transmit lane; authenticated discovery ACK grace and durable recipient snapshots
+        // continue to govern any newly learned peer.
+        boolean discoveryNeeded = pendingTargetIds.isEmpty();
+        if (!discoveryNeeded) {
+            for (LanChatStore.Target target : savedTargets) {
+                if (target == null || target.peerId == null || "acked".equals(target.status)) continue;
+                // A missing route needs discovery immediately; an unacknowledged prior
+                // attempt also needs a route refresh in case the peer changed IP silently.
+                if (!hasFreshLanChatPeerRoute(target.peerId) || target.attemptCount > 0) {
+                    discoveryNeeded = true;
+                    break;
+                }
+            }
+        }
+        boolean discoveryDue = discoveryNeeded && (lastPeerDiscoveryAt == 0L
+                || now - lastPeerDiscoveryAt >= LAN_PEER_DISCOVERY_COOLDOWN_MS);
+        boolean shouldDiscoverPeers = discoveryDue
+                && peerDiscoveryInFlight.compareAndSet(false, true);
+
+        // Empty-recipient first delivery must broadcast the chat packet synchronously
+        // within this ordered send. For fixed recipients, discovery is only auxiliary:
+        // resolve its subnet broadcast address on the probe executor, not under the FIFO
+        // transmission lock.
+        // The first-discovery broadcast address was resolved before FIFO admission;
+        // only the actual chat datagrams remain serialized on this ordered send lane.
+        final String[] broadcasts = pendingTargetIds.isEmpty()
+                ? new String[]{preparedBroadcastAddress} : new String[0];
+
+        if (shouldDiscoverPeers) {
+            lastPeerDiscoveryAt = now;
+            String nonce = java.util.UUID.randomUUID().toString();
+            java.util.concurrent.CountDownLatch peerLatch = new java.util.concurrent.CountDownLatch(1);
+            pendingPeerChallenges.put(nonce, peerLatch);
+            if (!registerPendingPeerChallengeIngress(nonce, socket)) {
+                clearPendingPeerChallenge(nonce);
+                peerDiscoveryInFlight.set(false);
+                lastPeerDiscoveryAt = 0L;
+            } else {
+            scheduleLanChatTask("peer-discovery-timeout", () -> {
+                if (pendingPeerChallenges.get(nonce) == peerLatch) {
+                    clearPendingPeerChallenge(nonce);
+                }
+            }, LAN_PEER_CHALLENGE_TIMEOUT_MS);
+            final long discoveryQueuedAt = android.os.SystemClock.elapsedRealtime();
+            try {
+                lanChatProbeExecutor.execute(() -> {
+                    long dispatchStartedAt = android.os.SystemClock.elapsedRealtime();
+                    try {
+                        if (serviceDestroyed || !isCurrentLanChatSocket(socket, socketGeneration)) return;
+                        long broadcastLookupStartedAt = android.os.SystemClock.elapsedRealtime();
+                        final String[] discoveryBroadcasts = broadcasts.length > 0
+                                ? broadcasts : new String[]{getWifiBroadcastAddress()};
+                        long discoveryBroadcastLookupMs = android.os.SystemClock.elapsedRealtime()
+                                - broadcastLookupStartedAt;
+                        if (discoveryBroadcastLookupMs >= 150L) {
+                            FileLogger.log(this, "CHAT", "P2P async discovery broadcast lookup message="
+                                    + messageId + " lookupMs=" + discoveryBroadcastLookupMs);
+                        }
+                        JSONObject helloPacket = LanP2pProtocol.create("peer.hello", myId, "android", "android-main");
+                        helloPacket.put("nonce", nonce);
+                        helloPacket.put("network_scope", getLanProtocolNetworkScope());
+                        helloPacket.put("capabilities", new JSONArray().put("chat.text").put("chat.ack"));
+                        byte[] hello = LanP2pProtocol.encode(helloPacket, RESCUE_SECRET);
+                        for (String target : discoveryBroadcasts) {
+                            if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
+                            for (int peerPort : new int[]{8888, 8887, 8889, 8890}) {
+                                if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
+                                try {
+                                    DatagramPacket packet = new DatagramPacket(hello, hello.length,
+                                            java.net.InetAddress.getByName(target), peerPort);
+                                    sendLanUdpPacket(socket, packet, "PEER_HELLO_" + peerPort);
+                                } catch (Exception e) {
+                                    FileLogger.log(this, "CHAT", "⚠️ P2P 发现广播失败 port="
+                                            + peerPort + ": " + e.getClass().getSimpleName());
+                                }
+                            }
+                        }
+                        long queueMs = dispatchStartedAt - discoveryQueuedAt;
+                        long dispatchMs = android.os.SystemClock.elapsedRealtime() - dispatchStartedAt;
+                        if (queueMs >= 150L || dispatchMs >= 150L) {
+                            FileLogger.log(this, "CHAT", "P2P discovery probe queueMs="
+                                    + queueMs + " dispatchMs=" + dispatchMs
+                                    + " socketGeneration=" + socketGeneration);
+                        }
+                        FileLogger.logD("CHAT", "P2P discovery broadcast dispatched cachedPeers="
+                                + verifiedChatPeers.size());
+                    } catch (Exception e) {
+                        FileLogger.log(this, "CHAT", "⚠️ P2P 发现失败: " + e.getClass().getSimpleName());
+                        lastPeerDiscoveryAt = 0L;
+                    } finally {
+                        // The nonce remains valid for late authenticated peer.ack responses.
+                        peerDiscoveryInFlight.set(false);
+                    }
+                });
+            } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                clearPendingPeerChallenge(nonce);
+                peerDiscoveryInFlight.set(false);
+                lastPeerDiscoveryAt = 0L;
+                FileLogger.log(this, "CHAT", "P2P discovery queue full; retry on next send");
+            }
+            }
+        }
+        routeProbeMs = Math.max(0L, android.os.SystemClock.elapsedRealtime()
+                - routeProbeStartedAt);
+        java.util.Map<String, java.net.InetSocketAddress> dispatchEndpoints = new java.util.HashMap<>();
+        java.util.Map<String, LanChatPathRegistry.RouteBinding> dispatchBindings =
+                new java.util.HashMap<>();
+        java.util.Set<String> verifiedRoutePeerIds = new java.util.HashSet<>();
+        final String preferredChatPath = rescueSocketPathFingerprint;
+        final long routeLookupNow = android.os.SystemClock.elapsedRealtime();
+        for (LanChatStore.Target target : savedTargets) {
+            if (target == null || target.peerId == null || "acked".equals(target.status)) continue;
+            // The selector preserves the O(1) single-listener fast path. It only enumerates
+            // peer routes when multiple listeners are actually registered; path authentication
+            // and the captured socket/generation remain attached to the selected binding.
+            LanChatPathRegistry.RouteBinding liveBinding =
+                    LanAdaptiveRouteSelector.selectPrimaryBinding(
+                            lanChatPathRegistry, target.peerId, preferredChatPath, routeLookupNow);
+            if (liveBinding != null && lanChatPathRegistry.isCurrentBinding(liveBinding)) {
+                dispatchBindings.put(target.peerId, liveBinding);
+                dispatchEndpoints.put(target.peerId, liveBinding.route.endpoint);
+                verifiedRoutePeerIds.add(target.peerId);
+                continue;
+            }
+            // The SQLite endpoint is a directed-challenge candidate by default; only the
+            // narrowly guarded single-listener case below may reuse it for chat payloads.
+            // Compatibility fallback is deliberately narrow: the durable peer row must
+            // carry the exact current listener epoch, the listener must be the only active
+            // chat path, and the endpoint must still be on that path's IPv4 subnet.
+            // Multi-listener topologies continue to require a live path-scoped RouteBinding.
+            LanChatListenerRuntime.Lease cachedLease = preferredChatPath == null
+                    ? null : lanChatListenerRuntime.get(preferredChatPath);
+            LanChatListenerPathPlan cachedPlan = lanChatListenerPathPlan;
+            LanNetworkPath cachedPath = cachedPlan == null ? null : cachedPlan.primary();
+            java.net.Inet4Address cachedPeerAddress =
+                    LanChatCachedRoutePolicy.parseIpv4Literal(target.endpointIp);
+            boolean singleCurrentListener = cachedLease != null && cachedPath != null
+                    && lanChatListenerRuntime.listenerCount() == 1
+                    && lanChatPathRegistry.listenerCount() == 1
+                    && cachedLease.socket == socket
+                    && cachedLease.generation == socketGeneration
+                    && cachedLease.pathFingerprint.equals(preferredChatPath)
+                    && cachedPath.diagnosticFingerprint().equals(preferredChatPath)
+                    && lanChatListenerRuntime.isCurrent(cachedLease)
+                    && isCurrentLanChatSocket(socket, socketGeneration);
+            boolean durableCurrentRoute = cachedPeerAddress != null && target.endpointPort > 0
+                    && store.hasFreshVerifiedPeerRoute(target.peerId, target.endpointIp,
+                            target.endpointPort, System.currentTimeMillis(),
+                            preferredChatPath, socketGeneration, serviceInstanceId);
+            if (LanChatCachedRoutePolicy.isEligible(singleCurrentListener, durableCurrentRoute,
+                    cachedPath == null ? null : cachedPath.localAddress,
+                    cachedPath == null ? 0 : cachedPath.prefixLength, cachedPeerAddress)) {
+                dispatchEndpoints.put(target.peerId, new java.net.InetSocketAddress(
+                        cachedPeerAddress, target.endpointPort));
+                FileLogger.logD("CHAT", "P2P single-listener cached route fallback peer="
+                        + target.peerId + " path=" + preferredChatPath);
+            }
+        }
+        java.util.Set<String> awaitingPeerIds = java.util.Collections.newSetFromMap(
+                new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+        awaitingPeerIds.addAll(dispatchEndpoints.keySet());
+        final int totalPeerCount = pendingTargetIds.size();
+        final int reachablePeerCount = awaitingPeerIds.size();
+        final int verifiedRouteCount = verifiedRoutePeerIds.size();
+
+        boolean firstDiscoveryWindowOpen = false;
+        if (totalPeerCount == 0) {
+            try {
+                firstDiscoveryWindowOpen = store.isDiscoveryPending(messageId);
+            } catch (Exception storageFailure) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN 发现窗口状态复核失败，停止广播以防误投: "
+                        + storageFailure.getClass().getSimpleName());
+                return;
+            }
+        }
+        if (totalPeerCount == 0 && !firstDiscoveryWindowOpen) {
+            FileLogger.log(this, "CHAT", "ℹ️ 消息首次发现窗口已关闭且没有固定目标；禁止向晚加入设备广播旧消息，保留待诊断状态: "
+                    + messageId);
+            return;
+        }
+        java.util.concurrent.CountDownLatch ack = new java.util.concurrent.CountDownLatch(
+                reachablePeerCount > 0 ? reachablePeerCount : (totalPeerCount == 0 ? 1 : 0));
+        pendingChatAckPeers.put(messageId, awaitingPeerIds);
+        pendingChatAckStartedAt.put(messageId, android.os.SystemClock.elapsedRealtime());
+        pendingChatAcks.put(messageId, ack);
+        long preparationMs = android.os.SystemClock.elapsedRealtime() - preparationStartedAt;
+        if (preparationMs >= 100L) {
+            FileLogger.log(this, "CHAT", "P2P 发送锁内准备耗时 message=" + messageId
+                    + " lockMs=" + preparationMs
+                    + " preLockBroadcastLookupMs=" + broadcastLookupMs
+                    + " preLockTargetDbMs=" + targetLoadMs
+                    + " routeProbeMs=" + routeProbeMs
+                    + " preLockPacketBuildMs=" + packetBuildMs
+                    + " otherLockMs=" + Math.max(0L, preparationMs - routeProbeMs));
+        }
+        FileLogger.log(this, "CHAT", "⏱️ P2P UDP 开始发送，固定目标 " + totalPeerCount
+                + "，已验证路径路由 " + verifiedRouteCount + "，待路径验证目标 "
+                + Math.max(0, totalPeerCount - reachablePeerCount) + "，消息 " + messageId);
+        long ackLoopStartedAt = android.os.SystemClock.elapsedRealtime();
+        java.util.concurrent.atomic.AtomicBoolean hadUdpDispatchAttempt =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        boolean ackCleanupDeferred = false;
+        try {
+            if (totalPeerCount == 0 && !socket.isClosed()) {
+                // Broadcast is permitted only inside the original discovery window. Long
+                // broadcast messages are sent as fragments; final chat.ack still adds the
+                // actual responder to the durable recipient ledger within that window.
+                for (String target : broadcasts) {
+                    if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
+                    for (int peerPort : new int[]{8888, 8887, 8889, 8890}) {
+                        if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
+                        try {
+                            if (preparedBroadcastData != null) {
+                                DatagramPacket p = new DatagramPacket(preparedBroadcastData, preparedBroadcastData.length,
+                                        java.net.InetAddress.getByName(target), peerPort);
+                                hadUdpDispatchAttempt.set(true);
+                                sendLanUdpPacket(socket, p, "CHAT_BROADCAST_" + peerPort);
+                            } else if (preparedBroadcastFragments != null) {
+                                // Broadcast only the first bounded flight. Authenticated
+                                // fragment ACKs can admit a message-scoped temporary target;
+                                // subsequent windows are selectively unicast to that endpoint.
+                                int firstWindowEnd = Math.min(preparedBroadcastFragments.size(), 8);
+                                for (int i = 0; i < firstWindowEnd; i++) {
+                                    if (!isCurrentLanChatSocket(socket, socketGeneration)) break;
+                                    byte[] fragmentPacket = preparedBroadcastFragments.get(i);
+                                    DatagramPacket p = new DatagramPacket(fragmentPacket,
+                                            fragmentPacket.length,
+                                            java.net.InetAddress.getByName(target), peerPort);
+                                    hadUdpDispatchAttempt.set(true);
+                                    sendLanUdpPacket(socket, p, "CHAT_FRAGMENT_BROADCAST_WINDOW_" + peerPort);
+                                }
+                            }
+                        } catch (Exception e) {
+                            FileLogger.log(this, "CHAT", "⚠️ P2P 广播失败 port="
+                                    + peerPort + ": " + e.getMessage());
+                        }
+                    }
+                }
+            } else if (reachablePeerCount > 0) {
+                for (int attempt = 1; attempt <= 1 && ack.getCount() > 0; attempt++) {
+                    if (socket.isClosed()) break;
+                    for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
+                        LanChatPathRegistry.RouteBinding routeBinding = dispatchBindings.get(peerId);
+                        DatagramSocket peerSocket = routeBinding == null ? socket : routeBinding.listener.socket;
+                        java.net.InetSocketAddress peer = dispatchEndpoints.get(peerId);
+                        if (peer == null || !isCurrentLanChatTargetBinding(
+                                routeBinding, socket, socketGeneration, peerId, peer)) continue;
+                        try {
+                            // Resolve the immutable packet before charging the durable send budget.
+                            // A missing prebuilt frame is a local preparation failure, not a UDP attempt.
+                            byte[] peerData = preparedPeerPackets.get(peerId);
+                            java.util.List<byte[]> peerFragments = preparedPeerFragmentPackets.get(peerId);
+                            if (peerData == null) {
+                                if (peerFragments == null || peerFragments.isEmpty()) {
+                                    FileLogger.log(this, "CHAT", "⚠️ P2P 缺少预编码目标数据包，保留发送预算 peer="
+                                            + peerId + " message=" + messageId);
+                                    continue;
+                                }
+                            }
+                            String attemptedEndpoint = peer.getAddress().getHostAddress() + ":" + peer.getPort();
+                            if (peerFragments != null) {
+                                if (!store.initializeTargetFragmentProgress(messageId, peerId, peerFragments.size())) {
+                                    FileLogger.log(this, "CHAT", "⚠️ 分片进度初始化失败，停止目标发送 message="
+                                            + messageId + " peer=" + peerId);
+                                    continue;
+                                }
+                            }
+                            // markAttempt() durably records only the attempted endpoint; the
+                            // last_attempt_endpoint reservation is not ACK evidence. Only
+                            // last_sent_endpoint after a successful UDP send (or a verified route)
+                            // may authorize a delayed chat.ack / chat.fragment.ack.
+                            // Persist the exact endpoint before UDP dispatch and revalidate the
+                            // immutable recipient snapshot immediately before any datagram.
+                            if (!isCurrentLanChatTargetBinding(routeBinding, socket, socketGeneration, peerId, peer)) {
+                                FileLogger.logD("CHAT", "P2P route binding expired before dispatch peer=" + peerId);
+                                continue;
+                            }
+                            long targetAttemptDbStartedAt = android.os.SystemClock.elapsedRealtime();
+                            boolean targetAttemptAllowed;
+                            try {
+                                targetAttemptAllowed = store != null
+                                        && store.markAttempt(messageId, peerId, attemptedEndpoint, "");
+                            } finally {
+                                long targetAttemptDbMs = android.os.SystemClock.elapsedRealtime() - targetAttemptDbStartedAt;
+                                if (targetAttemptDbMs >= 50L) {
+                                    FileLogger.log(this, "CHAT", "P2P SQLite target attempt message="
+                                            + messageId + " peer=" + peerId + " dbMs=" + targetAttemptDbMs);
+                                }
+                            }
+                            if (!targetAttemptAllowed) continue;
+                            boolean dispatchedAny = false;
+                            if (peerData != null) {
+                                DatagramPacket p = new DatagramPacket(peerData, peerData.length,
+                                        peer.getAddress(), peer.getPort());
+                                if (!isCurrentLanChatTargetBinding(routeBinding, socket, socketGeneration, peerId, peer))
+                                    throw new java.net.SocketException("stale LAN route binding");
+                                hadUdpDispatchAttempt.set(true);
+                                sendLanUdpPacket(peerSocket, p, verifiedRoutePeerIds.contains(peerId)
+                                        ? "CHAT_UNICAST_VERIFIED" : "CHAT_UNICAST_CACHED_ENDPOINT");
+                                dispatchedAny = true;
+                            } else {
+                                String bitmap = store.loadTargetFragmentAckBitmap(messageId, peerId);
+                                if (bitmap == null || bitmap.length() != peerFragments.size()) {
+                                    FileLogger.log(this, "CHAT", "⚠️ 分片 ACK 位图缺失/不一致，拒绝发送 message="
+                                            + messageId + " peer=" + peerId);
+                                    continue;
+                                }
+                                int firstMissing = -1;
+                                for (int i = 0; i < bitmap.length(); i++) {
+                                    if (bitmap.charAt(i) == '0') { firstMissing = i; break; }
+                                }
+                                // Keep retry windows aligned with the original 8-fragment
+                                // flight boundaries. Starting at an arbitrary firstMissing index
+                                // after a lost tail fragment would shift the window and make the
+                                // ACK-driven boundary detector wait for a whole-message retry.
+                                int windowStart = firstMissing >= 0
+                                        ? (firstMissing / 8) * 8 : peerFragments.size() - 1;
+                                int windowEnd = Math.min(peerFragments.size(), windowStart + 8);
+                                // Bounded selective-repeat window. Already ACKed fragments are
+                                // skipped; when all are ACKed, resend the final fragment as a
+                                // completion probe until the whole-message chat.ack arrives.
+                                for (int i = windowStart; i < windowEnd; i++) {
+                                    if (!isCurrentLanChatTargetBinding(routeBinding, socket, socketGeneration, peerId, peer)) break;
+                                    if (bitmap.charAt(i) == '1') continue;
+                                    byte[] fragmentPacket = peerFragments.get(i);
+                                    DatagramPacket p = new DatagramPacket(fragmentPacket,
+                                            fragmentPacket.length, peer.getAddress(), peer.getPort());
+                                    hadUdpDispatchAttempt.set(true);
+                                    sendLanUdpPacket(peerSocket, p, verifiedRoutePeerIds.contains(peerId)
+                                            ? "CHAT_FRAGMENT_UNICAST_VERIFIED"
+                                            : "CHAT_FRAGMENT_UNICAST_CACHED_ENDPOINT");
+                                    dispatchedAny = true;
+                                }
+                                if (!dispatchedAny && firstMissing < 0) {
+                                    byte[] finalProbe = peerFragments.get(peerFragments.size() - 1);
+                                    DatagramPacket p = new DatagramPacket(finalProbe, finalProbe.length,
+                                            peer.getAddress(), peer.getPort());
+                                    if (!isCurrentLanChatTargetBinding(routeBinding, socket, socketGeneration, peerId, peer))
+                                        throw new java.net.SocketException("stale LAN route binding");
+                                    hadUdpDispatchAttempt.set(true);
+                                    sendLanUdpPacket(peerSocket, p, "CHAT_FRAGMENT_COMPLETION_PROBE");
+                                    dispatchedAny = true;
+                                }
+                                FileLogger.logD("CHAT", "P2P fragment window message=" + messageId
+                                        + " peer=" + peerId + " start=" + windowStart
+                                        + " end=" + windowEnd + " count=" + peerFragments.size()
+                                        + " dispatched=" + dispatchedAny);
+                            }
+                            if (!dispatchedAny) continue;
+                            final String successfulEndpoint = peer.getAddress().getHostAddress() + ":" + peer.getPort();
+                            final LanChatStore endpointStore = store;
+                            try {
+                                lanChatPeerExecutor.execute(() -> {
+                                    long endpointPersistStartedAt = android.os.SystemClock.elapsedRealtime();
+                                    boolean endpointPersisted = endpointStore != null
+                                            && endpointStore.recordSuccessfulSendEndpoint(
+                                                    messageId, peerId, successfulEndpoint);
+                                    long endpointPersistMs = android.os.SystemClock.elapsedRealtime()
+                                            - endpointPersistStartedAt;
+                                    if (!endpointPersisted || endpointPersistMs >= 50L) {
+                                        FileLogger.log(this, "CHAT", "P2P async SQLite send-endpoint message="
+                                                + messageId + " peer=" + peerId
+                                                + " persisted=" + endpointPersisted
+                                                + " dbMs=" + endpointPersistMs);
+                                    }
+                                });
+                            } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                                boolean endpointPersisted = endpointStore != null
+                                        && endpointStore.recordSuccessfulSendEndpoint(
+                                                messageId, peerId, successfulEndpoint);
+                                if (!endpointPersisted) {
+                                    FileLogger.log(this, "CHAT", "⚠️ P2P 成功发送端点记账延后失败 message="
+                                            + messageId + " peer=" + peerId);
+                                }
+                            }
+                        } catch (Exception e) {
+                            final String sendError = e.getClass().getSimpleName();
+                            final LanChatStore errorStore = store;
+                            try {
+                                lanChatPeerExecutor.execute(() -> {
+                                    if (errorStore != null) {
+                                        errorStore.recordTargetSendError(messageId, peerId, sendError);
+                                    }
+                                });
+                            } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                                // Attempt count and exact endpoint were already committed pre-send.
+                            }
+                            FileLogger.log(this, "CHAT", "⚠️ P2P 单播失败: " + e.getMessage());
+                        }
+                    }
+
+                }
+            } else {
+                FileLogger.log(this, "CHAT", "ℹ️ 固定目标当前均离线，保留逐设备待送达记录: " + messageId);
+            }
+            final java.util.Set<String> completionAwaitingPeerIds = awaitingPeerIds;
+            final java.util.concurrent.CountDownLatch completionAck = ack;
+            final int completionTotalPeerCount = totalPeerCount;
+            final int completionReachablePeerCount = reachablePeerCount;
+            final LanChatStore completionStore = store;
+            final long completionStartedAt = ackLoopStartedAt;
+            // Publish the grace state before scheduling: a fast scheduler must never
+            // observe the task before the retry gate knows this message is still active.
+            lanChatAckGraceInFlight.add(messageId);
+            ackCleanupDeferred = true;
+            boolean completionScheduled = scheduleLanChatTask("chat-ack-grace-" + messageId, () -> {
+                Runnable completion = () -> completeLanChatAckWindow(messageId,
+                        completionAwaitingPeerIds, completionAck,
+                        completionTotalPeerCount, completionReachablePeerCount,
+                        completionStore, completionStartedAt, hadUdpDispatchAttempt.get());
+                try {
+                    lanChatIoExecutor.execute(completion);
+                } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                    completion.run();
+                }
+            }, 250L);
+            if (!completionScheduled) {
+                lanChatAckGraceInFlight.remove(messageId);
+                ackCleanupDeferred = false;
+                completeLanChatAckWindow(messageId, completionAwaitingPeerIds,
+                        completionAck, completionTotalPeerCount,
+                        completionReachablePeerCount, completionStore, completionStartedAt,
+                        hadUdpDispatchAttempt.get());
+            }
+        } finally {
+            if (!ackCleanupDeferred) {
+                pendingChatAcks.remove(messageId);
+                pendingChatAckPeers.remove(messageId);
+                pendingChatAckStartedAt.remove(messageId);
+            }
+        }
+    }
+
+    /**
+     * Complete the short ACK observation window away from the FIFO sender.
+     * UDP dispatch remains ordered, while ACK persistence continues on LanChat-IO.
+     */
+    private void completeLanChatAckWindow(String messageId,
+            java.util.Set<String> awaitingPeerIds,
+            java.util.concurrent.CountDownLatch ack,
+            int totalPeerCount, int reachablePeerCount,
+            LanChatStore store, long ackStartedAt, boolean hadUdpDispatchAttempt) {
+        boolean requestRouteRefresh = false;
+        try {
+            long elapsed = android.os.SystemClock.elapsedRealtime() - ackStartedAt;
+            LanChatStore.AckProgress durableProgress = store == null
+                    ? null : store.getTargetAckProgress(messageId);
+            String durableAckProgress = durableProgress == null ? "unavailable"
+                    : durableProgress.ackedTargets + "/" + durableProgress.totalTargets;
+            boolean persistedAllTargetsAcked = store != null && store.allTargetsAcked(messageId);
+            if (totalPeerCount == 0) {
+                if (ack.getCount() == 0) {
+                    lastPeerDiscoveryAt = 0L;
+                    FileLogger.log(this, "CHAT", "ℹ️ P2P 广播至少一个接收端已确认，但成员名单未建立；"
+                            + "保留消息并等待逐设备目标建立: " + messageId);
+                } else {
+                    FileLogger.log(this, "CHAT", "⚠️ P2P 广播暂未收到 ACK，消息保留待确认队列: " + messageId);
+                    // Empty-recipient first discovery has no per-peer attempt row. Re-send
+                    // the same durable message at 250ms intervals for a short initial burst,
+                    // then return to the normal persisted exponential retry schedule.
+                    int discoveryAttempts = store == null ? -1
+                            : store.getOutboxRetryAttemptCount(messageId);
+                    if (hadUdpDispatchAttempt && discoveryAttempts > 0 && discoveryAttempts < 3) {
+                        lastPeerDiscoveryAt = 0L;
+                        requestRouteRefresh = true;
+                    }
+                }
+            } else if (persistedAllTargetsAcked) {
+                // ACK completion runs on the IO lane; keep synchronous compatibility-file
+                // commits on the dedicated peer maintenance lane instead.
+                scheduleLanChatMirrorCleanup(messageId);
+                FileLogger.log(this, "CHAT", "✅ P2P 固定目标全部持久化 ACK: "
+                        + durableAckProgress + "，消息 " + messageId);
+            } else {
+                // A missing message ACK does not revoke a verified route, but it does
+                // justify one bounded subnet discovery. This catches silent peer-IP changes.
+                // Re-arm only if a packet was actually attempted (or no endpoint existed);
+                // a retry rejected by attempt backoff must not create a tight wake loop.
+                if (hadUdpDispatchAttempt || reachablePeerCount == 0) {
+                    lastPeerDiscoveryAt = 0L;
+                    requestRouteRefresh = true;
+                }
+                FileLogger.log(this, "CHAT", "⚠️ P2P 消息仍待确认并保留本地队列: "
+                        + durableAckProgress + "，保留已验证路由并触发有界路由刷新，消息 " + messageId);
+            }
+            if (elapsed >= 400L) {
+                FileLogger.logD("CHAT", "P2P ACK grace elapsedMs=" + elapsed
+                        + " remaining=" + ack.getCount() + "/" + totalPeerCount
+                        + " message=" + messageId);
+            }
+        } catch (Exception e) {
+            FileLogger.log(this, "CHAT", "⚠️ LAN ACK 观察窗口收尾失败 message="
+                    + messageId + " error=" + e.getClass().getSimpleName());
+        } finally {
+            pendingChatAcks.remove(messageId);
+            pendingChatAckPeers.remove(messageId);
+            pendingChatAckStartedAt.remove(messageId);
+            lanChatAckGraceInFlight.remove(messageId);
+            activeLanChatTransmissions.remove(messageId);
+        }
+        if (requestRouteRefresh && !serviceDestroyed) {
+            lanChatRouteRefreshPending.set(true);
+            // A missing ACK is not proof of network/peer recovery. Coalesce a planner request
+            // and let the persisted Outbox backoff choose the next full scan instead of
+            // immediately restarting the entire Outbox from every 250ms ACK window.
+            requestLanChatRetryPlan();
+        } else if (!serviceDestroyed) {
+            // Arm the durable backoff only after the short ACK/fast-retry decision has
+            // completed; this prevents an early timer from bypassing the intended 10s tier.
+            requestLanChatRetryPlan();
+        }
+    }
+
+    /**
+     * DatagramSocket is thread-safe; do not serialize unrelated chat, ACK and peer sends
+     * on the socket monitor. A concurrent close is surfaced as IOException and the durable
+     * outbox retains the message for the next valid socket generation.
+     */
+    private void sendLanUdpPacket(DatagramSocket socket, DatagramPacket packet, String kind)
+            throws java.io.IOException {
+        if (socket == null || socket.isClosed()) {
+            throw new java.net.SocketException("UDP socket closed before send");
+        }
+        long sendStarted = android.os.SystemClock.elapsedRealtime();
+        socket.send(packet);
+        long sendMs = android.os.SystemClock.elapsedRealtime() - sendStarted;
+        if (sendMs >= 250L) {
+            FileLogger.log(this, "UDP", "P2P UDP slow dispatch kind=" + kind
+                    + " sendMs=" + sendMs + " bytes=" + packet.getLength());
+        } else if (sendMs >= 50L) {
+            FileLogger.logD("UDP", "slow send kind=" + kind
+                    + " sendMs=" + sendMs + " bytes=" + packet.getLength());
+        }
+    }
+
+    /** Broadcast one authenticated peer beacon when the listener starts or the LAN route changes. */
+    private void broadcastLanPeerHello() {
+        if (!hasUsableWifiLanPath()) return;
+        DatagramSocket socket = rescueSocketRef;
+        if (serviceDestroyed || socket == null || socket.isClosed()) return;
+        LanChatListenerPathPlan currentPlan = lanChatListenerPathPlan;
+        String broadcast;
+        if (currentPlan != null
+                && currentPlan.primary().kind == LanNetworkPath.Kind.LOCAL_INTERFACE_CANDIDATE) {
+            java.net.Inet4Address candidateBroadcast = currentPlan.primary().broadcastAddress;
+            if (candidateBroadcast == null) return;
+            broadcast = candidateBroadcast.getHostAddress();
+        } else {
+            broadcast = getWifiBroadcastAddress();
+            if (broadcast == null || broadcast.isEmpty()) broadcast = "255.255.255.255";
+        }
+        sendPeerHello(socket, broadcast, new int[]{8888, 8887, 8889, 8890},
+                false, null, null);
+    }
+
+    /** Send a one-way challenge to a peer that announced itself; it cannot trigger a challenge loop. */
+    private void sendDirectedPeerChallenge(DatagramSocket socket, String expectedPeerId,
+                                            java.net.InetAddress address, int port) {
+        if (serviceDestroyed || socket == null || socket.isClosed() || address == null
+                || expectedPeerId == null || expectedPeerId.isEmpty()
+                || !(port == 8888 || port == 8887 || port == 8889 || port == 8890)) return;
+        if (pendingPeerChallengeExpectedIds.containsValue(expectedPeerId)) return;
+        sendPeerHello(socket, address.getHostAddress(), new int[]{port}, true,
+                expectedPeerId, new java.net.InetSocketAddress(address, port));
+    }
+
+    private boolean registerPendingPeerChallengeIngress(String nonce, DatagramSocket socket) {
+        if (nonce == null || nonce.isEmpty() || socket == null || socket.isClosed()) return false;
+        for (LanChatListenerRuntime.Lease lease : lanChatListenerRuntime.snapshot()) {
+            if (lease != null && lease.socket == socket && lanChatListenerRuntime.isCurrent(lease)) {
+                pendingPeerChallengeIngress.put(nonce, new PendingPeerChallengeIngress(
+                        lease.pathFingerprint, socket, lease.generation));
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void clearPendingPeerChallenge(String nonce) {
+        if (nonce == null || nonce.isEmpty()) return;
+        pendingPeerChallenges.remove(nonce);
+        pendingPeerChallengeIngress.remove(nonce);
+        pendingPeerChallengeExpectedIds.remove(nonce);
+        pendingPeerChallengeExpectedEndpoints.remove(nonce);
+    }
+
+    private void sendPeerHello(DatagramSocket socket, String address, int[] ports, boolean challengeOnly) {
+        sendPeerHello(socket, address, ports, challengeOnly, null, null);
+    }
+
+    private void sendPeerHello(DatagramSocket socket, String address, int[] ports, boolean challengeOnly,
+                               String expectedPeerId,
+                               java.net.InetSocketAddress expectedEndpoint) {
+        String nonce = java.util.UUID.randomUUID().toString();
+        java.util.concurrent.CountDownLatch challengeLatch =
+                new java.util.concurrent.CountDownLatch(1);
+        pendingPeerChallenges.put(nonce, challengeLatch);
+        if (!registerPendingPeerChallengeIngress(nonce, socket)) {
+            clearPendingPeerChallenge(nonce);
+            return;
+        }
+        if (expectedPeerId != null && expectedEndpoint != null) {
+            pendingPeerChallengeExpectedIds.put(nonce, expectedPeerId);
+            pendingPeerChallengeExpectedEndpoints.put(nonce, expectedEndpoint);
+        }
+        try {
+            JSONObject hello = LanP2pProtocol.create("peer.hello", getUniqueDeviceId(), "android", "android-main");
+            hello.put("nonce", nonce);
+            hello.put("listen_port", 8888);
+            hello.put("challenge_only", challengeOnly);
+            hello.put("network_scope", getLanProtocolNetworkScope());
+            hello.put("capabilities", new JSONArray().put("chat.text").put("chat.ack"));
+            byte[] bytes = LanP2pProtocol.encode(hello, RESCUE_SECRET);
+            for (int port : ports) {
+                try {
+                    DatagramPacket packet = new DatagramPacket(bytes, bytes.length,
+                            java.net.InetAddress.getByName(address), port);
+                    sendLanUdpPacket(socket, packet, "PEER_BEACON_" + port);
+                } catch (Exception e) {
+                    FileLogger.logD("CHAT", "LAN peer beacon send failed port=" + port
+                            + " error=" + e.getClass().getSimpleName());
+                }
+            }
+        } catch (Exception e) {
+            clearPendingPeerChallenge(nonce);
+            FileLogger.log(this, "CHAT", "LAN peer beacon creation failed: "
+                    + e.getClass().getSimpleName() + " reason=" + e.getMessage());
+            return;
+        }
+        scheduleLanChatTask("peer-challenge-timeout", () -> {
+            if (pendingPeerChallenges.get(nonce) == challengeLatch) {
+                clearPendingPeerChallenge(nonce);
+            }
+        }, LAN_PEER_CHALLENGE_TIMEOUT_MS);
+        FileLogger.log(this, "CHAT", "P2P peer.hello TX broadcast=" + address
+                + " ports=" + ports.length + " path=" + lanChatPathFingerprintForSocket(socket));
+    }
+
+    private String lanChatPathFingerprintForSocket(DatagramSocket socket) {
+        if (socket == null) return "none";
+        for (LanChatListenerRuntime.Lease lease : lanChatListenerRuntime.snapshot()) {
+            if (lease != null && lease.socket == socket && lanChatListenerRuntime.isCurrent(lease))
+                return lease.pathFingerprint;
+        }
+        return "unregistered";
+    }
+
+    /**
+     * 实时 LAN 控制包快路径：握手和聊天 ACK 在普通控制指令分发之前完成。
+     * 返回 true 表示该包已处理；不创建线程、不做磁盘 I/O、不执行 UI/业务命令。
+     */
+    private byte[] buildAuthenticatedLanChatPacket(String senderId, String targetPeerId,
+                                                           String messageId, String body) throws Exception {
+        JSONObject packet = LanP2pProtocol.create("chat.message", senderId, "android", "android-main");
+        packet.put("message_id", messageId);
+        packet.put("target_peer_id", targetPeerId);
+        packet.put("created_at_ms", System.currentTimeMillis());
+        packet.put("body", body);
+        return LanP2pProtocol.encode(packet, RESCUE_SECRET);
+    }
+
+    /** Build one logical long message as independently authenticated, MTU-bounded fragments. */
+    private java.util.List<byte[]> buildAuthenticatedLanChatFragmentPackets(
+            String senderId, String targetPeerId, String messageId, String body,
+            long createdAtMs) throws Exception {
+        java.util.List<LanP2pFragments.Fragment> fragments = LanP2pFragments.split(body);
+        java.util.List<byte[]> packets = new java.util.ArrayList<>(fragments.size());
+        if (createdAtMs <= 0L) throw new IllegalArgumentException("Invalid stable chat timestamp");
+        for (LanP2pFragments.Fragment fragment : fragments) {
+            JSONObject packet = LanP2pProtocol.create(
+                    "chat.fragment", senderId, "android", "android-main");
+            packet.put("message_id", messageId);
+            packet.put("target_peer_id", targetPeerId);
+            packet.put("created_at_ms", createdAtMs);
+            packet.put("fragment_index", fragment.index);
+            packet.put("fragment_count", fragment.count);
+            packet.put("total_bytes", fragment.totalBytes);
+            packet.put("sha256", fragment.sha256);
+            packet.put("fragment_data", fragment.base64Data);
+            byte[] encoded = LanP2pProtocol.encode(packet, RESCUE_SECRET);
+            if (encoded.length > LanP2pProtocol.MAX_DATAGRAM_BYTES) {
+                throw new IllegalArgumentException("Authenticated chat fragment exceeds UDP datagram limit");
+            }
+            packets.add(encoded);
+        }
+        return packets;
+    }
+
+    private boolean handleAuthenticatedLanPacket(DatagramSocket socket, DatagramPacket packet,
+                                                   JSONObject envelope, long packetReceivedAtElapsedMs,
+                                                   String listenerPathFingerprint, long listenerGeneration) {
+        try {
+            String type = envelope.optString("type", "");
+            String senderId = envelope.optString("sender_peer_id", "");
+            String serviceId = envelope.optString("service_id", "");
+            long now = System.currentTimeMillis();
+            // Only ACK frames need an ingress ownership snapshot. Keep ordinary chat,
+            // fragments, and peer-control packets off this additional Registry lookup.
+            // The receive loop passes its immutable path/generation snapshot. Never consult
+            // rescueSocketPathFingerprint here: that field belongs to the legacy single-listener
+            // publication slot and would misattribute packets once STA/AP listeners coexist.
+            final boolean isAckFrame = "peer.ack".equals(type) || "chat.ack".equals(type)
+                    || "chat.fragment.ack".equals(type);
+            final LanChatPathRegistry.Listener ingressListener = isAckFrame
+                    && listenerPathFingerprint != null
+                    ? lanChatPathRegistry.getListener(listenerPathFingerprint) : null;
+            final String ackIngressPath = ingressListener != null
+                    && ingressListener.socket == socket
+                    && ingressListener.generation == listenerGeneration
+                    && ingressListener.pathFingerprint.equals(listenerPathFingerprint)
+                    && ingressListener.isUsable() ? listenerPathFingerprint : null;
+            final long ackIngressGeneration = ackIngressPath == null ? -1L : listenerGeneration;
+            if ("peer.hello".equals(type)) {
+                int sourcePort = packet.getPort();
+                if (senderId.isEmpty() || senderId.equals(getUniqueDeviceId())
+                        || envelope.optString("nonce", "").isEmpty()
+                        || !(sourcePort == 8888 || sourcePort == 8887
+                             || sourcePort == 8889 || sourcePort == 8890)) return true;
+                final java.net.InetAddress peerAddress = packet.getAddress();
+                JSONObject reply = LanP2pProtocol.create("peer.ack", getUniqueDeviceId(),
+                        "android", "android-main");
+                reply.put("reply_nonce", envelope.optString("nonce", ""));
+                reply.put("listen_port", 8888);
+                byte[] bytes = LanP2pProtocol.encode(reply, RESCUE_SECRET);
+                DatagramPacket response = new DatagramPacket(bytes, bytes.length,
+                        peerAddress, sourcePort);
+
+                // A HELLO is authenticated presence, not yet a verified return route.
+                // Commit it as suspect before replying; otherwise the other side could trust
+                // a peer that failed to retain the route needed for its own retry path.
+                LanChatStore store = lanChatStore;
+                if (store == null) return true;
+                final String peerType = envelope.optString("sender_peer_type", "unknown");
+                final String peerNetwork = envelope.optString("network_scope", "");
+                final String peerIp = peerAddress.getHostAddress();
+                final boolean challengeOnly = envelope.optBoolean("challenge_only", false);
+                final String helloIngressPath = listenerPathFingerprint;
+                final long helloIngressGeneration = listenerGeneration;
+                try {
+                    lanChatPeerExecutor.execute(() -> {
+                        long peerQueueMs = android.os.SystemClock.elapsedRealtime()
+                                - packetReceivedAtElapsedMs;
+                        FileLogger.log(this, "CHAT", "P2P peer.hello RX peer=" + senderId
+                                + " source=" + peerIp + ":" + sourcePort
+                                + " path=" + (helloIngressPath == null ? "legacy" : helloIngressPath));
+                        if (peerQueueMs >= 150L) {
+                            FileLogger.log(this, "CHAT", "P2P peer.hello peer queueMs="
+                                    + peerQueueMs + " peer=" + senderId);
+                        }
+                        try {
+                            // A queued HELLO must not mutate peer state or send a reply after
+                            // the exact ingress listener has been replaced. Path-less legacy
+                            // ingress remains compatible only when no path identity exists.
+                            if (helloIngressPath != null
+                                    && !isCurrentLanChatIngress(helloIngressPath, socket,
+                                            helloIngressGeneration)) return;
+                            if (!store.observePeer(senderId, peerType, serviceId, peerNetwork,
+                                    peerIp, sourcePort, now, now + 120_000L)) {
+                                FileLogger.log(this, "CHAT", "⚠️ peer HELLO 持久化未确认，不发送 peer.ack peer="
+                                        + senderId + " path=" + helloIngressPath);
+                                return;
+                            }
+                            if (helloIngressPath != null
+                                    && !isCurrentLanChatIngress(helloIngressPath, socket,
+                                            helloIngressGeneration)) return;
+                            sendLanUdpPacket(socket, response, "PEER_ACK_V2");
+                            FileLogger.log(this, "CHAT", "P2P peer.ack TX peer=" + senderId
+                                    + " target=" + peerAddress.getHostAddress() + ":" + sourcePort
+                                    + " path=" + (helloIngressPath == null ? "legacy" : helloIngressPath));
+                            // A normal beacon also challenges its sender once, allowing an
+                            // existing sender to rediscover this device and resume its outbox.
+                            // challenge_only prevents challenge ping-pong.
+                            if (!challengeOnly) {
+                                boolean sameRoute = false;
+                                if (helloIngressPath != null && helloIngressGeneration >= 0L) {
+                                    sameRoute = lanChatPathRegistry.findCurrentPeerRouteBinding(
+                                            senderId, helloIngressPath, socket, helloIngressGeneration,
+                                            new java.net.InetSocketAddress(peerAddress, sourcePort),
+                                            android.os.SystemClock.elapsedRealtime()) != null;
+                                } else if (lanChatPathRegistry.listenerCount() <= 1) {
+                                    // Preserve the path-less legacy bridge only for one listener.
+                                    java.net.InetSocketAddress verified = verifiedChatPeers.get(senderId);
+                                    sameRoute = verified != null
+                                            && verified.getAddress().equals(peerAddress)
+                                            && verified.getPort() == sourcePort;
+                                }
+                                if (!sameRoute) sendDirectedPeerChallenge(socket, senderId, peerAddress, sourcePort);
+                            }
+                        } catch (Exception persistOrSendError) {
+                            FileLogger.log(this, "CHAT", "⚠️ peer HELLO 未能持久化/应答: "
+                                    + persistOrSendError.getClass().getSimpleName());
+                        }
+                    });
+                } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                    FileLogger.log(this, "CHAT", "⚠️ peer HELLO 队列已满，暂不确认，等待对端重发");
+                }
+                return true;
+            }
+            if ("peer.ack".equals(type)) {
+                // A challenge response without a live ingress lease cannot establish a
+                // path-scoped route or promote a peer-wide endpoint.
+                if (ackIngressPath == null || ackIngressGeneration < 0L) return true;
+                String nonce = envelope.optString("reply_nonce", "");
+                java.util.concurrent.CountDownLatch latch = pendingPeerChallenges.get(nonce);
+                PendingPeerChallengeIngress challengeIngress = pendingPeerChallengeIngress.get(nonce);
+                if (challengeIngress == null
+                        || !challengeIngress.matches(ackIngressPath, socket, ackIngressGeneration)
+                        || !isCurrentLanChatIngress(challengeIngress.pathFingerprint,
+                                challengeIngress.socket, challengeIngress.generation)) return true;
+                int port = packet.getPort();
+                final java.net.InetAddress peerAddress = packet.getAddress();
+                String expectedPeerId = pendingPeerChallengeExpectedIds.get(nonce);
+                java.net.InetSocketAddress expectedEndpoint =
+                        pendingPeerChallengeExpectedEndpoints.get(nonce);
+                boolean validStandardPort = port == 8888 || port == 8887
+                        || port == 8889 || port == 8890;
+                boolean directedChallengeMatches = expectedPeerId == null
+                        ? expectedEndpoint == null
+                        : expectedPeerId.equals(senderId) && expectedEndpoint != null
+                        && expectedEndpoint.getAddress().equals(peerAddress)
+                        && expectedEndpoint.getPort() == port;
+                if (latch != null && !senderId.isEmpty() && !senderId.equals(getUniqueDeviceId())
+                        && validStandardPort && directedChallengeMatches) {
+                    // Directed challenges are single-use; broadcast nonces remain open briefly
+                    // so every peer in the bounded discovery window can be collected.
+                    if (expectedPeerId != null) {
+                        if (!pendingPeerChallenges.remove(nonce, latch)) return true;
+                        pendingPeerChallengeIngress.remove(nonce, challengeIngress);
+                        pendingPeerChallengeExpectedIds.remove(nonce);
+                        pendingPeerChallengeExpectedEndpoints.remove(nonce);
+                    }
+                    LanChatStore store = lanChatStore;
+                    if (store == null) return true;
+                    final String peerType = envelope.optString("sender_peer_type", "unknown");
+                    final String peerNetwork = envelope.optString("network_scope", "");
+                    // Preserve the path identity of the socket that received peer.ack;
+                    // never infer it later from whichever listener happens to be current.
+                    final String verifiedPathFingerprint = ackIngressPath;
+                    final long verifiedListenerGeneration = ackIngressGeneration;
+                    try {
+                        lanChatControlExecutor.execute(() -> {
+                            // The ACK may wait in this queue while its ingress path is replaced.
+                            if (!isCurrentLanChatIngress(verifiedPathFingerprint, socket,
+                                    verifiedListenerGeneration)) return;
+                            long controlQueueMs = android.os.SystemClock.elapsedRealtime()
+                                    - packetReceivedAtElapsedMs;
+                            if (controlQueueMs >= 150L) {
+                                FileLogger.log(this, "CHAT", "P2P peer.ack control queueMs="
+                                        + controlQueueMs + " peer=" + senderId);
+                            }
+                            boolean persisted = store.upsertPeer(senderId, peerType, serviceId,
+                                    peerNetwork, peerAddress.getHostAddress(), port, now, now + 120_000L,
+                                    verifiedPathFingerprint, verifiedListenerGeneration, serviceInstanceId);
+                            if (!persisted) {
+                                FileLogger.log(this, "CHAT", "⚠️ peer.ack 路由持久化失败，暂不启用单播 peer="
+                                        + senderId + " path=" + verifiedPathFingerprint);
+                                return;
+                            }
+                            // The listener may be replaced while the durable peer write runs.
+                            // Do not promote global peer state or release waiters for a stale epoch.
+                            if (!isCurrentLanChatIngress(verifiedPathFingerprint, socket,
+                                    verifiedListenerGeneration)) return;
+                            // Mirror the durable authenticated route into the path-scoped registry.
+                            {
+                                try {
+                                    // Registry leases and ACK freshness use elapsed realtime,
+                                    // never wall-clock time (which can jump after clock sync).
+                                    long verifiedAt = android.os.SystemClock.elapsedRealtime();
+                                    lanChatPathRegistry.recordVerifiedPeer(senderId,
+                                            verifiedPathFingerprint,
+                                            new java.net.InetSocketAddress(peerAddress, port),
+                                            verifiedAt, verifiedAt + 120_000L,
+                                            socket, verifiedListenerGeneration);
+                                } catch (RuntimeException registryFailure) {
+                                    FileLogger.logD("CHAT", "verified route registry admission rejected: "
+                                            + registryFailure.getClass().getSimpleName());
+                                    return;
+                                }
+                            }
+                            // The exact socket/generation was checked atomically during registry
+                            // admission. Recheck before updating peer-wide compatibility hints.
+                            if (!isCurrentLanChatIngress(verifiedPathFingerprint, socket,
+                                    verifiedListenerGeneration)) return;
+                            // A durable peer row is not fallback authorization until Registry
+                            // has accepted this exact route. Compare-and-set the admission marker
+                            // only after that in-memory path-scoped commit succeeds.
+                            if (!store.markPeerRouteRegistryAdmitted(senderId,
+                                    peerAddress.getHostAddress(), port, System.currentTimeMillis(),
+                                    verifiedPathFingerprint, verifiedListenerGeneration, serviceInstanceId)) {
+                                FileLogger.log(this, "CHAT", "P2P route registry admitted but durable fallback marker failed peer="
+                                        + senderId + " path=" + verifiedPathFingerprint);
+                                return;
+                            }
+                            // The DB CAS may itself have waited on SQLite; do not promote
+                            // compatibility cache state or release waiters for a retired epoch.
+                            if (!isCurrentLanChatIngress(verifiedPathFingerprint, socket,
+                                    verifiedListenerGeneration)) return;
+                            // Registry admission is now durable, and the same transaction has
+                            // joined this verified peer to every still-open discovery snapshot.
+                            FileLogger.log(this, "CHAT", "P2P peer route verified peer=" + senderId
+                                    + " endpoint=" + peerAddress.getHostAddress() + ":" + port
+                                    + " path=" + verifiedPathFingerprint);
+                            synchronized (verifiedChatPeerRouteVersions) {
+                                verifiedChatPeerRouteVersions.put(senderId,
+                                        verifiedChatPeerRouteVersionCounter.incrementAndGet());
+                                verifiedChatPeers.put(senderId,
+                                        new java.net.InetSocketAddress(peerAddress, port));
+                                verifiedChatPeerSeen.put(senderId, System.currentTimeMillis());
+                            }
+                            latch.countDown();
+                            scheduleLanChatTask("peer-verified-retry", () -> retryPendingLanChatMessagesForPeer(senderId), 350L);
+                        });
+                    } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                        FileLogger.log(this, "CHAT", "⚠️ peer.ack 持久化队列已满，暂不启用单播");
+                    }
+                }
+                return true;
+            }
+            if ("chat.ack".equals(type)) {
+                String messageId = envelope.optString("message_id", "");
+                String targetId = envelope.optString("target_peer_id", "");
+                int sourcePort = packet.getPort();
+                if (messageId.isEmpty() || !getUniqueDeviceId().equals(targetId)
+                        || !"stored".equals(envelope.optString("status", ""))
+                        || !(sourcePort == 8888 || sourcePort == 8887
+                             || sourcePort == 8889 || sourcePort == 8890)) {
+                    return true;
+                }
+                final java.net.InetAddress sourceAddress = packet.getAddress();
+                final LanChatStore store = lanChatStore;
+                try {
+                    lanChatAckExecutor.execute(() -> processAuthenticatedLanChatAck(
+                            messageId, senderId, sourceAddress, sourcePort, store,
+                            ackIngressPath, socket, ackIngressGeneration,
+                            packetReceivedAtElapsedMs, true));
+                } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                    FileLogger.log(this, "CHAT", "⚠️ LAN ACK IO 队列已满，保留发送端待确认状态 message="
+                            + messageId + " peer=" + senderId);
+                }
+                return true;
+            }
+            if ("chat.fragment.ack".equals(type)) {
+                String messageId = envelope.optString("message_id", "");
+                String targetId = envelope.optString("target_peer_id", "");
+                int sourcePort = packet.getPort();
+                int fragmentIndex = envelope.optInt("fragment_index", -1);
+                if (messageId.isEmpty() || senderId.isEmpty()
+                        || senderId.equals(getUniqueDeviceId())
+                        || !getUniqueDeviceId().equals(targetId)
+                        || fragmentIndex < 0 || fragmentIndex >= LanP2pFragments.MAX_FRAGMENTS
+                        || !"received".equals(envelope.optString("status", ""))
+                        || !(sourcePort == 8888 || sourcePort == 8887
+                             || sourcePort == 8889 || sourcePort == 8890)) return true;
+                final java.net.InetAddress sourceAddress = packet.getAddress();
+                final LanChatStore store = lanChatStore;
+                try {
+                    lanChatAckExecutor.execute(() -> processAuthenticatedLanChatFragmentAck(
+                            messageId, senderId, sourceAddress, sourcePort, fragmentIndex,
+                            store, ackIngressPath, socket, ackIngressGeneration,
+                            packetReceivedAtElapsedMs, true));
+                } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                    FileLogger.log(this, "CHAT", "⚠️ fragment ACK IO 队列已满，保留位图待重传 message="
+                            + messageId + " peer=" + senderId + " index=" + fragmentIndex);
+                }
+                return true;
+            }
+            if ("chat.fragment".equals(type)) {
+                String messageId = envelope.optString("message_id", "");
+                String targetId = envelope.optString("target_peer_id", "");
+                int sourcePort = packet.getPort();
+                if (senderId.isEmpty() || senderId.equals(getUniqueDeviceId())
+                        || messageId.isEmpty()
+                        || !(targetId.equals("*") || targetId.equals(getUniqueDeviceId()))
+                        || !(sourcePort == 8888 || sourcePort == 8887
+                             || sourcePort == 8889 || sourcePort == 8890)) return true;
+                final java.net.InetAddress ackAddress = packet.getAddress();
+                final int ackPort = sourcePort;
+                final int fragmentIndex = envelope.optInt("fragment_index", -1);
+                final int fragmentCount = envelope.optInt("fragment_count", -1);
+                final int totalBytes = envelope.optInt("total_bytes", -1);
+                final String sha256 = envelope.optString("sha256", "");
+                final long createdAtMs = envelope.optLong("created_at_ms", -1L);
+                final String base64Data = envelope.optString("fragment_data", "");
+                final String displayName = envelope.optString("display_name", senderId);
+                try {
+                    lanChatIoExecutor.execute(() -> processAuthenticatedLanChatFragment(
+                            socket, ackAddress, ackPort, senderId, messageId, targetId,
+                            fragmentIndex, fragmentCount, totalBytes, sha256, createdAtMs,
+                            base64Data, displayName, packetReceivedAtElapsedMs));
+                } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                    FileLogger.log(this, "CHAT", "⚠️ LAN fragment IO 队列已满，等待对端重传 message="
+                            + messageId + " index=" + fragmentIndex + " peer=" + senderId);
+                }
+                return true;
+            }
+            if ("chat.message".equals(type)) {
+                String messageId = envelope.optString("message_id", "");
+                String targetId = envelope.optString("target_peer_id", "");
+                String body = envelope.optString("body", "");
+                if (senderId.isEmpty() || senderId.equals(getUniqueDeviceId())
+                        || messageId.isEmpty()
+                        || !(targetId.equals("*") || targetId.equals(getUniqueDeviceId()))) return true;
+                String receiveKey = senderId + ":" + messageId;
+                final PendingLanChatAckTarget ackTarget = new PendingLanChatAckTarget(
+                        socket, packet.getAddress(), packet.getPort(),
+                        listenerPathFingerprint, listenerGeneration);
+                final PendingLanChatReceive candidate = new PendingLanChatReceive();
+                PendingLanChatReceive receive = pendingLanChatV2Receives.putIfAbsent(
+                        receiveKey, candidate);
+                final boolean ownsReceive = receive == null;
+                if (ownsReceive) receive = candidate;
+                final PendingLanChatReceive pendingReceive = receive;
+                boolean ackAlreadyCommitted;
+                synchronized (pendingReceive) {
+                    ackAlreadyCommitted = pendingReceive.completed && pendingReceive.stored;
+                    if (!pendingReceive.completed) pendingReceive.addAckTarget(ackTarget);
+                }
+                if (!ownsReceive) {
+                    // If the durable commit completed while this duplicate was arriving,
+                    // ACK this ingress now; otherwise the owning worker will ACK it.
+                    if (ackAlreadyCommitted) sendLanChatReceiveAck(
+                            ackTarget, senderId, messageId);
+                    return true;
+                }
+                try {
+                    lanChatIoExecutor.execute(() -> {
+                        long dispatchQueueMs = android.os.SystemClock.elapsedRealtime()
+                                - packetReceivedAtElapsedMs;
+                        try {
+                            boolean stored = persistIncomingLanChat(senderId, messageId, body,
+                                    envelope.optString("display_name", senderId));
+                            long receiveTotalMs = android.os.SystemClock.elapsedRealtime()
+                                    - packetReceivedAtElapsedMs;
+                            if (dispatchQueueMs >= 150L || receiveTotalMs >= 300L) {
+                                FileLogger.log(this, "CHAT", "P2P 接收耗时 message=" + messageId
+                                        + " queueMs=" + dispatchQueueMs
+                                        + " durableTotalMs=" + receiveTotalMs
+                                        + " stored=" + stored);
+                            }
+                            java.util.List<PendingLanChatAckTarget> ackTargets;
+                            synchronized (pendingReceive) {
+                                pendingReceive.stored = stored;
+                                pendingReceive.completed = true;
+                                ackTargets = new java.util.ArrayList<>(pendingReceive.ackTargets);
+                            }
+                            if (stored) {
+                                int ackCount = 0;
+                                for (PendingLanChatAckTarget target : ackTargets) {
+                                    if (sendLanChatReceiveAck(target, senderId, messageId)) ackCount++;
+                                }
+                                // The SQLite inbox commit is the delivery boundary. Project
+                                // into SharedPreferences/UI only after ACK dispatch was attempted.
+                                scheduleLanChatInboxProjection();
+                                FileLogger.log(this, "CHAT", "P2P RX durable message=" + messageId
+                                        + " sender=" + senderId + " persisted=true ackPaths="
+                                        + ackCount + "/" + ackTargets.size());
+                            } else {
+                                FileLogger.log(this, "CHAT", "P2P RX message=" + messageId
+                                        + " sender=" + senderId + " persisted=false ackSent=false");
+                            }
+                        } finally {
+                            pendingLanChatV2Receives.remove(receiveKey, pendingReceive);
+                        }
+                    });
+                } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                    pendingLanChatV2Receives.remove(receiveKey, pendingReceive);
+                }
+                return true;
+            }
+        } catch (Exception e) {
+            FileLogger.logD("UDP", "authenticated LAN packet rejected: " + e.getClass().getSimpleName());
+        }
+        return true;
+    }
+
+    private boolean sendLanChatReceiveAck(PendingLanChatAckTarget target,
+                                          String senderPeerId, String messageId) {
+        if (target == null || target.socket == null || target.socket.isClosed()
+                || target.address == null) return false;
+        if (target.pathFingerprint != null && !target.pathFingerprint.isEmpty()
+                && !isCurrentLanChatIngress(target.pathFingerprint, target.socket,
+                        target.generation)) return false;
+        return sendAuthenticatedChatAck(target.socket, target.address, target.port,
+                senderPeerId, messageId);
+    }
+
+    private boolean isCurrentLanChatIngress(String path, DatagramSocket socket, long generation) {
+        if (serviceDestroyed || path == null || path.isEmpty()
+                || socket == null || generation < 0L || socket.isClosed()) return false;
+        LanChatPathRegistry.Listener listener = lanChatPathRegistry.getListener(path);
+        return listener != null && listener.socket == socket
+                && listener.generation == generation
+                && path.equals(listener.pathFingerprint) && listener.isUsable();
+    }
+
+    /**
+     * Peer-wide verifiedChatPeers is only a compatibility/member cache. A live route must
+     * exist in the path-scoped registry for at least one current listener before it may
+     * suppress discovery or a directed challenge.
+     */
+    private boolean hasFreshLanChatPeerRoute(String peerId) {
+        if (peerId == null || peerId.trim().isEmpty()) return false;
+        long now = android.os.SystemClock.elapsedRealtime();
+        LanChatPathRegistry.RouteBinding binding =
+                LanAdaptiveRouteSelector.selectPrimaryBinding(
+                        lanChatPathRegistry, peerId, rescueSocketPathFingerprint, now);
+        return binding != null && lanChatPathRegistry.isCurrentBinding(binding);
+    }
+
+    private boolean isCurrentLanChatSendBinding(LanChatPathRegistry.RouteBinding binding,
+            DatagramSocket fallbackSocket, long fallbackGeneration) {
+        if (binding != null) {
+            return binding.isCurrentAndUsable() && lanChatPathRegistry.isCurrentBinding(binding);
+        }
+        // A peer-wide persisted endpoint has no authenticated local path identity.
+        // It may seed a directed challenge, but can never authorize chat payload dispatch.
+        return false;
+    }
+
+    /** Revalidate a fixed-recipient route at every send boundary, including the legacy fallback. */
+    private boolean isCurrentLanChatTargetBinding(LanChatPathRegistry.RouteBinding binding,
+            DatagramSocket socket, long generation, String peerId,
+            java.net.InetSocketAddress endpoint) {
+        if (binding != null) {
+            return binding.isCurrentAndUsable() && lanChatPathRegistry.isCurrentBinding(binding);
+        }
+        if (peerId == null || endpoint == null || endpoint.getAddress() == null
+                || !(endpoint.getAddress() instanceof java.net.Inet4Address)
+                || !isCurrentLanChatSocket(socket, generation)
+                || lanChatListenerRuntime.listenerCount() != 1
+                || lanChatPathRegistry.listenerCount() != 1) return false;
+        String pathFingerprint = rescueSocketPathFingerprint;
+        if (pathFingerprint == null || pathFingerprint.isEmpty()) return false;
+        LanChatListenerRuntime.Lease lease = lanChatListenerRuntime.get(pathFingerprint);
+        LanChatListenerPathPlan plan = lanChatListenerPathPlan;
+        LanNetworkPath path = plan == null ? null : plan.primary();
+        if (lease == null || path == null || lease.socket != socket
+                || lease.generation != generation
+                || !pathFingerprint.equals(lease.pathFingerprint)
+                || !pathFingerprint.equals(path.diagnosticFingerprint())
+                || !lanChatListenerRuntime.isCurrent(lease)) return false;
+        LanChatStore store = lanChatStore;
+        if (store == null || !store.hasFreshVerifiedPeerRoute(peerId,
+                endpoint.getAddress().getHostAddress(), endpoint.getPort(),
+                System.currentTimeMillis(), pathFingerprint, generation, serviceInstanceId)) return false;
+        return LanChatCachedRoutePolicy.isEligible(true, true, path.localAddress,
+                path.prefixLength, (java.net.Inet4Address) endpoint.getAddress());
+    }
+
+    /**
+     * Queue the next selective-repeat fragment window after an authenticated fragment ACK.
+     * Duplicate ACKs coalesce while a worker is active; one follow-up pass is retained so an
+     * ACK racing the worker's final bitmap read cannot strand the next window.
+     */
+    private void scheduleLanChatFragmentWindowAdvance(final String messageId, final String peerId,
+            final java.net.InetAddress sourceAddress, final int sourcePort,
+            final String ingressPath, final DatagramSocket ingressSocket,
+            final long ingressGeneration) {
+        if (serviceDestroyed || messageId == null || peerId == null || sourceAddress == null) return;
+        final String key = messageId + ":" + peerId;
+        if (!activeLanChatFragmentAdvances.add(key)) {
+            pendingLanChatFragmentAdvances.add(key);
+            return;
+        }
+        try {
+            lanChatFragmentSendExecutor.execute(() -> {
+                try {
+                    advanceLanChatFragmentWindow(messageId, peerId, sourceAddress, sourcePort,
+                            ingressPath, ingressSocket, ingressGeneration);
+                } finally {
+                    activeLanChatFragmentAdvances.remove(key);
+                    if (pendingLanChatFragmentAdvances.remove(key) && !serviceDestroyed) {
+                        scheduleLanChatFragmentWindowAdvance(
+                                messageId, peerId, sourceAddress, sourcePort,
+                                ingressPath, ingressSocket, ingressGeneration);
+                    }
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException rejected) {
+            activeLanChatFragmentAdvances.remove(key);
+            pendingLanChatFragmentAdvances.remove(key);
+            FileLogger.log(this, "CHAT", "fragment window continuation queue full message="
+                    + messageId + " peer=" + peerId + "; durable ACK bitmap retained");
+        }
+    }
+
+    /**
+     * Advance only at an 8-fragment boundary. Missing pieces inside the current window remain
+     * the normal bounded retry planner's responsibility; a completed window moves forward
+     * without consuming another whole-message retry attempt or taking the FIFO transmit lock.
+     */
+    private void advanceLanChatFragmentWindow(String messageId, String peerId,
+            java.net.InetAddress sourceAddress, int sourcePort, String ingressPath,
+            DatagramSocket socket, long ingressGeneration) {
+        LanChatStore store = lanChatStore;
+        if (serviceDestroyed || store == null
+                || !isCurrentLanChatIngress(ingressPath, socket, ingressGeneration)
+                || !(sourcePort == 8888 || sourcePort == 8887
+                     || sourcePort == 8889 || sourcePort == 8890)
+                || !(sourceAddress instanceof java.net.Inet4Address)
+                || !sourceAddress.isSiteLocalAddress()
+                || sourceAddress.isLoopbackAddress() || sourceAddress.isAnyLocalAddress()) return;
+        try {
+            LanChatPathRegistry.RouteBinding routeBinding =
+                    lanChatPathRegistry.findCurrentPeerRouteBinding(peerId, ingressPath,
+                            socket, ingressGeneration,
+                            new java.net.InetSocketAddress(sourceAddress, sourcePort),
+                            android.os.SystemClock.elapsedRealtime());
+            boolean routeMatches = routeBinding != null;
+            boolean allowLegacyEndpointFallback = lanChatPathRegistry.listenerCount() == 1;
+            boolean persistedMatch = allowLegacyEndpointFallback
+                    && store.matchesExpectedAckEndpoint(
+                            messageId, peerId, sourceAddress.getHostAddress(), sourcePort);
+            boolean attemptedMatch = allowLegacyEndpointFallback
+                    && store.matchesAttemptedAckEndpoint(
+                            messageId, peerId, sourceAddress.getHostAddress(), sourcePort);
+            if (!routeMatches && !persistedMatch && !attemptedMatch) return;
+
+            LanChatStore.PendingMessage pending = null;
+            for (LanChatStore.PendingMessage item : store.loadPending(LAN_CHAT_QUEUE_MAX)) {
+                if (messageId.equals(item.messageId)) {
+                    pending = item;
+                    break;
+                }
+            }
+            if (pending == null) return;
+            LanChatStore.Target target = null;
+            for (LanChatStore.Target item : store.loadTargets(messageId)) {
+                if (peerId.equals(item.peerId)) {
+                    target = item;
+                    break;
+                }
+            }
+            if (target == null || "acked".equals(target.status)) return;
+
+            java.util.List<byte[]> packets = buildAuthenticatedLanChatFragmentPackets(
+                    pending.senderPeerId, peerId, messageId, pending.body, pending.createdAtMs);
+            if (!store.initializeTargetFragmentProgress(messageId, peerId, packets.size())) return;
+            String bitmap = store.loadTargetFragmentAckBitmap(messageId, peerId);
+            if (bitmap == null || bitmap.length() != packets.size()) return;
+
+            int firstMissing = bitmap.indexOf('0');
+            java.net.InetSocketAddress endpoint = routeMatches
+                    ? routeBinding.route.endpoint
+                    : new java.net.InetSocketAddress(sourceAddress, sourcePort);
+            if (firstMissing < 0) {
+                // All fragment ACKs are still not final delivery. Probe the receiver's
+                // durable reassembly/inbox path so it can repeat chat.ack if that ACK was lost.
+                byte[] finalProbe = packets.get(packets.size() - 1);
+                DatagramPacket probe = new DatagramPacket(
+                        finalProbe, finalProbe.length, endpoint.getAddress(), endpoint.getPort());
+                sendLanUdpPacket(socket, probe, "CHAT_FRAGMENT_COMPLETION_PROBE");
+                return;
+            }
+            if (firstMissing % 8 != 0) return;
+            int windowEnd = Math.min(packets.size(), firstMissing + 8);
+            int sent = 0;
+            for (int i = firstMissing; i < windowEnd; i++) {
+                if (!isCurrentLanChatIngress(ingressPath, socket, ingressGeneration)) return;
+                if (bitmap.charAt(i) == '1') continue;
+                byte[] frame = packets.get(i);
+                DatagramPacket packet = new DatagramPacket(
+                        frame, frame.length, endpoint.getAddress(), endpoint.getPort());
+                sendLanUdpPacket(socket, packet, "CHAT_FRAGMENT_ACK_WINDOW");
+                sent++;
+            }
+            if (sent > 0) {
+                FileLogger.logD("CHAT", "P2P fragment ACK advanced window message=" + messageId
+                        + " peer=" + peerId + " start=" + firstMissing
+                        + " end=" + windowEnd + " sent=" + sent
+                        + " retryBudgetCharged=false");
+            }
+        } catch (Exception e) {
+            FileLogger.log(this, "CHAT", "fragment window continuation deferred message="
+                    + messageId + " peer=" + peerId + " reason="
+                    + e.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Persist a chat ACK only after its sender endpoint is verified. During an open
+     * first-discovery window, allow one short asynchronous recheck so a fast chat.ack
+     * cannot lose a race against the peer.ack route-persistence task on the IO pool.
+     * This grace never bypasses either routeMatches or persistedEndpointMatch.
+     */
+    /** Persist selective fragment ACKs only from the verified/successfully-used peer endpoint. */
+    private void processAuthenticatedLanChatFragmentAck(String messageId, String senderId,
+            java.net.InetAddress sourceAddress, int sourcePort, int fragmentIndex,
+            LanChatStore store, String ingressPath, DatagramSocket ingressSocket,
+            long ingressGeneration, long packetReceivedAtElapsedMs, boolean allowEndpointGrace) {
+        if (store == null || sourceAddress == null
+                || !isCurrentLanChatIngress(ingressPath, ingressSocket, ingressGeneration)) return;
+        LanChatPathRegistry.RouteBinding routeBinding =
+                lanChatPathRegistry.findCurrentPeerRouteBinding(senderId, ingressPath,
+                        ingressSocket, ingressGeneration,
+                        new java.net.InetSocketAddress(sourceAddress, sourcePort),
+                        android.os.SystemClock.elapsedRealtime());
+        boolean routeMatches = routeBinding != null;
+        // The legacy SQLite endpoint ledger has no path key. Keep it only while exactly
+        // one listener exists; once multiple ingress paths are active, require a path-bound
+        // Registry route instead of allowing a peer-wide endpoint to authorize another path.
+        boolean allowLegacyEndpointFallback = lanChatPathRegistry.listenerCount() == 1;
+        boolean persistedEndpointMatch = !routeMatches && allowLegacyEndpointFallback
+                && store.matchesExpectedAckEndpoint(
+                        messageId, senderId, sourceAddress.getHostAddress(), sourcePort);
+        boolean attemptedEndpointPending = !routeMatches && !persistedEndpointMatch
+                && allowLegacyEndpointFallback && store.matchesAttemptedAckEndpoint(messageId, senderId,
+                        sourceAddress.getHostAddress(), sourcePort);
+        if (!persistedEndpointMatch && !attemptedEndpointPending && allowEndpointGrace) {
+            // A broadcast recipient has no fixed target row yet. Its first authenticated
+            // ACK may create a bounded, message-only target, never a trusted lan_peers row.
+            persistedEndpointMatch = store.admitBroadcastFragmentAckTarget(
+                    messageId, senderId, sourceAddress.getHostAddress(), sourcePort, fragmentIndex);
+        }
+        if (!routeMatches && !persistedEndpointMatch) {
+            if (allowEndpointGrace && attemptedEndpointPending) {
+                String key = "fragment:" + messageId + ":" + senderId + ":" + fragmentIndex;
+                if (pendingChatAckRouteRechecks.add(key)) {
+                    boolean scheduled = scheduleLanChatTask("fragment-ack-endpoint-recheck", () -> {
+                        pendingChatAckRouteRechecks.remove(key);
+                        try {
+                            lanChatAckExecutor.execute(() -> processAuthenticatedLanChatFragmentAck(
+                                    messageId, senderId, sourceAddress, sourcePort, fragmentIndex,
+                                    store, ingressPath, ingressSocket, ingressGeneration,
+                                    packetReceivedAtElapsedMs, false));
+                        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                            FileLogger.log(this, "CHAT", "fragment ACK endpoint recheck queue full message="
+                                    + messageId + " peer=" + senderId);
+                        }
+                    }, 200L);
+                    if (scheduled) return;
+                    pendingChatAckRouteRechecks.remove(key);
+                }
+            }
+            FileLogger.logD("CHAT", "P2P fragment ACK rejected message=" + messageId
+                    + " peer=" + senderId + " index=" + fragmentIndex
+                    + " reason=unverified_endpoint");
+            return;
+        }
+        boolean saved = store.acknowledgeTargetFragment(messageId, senderId, fragmentIndex);
+        if (!saved) {
+            FileLogger.log(this, "CHAT", "⚠️ 分片 ACK 未能写入固定收件人位图 message="
+                    + messageId + " peer=" + senderId + " index=" + fragmentIndex);
+            return;
+        }
+        String bitmap = store.loadTargetFragmentAckBitmap(messageId, senderId);
+        int acked = 0;
+        if (bitmap != null) for (int i = 0; i < bitmap.length(); i++) {
+            if (bitmap.charAt(i) == '1') acked++;
+        }
+        FileLogger.logD("CHAT", "P2P fragment ACK persisted message=" + messageId
+                + " peer=" + senderId + " index=" + fragmentIndex
+                + " acked=" + acked + "/" + (bitmap == null ? 0 : bitmap.length())
+                + " finalDelivery=false");
+        scheduleLanChatFragmentWindowAdvance(messageId, senderId, sourceAddress, sourcePort,
+                ingressPath, ingressSocket, ingressGeneration);
+    }
+
+    private void processAuthenticatedLanChatAck(String messageId, String senderId,
+            java.net.InetAddress sourceAddress, int sourcePort, LanChatStore store,
+            String ingressPath, DatagramSocket ingressSocket, long ingressGeneration,
+            long packetReceivedAtElapsedMs, boolean allowDiscoveryGrace) {
+        if (store == null || sourceAddress == null
+                || !isCurrentLanChatIngress(ingressPath, ingressSocket, ingressGeneration)) return;
+        long ackQueueMs = android.os.SystemClock.elapsedRealtime() - packetReceivedAtElapsedMs;
+        long ackPersistStarted = android.os.SystemClock.elapsedRealtime();
+        LanChatPathRegistry.RouteBinding routeBinding =
+                lanChatPathRegistry.findCurrentPeerRouteBinding(senderId, ingressPath,
+                        ingressSocket, ingressGeneration,
+                        new java.net.InetSocketAddress(sourceAddress, sourcePort),
+                        android.os.SystemClock.elapsedRealtime());
+        boolean routeMatches = routeBinding != null;
+        // A live authenticated route already proves this exact sender endpoint. Avoid a
+        // redundant SQLite endpoint lookup on the common ACK fast path; do not label the
+        // skipped persisted check as a match in diagnostics.
+        // The legacy SQLite endpoint ledger is peer-wide, not path-scoped. It is a
+        // compatibility fallback only while this process owns exactly one LAN listener.
+        boolean allowLegacyEndpointFallback = lanChatPathRegistry.listenerCount() == 1;
+        boolean persistedEndpointMatch = !routeMatches && allowLegacyEndpointFallback
+                && store.matchesExpectedAckEndpoint(messageId, senderId,
+                        sourceAddress.getHostAddress(), sourcePort);
+        boolean attemptedEndpointPending = false;
+        boolean discoveryAck = false;
+        // A successful-send endpoint or a live verified route is sufficient ACK provenance.
+        // A pre-send reservation is only a hint to wait once for the success record; it is
+        // never accepted as proof because DatagramSocket.send() may still fail.
+        if (!routeMatches && !persistedEndpointMatch) {
+            try {
+                attemptedEndpointPending = allowLegacyEndpointFallback
+                        && store.matchesAttemptedAckEndpoint(messageId, senderId,
+                                sourceAddress.getHostAddress(), sourcePort);
+                if (!attemptedEndpointPending) {
+                    discoveryAck = store.isDiscoveryPending(messageId);
+                }
+            } catch (Exception storageFailure) {
+                FileLogger.log(this, "CHAT", "⚠️ LAN ACK 来源复核失败，拒绝立即确认: "
+                        + storageFailure.getClass().getSimpleName());
+            }
+        }
+        if (!routeMatches && !persistedEndpointMatch) {
+            if (allowDiscoveryGrace && (discoveryAck || attemptedEndpointPending)) {
+                String recheckKey = messageId + ":" + senderId + ":"
+                        + sourceAddress.getHostAddress() + ":" + sourcePort;
+                if (!pendingChatAckRouteRechecks.add(recheckKey)) return;
+                boolean scheduled = scheduleLanChatTask("chat-ack-route-recheck", () -> {
+                    pendingChatAckRouteRechecks.remove(recheckKey);
+                    try {
+                        lanChatAckExecutor.execute(() -> processAuthenticatedLanChatAck(
+                                messageId, senderId, sourceAddress, sourcePort, store,
+                                ingressPath, ingressSocket, ingressGeneration,
+                                packetReceivedAtElapsedMs, false));
+                    } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                        FileLogger.log(this, "CHAT", "⚠️ LAN ACK 路由复核队列已满，继续保留待确认 message="
+                                + messageId + " peer=" + senderId);
+                    }
+                // Give the parallel peer.ack IO task one short turn to persist the verified route.
+                }, 200L);
+                if (scheduled) {
+                    FileLogger.logD("CHAT", "P2P ACK 暂缓复核握手路由 message="
+                            + messageId + " peer=" + senderId + " graceMs=200 queueMs=" + ackQueueMs);
+                    return;
+                }
+                pendingChatAckRouteRechecks.remove(recheckKey);
+            }
+            long ackDecisionMs = android.os.SystemClock.elapsedRealtime() - packetReceivedAtElapsedMs;
+            FileLogger.log(this, "CHAT", "P2P ACK rejected message=" + messageId
+                    + " peer=" + senderId
+                    + " source=" + sourceAddress.getHostAddress() + ":" + sourcePort
+                    + " routeMatch=" + routeMatches
+                    + " persistedSendEndpointMatch=" + persistedEndpointMatch
+                    + " discoveryPending=" + discoveryAck
+                    + " queueMs=" + ackQueueMs
+                    + " totalMs=" + ackDecisionMs
+                    + " reason=unverified_endpoint");
+            return;
+        }
+        // Re-read the current latch/expected set after any asynchronous route grace.
+        java.util.concurrent.CountDownLatch latch = pendingChatAcks.get(messageId);
+        java.util.Set<String> expected = pendingChatAckPeers.get(messageId);
+        boolean persistedAck = store.acknowledge(messageId, senderId);
+        if (persistedAck) {
+            boolean wasExpected = expected != null && expected.remove(senderId);
+            // ACK acceptance is path-scoped; do not refresh the peer-wide compatibility cache.
+            boolean discoveryBroadcastAck = !wasExpected && expected != null && expected.isEmpty()
+                    && latch != null && latch.getCount() > 0;
+            if (discoveryBroadcastAck && !discoveryAck) {
+                // A first-discovery peer may already have a verified live route because
+                // peer.ack was processed before this chat.ack. In that case routeMatches
+                // skips the earlier discovery-state read, so recheck the still-open
+                // discovery window here instead of leaving its ACK latch stranded.
+                try {
+                    discoveryBroadcastAck = store.isDiscoveryPending(messageId);
+                } catch (Exception storageFailure) {
+                    discoveryBroadcastAck = false;
+                    FileLogger.log(this, "CHAT", "⚠️ LAN ACK 发现窗口复核失败，暂不释放等待计数: "
+                            + storageFailure.getClass().getSimpleName());
+                }
+            }
+            if (latch != null && (wasExpected || discoveryBroadcastAck)) latch.countDown();
+            if (store.allTargetsAcked(messageId)) {
+                scheduleLanChatMirrorCleanup(messageId);
+                FileLogger.log(this, "CHAT", "P2P 最终 ACK 已落账；兼容队列清理已异步排队 message="
+                        + messageId + " peer=" + senderId);
+            }
+        } else {
+            FileLogger.log(this, "CHAT", "⚠️ v2 ACK 账本写入失败，等待重试: "
+                    + messageId + " peer=" + senderId);
+        }
+        long ackTotalMs = android.os.SystemClock.elapsedRealtime() - packetReceivedAtElapsedMs;
+        if (ackQueueMs >= 100L || ackTotalMs >= 200L) {
+            FileLogger.log(this, "CHAT", "P2P ACK 处理耗时 message=" + messageId
+                    + " queueMs=" + ackQueueMs
+                    + " dbMs=" + (android.os.SystemClock.elapsedRealtime() - ackPersistStarted)
+                    + " totalMs=" + ackTotalMs
+                    + " persisted=" + persistedAck
+                    + " endpointMatch=" + persistedEndpointMatch);
+        }
+    }
+
+    private boolean sendAuthenticatedChatAck(DatagramSocket socket, java.net.InetAddress address,
+                                             int port, String targetPeerId, String messageId) {
+        try {
+            if (socket == null || socket.isClosed() || address == null) return false;
+            JSONObject ack = LanP2pProtocol.create("chat.ack", getUniqueDeviceId(), "android", "android-main");
+            ack.put("target_peer_id", targetPeerId);
+            ack.put("message_id", messageId);
+            ack.put("status", "stored");
+            byte[] bytes = LanP2pProtocol.encode(ack, RESCUE_SECRET);
+            DatagramPacket response = new DatagramPacket(bytes, bytes.length, address, port);
+            sendLanUdpPacket(socket, response, "CHAT_ACK_V2");
+            return !socket.isClosed();
+        } catch (Exception e) {
+            FileLogger.log(this, "CHAT", "⚠️ v2 ACK 发送失败 message=" + messageId
+                    + " peer=" + targetPeerId + " error=" + e.getClass().getSimpleName());
+            return false;
+        }
+    }
+
+    /** A fragment ACK confirms only durable fragment-cache admission, never message delivery. */
+    private boolean sendAuthenticatedChatFragmentAck(DatagramSocket socket,
+            java.net.InetAddress address, int port, String targetPeerId,
+            String messageId, int fragmentIndex) {
+        try {
+            if (socket == null || socket.isClosed() || address == null) return false;
+            JSONObject ack = LanP2pProtocol.create(
+                    "chat.fragment.ack", getUniqueDeviceId(), "android", "android-main");
+            ack.put("target_peer_id", targetPeerId);
+            ack.put("message_id", messageId);
+            ack.put("fragment_index", fragmentIndex);
+            ack.put("status", "received");
+            byte[] bytes = LanP2pProtocol.encode(ack, RESCUE_SECRET);
+            sendLanUdpPacket(socket, new DatagramPacket(bytes, bytes.length, address, port),
+                    "CHAT_FRAGMENT_ACK_V2");
+            return !socket.isClosed();
+        } catch (Exception failure) {
+            FileLogger.log(this, "CHAT", "⚠️ fragment ACK 发送失败 message="
+                    + messageId + " index=" + fragmentIndex + " peer=" + targetPeerId
+                    + " error=" + failure.getClass().getSimpleName());
+            return false;
+        }
+    }
+
+    /**
+     * Fragment persistence and whole-message delivery are separate boundaries:
+     * only the complete UTF-8 body committed to the inbox can trigger chat.ack.
+     */
+    private void processAuthenticatedLanChatFragment(DatagramSocket socket,
+            java.net.InetAddress ackAddress, int ackPort, String senderId,
+            String messageId, String targetId, int fragmentIndex, int fragmentCount,
+            int totalBytes, String sha256, long createdAtMs, String base64Data,
+            String displayName, long packetReceivedAtElapsedMs) {
+        final String receiverScope = "android:" + getUniqueDeviceId();
+        final LanChatStore store = lanChatStore;
+        if (store == null) return;
+        long startedAt = android.os.SystemClock.elapsedRealtime();
+        String fragmentState = store.storeIncomingFragment(receiverScope, senderId,
+                messageId, fragmentIndex, fragmentCount, totalBytes, sha256,
+                createdAtMs, base64Data, System.currentTimeMillis());
+        if (!("stored".equals(fragmentState) || "duplicate".equals(fragmentState)
+                || "complete".equals(fragmentState))) {
+            FileLogger.log(this, "CHAT", "P2P fragment rejected message=" + messageId
+                    + " index=" + fragmentIndex + " peer=" + senderId);
+            return;
+        }
+
+        boolean fragmentAckSent = sendAuthenticatedChatFragmentAck(
+                socket, ackAddress, ackPort, senderId, messageId, fragmentIndex);
+        List<LanChatStore.IncomingFragment> cached = store.loadIncomingFragments(
+                receiverScope, senderId, messageId, System.currentTimeMillis());
+        if (cached.size() != fragmentCount) return;
+
+        String receiveKey = senderId + ":" + messageId;
+        if (!pendingLanChatReceives.add(receiveKey)) return;
+        try {
+            ArrayList<LanP2pFragments.Fragment> ordered = new ArrayList<>(cached.size());
+            for (LanChatStore.IncomingFragment part : cached) {
+                if (!receiverScope.equals(part.receiverScope)
+                        || !senderId.equals(part.senderPeerId)
+                        || !messageId.equals(part.messageId)
+                        || part.fragmentCount != fragmentCount
+                        || part.totalBytes != totalBytes
+                        || part.createdAtMs != createdAtMs
+                        || !sha256.equals(part.sha256)) {
+                    throw new IllegalArgumentException("Fragment session metadata mismatch");
+                }
+                ordered.add(new LanP2pFragments.Fragment(part.fragmentIndex,
+                        part.fragmentCount, part.totalBytes, part.sha256, part.base64Data));
+            }
+            // assemble() enforces ordering, exact lengths, UTF-8 validity and whole SHA-256.
+            String body = LanP2pFragments.assemble(ordered);
+            boolean stored = persistIncomingLanChat(senderId, messageId, body,
+                    displayName == null || displayName.isEmpty() ? senderId : displayName);
+            if (!stored) {
+                FileLogger.log(this, "CHAT", "P2P long message inbox commit failed message="
+                        + messageId + " peer=" + senderId + "; partial cache retained");
+                return;
+            }
+            // The durable inbox row is the delivery boundary. Partial state is disposable now.
+            boolean cacheCleared = store.deleteIncomingFragmentSession(
+                    receiverScope, senderId, messageId);
+            boolean finalAckSent = sendAuthenticatedChatAck(
+                    socket, ackAddress, ackPort, senderId, messageId);
+            scheduleLanChatInboxProjection();
+            long totalMs = android.os.SystemClock.elapsedRealtime() - packetReceivedAtElapsedMs;
+            FileLogger.log(this, "CHAT", "P2P long RX durable message=" + messageId
+                    + " sender=" + senderId + " bytes=" + totalBytes
+                    + " fragments=" + fragmentCount + " fragmentAckSent=" + fragmentAckSent
+                    + " cacheCleared=" + cacheCleared + " finalAckSent=" + finalAckSent
+                    + " queueMs=" + (startedAt - packetReceivedAtElapsedMs)
+                    + " totalMs=" + totalMs);
+        } catch (Exception failure) {
+            FileLogger.log(this, "CHAT", "⚠️ P2P long message reassembly failed message="
+                    + messageId + " peer=" + senderId + " error="
+                    + failure.getClass().getSimpleName() + "; no final chat.ack sent");
+        } finally {
+            pendingLanChatReceives.remove(receiveKey);
+        }
+    }
+
+    private boolean handleLanRealtimePacket(DatagramSocket socket, DatagramPacket packet,
+                                              long packetReceivedAtElapsedMs,
+                                              String listenerPathFingerprint, long listenerGeneration) {
+        try {
+            byte[] data = packet == null ? null : packet.getData();
+            int offset = packet == null ? 0 : packet.getOffset();
+            int length = packet == null ? 0 : packet.getLength();
+            if (data != null && length > 0 && offset >= 0
+                    && offset < data.length && data[offset] == '{') {
+                try {
+                    JSONObject envelope = LanP2pProtocol.decode(
+                            data, offset, length, RESCUE_SECRET);
+                    return handleAuthenticatedLanPacket(socket, packet, envelope,
+                            packetReceivedAtElapsedMs, listenerPathFingerprint, listenerGeneration);
+                } catch (Exception invalid) {
+                    FileLogger.logD("UDP", "invalid authenticated LAN JSON frame: "
+                            + invalid.getClass().getSimpleName());
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            FileLogger.logD("UDP", "LAN realtime packet handling failed: "
+                    + e.getClass().getSimpleName());
+            return true;
+        }
+        return false;
+    }
+
     private static final int RECENT_EXECUTIONS_MAX = 200;
 
     /**
@@ -3343,7 +8382,12 @@ public class TrackingService extends Service implements LocationListener {
         }
 
         if (recentExecutions.size() > RECENT_EXECUTIONS_MAX) {
-            recentExecutions.entrySet().removeIf(e -> now - e.getValue() > CMD_TIME_WINDOW_MS);
+            java.util.Iterator<java.util.Map.Entry<String, Long>> it =
+                    recentExecutions.entrySet().iterator();
+            while (it.hasNext()) {
+                java.util.Map.Entry<String, Long> entry = it.next();
+                if (now - entry.getValue() > CMD_TIME_WINDOW_MS) it.remove();
+            }
         }
         return false;
     }
@@ -3384,8 +8428,9 @@ public class TrackingService extends Service implements LocationListener {
     }
 
     /**
-     * 收聊天的公共逻辑（新 CHAT 前缀 / 旧 MSG-4段 兼容块共用）。
-     * 原 UDP 监听里的聊天处理逻辑抽此方法，避免两处重复。
+     * Retained legacy local chat presentation helper.
+     * The v2 LAN transport uses persistIncomingLanChat() so message_id, Inbox and
+     * history commit are coordinated before the stored ACK is sent.
      */
     private void handleIncomingChat(String senderId, String msgContent) {
         // 自己发的忽略
@@ -3403,70 +8448,311 @@ public class TrackingService extends Service implements LocationListener {
         if (shortName.contains("_")) shortName = shortName.substring(0, shortName.lastIndexOf("_"));
 
         saveChatToHistory("[" + shortName + "] " + msgContent);
-        FileLogger.log(this, "CHAT", "收到来自 " + shortName + " 的消息: " + msgContent);
+        FileLogger.log(this, "CHAT", "收到来自 " + shortName + " 的 LAN 聊天消息（正文不写入日志）");
         notifyChatUi();
     }
 
+    /**
+     * Refresh an already-persisted chat history without adding a duplicate record.
+     * Used when a retransmission recovers a crash between history commit and UI notification.
+     */
+    private void scheduleLanChatUiRefresh() {
+        handler.post(() -> {
+            if (!serviceDestroyed) notifyChatUi();
+        });
+    }
+
+    /**
+     * Compatibility overload for callers without a display name.
+     * A successful SQLite inbox commit is the durable delivery boundary; UI history
+     * is projected asynchronously and can be replayed after process recovery.
+     */
+    private boolean persistIncomingLanChat(String senderId, String messageId, String msgContent) {
+        return persistIncomingLanChat(senderId, messageId, msgContent, senderId);
+    }
+
+    private boolean persistIncomingLanChat(String senderId, String messageId, String msgContent,
+                                           String displayName) {
+        if (senderId == null || senderId.isEmpty() || messageId == null || messageId.isEmpty()) return false;
+        LanChatStore store = lanChatStore;
+        if (store == null) return false;
+        long inboxNow = System.currentTimeMillis();
+        String displayTime = new java.text.SimpleDateFormat(
+                "HH:mm", java.util.Locale.getDefault()).format(new java.util.Date(inboxNow));
+        long persistStarted = android.os.SystemClock.elapsedRealtime();
+        boolean stored = store.storeIncoming("android:" + getUniqueDeviceId(),
+                senderId, messageId, msgContent, displayName, inboxNow, displayTime);
+        long persistMs = android.os.SystemClock.elapsedRealtime() - persistStarted;
+        if (persistMs >= 50L || !stored) {
+            FileLogger.log(this, "CHAT", "P2P inbox SQLite commit message=" + messageId
+                    + " dbMs=" + persistMs + " stored=" + stored);
+        }
+        return stored;
+    }
+
+    /**
+     * Project durable inbox rows to the existing chat-history preference asynchronously.
+     * If the process dies after ACK but before this projection, displayed=0 survives and
+     * the next service start replays it. The stable ID list makes the projection idempotent.
+     */
+    private void scheduleLanChatInboxProjection() {
+        if (serviceDestroyed || lanChatStore == null) return;
+        // A request coalesced while the worker is active must be observed after its
+        // current snapshot; otherwise a just-committed inbox row can remain undisplayed.
+        lanChatInboxProjectionRequested.set(true);
+        if (!lanChatInboxProjectionInFlight.compareAndSet(false, true)) return;
+        try {
+            lanChatIoExecutor.execute(() -> {
+                boolean morePending = false;
+                try {
+                    lanChatInboxProjectionRequested.set(false);
+                    morePending = projectUndisplayedLanChatInbox();
+                } catch (Exception e) {
+                    morePending = true;
+                    FileLogger.log(this, "CHAT", "LAN inbox UI projection deferred: "
+                            + e.getClass().getSimpleName());
+                } finally {
+                    lanChatInboxProjectionInFlight.set(false);
+                }
+                if (serviceDestroyed) return;
+                if (morePending) {
+                    lanChatInboxProjectionRequested.set(true);
+                    scheduleLanChatTask("inbox-ui-projection",
+                            this::scheduleLanChatInboxProjection, 500L);
+                } else if (lanChatInboxProjectionRequested.getAndSet(false)) {
+                    // A new durable row arrived after the current worker loaded its snapshot.
+                    scheduleLanChatInboxProjection();
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException rejected) {
+            lanChatInboxProjectionInFlight.set(false);
+            if (!serviceDestroyed) {
+                scheduleLanChatTask("inbox-ui-projection-retry",
+                        this::scheduleLanChatInboxProjection, 500L);
+            }
+        }
+    }
+
+    /**
+     * Returns true when another batch may remain. The history commit precedes displayed=1;
+     * a crash between them is safe because the persisted stable ID prevents duplicate append.
+     */
+    private boolean projectUndisplayedLanChatInbox() {
+        LanChatStore store = lanChatStore;
+        if (store == null || serviceDestroyed) return false;
+        final String receiverScope = "android:" + getUniqueDeviceId();
+        synchronized (lanChatReceiveLock) {
+            List<LanChatStore.IncomingMessage> pending =
+                    store.loadUndisplayedIncoming(receiverScope, 100);
+            if (pending.isEmpty()) return false;
+            SharedPreferences sp = getSharedPreferences("device_finder_prefs", MODE_PRIVATE);
+            org.json.JSONArray ids;
+            try {
+                ids = new org.json.JSONArray(sp.getString(PREF_LAN_CHAT_RECEIVED_IDS, "[]"));
+            } catch (org.json.JSONException malformedIds) {
+                // SharedPreferences commit stores history and stable IDs together. If the
+                // ID index is corrupt, rebuild it from the still-durable undisplayed inbox
+                // rows rather than crashing the projection worker or withholding future UI.
+                FileLogger.log(this, "CHAT", "LAN inbox stable-ID index malformed; rebuilding from durable inbox");
+                ids = new org.json.JSONArray();
+            }
+            java.util.HashSet<String> knownIds = new java.util.HashSet<>();
+            for (int i = 0; i < ids.length(); i++) knownIds.add(ids.optString(i, ""));
+            String history = sp.getString("chat_history", "");
+            StringBuilder updated = new StringBuilder(history);
+            boolean historyChanged = false;
+            for (LanChatStore.IncomingMessage item : pending) {
+                if (item.senderPeerId == null || item.messageId == null) continue;
+                String stableId = item.senderPeerId + ":" + item.messageId;
+                if (knownIds.add(stableId)) {
+                    String name = item.displayName == null || item.displayName.isEmpty()
+                            ? item.senderPeerId : item.displayName;
+                    if ((item.displayName == null || item.displayName.isEmpty()) && name.contains("_")) {
+                        name = name.substring(0, name.lastIndexOf("_"));
+                    }
+                    String time = item.displayTime == null || item.displayTime.isEmpty()
+                            ? new java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+                                    .format(new java.util.Date())
+                            : item.displayTime;
+                    if (updated.length() > 0) updated.append("\n");
+                    updated.append(time).append(" | [").append(name).append("] ").append(item.body);
+                    ids.put(stableId);
+                    historyChanged = true;
+                }
+            }
+            while (ids.length() > 500) {
+                org.json.JSONArray trimmed = new org.json.JSONArray();
+                for (int i = ids.length() - 500; i < ids.length(); i++) {
+                    trimmed.put(ids.optString(i, ""));
+                }
+                ids = trimmed;
+            }
+            String updatedHistory = updated.toString();
+            String[] records = updatedHistory.split("\n");
+            if (records.length > 100) {
+                StringBuilder trimmedHistory = new StringBuilder();
+                for (int i = records.length - 100; i < records.length; i++) {
+                    if (trimmedHistory.length() > 0) trimmedHistory.append("\n");
+                    trimmedHistory.append(records[i]);
+                }
+                updatedHistory = trimmedHistory.toString();
+                historyChanged = true;
+            }
+            SharedPreferences.Editor editor = sp.edit().putString(PREF_LAN_CHAT_RECEIVED_IDS, ids.toString());
+            if (historyChanged) editor.putString("chat_history", updatedHistory);
+            if (!editor.commit()) {
+                FileLogger.log(this, "CHAT", "LAN inbox UI projection commit failed; rows remain replayable");
+                return true;
+            }
+            for (LanChatStore.IncomingMessage item : pending) {
+                if (item.senderPeerId == null || item.messageId == null) continue;
+                if (!store.markIncomingDisplayed(receiverScope, item.senderPeerId, item.messageId)) {
+                    FileLogger.log(this, "CHAT", "LAN inbox displayed marker deferred message=" + item.messageId);
+                    return true;
+                }
+            }
+            if (historyChanged) scheduleLanChatUiRefresh();
+            return pending.size() >= 100;
+        }
+    }
+
     private void startRescueListener() {
+        final long listenerGeneration = lanSocketGeneration.get();
+        final LanChatListenerPathPlan listenerPlanSnapshot = lanChatListenerPathPlan;
+        final LanNetworkPath plannedPrimaryPath = listenerPlanSnapshot == null
+                ? null : listenerPlanSnapshot.primary();
+        final boolean primaryIsLocalCandidate = plannedPrimaryPath != null
+                && plannedPrimaryPath.kind == LanNetworkPath.Kind.LOCAL_INTERFACE_CANDIDATE;
+        final String listenerPathFingerprint = primaryIsLocalCandidate
+                ? plannedPrimaryPath.diagnosticFingerprint() : wifiLanFingerprint;
+        final LanChatListenerInstance listenerInstance =
+                new LanChatListenerInstance(listenerPathFingerprint, listenerGeneration);
         synchronized (rescueLock) {
+            // Teardown may race a delayed listener-start callback. Never acquire a
+            // resource or publish a new owner after this Service has begun destruction.
+            if (serviceDestroyed) return;
             if (isListeningForRescue) {
                 FileLogger.log(this, "UDP", "⚠️ 监听已在运行，跳过重复启动");
                 return;
             }
+            if (listenerPathFingerprint != null
+                    && !lanChatListenerRuntime.installInstance(listenerInstance)) {
+                FileLogger.log(this, "UDP", "⚠️ 同一路径已有 receive-loop owner，拒绝重复启动 path="
+                        + listenerPathFingerprint);
+                return;
+            }
             isListeningForRescue = true;
-        }
-
-        if (multicastLock != null && !multicastLock.isHeld()) {
-            try {
-                multicastLock.acquire();
-                FileLogger.log(this, "UDP", "🔓 MulticastLock 已获取");
-            } catch (Exception e) {
-                FileLogger.log(this, "UDP", "⚠️ MulticastLock 获取失败: " + e.getMessage());
+            activeLanChatListenerInstance = listenerInstance;
+            // Acquire under the same lifecycle lock used by onDestroy. This closes the
+            // acquire-after-release window between listener admission and Thread.start().
+            if (multicastLock != null && !multicastLock.isHeld()) {
+                try {
+                    multicastLock.acquire();
+                    FileLogger.log(this, "UDP", "🔓 MulticastLock 已获取");
+                } catch (Exception e) {
+                    FileLogger.log(this, "UDP", "⚠️ MulticastLock 获取失败: " + e.getMessage());
+                }
             }
         }
 
-        new Thread(() -> {
+        Thread listenerThread = new Thread(() -> {
             DatagramSocket rescueSocket = null;
+            LanChatListenerRuntime.Lease listenerLease = null;
             try {
+                // Thread.start() may race onDestroy() after the owner reference is published.
+                // Exit before opening/binding a socket when teardown already won that race.
+                if (serviceDestroyed || Thread.currentThread().isInterrupted()) return;
                 rescueSocket = new DatagramSocket(null);
-                rescueSocket.setReuseAddress(true);
-                rescueSocket.setBroadcast(true);
-                bindSocketToWifi(rescueSocket);
-                rescueSocket.bind(new InetSocketAddress(8888));
+                if (!listenerInstance.attachSocket(rescueSocket)) {
+                    throw new java.net.SocketException("Listener instance no longer accepts a socket");
+                }
+                Network boundWifiNetwork;
+                if (primaryIsLocalCandidate) {
+                    // When the device has only an unrepresented AP/local LAN interface,
+                    // the primary listener must still bind that exact address, never wildcard.
+                    LanSocketBinding.bindDatagramListenerSocket(
+                            plannedPrimaryPath, rescueSocket, 8888);
+                    boundWifiNetwork = null;
+                } else {
+                    boundWifiNetwork = bindSocketToWifi(rescueSocket, 8888);
+                }
+                // Keep the legacy non-Wi-Fi UDP fallback only when no validated local path
+                // plan exists. A selected LAN path is always exact-address bound.
+                if (!rescueSocket.isBound() && !primaryIsLocalCandidate) {
+                    rescueSocket.setReuseAddress(true);
+                    rescueSocket.setBroadcast(true);
+                    rescueSocket.bind(new InetSocketAddress(8888));
+                }
                 rescueSocket.setSoTimeout(3000);
-
-                rescueSocketRef = rescueSocket;
+                synchronized (rescueLock) {
+                    if (serviceDestroyed || listenerInstance.isStopRequested()
+                            || listenerGeneration != lanSocketGeneration.get()) {
+                        throw new java.net.SocketException("Wi-Fi LAN generation changed during UDP bind");
+                    }
+                    // Publish the route before the volatile socket reference; readers that
+                    // observe this socket must also observe its exact bound Network.
+                    lanChatBoundWifiNetwork = boundWifiNetwork;
+                    if (listenerPathFingerprint != null
+                            && !listenerPathFingerprint.isEmpty()
+                            && !"NO_WIFI".equals(listenerPathFingerprint)
+                            && !"ERROR".equals(listenerPathFingerprint)
+                            && !"UNAVAILABLE".equals(listenerPathFingerprint)) {
+                        listenerLease = lanChatListenerRuntime.register(
+                                listenerPathFingerprint, rescueSocket, listenerGeneration);
+                        rescueSocketPathFingerprint = listenerPathFingerprint;
+                    } else {
+                        rescueSocketPathFingerprint = null;
+                    }
+                    if (activeLanChatListenerInstance != listenerInstance
+                            || !listenerInstance.ownsSocket(rescueSocket)) {
+                        throw new java.net.SocketException("Listener instance was replaced before publication");
+                    }
+                    rescueSocketRef = rescueSocket;
+                }
                 udpBindFailCount = 0;
                 FileLogger.log(this, "UDP", "✅ 监听已绑定 8888");
+                // 启动/重绑定后主动通告一次本机 LAN peer，唤醒其他节点的离线消息补发。
+                scheduleLanChatTask("listener-peer-beacon", this::broadcastLanPeerHello, 300L);
+                // 初次启动及网络切换重绑定后统一恢复待确认队列；此时 socket 已可用。
+                scheduleLanChatTask("listener-outbox-recovery", () -> retryPendingLanChatMessages(true), 1200L);
 
                 byte[] buffer = new byte[4096];
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
-                java.util.Map<String, Long> udpCmdDedup = new java.util.HashMap<>();
 
                 while (!serviceDestroyed) {
                     try {
                         packet.setLength(buffer.length);
                         rescueSocket.receive(packet);
+                        // A datagram may complete concurrently with onDestroy closing the
+                        // ingress socket. Do not dispatch work from a packet received after
+                        // teardown has begun; the sender will retry without a false ACK.
+                        if (serviceDestroyed || rescueSocket.isClosed()) break;
                     } catch (java.net.SocketTimeoutException te) {
                         continue;
                     }
+                    long udpReceiveElapsedMs = android.os.SystemClock.elapsedRealtime();
+                    // Parse authenticated v2 frames from the original datagram bytes before
+                    // any legacy String decoding can replace malformed UTF-8 sequences.
+                    if (handleLanRealtimePacket(rescueSocket, packet, udpReceiveElapsedMs,
+                            listenerPathFingerprint, listenerGeneration)) {
+                        continue;
+                    }
+                    // The service can be destroyed while authenticated-frame dispatch is
+                    // returning. Keep legacy command handlers outside the teardown window too.
+                    if (serviceDestroyed || rescueSocket.isClosed()) break;
                     String message = new String(packet.getData(), 0, packet.getLength());
-                    // 【诊断】任何 UDP 包到达都打日志，证明 socket 收到了
-                    FileLogger.log(this, "UDP", "📥 收到 UDP 包: " + message + " (来自 " + packet.getAddress() + ")");
+                    // 只记录命令前缀与来源，不记录认证字段、聊天正文或完整协议包。
+                    int typeEnd = message.indexOf(':');
+                    String packetType = typeEnd > 0 ? message.substring(0, typeEnd) : "UNKNOWN";
+                    // 不逐包写 logcat；仅在下方达到慢处理阈值时记录安全的命令类型。
 
                     if (message.startsWith("FIND_ME_ALARM:")
                             || message.startsWith("FIND_ME_TEST_LOW_BATTERY:")
-                            || message.startsWith("FIND_ME_MSG:")) {
+                            ) {
                         String dedupKey = message.length() > 64 ? message.substring(0, 64) : message;
-                        long nowMs = System.currentTimeMillis();
-                        Long last = udpCmdDedup.get(dedupKey);
-                        if (last != null && nowMs - last < 3000) {
+                        if (!lanUdpCommandDeduplicator.shouldAccept(
+                                dedupKey, android.os.SystemClock.elapsedRealtime())) {
                             continue;
-                        }
-                        udpCmdDedup.put(dedupKey, nowMs);
-                        if (udpCmdDedup.size() > 50) {
-                            long cutoff = nowMs - 30000;
-                            udpCmdDedup.entrySet().removeIf(e -> e.getValue() < cutoff);
                         }
                     }
 
@@ -3512,14 +8798,18 @@ public class TrackingService extends Service implements LocationListener {
                         }
                     // ★ 插件旁路挂载：远程陪伴
                     } else if (message.startsWith("FIND_ME_PUSH_") || message.startsWith("FIND_ME_PLUGIN:companion:")) {
-                        CompanionModule.handleUdp(this, message);
+                        final String companionMessage = message;
+                        handler.post(() -> {
+                            if (!serviceDestroyed) CompanionModule.handleUdp(TrackingService.this, companionMessage);
+                        });
                     } else if (message.startsWith("FIND_ME_ALARM:")) {
                         String[] parts = message.split(":", 2);
                         if (parts.length == 2 && RESCUE_SECRET.equals(parts[1])) {
                             // ★ 改动2：判重拦截，多包不会连环响铃
                             String dk = buildDedupKey("play_alarm", null, null);
                             if (!isRecentlyExecuted(dk)) {
-                                playAlarm();
+                                // 音频系统调用不占用 UDP 接收线程。
+                                handler.post(() -> { if (!serviceDestroyed) playAlarm(); });
                             }
                         }
                     }
@@ -3535,40 +8825,6 @@ public class TrackingService extends Service implements LocationListener {
                             }
                         }
                     }
-                    // ===== [P0-1] 聊天：v2 新前缀 =====
-                    else if (message.startsWith(FIND_ME_CHAT_MSG + ":")) {
-                        String[] chatParts = message.split(":", 4);
-                        if (chatParts.length == 4 && RESCUE_SECRET.equals(chatParts[1])) {
-                            String senderId = chatParts[2].trim();
-                            String content = chatParts[3].trim();
-                            String dk = buildDedupKey("chat_msg", content, null);
-                            if (!isRecentlyExecuted(dk)) {
-                                handleIncomingChat(senderId, content);
-                                // ★ 改动1：删除冗余 recentExecutions.put
-                            }
-                        }
-                    }
-                    // [COMPAT-20261105-v1] 旧 FIND_ME_MSG 前缀兼容
-                    else if (message.startsWith(FIND_ME_MSG_LEGACY + ":")) {
-                        String[] legacyParts = message.split(":", 4);
-                        if (legacyParts.length == 3 && RESCUE_SECRET.equals(legacyParts[1])) {
-                            String content = legacyParts[2].trim();
-                            String dk = buildDedupKey("custom_msg", content, null);
-                            if (!isRecentlyExecuted(dk)) {
-                                showFloatingMessage(content);
-                                // ★ 改动1：删除冗余 recentExecutions.put
-                            }
-                        } else if (legacyParts.length == 4 && RESCUE_SECRET.equals(legacyParts[1])) {
-                            String senderId = legacyParts[2].trim();
-                            String content = legacyParts[3].trim();
-                            String dk = buildDedupKey("chat_msg", content, null);
-                            if (!isRecentlyExecuted(dk)) {
-                                handleIncomingChat(senderId, content);
-                                // ★ 改动1：删除冗余 recentExecutions.put
-                            }
-                        }
-                    }
-                    // [/COMPAT-20261105-v1]
                     else if (message.startsWith("FIND_ME_CLEAR_HISTORY:")) {
                         String[] parts = message.split(":", 2);
                         if (parts.length == 2 && RESCUE_SECRET.equals(parts[1])) {
@@ -3695,6 +8951,11 @@ public class TrackingService extends Service implements LocationListener {
                             }
                         }
                     }
+                    long udpDispatchCostMs = android.os.SystemClock.elapsedRealtime() - udpReceiveElapsedMs;
+                    if (udpDispatchCostMs >= 200L) {
+                        FileLogger.log(this, "UDP", "⚠️ UDP 接收分支处理偏慢: " + udpDispatchCostMs
+                                + "ms, type=" + packetType);
+                    }
                 }
             } catch (java.net.BindException be) {
                 udpBindFailCount++;
@@ -3703,18 +8964,70 @@ public class TrackingService extends Service implements LocationListener {
                 Log.e("TrackingService", "UDP 监听异常: " + e.toString());
                 FileLogger.log(this, "UDP", "❌ 监听异常: " + e.getMessage());
             } finally {
-                if (rescueSocket != null && !rescueSocket.isClosed()) rescueSocket.close();
-                rescueSocketRef = null;
+                if (rescueSocket != null) {
+                    // Use this receive loop's immutable path snapshot. A delayed old
+                    // thread must never read/clear the replacement listener's path field.
+                    String ownedPath = listenerPathFingerprint;
+                    if (ownedPath != null && !ownedPath.isEmpty()) {
+                        if (listenerLease != null
+                                && ownedPath.equals(listenerLease.pathFingerprint)) {
+                            lanChatListenerRuntime.remove(listenerLease);
+                        }
+                        synchronized (rescueLock) {
+                            if (rescueSocketRef == rescueSocket
+                                    && ownedPath.equals(rescueSocketPathFingerprint)) {
+                                rescueSocketPathFingerprint = null;
+                            }
+                        }
+                    }
+                    // Release the UDP port before relinquishing path ownership. Otherwise a
+                    // concurrent restart can claim this path while the old socket is still
+                    // bound, lose its bind with EADDRINUSE, and unnecessarily enter backoff.
+                    if (!rescueSocket.isClosed()) rescueSocket.close();
+                    lanChatListenerRuntime.removeInstance(listenerInstance);
+                } else {
+                    // No socket was acquired, so there is no bound port to release first.
+                    lanChatListenerRuntime.removeInstance(listenerInstance);
+                }
+                final boolean networkGenerationChanged;
                 synchronized (rescueLock) {
-                    isListeningForRescue = false;
+                    if (rescueSocketRef == rescueSocket) {
+                        rescueSocketRef = null;
+                        // The published Network is valid only while its owning listener socket is current.
+                        lanChatBoundWifiNetwork = null;
+                    }
+                    boolean ownsListener = rescueListenerThread == Thread.currentThread()
+                            && activeLanChatListenerInstance == listenerInstance
+                            && listenerInstance.ownsThread(Thread.currentThread());
+                    if (ownsListener) {
+                        activeLanChatListenerInstance = null;
+                        rescueListenerThread = null;
+                        isListeningForRescue = false;
+                        // Release before another start can acquire this Service's lock.
+                        // A stale/non-owner thread must never release a replacement owner's lease.
+                        releaseLanMulticastLock();
+                    }
+                    // A deliberate Wi-Fi path replacement is not a socket failure. Its old
+                    // listener must hand off immediately instead of entering the 5s+ backoff.
+                    networkGenerationChanged = ownsListener
+                            && listenerGeneration != lanSocketGeneration.get();
                 }
 
-                if (multicastLock != null && multicastLock.isHeld()) {
-                    try { multicastLock.release(); } catch (Exception ignored) {}
-                }
-
-                // ★ 修改：指数退避无限重试 2026-11-04 14:20
+                // A former primary path may now be a desired secondary path after
+                // primary-role selection changes. Its old owner was intentionally retained
+                // until the socket closed; reconcile again only after that owner is retired.
+                // This is event-driven lifecycle work, not a timer or network rescan.
                 if (!serviceDestroyed) {
+                    reconcileLanChatSecondaryListeners(lanChatListenerPathPlan);
+                }
+
+                if (rescueListenerThread == null && !serviceDestroyed && networkGenerationChanged) {
+                    FileLogger.log(this, "NETWORK", "旧 UDP listener 代际已失效，立即重建 Wi-Fi LAN socket oldGeneration="
+                            + listenerGeneration + " newGeneration=" + lanSocketGeneration.get());
+                    triggerRescueListener();
+                } else if (rescueListenerThread == null && !serviceDestroyed) {
+                    // Genuine bind/receive failures retain exponential backoff; intentional
+                    // network-generation handoff above never waits on this failure policy.
                     long retryDelayMs = (long) Math.min(300000, 5000 * Math.pow(3, Math.min(udpBindFailCount, 4)));
                     FileLogger.log(this, "UDP", "监听断开，将在 " + (retryDelayMs / 1000) + " 秒后尝试第 " + (udpBindFailCount + 1) + " 次重连...");
 
@@ -3729,7 +9042,54 @@ public class TrackingService extends Service implements LocationListener {
                     }, retryDelayMs);
                 }
             }
-        }).start();
+        }, "LAN-UDP-Listener-" + serviceInstanceId);
+        synchronized (rescueLock) {
+            if (serviceDestroyed) {
+                listenerInstance.requestStop();
+                lanChatListenerRuntime.removeInstance(listenerInstance);
+                if (activeLanChatListenerInstance == listenerInstance) {
+                    activeLanChatListenerInstance = null;
+                }
+                isListeningForRescue = false;
+                return;
+            }
+            rescueListenerThread = listenerThread;
+            if (!listenerInstance.attachThread(listenerThread)) {
+                activeLanChatListenerInstance = null;
+                rescueListenerThread = null;
+                isListeningForRescue = false;
+                lanChatListenerRuntime.removeInstance(listenerInstance);
+                releaseLanMulticastLock();
+                return;
+            }
+        }
+        try {
+            listenerThread.start();
+        } catch (RuntimeException startFailure) {
+            synchronized (rescueLock) {
+                if (rescueListenerThread == listenerThread
+                        && activeLanChatListenerInstance == listenerInstance) {
+                    activeLanChatListenerInstance = null;
+                    rescueListenerThread = null;
+                    isListeningForRescue = false;
+                    lanChatListenerRuntime.removeInstance(listenerInstance);
+                    releaseLanMulticastLock();
+                }
+            }
+            throw startFailure;
+        }
+    }
+
+    /**
+     * Serialize release with listener admission so onDestroy and listener finally
+     * cannot both release the same MulticastLock or race a late acquire.
+     */
+    private void releaseLanMulticastLock() {
+        synchronized (rescueLock) {
+            if (multicastLock != null && multicastLock.isHeld()) {
+                try { multicastLock.release(); } catch (RuntimeException ignored) {}
+            }
+        }
     }
 
     private void parseResponse(JSONObject res) {
@@ -3783,16 +9143,18 @@ public class TrackingService extends Service implements LocationListener {
                         // 并发的普通上报与离线补发可能同时解析同一队列；同一进程内只允许一个执行入口。
                         if (commandsInFlight.contains(cmdId)) continue;
 
-                        // 本地反馈已到 accepted/最终状态时，即使进程在保存 executed_ids 前重启，也不能重复执行。
+                        // chat_msg has a stable Inbox message_id and is safe to replay after
+                        // process interruption. Other side-effecting commands keep the no-replay rule.
                         String priorFeedback = getCommandFeedbackStatus(cmdId);
-                        if ("accepted".equals(priorFeedback) || "uncertain".equals(priorFeedback)
-                                || "succeeded".equals(priorFeedback) || "failed".equals(priorFeedback)) {
+                        boolean retryableChat = "chat_msg".equals(cmdType);
+                        if ("accepted".equals(priorFeedback) || "succeeded".equals(priorFeedback)
+                                || (!retryableChat && ("uncertain".equals(priorFeedback)
+                                || "failed".equals(priorFeedback)))) {
                             executedIds.add(cmdId);
                             continue;
                         }
-                        if ("executing".equals(priorFeedback)) {
+                        if ("executing".equals(priorFeedback) && !retryableChat) {
                             if (commandsInFlight.contains(cmdId)) continue;
-                            // 上次进程在执行阶段中断，结果无法确定；不自动重放可能已有副作用的指令。
                             recordCommandFeedback(cmdId, cmdType, "uncertain", "进程在执行阶段中断，结果无法确认；为避免重复执行，不自动重放");
                             executedIds.add(cmdId);
                             continue;
@@ -3999,8 +9361,12 @@ public class TrackingService extends Service implements LocationListener {
                     if (commandId.equals(item.optString("command_id", ""))) {
                         if (!replaced) {
                             String oldStatus = item.optString("status", "");
-                            boolean oldFinal = "succeeded".equals(oldStatus) || "failed".equals(oldStatus);
-                            boolean oldTerminalDelivery = "accepted".equals(oldStatus) || "uncertain".equals(oldStatus);
+                            boolean retryableChat = "chat_msg".equals(action);
+                            boolean oldFinal = ("succeeded".equals(oldStatus) || "failed".equals(oldStatus))
+                                    && !("failed".equals(oldStatus) && retryableChat);
+                            boolean oldTerminalDelivery = ("accepted".equals(oldStatus)
+                                    || "uncertain".equals(oldStatus))
+                                    && !("uncertain".equals(oldStatus) && retryableChat);
                             boolean newEarly = "received".equals(status) || "executing".equals(status) || "retry_wait".equals(status);
                             // 迟到的早期状态不得覆盖 accepted/uncertain 或最终 succeeded/failed。
                             next.put((oldFinal || (oldTerminalDelivery && newEarly)) ? item : entry);
@@ -4034,15 +9400,38 @@ public class TrackingService extends Service implements LocationListener {
                 case "custom_msg":
                     if (payload != null && !payload.isEmpty()) showFloatingMessage(payload);
                     return true;
-                case "chat_msg":
-                    if (payload != null && !payload.isEmpty()) {
-                        // ★ 2026-11-07 对齐：与 UDP 路径的 handleIncomingChat 保持同一发送者前缀
-                        String shortName = "Web_Console";
-                        saveChatToHistory("[" + shortName + "] " + payload);
-                        notifyChatUi();
-                        FileLogger.log(this, "CHAT", "收到 HTTP 聊天: " + payload);
+                case "chat_msg": {
+                    if (payload == null || payload.isEmpty()) return true;
+                    String trimmedChatPayload = payload.trim();
+                    if (trimmedChatPayload.startsWith("{")) {
+                        try {
+                            JSONObject fallback = new JSONObject(trimmedChatPayload);
+                            if ("lan-p2p-v2".equals(fallback.optString("transport", ""))) {
+                                String messageId = fallback.optString("message_id", "");
+                                String senderPeerId = fallback.optString("sender_peer_id", "");
+                                String displayName = fallback.optString("display_name", "Web_Console");
+                                String body = fallback.optString("body", "");
+                                if (messageId.isEmpty() || senderPeerId.isEmpty()) {
+                                    FileLogger.log(this, "CHAT", "⚠️ HTTP chat fallback envelope incomplete; keep queued");
+                                    return false;
+                                }
+                                // HTTP and LAN v2 converge on one durable Inbox key. Whichever
+                                // arrives second is an acknowledged duplicate, never a second display.
+                                return persistIncomingLanChat(senderPeerId, messageId, body, displayName);
+                            }
+                        } catch (Exception malformed) {
+                            if (trimmedChatPayload.contains("lan-p2p-v2")) {
+                                FileLogger.log(this, "CHAT", "⚠️ HTTP chat fallback envelope malformed; keep queued");
+                                return false;
+                            }
+                        }
                     }
+                    // Legacy queued plain-text chat remains readable and is not reinterpreted as v2.
+                    saveChatToHistory("[Web_Console] " + payload);
+                    notifyChatUi();
+                    FileLogger.log(this, "CHAT", "收到 HTTP 聊天");
                     return true;
+                }
                 case "change_server":
                     if (!isValidUrl(payload)) return false;
                     saveNewServerUrl(payload);
@@ -4095,9 +9484,7 @@ public class TrackingService extends Service implements LocationListener {
                     }).start();
                     return true;
                 case "restart_udp":
-                    if (rescueSocketRef != null) {
-                        try { rescueSocketRef.close(); } catch (Exception ignored) {}
-                    }
+                    requestRescueListenerRestart("restart_udp");
                     return true;
                 case "test_low_battery":
                     sendReport(true, true);
@@ -4252,17 +9639,129 @@ public class TrackingService extends Service implements LocationListener {
         }
     }
 
+    /**
+     * Close the UDP producer before shutting down LAN executors. The listener publishes
+     * its socket under rescueLock only after checking serviceDestroyed, so this lock
+     * also closes the bind-vs-destroy publication race.
+     */
+    private void closeLanChatIngressSocket() {
+        DatagramSocket socketToClose;
+        synchronized (rescueLock) {
+            LanChatListenerInstance activeInstance = activeLanChatListenerInstance;
+            if (activeInstance != null) activeInstance.requestStop();
+            socketToClose = activeInstance != null ? activeInstance.socket() : rescueSocketRef;
+            if (rescueSocketRef == socketToClose) rescueSocketRef = null;
+            lanChatBoundWifiNetwork = null;
+        }
+        if (socketToClose != null) {
+            try {
+                socketToClose.close();
+            } catch (Exception e) {
+                FileLogger.log(this, "SERVICE", "⚠️ close rescueSocket 失败: "
+                        + e.getClass().getSimpleName());
+            }
+        }
+        // Retire every secondary owner on service teardown. Each worker is marked stale
+        // before its lease/socket/thread is stopped, and blocking operations occur outside
+        // rescueLock and LanChatListenerRuntime's monitor.
+        for (LanChatListenerInstance instance : lanChatListenerRuntime.instanceSnapshot()) {
+            if (instance != activeLanChatListenerInstance) stopSecondaryLanChatListener(instance);
+        }
+    }
+
+    /**
+     * SQLite must outlive every in-flight LAN task. Executor shutdown is asynchronous,
+     * so close the shared helper only after all producers/consumers have drained.
+     */
+    private void closeLanChatStoreAfterExecutors(final LanChatStore storeToClose) {
+        if (storeToClose == null) return;
+        Thread closer = new Thread(() -> {
+            awaitLanExecutorTermination(lanChatScheduler);
+            awaitLanExecutorTermination(lanChatPersistExecutor);
+            awaitLanExecutorTermination(lanChatImmediateExecutor);
+            awaitLanExecutorTermination(lanChatSendExecutor);
+            awaitLanExecutorTermination(lanChatControlExecutor);
+            awaitLanExecutorTermination(lanChatAckExecutor);
+            awaitLanExecutorTermination(lanChatFragmentSendExecutor);
+            awaitLanExecutorTermination(lanChatPeerExecutor);
+            awaitLanExecutorTermination(lanChatProbeExecutor);
+            awaitLanExecutorTermination(lanChatIoExecutor);
+            awaitLanExecutorTermination(maintenanceExecutor);
+            // Keep the shared reference valid until every accepted task has drained.
+            // In particular, queued persistence jobs still resolve lanChatStore here.
+            if (lanChatStore == storeToClose) lanChatStore = null;
+            try {
+                storeToClose.closeStore();
+                FileLogger.log(this, "SERVICE", "LAN SQLite store closed after communication queues drained");
+            } catch (Exception e) {
+                FileLogger.log(this, "SERVICE", "⚠️ 延后关闭 LAN SQLite 失败: "
+                        + e.getClass().getSimpleName());
+            }
+        }, "LanChat-Store-Close");
+        closer.setDaemon(true);
+        closer.start();
+    }
+
+    private void awaitLanExecutorTermination(java.util.concurrent.ExecutorService executor) {
+        if (executor == null) return;
+        boolean interrupted = false;
+        while (!executor.isTerminated()) {
+            try {
+                executor.awaitTermination(5L, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
+    }
+
     @Override
     public void onDestroy() {
         super.onDestroy();
         logLifecycle("SERVICE_DESTROY", "isForegroundStarted=" + isForegroundStarted);
         FileLogger.log(this, "SERVICE", "🛑 服务销毁");
         serviceDestroyed = true;
+        // Interrupt startup immediately: transport teardown may wait briefly for active
+        // file-transfer sessions, and must not leave startup work running during that wait.
+        Thread startupToStop = startupThread;
+        if (startupToStop != null) startupToStop.interrupt();
+        // Stop the independent file-transfer listener before closing its SQLite ledger.
+        closeLanTransferResources();
+        closeLanTransferPairingInitiators();
+        // Stop UDP ingress before shutting down its consumers. A packet already being
+        // handled may still be rejected during teardown; its sender will retry because
+        // no ACK can be sent on the closed socket. Accepted IO tasks are drained below.
+        closeLanChatIngressSocket();
+        LanChatListenerInstance activeListener = activeLanChatListenerInstance;
+        Thread listenerToStop = activeListener != null
+                ? activeListener.thread() : rescueListenerThread;
+        if (listenerToStop != null) {
+            listenerToStop.interrupt();
+            if (listenerToStop != Thread.currentThread()) {
+                try {
+                    // Socket close normally wakes receive immediately; bounded join ensures
+                    // teardown does not return while the owned ingress worker is still unwinding.
+                    listenerToStop.join(1000L);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }
+        // These peer-scoped events are process-local permissions, not durable message state.
+        // The Outbox survives; a recreated service establishes fresh authenticated routes.
+        lanChatPeerRecoveryEvents.clear();
+        synchronized (lanChatPeerRecoveryCooldownWakeAtMs) {
+            lanChatPeerRecoveryCooldownWakeAtMs.clear();
+        }
 
         // ★ 强力补丁 6：服务销毁时，拔掉所有定时和自愈消息，防幽灵唤醒
         handler.removeMessages(MSG_RETRY_RESCUE_LISTENER);
         handler.removeCallbacksAndMessages(null);
 
+        if (startupThread != null) {
+            startupThread.interrupt();
+            startupThread = null;
+        }
         if (watchdogThread != null) {
             watchdogThread.interrupt();
             watchdogThread = null;
@@ -4271,10 +9770,21 @@ public class TrackingService extends Service implements LocationListener {
         cancelFastPoll();
 
         if (reportExecutor != null) reportExecutor.shutdown();
-        if (rescueSocketRef != null) {
-            try { rescueSocketRef.close(); } catch (Exception e) { FileLogger.log(this, "SERVICE", "⚠️ close rescueSocket 失败: " + e.getMessage()); }
-            rescueSocketRef = null;
-        }
+        if (lanChatPersistExecutor != null) lanChatPersistExecutor.shutdown();
+        if (lanChatImmediateExecutor != null) lanChatImmediateExecutor.shutdown();
+        if (lanChatSendExecutor != null) lanChatSendExecutor.shutdown();
+        if (lanChatControlExecutor != null) lanChatControlExecutor.shutdown();
+        if (lanChatAckExecutor != null) lanChatAckExecutor.shutdown();
+        if (lanChatFragmentSendExecutor != null) lanChatFragmentSendExecutor.shutdown();
+        if (lanChatPeerExecutor != null) lanChatPeerExecutor.shutdown();
+        if (lanChatProbeExecutor != null) lanChatProbeExecutor.shutdown();
+        if (lanChatIoExecutor != null) lanChatIoExecutor.shutdown();
+        if (lanChatScheduler != null) lanChatScheduler.shutdownNow();
+        if (maintenanceExecutor != null) maintenanceExecutor.shutdownNow();
+        // Do not clear lanChatStore yet: already accepted persistence and communication
+        // tasks still need this handle while the executor queues are draining.
+        LanChatStore storeToClose = lanChatStore;
+        closeLanChatStoreAfterExecutors(storeToClose);
         if (locationManager != null) {
             try { locationManager.removeUpdates(this); } catch (Exception e) { FileLogger.log(this, "SERVICE", "⚠️ removeUpdates 失败: " + e.getMessage()); }
         }
@@ -4287,14 +9797,21 @@ public class TrackingService extends Service implements LocationListener {
         activeBubbles.clear();
 
         if (batteryMonitor != null) { try { unregisterReceiver(batteryMonitor); } catch (Exception ignored) {} }
+        if (lanHotspotStateReceiver != null) {
+            try { unregisterReceiver(lanHotspotStateReceiver); } catch (Exception ignored) { }
+            lanHotspotStateReceiver = null;
+        }
         if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
-        if (multicastLock != null && multicastLock.isHeld()) multicastLock.release();
+        releaseLanMulticastLock();
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         if (sensorManager != null && motionListener != null) sensorManager.cancelTriggerSensor(motionListener, motionSensor);
         handler.removeCallbacks(networkRefreshRunnable);
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-            if (cm != null && networkCallback != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) cm.unregisterNetworkCallback(networkCallback);
+            if (cm != null && networkCallback != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) cm.unregisterNetworkCallback(networkCallback);
+            if (cm != null && wifiLanNetworkCallback != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                cm.unregisterNetworkCallback(wifiLanNetworkCallback);
+            }
         } catch (Exception ignored) {}
     }
 

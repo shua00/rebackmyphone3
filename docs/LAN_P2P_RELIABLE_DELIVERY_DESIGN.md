@@ -1,0 +1,435 @@
+# 局域网 P2P 可靠消息投递架构（仅 v2）
+
+状态：已批准的实施基线  
+分支：`feature/lan-p2p-v2-only`  
+范围：Android 设备之间，以及 Android 与现有 Python 服务之间的可靠文本对讲/聊天。本设计不授权修改远程悬浮留言通道，也不允许删除任何现有功能。
+
+## 1. 目标与非目标
+
+### 目标
+
+- 即使 `server2.py`、`rescue2.py`、`chat.py` 全部停止运行，同一局域网内的 Android 设备仍可直接通信。
+- 发送方能够分别跟踪每一个已知接收设备的投递状态。
+- 接收方只有在消息成功持久化到本地收件箱后，才发送 ACK。
+- 重试必须沿用原始消息 ID；重复消息仍需重新 ACK，但不得重复显示。
+- 设备成员身份在进程重启、IP 地址变化和网络切换后保持稳定。
+- 待发送消息和逐设备 ACK 状态能够跨进程重启及临时断网保存、恢复。
+- 现有 Python 服务继续独立运行，并保留各自原有职责。
+- 远程悬浮留言通道与设备间对讲严格隔离。
+
+### 本阶段明确不做
+
+- 不实现虚拟网卡、VPN、NAT 打洞或强制中继。
+- 不搭建 WebSocket 集群，也不新增云端消息服务。
+- 不通过 UDP 传输二进制、图片、文件或语音；这些载荷留待后续扩展传输层。
+- 不增加 Android 第三方依赖，不引入 Room，也不要求新增常驻守护进程。
+- 不增加隐蔽追踪能力，不绕过用户可控的停止行为。
+
+## 2. 架构模型
+
+将系统分为四个相互独立的部分：
+
+1. **身份层（Identity）**：稳定的设备/服务逻辑身份。
+2. **成员与控制面（Membership / Control Plane）**：经过认证的发现、租约、能力和当前网络端点。
+3. **消息数据面（Message / Data Plane）**：发送箱、逐接收方投递状态、收件箱、ACK 和重试。
+4. **应用呈现层（Presentation）**：沿用现有聊天历史和 UI，不因传输层升级而重写聊天界面。
+
+传输方式：
+
+- 同一局域网发现：向现有服务端口发送 UDP 广播。
+- 已知的局域网接收方：向最近一次验证过的端点发送 UDP 单播。
+- 投递确认：使用经过认证的 UDP ACK。
+- 远程/网页消息：继续使用现有 HTTP/服务端队列路径，在不替换既有命令、上报路径的前提下，升级为持久化消息及逐接收方状态。
+- 后续大载荷：通过单独协商的 TCP/HTTP 传输，不把大载荷塞入 UDP 数据报。
+
+现有端口保持不变：Android 8888、server2 8887、rescue2 8889、chat.py 8890。除非通过协调一致的协议迁移明确变更，否则必须保留现有监听行为和各服务过滤规则。
+
+## 3. 稳定身份
+
+每一个逻辑端点都必须拥有稳定 ID：
+
+- Android：沿用现有持久化的 `saved_device_id`。
+- server2：在其现有持久化状态/数据库中保存独立服务 ID。
+- rescue2：保存独立于 server2 的服务 ID。
+- chat.py：保存独立于其他服务的服务 ID。
+
+进程/会话 UUID 不能充当设备身份。运行时启动 ID 或会话 ID 可以用于诊断，但绝不能作为持久化身份或消息投递目标。
+
+成员记录至少包含：
+
+- `peer_id`：稳定主身份。
+- `peer_type`：`android`、`server2`、`rescue2`、`chat`。
+- `service_id`：稳定的逻辑服务端点身份。
+- `protocol_version`、`capabilities`：协议版本和能力。
+- `network_scope`：尽可能根据网卡、子网、网关等信息形成的网络指纹；它只是辅助信息，不是认证依据。
+- `endpoint_ip`、`endpoint_port`：临时路由地址。
+- `last_seen_at`、`last_verified_at`、`lease_expires_at`：发现、验证和租约时间。
+- `status`：`active`、`suspect`、`offline`、`expired`。
+
+IP 地址永远不能作为设备身份。网络变化时应使旧端点路由失效并重新发现，但不能删除稳定 peer 或其投递历史。租约到期只代表成员离线，不代表删除成员记录。
+
+## 4. 版本化控制与消息信封
+
+统一使用有边界的 UTF-8 JSON 信封承载协调后的 v2 协议。所有接收端都必须执行数据报长度上限检查，初始目标为包含信封在内不超过 1200 字节；超长消息必须在解析和处理前拒绝。文本正文长度按 UTF-8 字节数校验，不能只按 Java 字符数计算。
+
+公共字段：
+
+- `v`：协议版本整数，当前为 2。
+- `type`：消息类型。
+- `sender_peer_id`：发送方稳定身份。
+- `sender_peer_type`：发送方类型。
+- `service_id`：发送方逻辑服务身份。
+- `nonce`：适用时使用的挑战随机数。
+- `network_scope`：辅助网络指纹。
+- `capabilities`：支持的功能列表。
+
+控制消息：
+
+- `peer.hello`：发送方身份、服务身份、nonce、协议版本和能力。
+- `peer.ack`：响应方身份及原样返回的 `reply_nonce`。只有认证成功且 nonce 匹配后，才允许记录响应来源端点。
+- `peer.goodbye`：可选提示消息；成员是否过期仍以租约为准，不能依赖 goodbye。
+
+消息：
+
+- `chat.message`：包含 `message_id`（UUID）、`sender_peer_id`、`target_peer_id`、`created_at_ms`、`body`，以及可选的 `body_digest`。
+- `chat.ack`：包含 `message_id`、原始发送方 `sender_peer_id`、实际接收方 `receiver_peer_id`、`status=stored`，以及可选摘要。
+- `chat.read`：为未来明确的已读回执预留。`stored` 绝不能显示或解释成“已读”。
+
+认证：
+
+- 初始迁移阶段沿用当前共享密钥信任模型，但协议信封必须使用派生密钥进行 HMAC-SHA256 认证；平台支持时使用恒定时间比较。
+- HMAC 必须覆盖规范化序列化后的字段及消息正文/摘要。缺少认证或认证不正确的数据包一律拒绝。
+- nonce 用于防止过期发现响应刷新路由；消息 ID 和接收方身份用于防止 ACK 串线。
+- APK 内置共享密钥不等同于每台设备独立的密码学身份。未来可增加逐设备配对密钥，但不能改变现有消息语义。
+
+现有以冒号分隔的 `FIND_ME_*` 协议，只能在本 v2-only 分支上由四类端点协调完成迁移后整体替换。严禁出现一个端点期待 JSON、另一个端点仍发送旧信封的混合部署。悬浮留言的协议标识和载荷处理不属于本次迁移范围。
+
+## 5. 成员发现与路由状态
+
+发现过程必须由事件触发，并且有明确边界：
+
+- 首次发送且没有有效成员信息时、网络变化后、路由失败后，或成员租约策略要求刷新时，才启动发现。
+- 已有有效路由时，不得每发送一条消息都强制等待 500 毫秒发现窗口。
+- 向现有端口广播，并在有限发现窗口内收集响应；早期设计曾采用 500 毫秒，现已被第 7 节明确的跨 Android/Python 统一 10 秒首次发现窗口取代。不得将旧值用于实现或验收。
+- 更新成员信息前，必须验证协议版本、HMAC、nonce、peer ID、peer 类型、service ID 和数据包来源端点。
+- 即使多个逻辑服务位于同一台主机，也必须保留为不同 peer。
+- 有效 hello/ack 可以刷新租约。路由只是当前端点，不是持久身份。
+- 使用保守租约，初始建议 120 秒，并区分 active/suspect/offline 状态。具体刷新频率必须避免高频后台扫描。
+
+网络指纹属于辅助信息，尽量结合可用网卡、子网和网关信息。不能仅凭私有 IP 前缀相同就断定处于同一局域网。可用路由必须建立在经过认证的握手及响应来源端点之上。
+
+## 6. 可靠消息投递
+
+### 发送箱（Sender Outbox）
+
+每条待发送消息至少记录：
+
+- `message_id`、`sender_peer_id`、`message_type=chat`、`body`、`created_at_ms`、`protocol_version`。
+- 总体状态：`discovery_pending`、`pending`、`partial`、`delivered`、`expired`。
+- `delivery_deadline` 和诊断时间戳。
+
+每个接收设备单独建立目标记录：
+
+- `message_id`、`peer_id`。
+- `status`：`pending`、`sent`、`acked`、`expired`。
+- `attempt_count`、`last_attempt_at`、`last_ack_at`。
+- `last_endpoint`、`last_error`。
+
+必须遵守以下规则：
+
+1. 先持久化消息，再尝试网络发送。
+2. 发送时已有成员集合的，必须在消息创建时将所有已知成员固定为目标，包括暂时离线的成员。
+3. 如果没有任何已知成员，消息进入 `discovery_pending`；首次有界发现周期内发现的所有 peer 都加入固定目标集合。如果没有发现任何成员，则保留为 `waiting_peers`，不能误报已送达。
+4. 不得把后来加入网络的新设备无限追加到旧消息。新设备默认只接收其成为已知成员之后创建的消息，除非用户明确选择它作为目标。
+5. 只有目标设备的 ACK 才能确认该设备；非目标设备的 ACK 必须忽略。
+6. 已 ACK 的目标永远不再重发；只重试仍未 ACK 的目标。
+7. 只有全部固定目标都 ACK 后，消息才能标记为 delivered。空目标集合绝不能被视为已送达。
+8. 重试必须沿用完全相同的消息 ID 和正文。即使 ACK 丢失，接收端持久化去重也必须保证安全。
+9. 队列容量必须有上限，初始应保留 Android 现有 50 条消息上限。队列满时明确拒绝新消息，绝不能覆盖更早的待发送消息。
+10. 过期必须是可识别的状态，不能静默删除。应保留诊断元数据；只有明确制定保留/清理策略后，才能删除正文。
+
+初始重试节奏可采用短间隔有界重试（例如 300 毫秒、1 秒、3 秒、10 秒），之后采用带上限的指数退避；网络恢复时触发一次有界的立即重试。这些是可调参数，不是保证送达时间的承诺。必须设置逐 peer 重试限制，避免多个设备同步产生广播风暴。
+
+### 接收箱（Recipient Inbox）
+
+- 唯一键：`(receiver_scope, sender_peer_id, message_id)`。
+- 必须在同一事务中保存消息 ID、正文、发送者、创建时间和接收时间。
+- 只有数据库事务提交成功后，才能发送 `chat.ack(status=stored)`。
+- 如果唯一键已经存在，应再次 ACK，但不得再次创建历史记录或 UI 事件。
+- 如果存储失败，不得 ACK。
+- 收件箱历史和去重记录的保留时间必须覆盖发送方重试/保留窗口。只要对应消息仍可能被重试，就不能提前清理其去重 ID。
+
+**当前生命周期安全基线（待后续显式版本化）**：
+
+- 当前设计尚未批准统一的消息最大存活时间；Android 的网络/设备恢复事件可以在有限重试轮次耗尽后重新开启补发，Python 发送箱也保留未确认消息等待原 peer 恢复。因此不得把某个接收端的历史清理周期推定为发送端 TTL。
+- 在发送端尚无跨 Android/Python 一致、持久化且不可逆的过期终态之前，三个 Python 服务不得按 7 天或 10000 条上限删除 received_chat_messages 去重依据。相同 message_id 的晚到重放必须继续命中原正文校验，不能重新成为一条新消息。
+- Android Inbox 当前也不按时间/条数清除；Python 与 Android 暂时统一为保留去重账本，不自动过期。此安全基线可能增加 SQLite 占用，属于明确的可靠性优先取舍，不代表永久保留是最终容量方案。
+- 后续若引入消息 TTL，必须先定义创建时间基准、最大投递期限、迟到包拒绝规则、恢复事件不得复活 expired 的持久化状态，以及独立于展示历史的去重墓碑保留期；墓碑保留必须严格覆盖发送端最大重放窗口。必须通过跨平台迁移和故障注入后才能启用清理。
+
+## 7. 持久化实现
+
+### Android
+
+- 使用系统自带的 `SQLiteOpenHelper`，以事务方式管理 peers、outbox、targets 和 inbox；不引入 Room 或第三方依赖。
+- 保持现有聊天 UI/历史集成不变；数据库是可靠传输账本，不是替换聊天界面的新系统。
+- 迁移 `PREF_LAN_CHAT_QUEUE` 时，必须保留原消息 ID、正文和创建时间。旧消息因缺少目标信息而进入 `discovery_pending`，不能因此丢弃。
+- 在废弃旧偏好设置前，迁移已有接收消息 ID/历史。迁移必须版本化、幂等并具有事务保护。
+- 数据库失败时禁止 ACK，并保留发送箱中的待发送消息。
+
+### Python
+
+- 复用现有 SQLite 基础设施和事务模式，不新增数据库框架。
+- server2 与 rescue2 可以共享数据库文件，但必须使用不同的 `receiver_scope`。
+- chat.py 保持独立服务作用域及现有独立历史行为。
+- 每个服务的稳定 peer ID 必须保存在持久化状态中。
+- 保留现有表和数据，只允许采用增量式 schema 迁移。
+
+### 并发
+
+- 每条发送箱事务路径应由一个串行化的所有者/工作单元管理。
+- 使用 SQLite 事务保护消息与目标记录的联合变更。
+- 网络接收线程不得阻塞等待 UI 工作。工作队列必须有界，并明确队列过载时的行为。
+- 绝不能在收件箱持久化提交之前发送 ACK。
+
+## 8. 与悬浮留言严格隔离
+
+本次工作只改造设备间对讲/聊天：
+
+- LAN 设备间对讲：只使用 v2 JSON `chat.message` / `chat.ack` 信封；Android 先通过 `persistIncomingLanChat()` 写入 SQLite Inbox 与本地对讲历史，成功后才发送 stored ACK 并通知对讲 UI。旧字符串式 `FIND_ME_CHAT` / `FIND_ME_CHAT_ACK` / `FIND_ME_PEER_*` 不再作为接收协议。
+- 跨网络网页/HTTP 对讲：继续使用服务端现有 `chat_msg` 动作和独立服务端 Outbox，不与悬浮留言合并。每条网页对讲只生成一个 message_id，LAN v2 UDP 包和 HTTP 兜底命令封装携带相同的 sender_peer_id/message_id/body；Android 两路都进入同一 `persistIncomingLanChat()` / SQLite Inbox，先到的一路写入并显示，后到的一路识别为相同消息后只返回确认、不重复显示。UDP stored ACK 会撤销该设备对应的 HTTP 兜底；HTTP 侧只有收到设备 `accepted` 反馈且服务端持久化该反馈后，才确认对应 Outbox 目标。对讲命令在中断后可沿用同一 ID 幂等重放；其他有副作用指令仍保持原有不自动重放策略。
+- 远程悬浮留言：继续使用 `FIND_ME_FLOAT_MSG` / `custom_msg` 和 `showFloatingMessage(content)`，其接收、显示、关闭、已读/清理和服务端队列保持独立。
+
+悬浮留言的协议、显示、关闭行为、历史、已读/清理行为、服务端队列和路由必须保持不变。对讲和悬浮留言不得共享去重命名空间、收件箱记录、队列清理逻辑或 UI 通知路径。传输层实施期间不得修改 `ChatActivity.java`。
+
+## 9. 现有 Python 服务与网页通道
+
+- server2、rescue2 和 chat.py 必须保留各自现有功能、监听职责、过滤规则以及管理/控制能力。
+- 三个服务分别作为不同的稳定逻辑 peer 参与通信。
+- 跨局域网网页/HTTP 通道继续可用。必须区分“服务端已接收”与“目标设备已持久化接收 ACK”。
+- 网页发起的对讲消息应进入持久化服务端发送箱，固定明确的接收目标，并在投递到设备时沿用相同消息 ID 语义。
+- 现有远程悬浮留言继续使用独立管线，不能转换为对讲消息。
+- 本阶段不引入 WebSocket、NAT 穿透、中继或文件传输。
+
+## 10. 迁移与发布顺序
+
+由于所有四类端点都必须理解新信封，协议升级必须协调推进：
+
+1. 增量增加持久化 schema 和稳定 ID，并确认旧数据未受影响。
+2. 在 Python 和 Android 两侧加入一致的协议编解码与认证实现。
+3. 加入发现及成员租约管理。
+4. 加入发送方逐目标发送箱账本，以及接收方事务化收件箱/ACK。
+5. 接入现有对讲展示回调，不改变 UI 行为。
+6. 直连局域网链路稳定后，再接入网页发起的对讲消息。
+7. 只有四类 v2 端点全部同步更新后，才允许移除旧的设备间对讲解析逻辑。悬浮留言解析器保持原样。
+
+不要合并到 main。所有改动继续留在 `feature/lan-p2p-v2-only` 分支。
+
+## 11. 验收矩阵
+
+在以下项目完成前，不得宣布功能完成：
+
+- 两台 Android 设备在三个 Python 服务全部关闭时仍能双向对讲。
+- 三台或更多 Android 设备能够发现彼此并对讲。
+- Python 服务可以分别被发现，重启后仍保持稳定身份。
+- server2 与 rescue2 在同一主机运行时，设备列表中显示为两个不同逻辑端点。
+- 部分 ACK：只重试尚未确认的接收设备。
+- ACK 丢失：重复数据包会再次得到 ACK，但消息只显示一次。
+- 接收方数据库写入失败：不发送 ACK。
+- 发送方进程重启：待发送消息和逐设备 ACK 状态可以恢复。
+- 接收方进程重启：收件箱去重状态仍然有效，不产生重复显示。
+- Wi-Fi 断开、网络切换及恢复后：路由重新发现，待发送消息恢复投递。
+- 未知成员场景下，不能把某一台设备的广播 ACK 错误认定为所有设备都已送达。
+- 队列满时拒绝新消息，不覆盖旧的待发送消息。
+- 网页发起的对讲能够分别报告服务端接收状态和实际设备 ACK。
+- 悬浮留言显示、历史、已读、清理行为保持不变。
+- 现有找回、定位、设备管理和聊天窗口行为保持不变。
+- GitHub Actions 构建通过。构建通过是必要条件，但不是充分条件；仍须完成真实多设备测试。
+
+## 12. 实施护栏
+
+- 保留每一项既有功能；不能通过删除旧功能来换取可靠性。
+- 不修改 `ChatActivity.java`。
+- 不改变悬浮留言通道。
+- 不增加 Android 第三方依赖。
+- 不进行高频、永久性的局域网扫描。
+- 不能把 UDP send 成功或 HTTP 200 当成端到端送达。
+- 不能把编译通过或静态代码检查说成真实设备验收通过。
+- 对不支持的网络类型（例如没有可用 IPv4 广播能力的局域网）必须如实记录，不能默认为已经支持。
+
+## 13. 实施状态（2026-11-22）
+
+### 已完成或已落地的基础
+
+- 本设计已作为批准的实施基线提交到 `feature/lan-p2p-v2-only`。
+- Python 服务 ID 已持久化到 SQLite，进程重启后保持稳定。server2 和 rescue2 即使共享去重数据库，也使用不同服务身份；chat.py 使用独立数据库。
+- 共享模块 `lan_p2p_core.py` 已提供 Python 侧 peer 观察记录，并按服务使用不同的接收作用域。收到 HELLO 时记录为 `suspect`；消息被可靠持久化接收后才刷新为 `active`。
+- Python 侧已加入持久化发送箱、逐接收方目标记录、ACK 状态更新、首次发现目标补充、待确认消息查询及发送尝试记录等基础函数，并已接入相关服务的 v2 对讲路径。
+- Python 侧已有受限长度的 JSON v2 信封编解码和 HMAC-SHA256 校验实现。
+- Android 已有原生 SQLite `LanChatStore`，包含 peer、outbox、逐接收方 target、inbox 和 metadata 表；已接入发送消息持久化、目标快照、逐 peer ACK 持久化，以及先写收件箱再 ACK 的接收路径。
+- Android 当前仍同时写入旧 SharedPreferences 发送队列和 SQLite 发送箱。旧队列继续作为兼容/恢复镜像，直到迁移和重启恢复行为得到完整验证；不能静默丢弃旧队列。
+- Android 已支持在有界发现刷新窗口之间复用已验证的局域网路由，避免每发一条消息都等待 500 毫秒。
+- CI 已编译 Python 服务，并运行稳定身份和 peer 作用域持久化相关单元测试。
+- 最新已核实的 GitHub Actions 构建通过：17 项 Python 单元测试、Android Java 编译、Debug APK 构建及 artifact 上传均成功；提交 `b9af01eb2bf517864aa802eec9515d79beb8f967`，[Actions run 44984288925](https://github.com/shua00/rebackmyphone3/actions/runs/44984288925)。这只证明该提交通过自动检查与云构建，不代表真实设备通信已验收。
+
+
+- LAN v2 与网页 HTTP 兜底现共用同一 message_id 和发送者身份；Android 两路均进入同一持久化 Inbox，避免同一网页消息经 UDP/HTTP 到达时重复显示；已加入 HTTP accepted 与 P2P stored ACK 的逐设备 Outbox 收敛逻辑。
+- Python 已知离线成员现进入服务端发起消息的固定接收目标快照；立即发送仍只使用有效租约端点，设备重新上线后按原 message_id 补发。
+- v2 接收面已移除旧字符串式 FIND_ME_CHAT/FIND_ME_PEER 分支；悬浮留言 FIND_ME_FLOAT_MSG/custom_msg 与非聊天救援命令保留。
+
+
+- Python 三个 UDP 服务在监听 socket 成功绑定后各发起一次经过 HMAC 认证的 v2 peer.hello，目标覆盖 Android 与其他服务端口；只在启动/重新绑定时触发，不增加周期性扫描或常驻线程。server2 的网页 HTTP 设备队列只把 `peer_type=android` 的历史成员作为 Android 接收目标，避免服务进程节点混入手机命令队列。
+- 新增启动广播模拟测试，校验目标地址/端口数量、v2 HMAC 解码、peer 身份、listen_port 和 nonce 一致性；最新 CI 17 项 Python 单元测试全部通过。
+
+### 仍需完成或验证
+
+- Android 与 Python 的 v2 信封字段、规范化 JSON、HMAC、nonce/响应端点验证必须进行逐字段互通核对，不能只凭两侧分别能编译就认定兼容。
+- Python 逐设备发送箱和 ACK 虽已加入基础实现，仍需核实三种服务的端口选择、目标快照、重发现补充、重启恢复及 ACK 来源校验是否完全一致。
+- 无已知成员时的首次发现窗口必须有统一、可验证的开始和结束语义；窗口关闭后不得继续接纳新目标，也不得把空目标集合误标为 delivered。
+- Android 旧接收 ID/历史迁移，以及 SharedPreferences 兼容镜像的安全退役仍未完成。
+- 必须补齐发送端重启、接收端重启、部分 ACK、ACK 丢失、网络切换、数据库失败和悬浮留言隔离等端到端测试。
+- 真实多设备验收尚未完成；不能以 CI 构建结果替代实机验收。
+
+本轮已完成一次集中代码修复与静态/自动化/CI 检查；仍未取得真实设备通信证据。只有补齐未完成的 A/S/M/F/G 项目并通过真实设备验收矩阵后，才能宣布功能整体验收完成。
+
+## 14. 完整验收矩阵（冻结基线）
+
+本设计的验收标准以 [《LAN P2P 完整验收矩阵（v2-only）》](./LAN_P2P_ACCEPTANCE_MATRIX.md) 为唯一完整清单。矩阵固定最初 A01–A10 十项核心标准，并累加开发期间全部补充要求 S01–S19、三种运行模式 M-A–M-C、故障用例 F01–F13 和回归用例 G01–G07。各项必须分别记录代码审查、自动化、CI、实机证据；任何条目不得删除、合并弱化或以构建通过替代实机验收。后续新增要求只允许追加或提高标准。
+
+
+## 15. 本轮可靠恢复与固定目标收敛补充（2026-11-22）
+
+本节记录本轮对既有 v2 设计的实现补充；不替代第 11 节完整验收矩阵，也不构成实机通过声明。
+
+### Android Outbox 恢复与有界重试
+
+- SQLite `lan_outbox` 是待发恢复的权威来源；SharedPreferences 队列只作为旧数据迁移/兼容镜像。服务启动或网络恢复时，先迁移仍存在的旧镜像，再从 SQLite 查询待确认消息。
+- SQLite 查询异常必须向恢复所有者抛出并记录，不能返回空列表来伪装“没有待发消息”。读取固定目标集合失败时，当前发送事务必须 fail closed，不能误退化为全网广播。
+- 数据库 schema 增至 v4，新增每条消息的 `retry_attempt_count` 和 `last_retry_at_ms`，采用增量迁移。只有发送尝试计数成功持久化后，才允许进入网络发送与下一次有界重试唤醒。
+- 每次恢复按稳定的 SQLite 快照分批处理，每批最多 3 条、每次唤醒最多 3 批；后续消息不会因为最早一批长期未 ACK 而永远得不到首次发送机会。自动延迟唤醒最多覆盖 3 次发送尝试；超过预算后保留待确认账本，等待服务/网络恢复事件再次触发，不建立无限后台轮询。
+- 服务销毁后不再执行已排队的延迟补发。
+
+### 首次发现窗口与固定接收人
+
+- 首次发现窗口从首轮实际 LAN 发现发送开始计时，不从消息在本地发送队列中的入队时间计时；窗口为有界 10 秒。窗口关闭后，空目标消息进入 `waiting_peers`：保留持久化记录但退出自动重试，不向晚加入设备广播，也不把未知 ACK 当成既有目标的 ACK。
+- 已有固定目标但当前没有 active/verified endpoint 时，消息保留在原 Outbox，等待原 peer 重新完成认证发现；不得用广播将旧消息投递给后来加入的设备。
+- rescue2、chat.py 与 server2 网页对讲的 LAN 发送统一遵循该规则：固定目标只经已验证 endpoint 单播；只有创建消息时目标集合为空且原发现窗口仍开放，才可执行有界首次发现广播。
+- server2 网页对讲仍先持久化 HTTP 兜底队列，再执行 LAN v2 直连；P2P stored ACK 与 HTTP fallback 继续使用相同 message_id，悬浮留言继续使用独立的原有管线。
+
+### 本轮自动化与 CI 证据
+
+最新提交 `5fd24070bdbcf57897de82d5ace185b473014b7c` 的 GitHub Actions [run 44997507429](https://github.com/shua00/rebackmyphone3/actions/runs/44997507429) 已通过 Python 服务语法检查、44 项 Python 单元测试、Android Java 编译、Debug APK 构建及 artifact 上传。APK artifact ID 为 `14744068334`。
+
+这些结果证明该提交通过自动化与云构建，不证明真实手机间双向、多设备、断网恢复或服务组合实测通过。真实设备验收仍严格以冻结文件 `LAN_P2P_ACCEPTANCE_MATRIX.md` 的 A/S/M/F/G 全部条目为准。
+
+
+## 16. Python Outbox ACK 超时重试补充（2026-11-23）
+
+- Python 三服务共享同一持久化逐目标重试策略：最多 8 次自动发送尝试；重试间隔按目标已记录尝试次数退避，依次为 1.5 秒、4 秒、10 秒、20 秒、40 秒，之后最多 60 秒。
+- 单一进程级 worker 每秒扫描已验证且租约有效的 peer，只处理到期的未 ACK 目标；不会为每条消息或每个 peer 创建独立定时器。正常发送但 ACK 丢失的消息也因此能够自动重试，不再只依赖下一次握手。
+- 每个目标独立计数，某个离线成员不会消耗其他成员的预算。达到 8 次后停止定时发送，消息和目标仍持久保留；只有经过 nonce challenge 验证的 peer 恢复事件才可能重开预算，且同一目标至少间隔 60 秒，防止重复 HELLO/ACK 事件反复重置。
+- 新增 last_recovery_at_ms 增量迁移；旧数据库在 UDP 恢复 worker 启动前自动补列。发送尝试仍必须先成功写入 SQLite，再进行 UDP I/O。
+- 在 v2.8.15 阶段，本策略先约束 Python 三服务的逐目标 LAN 补发；Android 当时仍使用消息级预算。该历史差异已由第20节 v2.8.20 收口为固定目标逐目标预算；悬浮留言独立通道和 HTTP 兜底语义保持不变。端到端跨端时序仍需按验收矩阵实测。
+
+- 为每秒重试扫描增加 peer/status/attempt_count/last_attempt_at 复合索引及 sender_scope/state 索引，避免 Outbox 增长后周期性扫描退化为全表遍历。
+
+
+## 17. 重试 schema 启动失败自恢复（2026-11-23）
+
+- Outbox 重试 worker 不再因服务启动时 SQLite 暂时锁定、schema 迁移失败而永久不启动。worker 始终只启动一个；schema 未就绪时按低频间隔重试迁移，成功后再进入 ACK 超时扫描。
+- 数据库迁移失败期间不伪装为空队列、不执行依赖新列的重试扫描；现有 UDP listener 生命周期不被迁移线程阻塞。
+- 新增三服务静态回归检查，确保 schema 初始化失败不会提前 return 并丢失唯一恢复 worker。
+
+- 初次快速发送查询也排除 waiting_peers 和已耗尽目标，避免对不可发送行重复做无效 SQLite 更新；实际网络 I/O 仍以原子 mark attempt 结果为准。
+
+
+## 18. 验收矩阵新增 S19/F13/G07（2026-11-23）
+
+- 本轮新增要求已追加到冻结验收矩阵，不修改或弱化 A01–A10、S01–S18、M-A–M-C、F01–F12、G01–G06。
+- S19/F13/G07 覆盖 Python 三服务 ACK 超时自动重试、每目标有限预算与退避、ACK 排除、恢复事件冷却、旧 schema 迁移和三服务独立进程回归。
+- 当前自动化与 CI 通过，但真实服务进程/真实 Android 设备上的 ACK 丢失和恢复测试仍未完成；总体验收保持未完成。
+
+
+## 19. 后台重试调度的原子退避复核（v2.8.19）
+
+后台 worker 的 due-peer 扫描只是候选发现，不构成发送授权。候选目标在真正发送前必须通过 `mark_outgoing_attempt(..., allow_fast_retry=False)` 的 SQLite 原子 UPDATE，再次读取当前持久化的 `attempt_count` 与 `last_attempt_at` 并复核退避窗口。这样即使 worker 在初始快速发送之前读取了候选列表，初始发送先完成记账后，worker 使用旧候选结果也不能绕过最新退避状态。
+
+初始发送路径继续保留原有最多三次、短间隔快速尝试；仅后台恢复 worker 使用严格退避模式。经过认证的 peer recovery 事件仍可按既有冷却策略重置耗尽预算，重置后的首次恢复发送允许立即执行。ACKed、预算耗尽和父消息终态条件仍在原子更新中检查。
+
+此机制消除“过期 due-scan 结果直接触发后台重发”的竞态，不承诺 UDP 层绝对不出现重复数据报：发送与 ACK 在网络上的先后无法由 SQLite 事务覆盖，接收端仍必须依靠 message_id 去重并对重复包重新 ACK。
+
+
+## 20. Android/Python 逐目标重试预算一致性（v2.8.20）
+
+固定收件人消息在 Android 与 Python 三服务中均按目标独立维护重试次数和退避。Android 的 `lan_outbox.retry_attempt_count` 仅保留给尚无固定收件人的首次发现广播；存在固定目标后，目标级 `attempt_count`、`last_attempt_at` 和 `last_recovery_at_ms` 决定是否允许发送。每个目标独立受8次预算和指数退避约束；某个目标 ACK 后不再参与重试。消息仅在所有未 ACK 目标都耗尽预算时暂停。
+
+恢复事件仅重置冷却到期的耗尽目标，未耗尽目标的计数和退避进度不清零。数据库版本7为目标账本增加 `last_recovery_at_ms` 和复合索引 `(message_id,status,attempt_count,last_attempt_at)`；升级时清除固定目标消息的旧聚合计数，并恢复仍有目标级预算的历史暂停消息。迁移只增列/索引和更新状态，不删除 Outbox、目标、Inbox 或历史展示记录。
+
+无固定收件人的发现广播仍使用原消息级有限预算，原有10秒首次发现窗口不变。ACK 只有在接收端持久化成功后才发送；留言悬浮消息与对讲消息管线保持分离。
+
+## 21. Python 服务监听生命周期与代理边界（v2.8.20）
+
+rescue2.py 与 server2.py 在 UDP listener 重新绑定成功后启动唯一恢复 worker；socket 断开时 worker 暂时看不到 listener socket，重新绑定后继续复用该 worker。chat.py 独立模式此前只尝试绑定一次，本版改为 bind/recv 异常后延迟重试并重新绑定；worker 的启动仍在 bind 成功之后，避免无可用 socket 时误认为 listener 已就绪。
+
+chat.py 在 server2.py 启动时采用代理模式，不启动自己的 UDP listener 和恢复 worker；这是有意的单一权威发送/接收边界，避免两个 chat 服务同时运行造成 UDP 端口冲突、重复消息身份和双 Outbox。若 server2.py 在 chat.py 启动后退出，chat.py 不自动切换到独立模式，需重启 chat.py 重新判定模式；不能在运行中未经协调地同时启用两个独立账本。
+
+
+## 22. UDP 接收 socket 失效后的重绑定（v2.8.21）
+
+UDP listener 的 `recvfrom()` 异常不能仅记录日志后无限复用同一个 socket。若底层 socket 已关闭或进入不可恢复状态，继续循环会造成“线程仍在、端口实际不可用”，同时恢复 worker 也无法通过该 listener 发出补发数据报。
+
+server2.py 的接收异常现在向外传播，由 listener 外层异常处理执行退避等待，并由 `finally` 清理当前 socket、清空当前 listener 引用；外层主循环随后创建新 socket 并重新 bind。rescue2.py 与 chat.py 原有异常传播/清理路径保持不变。恢复 worker 是每个服务进程唯一实例，不随 socket 重建重复启动；它在 listener 引用恢复后继续使用新 socket。
+
+该修复不把临时网络错误误判为 peer 离线，也不清空 Outbox、目标账本或 peer 身份。验收需注入 recvfrom 异常，确认旧 socket 关闭、监听端口重新绑定、worker 不重复创建，且恢复后仍可收发认证 v2 包。
+
+
+## 23. 最终跨端状态机核查（v2.8.22）
+
+### Android ACK端点来源
+
+Android 分开保存两个 endpoint 语义：
+
+- `last_endpoint`：最近已知路由候选，可来自历史 peer 快照，仅用于定向 nonce challenge；不单独证明此消息曾成功发送。
+- `last_sent_endpoint`：消息目标的成功发送端点。只有 `DatagramSocket.send()` 正常返回后，`recordSuccessfulSendEndpoint()` 才写入；ACK 备用校验只匹配此字段。
+
+数据库 v8 增量新增 `last_sent_endpoint`。旧库中的新列保持空，不从旧 `last_endpoint` 回填，避免历史路由候选被误认为成功发送证据。Outbox、targets、attempt_count 和旧路由候选均保留；若旧 ACK 无法通过备用校验，后续 verified route 或有界重发仍可恢复投递。
+
+### Python恢复冷却与Android收敛
+
+Python `prepare_outgoing_peer_recovery()` 与 Android `resumeExhaustedRetriesForRecoveryEvent()` 一样，只更新状态未 ACK 且 `attempt_count>=8` 的目标。预算尚未耗尽时，恢复事件不能提前写入 `last_recovery_at_ms`；目标后续耗尽时，60秒冷却仍以真正重开过预算的恢复事件为基准。逐目标8次预算、1.5/4/10/20/40/60秒退避、ACK隔离和父消息终态保护均不变。
+
+### 验证边界
+
+本批增加 Python “预算耗尽前恢复事件不占用冷却”用例，并强化 Android 源码回归检查，覆盖 endpoint 两字段分工和 v8 增量迁移。CI 验证 Python 测试与 Android 编译；真实 Android SQLite迁移/故障注入、ACK与发送并发、三服务独立进程故障注入仍按验收矩阵执行，不能用CI代替实机。
+
+
+## 24. 发现控制报文的 network_scope 有界编码（v2.8.23）
+
+Android 的 `buildWifiLanFingerprint()` 继续生成完整、排序后的 Wi-Fi 网络路径指纹，用于本机比较网络路径变化。该值可能包含多个 `LinkProperties` 地址和路由条目，长度不受控制，因此不得直接放入受 1200 字节限制的 UDP v2 JSON 信封。
+
+所有 Android `peer.hello` 出口统一通过 `buildLanProtocolNetworkScope()` 将完整指纹计算为 `sha256:` 前缀加 64 位小写十六进制摘要（固定 71 个 ASCII 字符）。`UNAVAILABLE`、`ERROR`、`NO_WIFI` 等非路径状态发送为空 scope；摘要计算不可用时也退化为空提示，不阻断认证 nonce challenge。完整指纹仍保存在本地并继续参与网络变化检测，不会因压缩传输字段而削弱旧 endpoint 失效逻辑。
+
+该摘要只是可选的网络范围提示，不是稳定 peer ID、共享密钥认证、nonce challenge 或端点可达证明。协议 `MAX_DATAGRAM_BYTES=1200` 不变；不能通过提高上限掩盖字段膨胀。Android 普通广播发现、启动 Beacon 和定向 challenge 必须共用同一有界编码出口。Python 服务无需改变既有消息 envelope 或服务端身份/端口职责。
+
+本条修复只涉及对讲发现控制面，不改变 `chat.message` 正文、Outbox/Inbox/逐设备 ACK 语义，也不触碰悬浮留言独立通道。验收需覆盖大规模地址/路由快照、所有 Android HELLO 出口、v2 解码、Android 11/15 实机互发现，以及修复后 ACK 来源校验是否仍按真实成功发送端点严格工作。
+
+
+ACK 拒绝日志同时记录来源 IP/UDP 端口、内存 verified-route 匹配、持久化成功发送端点匹配和 discovery window 状态；Beacon 创建异常记录具体异常消息。日志不包含消息正文、HMAC 密钥或认证字段。
+
+## 25. IPMessenger Clone! 1.1.11 静态参考分析
+
+用户提供的 APK 已完成 Manifest、DEX 常量、实际服务调用链和主要 UDP 收发路径的静态提取。详细证据与限制记录在 [IPMSG_CLONE_1.1.11_REFERENCE_ANALYSIS.md](./IPMSG_CLONE_1.1.11_REFERENCE_ANALYSIS.md)。
+
+可借鉴的是发现命令、消息命令、接收确认与阅读通知之间的语义分离，以及已知成员路由复用的设计方向。该 APK 的 v1 冒号文本/GBK 信封、UDP 2425、8192 字节缓冲区、每包新线程和一次性发送线程不作为 v2 实现模板。当前 LAN v2 继续使用稳定 peer_id、nonce challenge、HMAC、1200 字节上限、SQLite Outbox/Inbox、逐目标 ACK 和有界重试。静态逆向未证明旧 APK 具有与当前 v2 等价的持久化 ACK/重试或密码学认证；动态抓包仍未完成。
+
+
+### 14. 即时投递修正（2026-11-23）
+
+固定收件人集合仍在消息创建时冻结，但首次发送不再强制等待内存路由重新验证。当前已验证路由优先；若进程重启或网络切换清空路由缓存，则立即向该固定 peer 的持久化最近 endpoint 发送带精确 target_peer_id 的消息。Android 在 UDP dispatch 前持久化 last_attempt_endpoint；匹配该 message_id + peer_id 的认证 ACK 只确认本次消息，不提升可复用路由信任。nonce challenge 与数据面发送并行。对端 IP 已变化时，仍通过新路径上的 peer hello/ack 更新 endpoint，再由 outbox 重试；绝不把旧消息改为通配广播。
+
+
+### 15. Python 固定目标即时发送与恢复调度（2026-11-23）
+
+- Python 端 outbox 首次发送和定时重试不再只查询 active lease；固定 target 仍使用最后持久化 endpoint 发起定向尝试。
+- Python ACK 要求 target/message 身份匹配，并匹配当前 active route 或该消息最近一次精确尝试 endpoint；尝试 endpoint 只用于该消息确认，不会把 peer 状态提升为 active。
+- peer.ack 的历史 outbox 重放由恢复 worker 执行；UDP receive loop 只登记 peer recovery 并唤醒 worker，避免在接收线程中同步批量发送。
+- 路由重新验证事件可绕过普通重试 backoff，但不绕过每目标最大尝试次数；只有冷却后的显式恢复才重开耗尽预算。

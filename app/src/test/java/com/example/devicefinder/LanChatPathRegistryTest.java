@@ -1,0 +1,419 @@
+package com.example.devicefinder;
+
+import org.junit.Test;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import static org.junit.Assert.*;
+
+public class LanChatPathRegistryTest {
+    private static final long NOW = 1_000_000L;
+    private static DatagramSocket socket() throws Exception {
+        return new DatagramSocket(0, InetAddress.getByName("127.0.0.1"));
+    }
+    private static InetSocketAddress endpoint(String ip) throws Exception {
+        return new InetSocketAddress(InetAddress.getByName(ip), 8888);
+    }
+
+    @Test public void concurrentStaAndApAuthenticationRetainsBothPeerRoutes() throws Exception {
+        final LanChatPathRegistry registry = new LanChatPathRegistry();
+        final DatagramSocket sta = socket(), ap = socket();
+        final String staPath = "sta|wlan0|192.168.1.20/24";
+        final String apPath = "ap|ap0|192.168.43.1/24";
+        final CountDownLatch start = new CountDownLatch(1);
+        final CountDownLatch done = new CountDownLatch(2);
+        final AtomicReference<Throwable> failure = new AtomicReference<>();
+        try {
+            registry.registerListener(staPath, sta, 101L);
+            registry.registerListener(apPath, ap, 202L);
+            Thread staAdmission = new Thread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        start.await();
+                        registry.recordVerifiedPeer("same-peer", staPath,
+                                endpoint("192.168.1.31"), NOW, NOW + 120000L, sta, 101L);
+                    } catch (Throwable error) {
+                        failure.compareAndSet(null, error);
+                    } finally { done.countDown(); }
+                }
+            }, "sta-route-admission-test");
+            Thread apAdmission = new Thread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        start.await();
+                        registry.recordVerifiedPeer("same-peer", apPath,
+                                endpoint("192.168.43.2"), NOW + 1L, NOW + 120001L, ap, 202L);
+                    } catch (Throwable error) {
+                        failure.compareAndSet(null, error);
+                    } finally { done.countDown(); }
+                }
+            }, "ap-route-admission-test");
+            staAdmission.start();
+            apAdmission.start();
+            start.countDown();
+            assertTrue("both path admissions must finish", done.await(2, TimeUnit.SECONDS));
+            if (failure.get() != null) throw new AssertionError("concurrent route admission failed", failure.get());
+
+            LanChatPathRegistry.RouteBinding staBinding =
+                    registry.getFreshPeerRouteBinding("same-peer", staPath, NOW + 2L);
+            LanChatPathRegistry.RouteBinding apBinding =
+                    registry.getFreshPeerRouteBinding("same-peer", apPath, NOW + 2L);
+            assertNotNull(staBinding);
+            assertNotNull(apBinding);
+            assertTrue(registry.isCurrentBinding(staBinding));
+            assertTrue(registry.isCurrentBinding(apBinding));
+            assertEquals("192.168.1.31", staBinding.route.endpoint.getAddress().getHostAddress());
+            assertEquals("192.168.43.2", apBinding.route.endpoint.getAddress().getHostAddress());
+            assertEquals(2, registry.getFreshPeerRoutes("same-peer", NOW + 2L).size());
+        } finally { sta.close(); ap.close(); }
+    }
+
+    @Test public void samePeerCanHaveStaAndApRoutes() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket sta = socket(), ap = socket();
+        try {
+            String s = "sta|wlan0|192.168.1.20/24", a = "ap|ap0|192.168.43.1/24";
+            registry.registerListener(s, sta, 1); registry.registerListener(a, ap, 2);
+            registry.recordVerifiedPeer("peer", s, endpoint("192.168.1.31"), NOW, NOW + 120000);
+            registry.recordVerifiedPeer("peer", a, endpoint("192.168.43.2"), NOW + 1, NOW + 120001);
+            List<LanChatPathRegistry.PeerRoute> result = registry.getFreshPeerRoutes("peer", NOW + 2);
+            assertEquals(2, result.size());
+            assertNotEquals(result.get(0).pathFingerprint, result.get(1).pathFingerprint);
+        } finally { sta.close(); ap.close(); }
+    }
+
+    @Test public void staleListenerCannotRemoveReplacementOrItsRoute() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket old = socket(), current = socket();
+        try {
+            String path = "sta|wlan0|192.168.1.20/24";
+            registry.registerListener(path, old, 1);
+            registry.registerListener(path, current, 2);
+            registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.31"), NOW, NOW + 100);
+            assertFalse(registry.removeListener(path, old));
+            assertSame(current, registry.getListener(path).socket);
+            assertEquals(1, registry.getFreshPeerRoutes("peer", NOW + 1).size());
+        } finally { old.close(); current.close(); }
+    }
+
+    @Test public void advancingGenerationOnSameSocketInvalidatesOldRoutes() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket listener = socket();
+        try {
+            String path = "sta|wlan0|192.168.1.20/24";
+            registry.registerListener(path, listener, 1);
+            registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.31"), NOW, NOW + 100);
+            registry.registerListener(path, listener, 2);
+            assertTrue(registry.getFreshPeerRoutes("peer", NOW + 1).isEmpty());
+            registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.32"), NOW + 2, NOW + 102);
+            List<LanChatPathRegistry.PeerRoute> routes =
+                    registry.getFreshPeerRoutes("peer", NOW + 3);
+            assertEquals(1, routes.size());
+            assertEquals(2L, routes.get(0).listenerGeneration);
+        } finally { listener.close(); }
+    }
+
+    @Test public void staleGenerationCannotRemoveSameSocketReplacement() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket listener = socket();
+        try {
+            String path = "sta|wlan0|192.168.1.20/24";
+            registry.registerListener(path, listener, 10);
+            registry.registerListener(path, listener, 11);
+            assertFalse(registry.removeListener(path, listener, 10));
+            assertSame(listener, registry.getListener(path).socket);
+            assertEquals(11L, registry.getListener(path).generation);
+            assertTrue(registry.removeListener(path, listener, 11));
+            assertEquals(0, registry.listenerCount());
+        } finally { listener.close(); }
+    }
+
+    @Test public void staleIngressCannotRegisterRouteUnderReplacementGeneration() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket old = socket(), replacement = socket();
+        String path = "sta|wlan0|192.168.1.20/24";
+        try {
+            registry.registerListener(path, old, 70);
+            registry.registerListener(path, replacement, 71);
+            try {
+                registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.31"),
+                        NOW, NOW + 100, old, 71);
+                fail("socket identity mismatch must not be promoted");
+            } catch (IllegalStateException expected) { }
+            try {
+                registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.31"),
+                        NOW, NOW + 100, replacement, 70);
+                fail("generation mismatch must not be promoted");
+            } catch (IllegalStateException expected) { }
+            assertTrue(registry.getFreshPeerRoutes("peer", NOW + 1).isEmpty());
+            registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.32"),
+                    NOW + 2, NOW + 102, replacement, 71);
+            List<LanChatPathRegistry.PeerRoute> routes =
+                    registry.getFreshPeerRoutes("peer", NOW + 3);
+            assertEquals(1, routes.size());
+            assertEquals(71L, routes.get(0).listenerGeneration);
+            assertEquals("192.168.1.32",
+                    routes.get(0).endpoint.getAddress().getHostAddress());
+        } finally { old.close(); replacement.close(); }
+    }
+
+    @Test public void closedListenerRoutesArePrunedWhenQueried() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket listener = socket();
+        String path = "sta|wlan0|192.168.1.20/24";
+        registry.registerListener(path, listener, 20);
+        registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.31"), NOW, NOW + 100);
+        listener.close();
+        assertTrue(registry.getFreshPeerRoutes("peer", NOW + 1).isEmpty());
+        assertTrue(registry.getFreshPeerRoutes("peer", NOW + 2).isEmpty());
+    }
+
+    @Test public void replacingListenerInvalidatesRoutesFromPreviousSocketEpoch() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket old = socket(), replacement = socket();
+        try {
+            String path = "sta|wlan0|192.168.1.20/24";
+            registry.registerListener(path, old, 1);
+            registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.31"), NOW, NOW + 100);
+            registry.registerListener(path, replacement, 2);
+            assertTrue(registry.getFreshPeerRoutes("peer", NOW + 1).isEmpty());
+        } finally { old.close(); replacement.close(); }
+    }
+
+    @Test public void advancingStaGenerationPreservesIndependentApRoute() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket sta = socket(), ap = socket();
+        try {
+            String s = "sta|wlan0|192.168.1.20/24", a = "ap|ap0|192.168.43.1/24";
+            registry.registerListener(s, sta, 1);
+            registry.registerListener(a, ap, 1);
+            registry.recordVerifiedPeer("peer", s, endpoint("192.168.1.31"), NOW, NOW + 100);
+            registry.recordVerifiedPeer("peer", a, endpoint("192.168.43.2"), NOW, NOW + 100);
+            registry.registerListener(s, sta, 2);
+            List<LanChatPathRegistry.PeerRoute> remaining =
+                    registry.getFreshPeerRoutes("peer", NOW + 1);
+            assertEquals(1, remaining.size());
+            assertEquals(a, remaining.get(0).pathFingerprint);
+            assertEquals(1L, remaining.get(0).listenerGeneration);
+        } finally { sta.close(); ap.close(); }
+    }
+
+    @Test public void removingApPathPreservesStaRoute() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket sta = socket(), ap = socket();
+        try {
+            String s = "sta|wlan0|192.168.1.20/24", a = "ap|ap0|192.168.43.1/24";
+            registry.registerListener(s, sta, 1); registry.registerListener(a, ap, 2);
+            registry.recordVerifiedPeer("peer", s, endpoint("192.168.1.31"), NOW, NOW + 100);
+            registry.recordVerifiedPeer("peer", a, endpoint("192.168.43.2"), NOW, NOW + 100);
+            assertTrue(registry.removeListener(a, ap));
+            List<LanChatPathRegistry.PeerRoute> result = registry.getFreshPeerRoutes("peer", NOW + 1);
+            assertEquals(1, result.size()); assertEquals(s, result.get(0).pathFingerprint);
+        } finally { sta.close(); ap.close(); }
+    }
+
+    @Test public void expiredOrLoopbackRoutesAreRejected() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket sta = socket();
+        try {
+            String path = "sta|wlan0|192.168.1.20/24";
+            registry.registerListener(path, sta, 1);
+            registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.31"), NOW, NOW + 10);
+            assertTrue(registry.getFreshPeerRoutes("peer", NOW + 10).isEmpty());
+            try {
+                registry.recordVerifiedPeer("peer", path, endpoint("127.0.0.1"), NOW, NOW + 100);
+                fail("loopback is not a LAN endpoint");
+            } catch (IllegalArgumentException expected) { }
+        } finally { sta.close(); }
+    }
+    @Test public void verifiedRouteRequiresAnActivePathListener() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        String path = "sta|wlan0|192.168.1.20/24";
+        try {
+            registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.31"), NOW, NOW + 100);
+            fail("route admission must be tied to a live listener path");
+        } catch (IllegalStateException expected) { }
+        assertTrue(registry.getFreshPeerRoutes("peer", NOW + 1).isEmpty());
+    }
+
+    @Test public void listenerRejectsNegativeGeneration() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket socket = socket();
+        try {
+            try {
+                registry.registerListener("sta|wlan0|192.168.1.20/24", socket, -1);
+                fail("negative generations are invalid");
+            } catch (IllegalArgumentException expected) { }
+        } finally { socket.close(); }
+    }
+
+
+    @Test public void ordinaryRouterSupportsMultipleAndroidAndPythonPeersOnOnePath() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket routerLan = socket();
+        try {
+            // Platform labels do not establish trust; all peers use authenticated peer IDs.
+            String path = "sta|wlan0|192.168.1.20/24";
+            registry.registerListener(path, routerLan, 7);
+            registry.recordVerifiedPeer("android-peer-a", path, endpoint("192.168.1.31"), NOW, NOW + 120000);
+            registry.recordVerifiedPeer("python-peer-b", path, endpoint("192.168.1.32"), NOW + 1, NOW + 120001);
+            registry.recordVerifiedPeer("android-peer-c", path, endpoint("192.168.1.33"), NOW + 2, NOW + 120002);
+            assertEquals(1, registry.listenerCount());
+            assertEquals(1, registry.getFreshPeerRoutes("android-peer-a", NOW + 3).size());
+            assertEquals(1, registry.getFreshPeerRoutes("python-peer-b", NOW + 3).size());
+            assertEquals(1, registry.getFreshPeerRoutes("android-peer-c", NOW + 3).size());
+            assertTrue(registry.getFreshPeerRoutes("unknown-peer", NOW + 3).isEmpty());
+        } finally { routerLan.close(); }
+    }
+
+    @Test public void routeUpdatesForOnePeerDoNotOverwriteAnotherPeerOnSamePath() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket routerLan = socket();
+        try {
+            String path = "sta|wlan0|192.168.1.20/24";
+            registry.registerListener(path, routerLan, 8);
+            registry.recordVerifiedPeer("peer-a", path, endpoint("192.168.1.31"), NOW, NOW + 120000);
+            registry.recordVerifiedPeer("peer-b", path, endpoint("192.168.1.32"), NOW, NOW + 120000);
+            registry.recordVerifiedPeer("peer-a", path, endpoint("192.168.1.41"), NOW + 5, NOW + 120005);
+            assertEquals("192.168.1.41", registry.getFreshPeerRoutes("peer-a", NOW + 6)
+                    .get(0).endpoint.getAddress().getHostAddress());
+            assertEquals("192.168.1.32", registry.getFreshPeerRoutes("peer-b", NOW + 6)
+                    .get(0).endpoint.getAddress().getHostAddress());
+        } finally { routerLan.close(); }
+    }
+
+    @Test public void routeBindingCapturesExactPathListenerAndGeneration() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket sta = socket(), ap = socket();
+        try {
+            String s = "sta|wlan0|192.168.1.20/24", a = "ap|ap0|192.168.43.1/24";
+            registry.registerListener(s, sta, 31);
+            registry.registerListener(a, ap, 47);
+            registry.recordVerifiedPeer("peer", s, endpoint("192.168.1.31"), NOW, NOW + 100);
+            registry.recordVerifiedPeer("peer", a, endpoint("192.168.43.2"), NOW + 1, NOW + 101);
+
+            List<LanChatPathRegistry.RouteBinding> bindings =
+                    registry.getFreshPeerRouteBindings("peer", NOW + 2);
+            assertEquals(2, bindings.size());
+            for (LanChatPathRegistry.RouteBinding binding : bindings) {
+                assertTrue(registry.isCurrentBinding(binding));
+                if (s.equals(binding.route.pathFingerprint)) {
+                    assertSame(sta, binding.listener.socket);
+                    assertEquals(31L, binding.listener.generation);
+                } else {
+                    assertEquals(a, binding.route.pathFingerprint);
+                    assertSame(ap, binding.listener.socket);
+                    assertEquals(47L, binding.listener.generation);
+                }
+                assertEquals(binding.route.listenerGeneration, binding.listener.generation);
+            }
+        } finally { sta.close(); ap.close(); }
+    }
+
+    @Test public void routeBindingIsInvalidatedWhenItsListenerEpochIsReplaced() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket old = socket(), replacement = socket();
+        try {
+            String path = "sta|wlan0|192.168.1.20/24";
+            registry.registerListener(path, old, 51);
+            registry.recordVerifiedPeer("peer", path, endpoint("192.168.1.31"), NOW, NOW + 100);
+            List<LanChatPathRegistry.RouteBinding> before =
+                    registry.getFreshPeerRouteBindings("peer", NOW + 1);
+            assertEquals(1, before.size());
+            assertSame(old, before.get(0).listener.socket);
+
+            registry.registerListener(path, replacement, 52);
+            assertTrue(registry.getFreshPeerRouteBindings("peer", NOW + 2).isEmpty());
+            // A previously captured binding remains tied to the old epoch; it must never
+            // silently become a binding to the replacement listener.
+            assertSame(old, before.get(0).listener.socket);
+            assertEquals(51L, before.get(0).listener.generation);
+            assertFalse(registry.isCurrentBinding(before.get(0)));
+        } finally { old.close(); replacement.close(); }
+    }
+
+    @Test public void exactIngressLookupNeverBorrowsAnotherPathAuthentication() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket sta = socket(), ap = socket(), wrong = socket();
+        try {
+            String s = "sta|wlan0|192.168.1.20/24";
+            String a = "ap|ap0|192.168.43.1/24";
+            InetSocketAddress staEndpoint = endpoint("192.168.1.31");
+            InetSocketAddress apEndpoint = endpoint("192.168.43.2");
+            registry.registerListener(s, sta, 61);
+            registry.registerListener(a, ap, 72);
+            registry.recordVerifiedPeer("peer", s, staEndpoint, NOW, NOW + 100);
+            registry.recordVerifiedPeer("peer", a, apEndpoint, NOW, NOW + 100);
+
+            LanChatPathRegistry.RouteBinding staBinding =
+                    registry.findCurrentPeerRouteBinding("peer", s, sta, 61, staEndpoint, NOW + 1);
+            assertNotNull(staBinding);
+            assertSame(sta, staBinding.listener.socket);
+            assertEquals(s, staBinding.route.pathFingerprint);
+
+            assertNull(registry.findCurrentPeerRouteBinding(
+                    "peer", s, ap, 72, apEndpoint, NOW + 1));
+            assertNull(registry.findCurrentPeerRouteBinding(
+                    "peer", s, wrong, 61, staEndpoint, NOW + 1));
+            assertNull(registry.findCurrentPeerRouteBinding(
+                    "peer", s, sta, 60, staEndpoint, NOW + 1));
+            assertNull(registry.findCurrentPeerRouteBinding(
+                    "peer", s, sta, 61, apEndpoint, NOW + 1));
+
+            LanChatPathRegistry.RouteBinding apBinding =
+                    registry.findCurrentPeerRouteBinding("peer", a, ap, 72, apEndpoint, NOW + 1);
+            assertNotNull(apBinding);
+            assertSame(ap, apBinding.listener.socket);
+            assertEquals(a, apBinding.route.pathFingerprint);
+        } finally { sta.close(); ap.close(); wrong.close(); }
+    }
+
+    @Test public void exactIngressLookupRejectsExpiredRouteAndClosedListener() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket listener = socket();
+        try {
+            String path = "sta|wlan0|192.168.1.20/24";
+            InetSocketAddress peer = endpoint("192.168.1.31");
+            registry.registerListener(path, listener, 81);
+            registry.recordVerifiedPeer("peer", path, peer, NOW, NOW + 10);
+            assertNull(registry.findCurrentPeerRouteBinding(
+                    "peer", path, listener, 81, peer, NOW + 10));
+            registry.recordVerifiedPeer("peer", path, peer, NOW + 11, NOW + 100);
+            listener.close();
+            assertNull(registry.findCurrentPeerRouteBinding(
+                    "peer", path, listener, 81, peer, NOW + 12));
+        } finally { listener.close(); }
+    }
+
+
+    @Test public void preferredPathLookupIsO1PathScopedAndExpiresStaleLease() throws Exception {
+        LanChatPathRegistry registry = new LanChatPathRegistry();
+        DatagramSocket sta = socket(), ap = socket();
+        try {
+            String s = "sta|wlan0|192.168.1.20/24", a = "ap|ap0|192.168.43.1/24";
+            registry.registerListener(s, sta, 91);
+            registry.registerListener(a, ap, 92);
+            InetSocketAddress staEndpoint = endpoint("192.168.1.31");
+            InetSocketAddress apEndpoint = endpoint("192.168.43.2");
+            registry.recordVerifiedPeer("peer", s, staEndpoint, NOW, NOW + 200);
+            registry.recordVerifiedPeer("peer", a, apEndpoint, NOW, NOW + 100);
+
+            LanChatPathRegistry.RouteBinding preferred =
+                    registry.getFreshPeerRouteBinding("peer", a, NOW + 1);
+            assertNotNull(preferred);
+            assertSame(ap, preferred.listener.socket);
+            assertEquals(a, preferred.route.pathFingerprint);
+            assertTrue(registry.isCurrentBinding(preferred));
+            assertNull(registry.getFreshPeerRouteBinding("peer", "unknown-path", NOW + 1));
+
+            assertNull(registry.getFreshPeerRouteBinding("peer", a, NOW + 100));
+            assertNotNull(registry.getFreshPeerRouteBinding("peer", s, NOW + 100));
+        } finally { sta.close(); ap.close(); }
+    }
+
+
+}

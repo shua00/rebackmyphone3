@@ -1,0 +1,195 @@
+# 统一网络感知与自适应路由架构
+
+状态：**项目级 P0 架构原则；分阶段实施。**
+适用范围：Android、Python 端及未来 Rescue2 / Server2 控制面。当前 LAN P2P v2 的 IPv4 STA/AP 基础工作不因本文件而中断。macOS 不在当前范围。
+
+## 1. 架构目标
+
+设备不应依赖固定网络假设或单一传输通道，而应感知当前网络环境、目标设备和经过验证的通信路径，按通信需求选择合适路径，并在路径失效/恢复时有界切换。
+
+统一原则：
+
+- **先感知，再决策，再传输**；发现到接口、地址或网段不等于端到端可达。
+- **候选路径与可信路径分离**；只有在具体路径上完成身份认证及双向可达验证后，才可作为可信路由。
+- **路径级隔离**；认证、端点、socket、listener generation、租约和失败状态均绑定具体路径，不能跨路径借用授权。
+- **按目标和通信类型决策**；同一设备的聊天、文件、实时指令等可有不同传输策略，但共享底层感知事实。
+- **简单网络快路径优先**；单一普通路由器下两台或多台 Android/Python 设备只使用必要 listener 和已验证 route，不因未来多路径能力增加周期扫描、无效探测、每包枚举或冗余发送。
+- **有界故障恢复**；首选路径失败、超时或被明确失效后，才尝试有限备用路径；禁止无界 fan-out。
+- **状态可解释、可诊断**；记录稳定错误码、路径变更和决策原因，不记录密钥、聊天正文或文件内容。
+
+## 2. 分层职责
+
+### 2.1 Network Awareness（网络感知）
+
+收集并维护：
+- 本地网络/接口生命周期：IPv4 地址、接口、Android Network 绑定信息、STA/SoftAP 等适配器身份。
+- 目标设备候选信息：设备身份、发现来源、端点、最后观察时间。
+- 路径事实：本地路径 fingerprint、远端 endpoint、socket/listener generation、路径状态。
+- 验证事实：认证 peer exchange、双向 reachability 结果、验证时间和有效期。
+- 质量事实：实际消息 RTT、ACK 成功/超时、丢包/重试和近期失败；只有有足够观测时才形成质量判断。
+- 生命周期事件：出现、变更、失效、恢复、过期。
+
+感知必须事件驱动优先；必要的验证/刷新应有节流、退避和租约，不能对每个 peer 高频轮询。
+
+### 2.2 Route Registry（路径与端点登记）
+
+维护 peer × path 维度的路由绑定。至少包含：
+- peer identity；
+- path fingerprint；
+- remote endpoint；
+- 精确 listener/socket 引用及 generation；
+- authenticated verification time、expiry/lease；
+- 最近成功/失败与有限质量统计。
+
+候选端点不能直接升级为可信 route。一个路径上的认证不得扩散到另一条路径。旧版不含 path 身份的持久化 endpoint 只允许在明确的单路径兼容条件下使用，不得在多路径时作为跨路径凭据。
+
+### 2.3 Adaptive Route Selector（自适应路径选择）
+
+当前代码已引入 `LanAdaptiveRouteSelector`：单 Listener 使用 peer+preferredPath 的 O(1) 查询；多 Listener 才创建候选列表；显式首选路径优先，否则按最近认证时间选择。备用候选 API 仅在调用方主动请求时构造，最多返回 2 条。**这只是路由选择第一阶段，不代表质量评分或发送失败后的自动回退闭环已经完成。**
+
+输入：目标 peer、通信类型/时效性、当前 fresh authenticated route bindings、路径健康事实及发送预算。
+
+输出：一个首选 route binding 和有界备用候选（仅在需要时构造）。
+
+决策约束：
+- 稳定单路径时 O(1) 直接使用已验证 binding，不创建多路径重试计划。
+- 多路径时优先考虑端到端验证有效性，其次结合近期 RTT、成功率、失败/超时和资源成本；不能仅按网段、接口优先级或 socket bind 成功推断可达性。
+- 普通消息一次只走一条首选路径；只有失败/超时/显式失效后才有限回退。
+- 选择结果必须携带 path/socket/generation 快照；异步任务发送前复核 binding 仍 current。
+- 不允许因路径质量评分而绕过认证、消息收件人快照、ACK 来源校验或安全策略。
+
+### 2.4 Transport Adapters（传输适配器）
+
+适配器负责网络特定的发现、绑定、路径事件、可达性验证支持和错误分类；共享核心负责身份、路由租约、选择、可靠投递、去重和诊断。
+
+当前实施范围：
+- IPv4 普通路由器 LAN：两台或多台 Android/Python 设备，Android↔Android、Android↔Python、Python↔Android。
+- IPv4 Android STA/SoftAP 及复杂拓扑：包括 STA+AP 同时存在的多设备环境，三台设备任意两台均需双向可达验收。
+
+未来兼容边界（不代表当前实施）：
+- P1：USB、有线、便携路由器、Mesh、VPN、多网卡、Guest/客户端隔离、多子网。
+- P2：IPv6、Wi-Fi Direct 等可选适配器；不得成为 IPv4 核心依赖。
+
+## 3. 统一路由策略与 Rescue2 / Server2
+
+未来 Rescue2 / Server2 指令发送应复用同一网络感知事实和路由决策边界，但保留独立传输实现：
+
+- 目标设备存在 fresh、authenticated、双向可达的 LAN UDP route 时，优先使用 LAN UDP 即时下发。
+- 没有可用 LAN UDP route、目标在 LAN 外或 LAN 路径暂时不可达时，按指令策略使用 Server2 HTTP 通道。
+- LAN UDP 与 HTTP 是两条独立可选通道，不以 IP 网段相同作为 LAN 可达证明。
+- 切换通道必须保留同一 commandId/operationId；接收端执行账本必须幂等，重复命令返回已有状态，不重复执行有副作用操作。
+- 明确区分 queued、sent、received/accepted、executing、succeeded、failed、expired；HTTP accepted 不能被误报为命令已执行。
+- 具备 deadline/TTL 的即时指令过期后不得因网络恢复而盲目补执行；允许离线排队的命令必须由各命令类型显式声明。
+- 通道回退和恢复均须有界、可观测；避免 UDP 与 HTTP 同时无控制地重复执行。
+
+这部分是**正式 P0 架构目标**。其目标优先级已提升，但实施仍按依赖分阶段推进：先确保 LAN P2P v2 基础路径可靠，再接入 Rescue2/Server2，避免在基础链路未稳定时叠加故障面。不得因此改造或扩建已封存的 Rescue2 新诊断模块，也不得改变旧版批量日志拉取能力。
+
+### 3.1 Rescue2 P0：热点发现、跨网络指令与双向文件互传
+
+以下三项现正式列为项目级 **P0 目标**，不是可有可无的远期设想：
+
+1. **热点设备发现与管理**：Rescue2 能发现连接手机热点的 Android 设备。Rescue2 主机与手机处于同一可达热点网段时，使用该路径的定向发现和认证单播；若主机位于另一子网、热点 NAT 或客户端隔离阻断直连，不得把广播失败误判为设备不存在，必须进入主动出站会话/中继路径。
+2. **跨网络指令下发**：设备主动向 Rescue2/Server2 可达入口建立认证会话；LAN UDP 可用时优先低延迟下发，LAN 不可达时使用 HTTP/持久在线会话或中继。跨通道保持稳定 commandId/operationId、幂等执行账本、TTL、接收确认与执行结果回传。必须区分“已发送、已接收、执行中、执行成功/失败”，不得把 HTTP 接受或 UDP 发出等同于命令执行成功。
+3. **双向文件互传**：Android 与 Rescue2 均可发起文件传输，支持发现/选择目标、发送文件 offer、接收端明确接受或拒绝、传输进度、完成校验、失败重试与断点续传。用户交互可采用类似蓝牙文件分享的熟悉流程（选设备、发起、对端确认、查看进度与结果），但底层必须使用独立、经过认证的文件传输数据面；不能把聊天 UDP、命令通道或配对凭据直接当作文件传输通道/授权。
+
+**网络边界**：同一热点网段且双向可达时可直接传输；跨子网/NAT 时不能依赖 UDP 广播穿透。应优先采用设备主动出站连接建立会话，必要时使用受控中继/隧道。若不存在任何可达入口或中继，则必须明确报告不可达，不能声称已实现 NAT 穿透。
+
+**实施约束**：共享 Network Awareness、peer 身份和已验证路径事实；聊天、文件、Rescue2 命令继续使用独立业务协议、队列、存储和幂等边界。保留 Rescue2 现有完整管理能力、旧版 `pull_logs_multi()`、Shell/ADB/Root 能力。
+
+### 3.2 Rescue2 对网络感知能力的实际应用契约
+
+网络感知必须成为 Rescue2 的真实决策输入，而不只是诊断信息或设备列表的附属字段。Rescue2 对每个设备维护统一的连接状态视图，但连接状态必须由证据驱动，至少区分：
+
+- **discovered**：收到候选设备信息；只代表发现，不代表可连接。
+- **locally-reachable**：某条明确 LAN path 上完成双向认证/探测；允许该路径上的直连 UDP。
+- **outbound-session**：设备主动建立到 Rescue2/Server2 可达入口的认证会话；可跨热点 NAT、不同子网和多数入站受限网络维持控制通道。
+- **relay-required**：没有可用直连路径，但双方均能到达受控中继；通过中继承载控制或文件会话。
+- **offline/unreachable**：没有任何已验证直连、主动会话或中继路径；必须显示不可达原因，不得用“已发现”伪装在线。
+
+Rescue2 每次通信按用途选择通道，而不是给设备永久贴一个“局域网/外网”标签：
+
+1. 实时指令：有 fresh authenticated LAN route 时优先 UDP；否则使用已认证 outbound session/HTTP；只有会话不可达且中继可用时才走 relay。每个 commandId/operationId 贯穿回退链。
+2. 设备状态与管理：优先复用现存会话和已验证路径；网络变化只刷新受影响设备/路径，避免全量扫描。
+3. 文件互传：先协商 Offer/接受状态，再选择直连或会话/中继数据通道；传输会话独立认证、独立限流、分块校验和断点恢复，不把控制通道当作文件数据面。
+4. 热点发现：同一可达热点网段使用定向发现；跨 NAT 不尝试“广播穿透”，由 Android 主动出站注册/保活，使 Rescue2 能通过设备身份找到其当前会话。
+
+感知到应用之间必须有明确闭环：网络事件 → 候选路径刷新 → 身份认证与双向可达验证 → route/session lease → 按业务策略选择 → 成功/失败/RTT/ACK 结果回写感知层 → 有界重选或恢复。单向收包、接口存在、同网段、Socket bind 成功均不能单独提升为在线/可达。
+
+**回归优先级门槛**：#1035（run 45754370135，对应当时提交 ad911d2）记录了 Python 验证与 Android APK 构建成功；用户在相同 LAN 环境下实测双 Android 对讲畅通。它作为普通 LAN 功能行为基线。V2 后续改造必须先恢复双 Android 普通 LAN 双向发现、peer.hello/peer.ack、route verified、消息与 ACK 闭环，再把 STA/AP 多路径和 Rescue2 跨网能力叠加上去。该历史 CI 记录不等于当前代码已通过，也不替代当前真机回归。
+
+## 4. 共享与隔离边界
+
+共享：网络感知事件、path fingerprint 语义、认证可达性事实、route registry/lease、路径选择接口、错误分类、限量诊断字段。
+
+隔离：聊天消息协议与 Inbox/Outbox、文件传输协议与 Worker/存储、Rescue2 命令执行账本、Server2 HTTP API、语音媒体数据面。共享路由能力不意味着共享业务队列、数据库或副作用执行器。
+
+## 5. P0 分阶段实施与验收
+
+### P0-A：架构契约与当前 IPv4 基础（现在）
+- [x] 建立统一网络感知与自适应路由架构原则。
+- [x] LAN 聊天发送端已使用 path-scoped RouteBinding；单 Listener 快路径和 binding 复核已接入。
+- [x] 新增 `LanChatListenerRuntime` path-keyed lease owner，并将当前单 Wi-Fi Listener 的注册/注销接入；该步骤只统一现有单 Listener 的 lease 生命周期。
+- [x] Android STA primary + validated secondary/AP candidate 的 per-path socket/worker/lease/generation 代码已接入；路径变化与 teardown 按实例身份清理，普通单路径不额外创建 Listener（代码/CI 层完成）。
+- [ ] 多 Listener ingress、peer.hello/peer.ack、ACK/fragment ACK、peer×path 认证与 generation 竞争闭环仍需收口；STA/AP 双路径真机双向验证、三设备任意两台互通仍未通过验收。
+- [ ] 普通路由器多 peer 快路径回归，不引入常驻扫描/探测或冗余 fan-out。
+
+### P0-B：共享感知/决策接口
+- [ ] 定义跨 Android/Python 可对齐的 path state、route lease、failure reason 和 route decision 语义。
+- [ ] 将网络变化事件、路径认证、可达性和 route lifecycle 从业务发送逻辑中明确分层。
+- [x] selector 单路径 O(1) 快路径、多路径已认证候选选择及异步 binding 复核基础已接入并有组件测试。
+- [ ] 发送失败/ACK 超时后的备用 RouteBinding 回退、真实 RTT/成功率/失败质量事实闭环仍待完成。
+- [ ] 统一诊断字段与导出语义，保持 bounded、redacted、可关闭/剥离。
+
+### P0-C：Rescue2 / Server2 热点发现、跨网指令与文件互传（正式 P0；分阶段实施）
+- [ ] Rescue2/Server2 共享目标设备网络感知结果，避免各自用网段/IP 猜测 LAN 状态。
+- [ ] Rescue2 热点发现：同热点网段定向发现与认证单播；跨子网/NAT 时通过设备主动出站会话或受控中继发现/保持在线，不依赖广播穿透。
+- [ ] Android ↔ Rescue2 双向文件互传：设备选择、Offer、接收端接受/拒绝、分块传输、进度、SHA-256 完整性校验、ACK、有限重试、断点续传与重启恢复；采用类似蓝牙分享的交互流程，但保持独立安全数据面。
+- [ ] LAN 内优先 UDP 即时指令，LAN 外或 LAN route 不可用时使用 HTTP。
+- [ ] commandId/operationId 跨通道稳定，设备端持久化幂等执行账本。
+- [ ] 指令 TTL、允许离线补发的类型、接收/执行状态和结果回传。
+- [ ] UDP ACK 丢失后 HTTP 回退不得重复执行；路径恢复后平滑回归 UDP。
+- [ ] 跨网络会话的连接保持、断线恢复、设备身份校验、会话过期与中继资源上限。
+- [ ] 保留 Rescue2 旧版 pull_logs_multi() 和现有 Shell/ADB/Root 能力边界。
+
+### P0 验收矩阵
+
+| 场景 | 必须证明 |
+|---|---|
+| 普通路由器，多台 Android | 每个 peer 双向消息、ACK、重试与并发；单路径开销不随 peer 数量引入无关扫描 |
+| 普通路由器，Android + Python | Android→Python、Python→Android 双向认证与消息送达 |
+| STA/AP + Router 三设备 | 三组设备组合任意两台双向可达；断开/恢复任一链路后只清理对应路径 |
+| 多路径 peer | 正常发送只选一条最佳已验证路径；首选失效后有限回退；ACK 只能由合法路径/端点完成 |
+| 网络切换/恢复 | 路径变化触发定向失效和重验证；旧 generation 的异步任务不能污染新路径 |
+| UDP→HTTP 命令回退（后续） | 同一 commandId 幂等；ACK 丢失不重复执行；过期命令不补执行 |
+| 性能 | 记录 listener/worker 数、idle CPU/wakeup、内存、包数、RTT、重试、恢复时间；阈值以代表性真机测量确定 |
+
+自动化、CI、APK 构建、模拟集成与真机验收必须分栏记录；任何前者通过均不能替代真机结果。
+
+## 6. 当前明确不做
+
+- 不暂停或重排当前 LAN P2P v2 IPv4 STA/AP 基础工作。
+- 不在当前批次实现 Rescue2/Server2 UDP/HTTP 智能切换。
+- 不因“统一”而把聊天、文件、命令和语音塞进同一个业务协议、队列或数据库。
+- 不对每个接口/peer 周期扫描或广播全部消息。
+- 不将子网相同、UDP socket bind 成功或单向收包视为双向可达。
+- 当前不考虑 macOS；P1/P2 仅保留适配器边界。
+
+## 7. 感知能力常备，感知活动按需激活（硬约束）
+
+统一网络感知模块是常驻的基础能力/状态模型，但不意味着后台持续扫描。必须区分“具备感知能力”和“正在执行感知工作”：
+
+- 常态仅维护已有 Network/interface 生命周期事件、已认证 route lease 和真实业务流量自然产生的 RTT/ACK/失败事实；不为单路径设备启动独立感知线程或周期探测器。
+- 单 Listener、route lease fresh 且近期成功时，发送决策走 O(1) 快路径，不枚举接口、不创建候选集合、不执行探测。
+- 只有出现网络/接口变化、route lease 即将过期、首次建立候选路径、连续发送失败、ACK 超时或用户明确触发诊断时，才按目标 peer/path 定向刷新或验证。
+- 刷新必须合并重复请求、设置冷却/退避和并发上限；失败状态按 path 隔离，恢复事件只重验受影响路径。
+- 任何探测都必须回答一个明确问题（例如某个 peer 在某条新路径上是否双向可达）；没有目标、没有状态变化、没有待解决失败时不得探测。
+- 选择器只使用已认证路径和实际观测到的质量数据；样本不足时使用确定性保守策略，不虚构质量分数。
+
+验收时分别测量“能力模块已装载但空闲”与“多路径/异常感知被激活”两种状态，证明单路径设备没有额外线程、定时器、扫描、探测包和周期唤醒。
+
+
+## 8. 文件传输模式与远程策略
+
+文件传输的产品模式、接收策略、Rescue2/Server2 远程策略、管理端冲突、离线策略和验收契约，统一见 [FILE_TRANSFER_MODES_AND_REMOTE_POLICY.md](FILE_TRANSFER_MODES_AND_REMOTE_POLICY.md)。
+
+文件传输模块必须消费本架构定义的网络感知与路径事实，但不得将网络可达性等同于文件接收授权；TransferPolicy 与文件数据面保持独立。默认 quick、secure 强认证、用户自主切换、Rescue2/Server2 可远程切换或强制限制，以及自动接收边界均以该专项契约为准。
