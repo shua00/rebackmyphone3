@@ -461,7 +461,7 @@ class LanP2PCoreTests(unittest.TestCase):
     def test_android_outbox_persists_per_recipient_fragment_ack_bitmap(self):
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
-        self.assertIn("private static final int DB_VERSION = 12;", source)
+        self.assertIn("private static final int DB_VERSION = 13;", source)
         self.assertIn('"fragment_count INTEGER NOT NULL DEFAULT 0,"', source)
         self.assertIn('"fragment_ack_bitmap TEXT NOT NULL DEFAULT \'\',"', source)
         self.assertIn('if (oldVersion < 11)', source)
@@ -1968,7 +1968,7 @@ class LanP2PCoreTests(unittest.TestCase):
         store = (
             repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         ).read_text(encoding="utf-8")
-        self.assertIn("DB_VERSION = 12", store)
+        self.assertIn("DB_VERSION = 13", store)
         self.assertIn("retry_attempt_count INTEGER NOT NULL DEFAULT 0", store)
         self.assertIn("state='retry_paused'", store)
         self.assertIn("'retry_paused' ELSE state", store)
@@ -2042,9 +2042,9 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("SUM(CASE WHEN status!='acked'", progress)
         self.assertIn("retry_attempt_count<?", attempt)
         self.assertIn("last_recovery_at_ms INTEGER NOT NULL DEFAULT 0", store)
-        self.assertIn("DB_VERSION = 12", store)
+        self.assertIn("DB_VERSION = 13", store)
         self.assertIn("idx_lan_targets_retry", store)
-        self.assertIn("DB_VERSION = 12", store)
+        self.assertIn("DB_VERSION = 13", store)
         self.assertIn("retry_attempt_count=0,last_retry_at_ms=0", store)
         ack = extract_java_method(store, "public boolean acknowledge(")
         self.assertIn('hasRetryBudget ? "pending" : "retry_paused"', ack)
@@ -4355,15 +4355,19 @@ class AndroidFixedTargetImmediateDispatchTests(unittest.TestCase):
         self.assertIn("dispatchBindings.put(target.peerId, liveBinding)", send)
         self.assertIn("dispatchEndpoints.put(target.peerId, liveBinding.route.endpoint)", send)
         self.assertIn("target.endpointIp", send)
-        self.assertIn("directed-challenge candidate only", send)
+        self.assertIn("directed-challenge candidate by default", send)
         self.assertNotIn("dispatchEndpoints.put(target.peerId, cachedRoute)", send)
         self.assertNotIn("preparedCachedEndpoints", send)
         self.assertNotIn("verifiedChatPeers.get(target.peerId)", send)
         self.assertIn("store.markAttempt(messageId, peerId, attemptedEndpoint", send)
-        self.assertIn("isCurrentLanChatSendBinding(routeBinding, socket, socketGeneration)", send)
+        self.assertIn("isCurrentLanChatTargetBinding(routeBinding, socket, socketGeneration, peerId, peer)", send)
         guard = extract_java_method(source, "private boolean isCurrentLanChatSendBinding(")
         self.assertIn("lanChatPathRegistry.isCurrentBinding(binding)", guard)
         self.assertIn("return false;", guard)
+        target_guard = extract_java_method(source, "private boolean isCurrentLanChatTargetBinding(")
+        self.assertIn("store.hasFreshVerifiedPeerRoute(peerId", target_guard)
+        self.assertIn("lanChatListenerRuntime.listenerCount() != 1", target_guard)
+        self.assertIn("LanChatCachedRoutePolicy.isEligible", target_guard)
 
     def test_ack_matches_attempted_endpoint_but_not_historical_route_candidate(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -6041,7 +6045,7 @@ class LongChatFragmentProtocolTests(unittest.TestCase):
     def test_android_fragment_receive_cache_is_durable_bounded_and_separate_from_final_ack(self):
         repo_root = Path(__file__).resolve().parents[1]
         store = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
-        self.assertIn("DB_VERSION = 12", store)
+        self.assertIn("DB_VERSION = 13", store)
         self.assertIn("CREATE TABLE IF NOT EXISTS lan_chat_fragment_sessions", store)
         self.assertIn("CREATE TABLE IF NOT EXISTS lan_chat_fragments", store)
         self.assertIn("FRAGMENT_SESSION_TTL_MS = 30L * 60L * 1000L", store)
