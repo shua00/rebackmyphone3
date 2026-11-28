@@ -223,10 +223,15 @@ public final class LanTransferSenderWorker implements Runnable {
         long offerDeadline = System.currentTimeMillis() + offerWaitMs;
         long backoff = 1000L;
         JSONObject acknowledgement = null;
+        boolean offerAcknowledged = false;
         while (!cancelled.get() && !pauseRequested.get() && System.currentTimeMillis() < offerDeadline) {
             try {
                 acknowledgement = sendOfferAcrossCurrentPaths();
                 String remoteState = acknowledgement.optString("state", "");
+                if ("offered".equals(remoteState) || "accepted".equals(remoteState)
+                        || "transferring".equals(remoteState) || "completed".equals(remoteState)) {
+                    offerAcknowledged = true;
+                }
                 if ("rejected".equals(remoteState) || "cancelled".equals(remoteState)
                         || "expired".equals(remoteState) || "failed".equals(remoteState)) {
                     if ("offered".equals(requireLocalTask().state))
@@ -247,12 +252,16 @@ public final class LanTransferSenderWorker implements Runnable {
         }
         if (cancelled.get()) { cancelLedger(); return; }
         if (pauseRequested.get()) { notifyPausedAtBoundary(); return; }
+        if (!offerAcknowledged) {
+            notifyState("waiting_for_network");
+            return; // No remote Offer response was received; keep the durable Offer for retry.
+        }
         if (acknowledgement == null
                 || !("accepted".equals(acknowledgement.optString("state"))
                     || "transferring".equals(acknowledgement.optString("state"))
                     || "completed".equals(acknowledgement.optString("state")))) {
             notifyState("waiting_for_acceptance");
-            return; // Durable local Offer remains available for a later retry.
+            return; // The peer has the Offer; the receiver still needs to accept it.
         }
 
         advanceLocalToTransferring();
