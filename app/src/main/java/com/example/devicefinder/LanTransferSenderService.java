@@ -35,6 +35,7 @@ public final class LanTransferSenderService extends Service {
     private final Handler retryHandler = new Handler(Looper.getMainLooper());
     private final java.util.concurrent.atomic.AtomicBoolean jobActive = new java.util.concurrent.atomic.AtomicBoolean(false);
     private volatile LanTransferSenderWorker activeWorker;
+    private volatile String lastWorkerState;
 
     public static boolean hasPendingJob(Context context) {
         return context.getApplicationContext().getSharedPreferences(PREFS,Context.MODE_PRIVATE).contains(JOB);
@@ -104,7 +105,7 @@ public final class LanTransferSenderService extends Service {
         super.onCreate();
         executor=Executors.newSingleThreadExecutor(r->{Thread t=new Thread(r,"LanTransfer-Sender");t.setDaemon(false);return t;});
         createChannel();
-        startForeground(NOTIFICATION_ID,notification("文件传输任务已恢复/等待网络"));
+        startForeground(NOTIFICATION_ID,notification("正在检查待处理文件传输任务"));
     }
 
     @Override public int onStartCommand(Intent intent,int flags,int startId) {
@@ -249,6 +250,20 @@ public final class LanTransferSenderService extends Service {
         }
     }
 
+
+    private static String notificationTextForState(String state) {
+        if ("waiting_for_acceptance".equals(state)) return "已发送文件请求，待对方接收";
+        if ("waiting_for_network".equals(state)) return "尚未联系到接收设备，等待网络";
+        if ("transferring".equals(state)) return "正在传输文件";
+        if ("paused".equals(state)) return "文件传输暂停，等待恢复";
+        if ("accepted".equals(state)) return "对方已接受，准备传输";
+        if ("completed".equals(state)) return "文件已成功送达";
+        if ("rejected".equals(state)) return "对方拒绝接收文件";
+        if ("cancelled".equals(state)) return "文件发送已取消";
+        if ("expired".equals(state)) return "文件传输请求已过期";
+        if ("failed".equals(state)) return "文件传输失败";
+        return "文件传输状态：" + state;
+    }
 
     private void cancelPersistedLocalJob(int startId) {
         String raw=getSharedPreferences(PREFS,MODE_PRIVATE).getString(JOB,null);
