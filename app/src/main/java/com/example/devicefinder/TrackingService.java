@@ -5721,8 +5721,11 @@ public class TrackingService extends Service implements LocationListener {
         try {
             // Reserve the largest valid, worst-case JSON-escaped recipient ID before durable admission.
             // A wildcard-only check is insufficient: the later directed datagram carries a real peer ID.
-            buildAuthenticatedLanChatPacket(getUniqueDeviceId(),
-                    LanP2pProtocol.maxPeerIdBudgetProbe(), messageId, message);
+            // Admission validation must accept the same bounded fragment format used by
+            // the actual send path. Valid long messages must not be rejected as one UDP frame.
+            buildAuthenticatedLanChatFragmentPackets(getUniqueDeviceId(),
+                    LanP2pProtocol.maxPeerIdBudgetProbe(), messageId, message,
+                    System.currentTimeMillis());
         } catch (Exception tooLargeOrInvalid) {
             FileLogger.log(this, "CHAT", "⚠️ LAN 对讲消息超过单个 UDP 数据包限制，未入队: "
                     + tooLargeOrInvalid.getClass().getSimpleName());
