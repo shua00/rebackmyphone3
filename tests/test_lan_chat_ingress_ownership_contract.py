@@ -204,6 +204,11 @@ class LanChatIngressOwnershipContractTests(unittest.TestCase):
             peer_ack.index("store.markPeerRouteRegistryAdmitted("),
             peer_ack.index("verifiedChatPeers.put(senderId,"),
         )
+        post_admission_guard = peer_ack.index(
+            "isCurrentLanChatIngress(verifiedPathFingerprint, socket,",
+            peer_ack.index("store.markPeerRouteRegistryAdmitted("),
+        )
+        self.assertLess(post_admission_guard, peer_ack.index("verifiedChatPeers.put(senderId,"))
         store = (
             ROOT / "app/src/main/java/com/example/devicefinder/LanChatStore.java"
         ).read_text(encoding="utf-8")
