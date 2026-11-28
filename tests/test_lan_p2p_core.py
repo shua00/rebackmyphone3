@@ -2796,20 +2796,30 @@ class LanP2PCoreTests(unittest.TestCase):
         end = service.index('if ("chat.ack".equals(type))', start)
         handler = service[start:end]
 
-        # A peer must be durably recorded and added to every still-open first-discovery
-        # snapshot before it becomes an active unicast route or releases discovery waiters.
+        # First persist an unadmitted hint, then admit the exact path in Registry, and only
+        # after that CAS-promote the durable marker and join open discovery snapshots.
         persist = handler.index("store.upsertPeer(")
+        registry = handler.index("lanChatPathRegistry.recordVerifiedPeer(")
+        admitted = handler.index("store.markPeerRouteRegistryAdmitted(")
         route = handler.index("verifiedChatPeers.put(senderId")
         release = handler.index("latch.countDown()")
-        self.assertLess(persist, route)
+        self.assertLess(persist, registry)
+        self.assertLess(registry, admitted)
+        self.assertLess(admitted, route)
         self.assertLess(route, release)
         self.assertIn("if (!persisted)", handler)
         self.assertNotIn("store.addDiscoveryPeerToOpenMessages(senderId)", handler)
         store_source = (repo_root / "app/src/main/java/com/example/devicefinder/LanChatStore.java").read_text(encoding="utf-8")
         upsert = extract_java_method(store_source, "public boolean upsertPeer(")
-        self.assertIn("addDiscoveryPeerToOpenMessages(db, peerId, now)", upsert)
+        self.assertNotIn("addDiscoveryPeerToOpenMessages(db, peerId, now)", upsert)
+        self.assertIn('v.put("verified_route_admitted", 0)', upsert)
         self.assertIn("db.beginTransaction()", upsert)
         self.assertIn("db.setTransactionSuccessful()", upsert)
+        promote = extract_java_method(store_source, "public boolean markPeerRouteRegistryAdmitted(")
+        self.assertIn('values.put("verified_route_admitted", 1)', promote)
+        self.assertIn("addDiscoveryPeerToOpenMessages(db, peerId, now)", promote)
+        self.assertIn("db.beginTransaction()", promote)
+        self.assertIn("db.setTransactionSuccessful()", promote)
         self.assertIn("lanChatControlExecutor.execute", handler)
         # peer.ack route registration must retain the exact receiving listener epoch.
         self.assertIn('final boolean isAckFrame = "peer.ack".equals(type) || "chat.ack".equals(type)', service)
