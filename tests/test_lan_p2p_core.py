@@ -7294,6 +7294,7 @@ while True:
                             self.assertLessEqual(sent, 8)
                             total_sent = sent
                             acked = set()
+                            receiver_restarted = False
                             final_acknowledged = False
                             deadline = time.time() + 15
                             while time.time() < deadline and (
@@ -7319,7 +7320,39 @@ while True:
                                         sender_db, sender_scope, message_id,
                                         receiver_id, index, source[0], source[1]))
                                     acked.add(index)
-                                    if len(acked) == total_sent and total_sent < expected_fragments:
+                                    if not receiver_restarted:
+                                        # Crash the real service after its first durable fragment ACK.
+                                        receiver.terminate()
+                                        receiver_stdout, receiver_stderr = receiver.communicate(timeout=5)
+                                        self.assertTrue(
+                                            "STORE_RESULT:" in receiver_stdout,
+                                            "listener exited before durable fragment storage: " +
+                                            receiver_stdout + "\\n" + receiver_stderr)
+                                        os.remove(ready)
+                                        receiver = subprocess.Popen(
+                                            [sys.executable, "-u", "-c", receiver_code, service_copy,
+                                             receiver_type, receiver_id, secret, str(receiver_port), ready],
+                                            cwd=temp_dir, env=env, stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE, text=True)
+                                        restart_deadline = time.time() + 12
+                                        while time.time() < restart_deadline and not os.path.exists(ready):
+                                            if receiver.poll() is not None:
+                                                break
+                                            time.sleep(0.025)
+                                        self.assertTrue(
+                                            os.path.exists(ready),
+                                            "production listener failed to restart: " +
+                                            (receiver.stderr.read() if receiver.poll() is not None else "timeout"))
+                                        receiver_restarted = True
+                                        resumed = send_outgoing_fragment_window(
+                                            sender_sock, sender_db, sender_scope, message_id,
+                                            receiver_id, body, created_at,
+                                            ("127.0.0.1", receiver_port), sender_id,
+                                            "python", sender_id, secret,
+                                            mark_attempt=False, allow_fast_retry=False)
+                                        self.assertGreater(resumed, 0)
+                                        total_sent += resumed
+                                    if len(acked) < expected_fragments and len(acked) % 8 == 0:
                                         advanced = send_outgoing_fragment_window(
                                             sender_sock, sender_db, sender_scope, message_id,
                                             receiver_id, body, created_at,
@@ -7333,7 +7366,7 @@ while True:
                                     final_acknowledged = acknowledge_outgoing_message(
                                         sender_db, sender_scope, message_id, receiver_id)
                             self.assertEqual(expected_fragments, len(acked))
-                            self.assertEqual(expected_fragments, total_sent)
+                            self.assertTrue(receiver_restarted)
                             self.assertTrue(final_acknowledged)
                         finally:
                             sender_sock.close()
