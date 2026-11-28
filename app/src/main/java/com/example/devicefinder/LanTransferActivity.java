@@ -381,7 +381,7 @@ public final class LanTransferActivity extends Activity {
                 return;
             }
             List<LanTransferPeerDirectory.Candidate> candidates =
-                    LanTransferPeerDirectory.loadCurrent(this, System.currentTimeMillis());
+                    loadStableCandidates();
             java.util.ArrayList<LanTransferPeerDirectory.Candidate> trusted = new java.util.ArrayList<>();
             for (LanTransferPeerDirectory.Candidate candidate : candidates)
                 if (candidate.isConnectable() && credentials.trustedPeerIds.contains(candidate.peerId))
@@ -495,7 +495,7 @@ public final class LanTransferActivity extends Activity {
 
     private List<LanTransferPeerDirectory.Candidate> loadStableCandidates() {
         List<LanTransferPeerDirectory.Candidate> candidates = new ArrayList<>(
-                LanTransferPeerDirectory.loadCurrent(this, System.currentTimeMillis()));
+                loadStableCandidates());
         Collections.sort(candidates, (left, right) -> {
             String leftId = left.peerId == null ? "" : left.peerId;
             String rightId = right.peerId == null ? "" : right.peerId;
