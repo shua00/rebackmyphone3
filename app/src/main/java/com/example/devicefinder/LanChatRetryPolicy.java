@@ -33,6 +33,15 @@ final class LanChatRetryPolicy {
     static final int RETRY_BATCH_SIZE = 3;
     static final int MAX_RETRY_BATCHES_PER_WAKE = 3;
 
+    /**
+     * Only concrete recovery events may bypass the durable Outbox wake cadence.
+     * An ACK timeout/route refresh is a probe request, not evidence that a peer recovered.
+     */
+    static boolean shouldImmediatelyRetryForRecovery(
+            boolean globalRecoveryEvent, boolean peerRecoveryEvent) {
+        return globalRecoveryEvent || peerRecoveryEvent;
+    }
+
     static long outboxRetryWakeDelayMs(int minimumAttempts, boolean hasUnattemptedRouteTargets) {
         long sendRetryDelayMs = minimumAttempts == Integer.MAX_VALUE ? Long.MAX_VALUE
                 : (minimumAttempts <= 1 ? OUTBOX_RETRY_FIRST_DELAY_MS
