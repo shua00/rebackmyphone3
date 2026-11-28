@@ -6465,6 +6465,161 @@ assert indexes == [1, 3, 4, 5, 6, 7], indexes
             self.assertEqual(0, resumed.returncode, resumed.stderr)
 
 
+class PythonLongChatSenderRealUdpProcessRestartTests(unittest.TestCase):
+    """Verify a new sender process resumes a persisted UDP flight after a crash."""
+
+    def test_sender_process_restart_resumes_real_udp_delivery_and_final_ack(self):
+        import socket
+        from lan_p2p_core import (
+            decode_packet, encode_packet, store_incoming_chat_fragment,
+            load_incoming_chat_fragments, assemble_chat_fragments,
+            fragment_chat_message,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(__file__).resolve().parents[1]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+            db = os.path.join(temp_dir, "sender.sqlite3")
+            receiver_db = os.path.join(temp_dir, "receiver.sqlite3")
+            sender_id, receiver_id = "sender-crash-process", "receiver-udp-harness"
+            message_id, scope, secret = "sender-process-crash-long-message", "server2", "sender-restart-secret"
+            body = "独立发送进程真实UDP恢复🙂 " * 180
+            created_at = 123456789
+            receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            receiver.bind(("127.0.0.1", 0))
+            receiver.settimeout(8)
+            endpoint = receiver.getsockname()
+            expected = len(fragment_chat_message(message_id, receiver_id, body, created_at))
+
+            first = r"""
+import socket, sys
+from lan_p2p_core import persist_outgoing_message, send_outgoing_fragment_window, decode_packet, record_outgoing_fragment_ack
+db, host, port, sender, peer, message, secret = sys.argv[1:]
+body = "独立发送进程真实UDP恢复🙂 " * 180
+created = 123456789
+assert persist_outgoing_message(db, "server2", sender, message, body, [peer], created)
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("127.0.0.1", 0))
+sock.settimeout(8)
+sent = send_outgoing_fragment_window(sock, db, "server2", message, peer, body, created,
+    (host, int(port)), sender, "server2", sender, secret,
+    mark_attempt=True, allow_fast_retry=True)
+assert sent > 1, sent
+while True:
+    raw, addr = sock.recvfrom(1200)
+    packet = decode_packet(raw, secret)
+    if packet.get("type") == "chat.fragment.ack":
+        assert record_outgoing_fragment_ack(db, "server2", message, peer,
+            packet["fragment_index"], addr[0], addr[1])
+        print("SENDER_CRASH_AFTER_ACK:" + str(packet["fragment_index"]), flush=True)
+        break
+sock.close()
+"""
+            resumed = r"""
+import socket, sys, time
+from lan_p2p_core import (send_outgoing_fragment_window, decode_packet,
+    record_outgoing_fragment_ack, acknowledge_outgoing_message,
+    packet_service_identity_matches, load_outgoing_fragment_ack_bitmap)
+db, host, port, sender, peer, message, secret = sys.argv[1:]
+body = "独立发送进程真实UDP恢复🙂 " * 180
+created = 123456789
+bitmap = load_outgoing_fragment_ack_bitmap(db, message, peer)
+assert "1" in bitmap, bitmap
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("127.0.0.1", 0))
+sock.settimeout(1)
+endpoint = (host, int(port))
+sent = send_outgoing_fragment_window(sock, db, "server2", message, peer, body, created,
+    endpoint, sender, "server2", sender, secret,
+    mark_attempt=True, allow_fast_retry=True)
+assert sent > 0, sent
+deadline = time.time() + 18
+final = False
+while time.time() < deadline and not final:
+    try:
+        raw, addr = sock.recvfrom(1200)
+    except socket.timeout:
+        more = send_outgoing_fragment_window(sock, db, "server2", message, peer,
+            body, created, endpoint, sender, "server2", sender, secret,
+            mark_attempt=False, allow_fast_retry=True)
+        sent += more
+        continue
+    packet = decode_packet(raw, secret)
+    if not packet_service_identity_matches(packet, peer):
+        continue
+    if packet.get("target_peer_id") != sender or packet.get("message_id") != message:
+        continue
+    if packet.get("type") == "chat.fragment.ack":
+        record_outgoing_fragment_ack(db, "server2", message, peer,
+            packet["fragment_index"], addr[0], addr[1])
+        more = send_outgoing_fragment_window(sock, db, "server2", message, peer,
+            body, created, endpoint, sender, "server2", sender, secret,
+            mark_attempt=False, allow_fast_retry=True)
+        sent += more
+    elif packet.get("type") == "chat.ack":
+        final = acknowledge_outgoing_message(db, "server2", message, peer)
+assert final, "restarted sender did not persist final ACK"
+print("SENDER_RESTART_FINAL_ACK", flush=True)
+sock.close()
+"""
+            try:
+                first_run = subprocess.run(
+                    [sys.executable, "-u", "-c", first, db, endpoint[0], str(endpoint[1]),
+                     sender_id, receiver_id, message_id, secret],
+                    cwd=str(repo_root), env=env, capture_output=True, text=True, timeout=20)
+                self.assertEqual(0, first_run.returncode, first_run.stdout + "\n" + first_run.stderr)
+                self.assertIn("SENDER_CRASH_AFTER_ACK:", first_run.stdout)
+
+                resumed_proc = subprocess.Popen(
+                    [sys.executable, "-u", "-c", resumed, db, endpoint[0], str(endpoint[1]),
+                     sender_id, receiver_id, message_id, secret],
+                    cwd=str(repo_root), env=env, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True)
+                fragments = {}
+                complete = False
+                deadline = time.time() + 22
+                while time.time() < deadline and not complete:
+                    raw, addr = receiver.recvfrom(1200)
+                    packet = decode_packet(raw, secret)
+                    if packet.get("type") != "chat.fragment":
+                        continue
+                    self.assertEqual(receiver_id, packet.get("target_peer_id"))
+                    result = store_incoming_chat_fragment(receiver_db, "restart-receiver",
+                                                          sender_id, packet)
+                    self.assertIn(result, ("stored", "completed", "complete_duplicate"))
+                    fragments[packet["fragment_index"]] = packet
+                    ack = encode_packet({
+                        "type": "chat.fragment.ack", "sender_peer_id": receiver_id,
+                        "sender_peer_type": "python", "service_id": receiver_id,
+                        "target_peer_id": sender_id, "message_id": message_id,
+                        "fragment_index": packet["fragment_index"], "status": "received",
+                    }, secret)
+                    receiver.sendto(ack, addr)
+                    if len(fragments) == expected:
+                        cached = load_incoming_chat_fragments(
+                            receiver_db, "restart-receiver", sender_id, message_id)
+                        self.assertEqual(body, assemble_chat_fragments(cached))
+                        final_ack = encode_packet({
+                            "type": "chat.ack", "sender_peer_id": receiver_id,
+                            "sender_peer_type": "python", "service_id": receiver_id,
+                            "target_peer_id": sender_id, "message_id": message_id,
+                            "status": "stored",
+                        }, secret)
+                        receiver.sendto(final_ack, addr)
+                        complete = True
+                self.assertTrue(complete, "sender restart did not complete all UDP fragments")
+                stdout, stderr = resumed_proc.communicate(timeout=20)
+                self.assertEqual(0, resumed_proc.returncode, stdout + "\n" + stderr)
+                self.assertIn("SENDER_RESTART_FINAL_ACK", stdout)
+                self.assertEqual(expected, len(fragments))
+            finally:
+                receiver.close()
+                if 'resumed_proc' in locals() and resumed_proc.poll() is None:
+                    resumed_proc.terminate()
+                    resumed_proc.communicate(timeout=5)
+
+
 class PythonLongChatCrossServiceDiscoveryTests(unittest.TestCase):
     def test_discovery_targets_every_other_listener_without_looping_to_self(self):
         from lan_p2p_core import build_chat_discovery_destinations
