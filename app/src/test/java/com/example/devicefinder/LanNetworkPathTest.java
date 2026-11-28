@@ -3,6 +3,7 @@ package com.example.devicefinder;
 import static org.junit.Assert.*;
 import java.net.Inet4Address;
 import java.net.InetAddress;
+import android.net.NetworkCapabilities;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
@@ -14,6 +15,21 @@ import org.robolectric.shadows.ShadowNetwork;
 public class LanNetworkPathTest {
     private static Inet4Address ipv4(String value) throws Exception {
         return (Inet4Address) InetAddress.getByName(value);
+    }
+
+    @Test public void vpnTransportIsNeverSelectedAsWifiLanEvenWithWifiUnderlyingTransport() {
+        NetworkCapabilities wifi = new NetworkCapabilities();
+        wifi.addTransportType(NetworkCapabilities.TRANSPORT_WIFI);
+        assertTrue(LanNetworkPath.isWifiLanNetwork(wifi));
+
+        NetworkCapabilities vpnOverWifi = new NetworkCapabilities();
+        vpnOverWifi.addTransportType(NetworkCapabilities.TRANSPORT_WIFI);
+        vpnOverWifi.addTransportType(NetworkCapabilities.TRANSPORT_VPN);
+        assertFalse(LanNetworkPath.isWifiLanNetwork(vpnOverWifi));
+
+        NetworkCapabilities vpnOnly = new NetworkCapabilities();
+        vpnOnly.addTransportType(NetworkCapabilities.TRANSPORT_VPN);
+        assertFalse(LanNetworkPath.isWifiLanNetwork(vpnOnly));
     }
 
     @Test public void acceptsPrivateIpv4AndRejectsNonLanAddresses() throws Exception {
