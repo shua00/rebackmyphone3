@@ -754,3 +754,17 @@
 - [ ] 继续查明 #1035→V2 的实际回归点：用三机新 APK 日志逐台核对 `peer.hello RX`、`peer.ack TX`、`peer.ack` ingress、`peer route verified`、RouteBinding 数量和第一条消息 ACK；无日志/无证据时不得推断是广播、认证或 generation 哪一环。
 
 > 当前差异复核没有发现可以安全地直接撤销的 path-scoped 安全检查；尚未证明上述 SQLite hint 竞态就是现场对讲失败根因。下一步优先补充有边界的存储一致性测试，再根据真机日志定位实际断点。
+
+
+## #1035 普通 LAN 对讲回归：固定目标 endpoint fallback 差异（2026-11-28）
+
+- [x] 重新核对 #1035 APK 对应源码快照 `ad911d29651165c991f759fb4fd5e31a9ed2e7a6`（该 commit 的提交标题虽是配对恢复，但其完整 tree 可作为 APK 源码快照；不能只看 commit diff 判断源码状态）。
+- [x] 找到一个明确的发送行为差异：#1035 在准备阶段从持久化 Outbox target 的 `endpoint_ip/endpoint_port` 构建 `preparedCachedEndpoints`；发送时优先使用当前内存 verified route，否则允许向该历史 endpoint 直接发送目标 Peer ID 绑定的认证聊天包，并记录该次实际成功发送 endpoint，供同一 messageId 的 ACK 校验。
+- [x] 当前 V2 已移除上述持久化 endpoint 的 payload fallback：发送目标只从当前 `LanChatPathRegistry.RouteBinding` 构建；SQLite peer-wide endpoint 只允许触发定向 challenge，不得直接授权 chat/fragment payload。若固定目标存在但当前 path-scoped binding 缺失，既不会走历史 endpoint 单播，也不会进入“无固定目标”的首次广播分支。
+- [x] 该差异能解释一种重要回归形态：设备已有历史可信 endpoint、但本轮 peer discovery/RouteBinding 未建立时，#1035 仍可能单播对讲；V2 则会等待当前路径重新认证。它与 #1035“设备发现失败但 UDP 对讲双向成功”的已知结果相符，是当前最强代码差异线索，但尚不能单凭静态代码认定为现场根因。
+- [ ] **P0 修复设计**：不能无条件恢复 peer-wide endpoint 直投。先为单 Listener 快路径设计有界兼容策略：必须证明 endpoint 来自未过期的历史认证记录、属于当前实际 LAN 子网/网络 scope、当前仅一个 Listener 且无跨路径歧义；每次发送仍绑定目标 Peer ID，并只接受该 messageId 成功 UDP send 后来自精确 endpoint 的认证 ACK。多 Listener 情况继续强制 path-scoped RouteBinding，不允许跨路径借用。
+- [ ] 若现有 SQLite schema 缺少验证时间/租约/路径归属信息，先补充可迁移字段或独立的 path-scoped durable route record；不能把普通 `last_endpoint` 当成已认证记录，也不能仅凭私网 IP/CIDR 授权。
+- [ ] 增加 Android 回归测试：①单 Listener + 未过期、当前 LAN scope 匹配的历史认证 endpoint 可按兼容策略投递；②过期/跨子网/不同 scope/多 Listener/stale generation 均拒绝 fallback；③成功发送 endpoint 才可接受同消息 ACK；④历史 endpoint 不更新 RouteBinding、不释放 peer discovery latch、不被误报为当前路径认证成功。
+- [ ] 对照真机新日志确认：Outbox target 是否非空、target endpoint 是否存在且未过期、当前 RouteBinding 数量、定向 challenge 是否收到 ACK、是否因此进入 waiting_peers；重新以中兴 A2023BH API 30 + Redmi Note 8 API 35、同一 5GHz Wi-Fi 做双向短消息验收。
+
+> 当前已定位到“#1035 有持久化 endpoint 直投 fallback、V2 删除该 fallback”的确定代码差异；尚未修改生产发送授权逻辑。下一步先补足历史 endpoint 的认证/租约/scope 证据与单 Listener 安全边界，再实现受限兼容并跑 Android 单测/CI。发现失败与聊天失败仍分别记录。
