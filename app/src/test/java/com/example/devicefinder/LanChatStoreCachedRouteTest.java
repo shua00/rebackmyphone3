@@ -21,6 +21,12 @@ public class LanChatStoreCachedRouteTest {
 
             assertFalse(store.hasFreshVerifiedPeerRoute("peer-1", "192.168.1.55",
                     8888, 2_000L, "wifi-path-a", 7L, "service-instance-1"));
+            assertFalse(store.markPeerRouteRegistryAdmitted("peer-1", "192.168.1.55",
+                    8888, 2_000L, "wifi-path-a", 8L, "service-instance-1"));
+            assertFalse(store.markPeerRouteRegistryAdmitted("peer-1", "192.168.1.56",
+                    8888, 2_000L, "wifi-path-a", 7L, "service-instance-1"));
+            assertFalse(store.markPeerRouteRegistryAdmitted("peer-1", "192.168.1.55",
+                    8888, 2_000L, "wifi-path-a", 7L, "service-instance-2"));
             assertTrue(store.markPeerRouteRegistryAdmitted("peer-1", "192.168.1.55",
                     8888, 2_000L, "wifi-path-a", 7L, "service-instance-1"));
             assertTrue(store.hasFreshVerifiedPeerRoute("peer-1", "192.168.1.55",
