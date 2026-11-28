@@ -308,8 +308,9 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("scheduleLanChatRetryAfterFailure(", retry)
         self.assertIn('"outbox-retry-after-failure"', retry)
         self.assertNotIn("retryAfterFailure", retry)
-        self.assertIn("retryPendingLanChatMessages(true)", retry)
-        self.assertIn("retryPendingLanChatMessages(false)", retry)
+        self.assertIn("LanChatRetryPolicy.shouldImmediatelyRetryForRecovery(", retry)
+        self.assertIn("retryPendingLanChatMessages(lanChatRecoveryEventPending.get())", retry)
+        self.assertIn("scheduleLanChatRetryFromOutbox()", retry)
 
 
     def test_recovery_epoch_storage_failure_is_not_reported_as_no_work(self):
@@ -2497,7 +2498,8 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertNotIn("lastPeerDiscoveryAt = 0L;\n                for (String peerId", cleanup)
         self.assertIn("保留已验证路由并触发有界路由刷新", cleanup)
         self.assertIn("if (hadUdpDispatchAttempt || reachablePeerCount == 0)", cleanup)
-        self.assertIn("retryPendingLanChatMessages(false)", cleanup)
+        self.assertIn("requestLanChatRetryPlan()", cleanup)
+        self.assertNotIn("retryPendingLanChatMessages(false)", cleanup)
         self.assertIn("now - e.getValue() > 120_000L", send)
         self.assertIn("verifiedChatPeerRouteVersionCounter.incrementAndGet()", source)
 
@@ -2968,8 +2970,9 @@ class LanP2PCoreTests(unittest.TestCase):
         self.assertIn("lanChatRecoveryEventPending.set(true)", retry)
         self.assertIn("lanChatRetryInFlight.compareAndSet(false, true)", retry)
         self.assertIn("lanChatRecoveryEventPending.getAndSet(false)", retry)
-        self.assertIn("if (lanChatRecoveryEventPending.get())", retry)
-        self.assertIn("retryPendingLanChatMessages(true)", retry)
+        self.assertIn("LanChatRetryPolicy.shouldImmediatelyRetryForRecovery(", retry)
+        self.assertIn("retryPendingLanChatMessages(lanChatRecoveryEventPending.get())", retry)
+        self.assertIn("scheduleLanChatRetryFromOutbox()", retry)
         cooldown_wake = extract_java_method(service, "private void scheduleLanChatRecoveryCooldownWake(")
         self.assertIn("AtomicLong lanChatRecoveryCooldownWakeAtMs", service)
         self.assertIn("currentWakeAtMs <= requestedWakeAtMs", cooldown_wake)
@@ -4437,7 +4440,8 @@ class AndroidLanInstantRouteRecoveryTests(unittest.TestCase):
         self.assertIn("target.attemptCount > 0", send)
         self.assertIn("hadUdpDispatchAttempt.set(true)", send)
         self.assertIn("lastPeerDiscoveryAt = 0L", complete)
-        self.assertIn("retryPendingLanChatMessages(false)", complete)
+        self.assertIn("requestLanChatRetryPlan()", complete)
+        self.assertNotIn("retryPendingLanChatMessages(false)", complete)
         self.assertIn("lanChatRouteRefreshPending.set(true)", complete)
         self.assertIn("lanChatRouteRefreshPending.get()", source)
         self.assertIn("lanChatRouteRefreshPending.getAndSet(false)", source)
