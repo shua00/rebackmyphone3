@@ -2433,7 +2433,7 @@ public class TrackingService extends Service implements LocationListener {
                     incompleteNetworkSnapshot = true;
                     continue;
                 }
-                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                if (LanNetworkPath.isWifiLanNetwork(caps)) {
                     wifiNetworks.add(network);
                 }
             }
@@ -2503,7 +2503,7 @@ public class TrackingService extends Service implements LocationListener {
                     incomplete = true;
                     continue;
                 }
-                if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue;
+                if (!LanNetworkPath.isWifiLanNetwork(capabilities)) continue;
                 LinkProperties links = cm.getLinkProperties(network);
                 if (links == null || links.getInterfaceName() == null
                         || links.getInterfaceName().isEmpty() || links.getLinkAddresses() == null) {
