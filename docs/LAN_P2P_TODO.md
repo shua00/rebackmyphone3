@@ -741,3 +741,16 @@
 - [ ] 决定并实现安全的两阶段提交/条件回滚方案，保持 SQLite 写入不进入 UDP 接收快路径；禁止为了消除竞态而在普通单路径发送快路径增加锁竞争、磁盘 I/O 或探测。
 
 > 当前代码审计发现的是持久化兼容提示与内存 RouteBinding 之间的竞态窗口，不是已确认的聊天 payload 授权绕过，也不是已确认的 #1035 对讲回归根因。需通过针对性测试后再修复，不应贸然撤销 path-scoped 安全边界。
+
+
+## #1035 与 V2 握手差异复核（本轮继续审计）
+
+- [x] 对照 #1035 的 `handleAuthenticatedLanPacket()` 与当前 V2：#1035 的 `peer.ack` 主要依赖 nonce、sender ID/endpoint/port 校验，随后直接写入 peer-wide SQLite 记录并更新全局 verified cache；当前 V2 增加 ACK ingress path、精确 Socket/generation 与 pending challenge egress lease 的匹配，并在 Registry 原子登记 path-scoped RouteBinding 后才更新全局兼容 cache。
+- [x] 对照聊天 ACK：#1035 的普通/分片 ACK 处理没有当前 V2 这套 ingress listener epoch + peer route binding 的双重检查；V2 的多 Listener 安全约束是实质性变化，不能简单恢复旧版无路径约束逻辑。
+- [x] 对照 peer.hello：V2 在异步持久化前后检查 ingress lease，并在当前路径上回复 ACK；非 challenge-only hello 会在当前路径没有匹配 RouteBinding 时发起定向 challenge。该流程需要真机日志验证实际到达与回程，静态代码不能证明无线网络已完成握手。
+- [x] 明确当前 peer.ack 顺序：先 `store.upsertPeer()`，后 `recordVerifiedPeer(..., socket, generation)`，最后更新内存兼容 cache 并释放 latch。若 Registry admission 因 Listener epoch 变化失败，SQLite peer-wide hint 可能已经写入；该 hint 不能授权多 Listener payload 发送，但可能成为后续定向 challenge 候选。
+- [ ] 为上述失败窗口增加可验证的持久化一致性测试：验证 Registry admission 失败后不会更新 verified cache、不会释放等待者；同时验证 stale SQLite hint 只能触发重新挑战，不能直接发送聊天 payload，也不能错误完成 discovery target。
+- [ ] 设计条件化的 stale-hint 清理/过期方案，必须按 peer + endpoint + 本次验证时间/版本 compare-and-set，不能删除同一 peer 后续新路径成功写入的记录；同时检查 upsertPeer 对 Outbox target candidate 与 open discovery snapshot 的副作用，不能只回滚 lan_peers 行。
+- [ ] 继续查明 #1035→V2 的实际回归点：用三机新 APK 日志逐台核对 `peer.hello RX`、`peer.ack TX`、`peer.ack` ingress、`peer route verified`、RouteBinding 数量和第一条消息 ACK；无日志/无证据时不得推断是广播、认证或 generation 哪一环。
+
+> 当前差异复核没有发现可以安全地直接撤销的 path-scoped 安全检查；尚未证明上述 SQLite hint 竞态就是现场对讲失败根因。下一步优先补充有边界的存储一致性测试，再根据真机日志定位实际断点。
