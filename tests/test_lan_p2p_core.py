@@ -7566,8 +7566,8 @@ while True:
                         self.assertTrue(final_ack, "restarted listener did not return final ACK")
                         self.assertEqual(expected, len(acked))
                         self.assertEqual(expected, sent_total)
-                        self.assertGreaterEqual(
-                            len(open(marker, encoding="utf-8").read().splitlines()), 1)
+                        with open(marker, encoding="utf-8") as marker_stream:
+                            self.assertGreaterEqual(len(marker_stream.read().splitlines()), 1)
                     finally:
                         sender_sock.close()
                         if receiver.poll() is None:
