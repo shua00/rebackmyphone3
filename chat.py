@@ -532,8 +532,15 @@ def _start_v2_recovery_retry_worker():
         if _V2_RECOVERY_WORKER_STARTED:
             return
         _V2_RECOVERY_WORKER_STARTED = True
-    threading.Thread(target=_retry_deferred_v2_peer_recoveries, daemon=True,
-                     name="lan-v2-recovery-retry").start()
+    worker = threading.Thread(target=_retry_deferred_v2_peer_recoveries, daemon=True,
+                               name="lan-v2-recovery-retry")
+    try:
+        worker.start()
+    except Exception:
+        # A failed Thread.start() must not leave the singleton guard stuck true.
+        with _V2_RECOVERY_RETRY_LOCK:
+            _V2_RECOVERY_WORKER_STARTED = False
+        raise
 
 
 def _handle_authenticated_v2_packet(envelope, sock, addr):
