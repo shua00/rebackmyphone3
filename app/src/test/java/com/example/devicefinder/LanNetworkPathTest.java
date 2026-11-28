@@ -18,17 +18,17 @@ public class LanNetworkPathTest {
     }
 
     @Test public void vpnTransportIsNeverSelectedAsWifiLanEvenWithWifiUnderlyingTransport() {
-        NetworkCapabilities wifi = new NetworkCapabilities();
-        wifi.addTransportType(NetworkCapabilities.TRANSPORT_WIFI);
+        NetworkCapabilities wifi = new NetworkCapabilities.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build();
         assertTrue(LanNetworkPath.isWifiLanNetwork(wifi));
 
-        NetworkCapabilities vpnOverWifi = new NetworkCapabilities();
-        vpnOverWifi.addTransportType(NetworkCapabilities.TRANSPORT_WIFI);
-        vpnOverWifi.addTransportType(NetworkCapabilities.TRANSPORT_VPN);
+        NetworkCapabilities vpnOverWifi = new NetworkCapabilities.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .addTransportType(NetworkCapabilities.TRANSPORT_VPN).build();
         assertFalse(LanNetworkPath.isWifiLanNetwork(vpnOverWifi));
 
-        NetworkCapabilities vpnOnly = new NetworkCapabilities();
-        vpnOnly.addTransportType(NetworkCapabilities.TRANSPORT_VPN);
+        NetworkCapabilities vpnOnly = new NetworkCapabilities.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_VPN).build();
         assertFalse(LanNetworkPath.isWifiLanNetwork(vpnOnly));
     }
 
