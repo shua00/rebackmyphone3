@@ -6812,3 +6812,98 @@ sock.close()
                         if receiver.poll() is None:
                             receiver.terminate()
                             receiver.wait(timeout=5)
+
+
+class PythonProductionFragmentHandlerTests(unittest.TestCase):
+    def test_each_real_service_handler_persists_before_fragment_and_final_ack(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        for filename, service, db_name, lock_name in (
+                ("rescue2.py", "rescue2", "_CHAT_DEDUP_DB", "_state_lock"),
+                ("chat.py", "chat.py", "CHAT_DB", "print_lock"),
+                ("server2.py", "server2", "CHAT_DEDUP_DB", "state_lock")):
+            with self.subTest(service=service):
+                source = (repo_root / filename).read_text(encoding="utf-8")
+                module = ast.parse(source, filename=filename)
+                handler_node = next(
+                    node for node in module.body
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "_handle_authenticated_v2_packet")
+                events = []
+                sent = []
+
+                class FakeSocket:
+                    def sendto(self, packet, address):
+                        events.append(("send", packet["type"]))
+                        sent.append((packet, address))
+
+                class FakeLock:
+                    def __enter__(self): return self
+                    def __exit__(self, *args): return False
+
+                def store(db, scope, sender, packet):
+                    events.append(("persist", scope, sender))
+                    return "completed"
+
+                def load(db, scope, sender, message_id):
+                    events.append(("load", scope, sender, message_id))
+                    return [{"fragment_index": 0, "body": "payload"}]
+
+                def claim(sender, message_id, body):
+                    events.append(("claim", sender, message_id, body))
+                    return True
+
+                namespace = {
+                    "PEER_NODE_ID": "local-" + service,
+                    "RESCUE_SECRET": "test-secret",
+                    db_name: "isolated-" + service + ".sqlite3",
+                    lock_name: FakeLock(),
+                    "LanP2PStorageError": LanP2PStorageError,
+                    "store_incoming_chat_fragment": store,
+                    "load_incoming_chat_fragments": load,
+                    "assemble_chat_fragments": lambda cached: "assembled body",
+                    "encode_packet": lambda packet, secret: packet,
+                    "record_peer": lambda *args: events.append(("peer",) + args[1:]),
+                    "_claim_chat_message": claim,
+                    "print": lambda *args, **kwargs: None,
+                    "time": __import__("time"),
+                    "DISCOVERED_DEVICES": {},
+                    "CHAT_MESSAGES": [],
+                    "ALL_DEVICES_STATUS": {},
+                    "I": type("Icons", (), {"chat": ""})(),
+                    "display_sender": "remote",
+                    "logging": __import__("logging"),
+                    "_diag_event": lambda *args, **kwargs: None,
+                    "_diag_exception": lambda *args, **kwargs: None,
+                    "datetime": __import__("datetime"),
+                    "state_lock": FakeLock(),
+                    "print_lock": FakeLock(),
+                }
+                exec(compile(ast.Module(body=[handler_node], type_ignores=[]),
+                             filename, "exec"), namespace)
+                handler = namespace["_handle_authenticated_v2_packet"]
+                packet = {
+                    "type": "chat.fragment",
+                    "sender_peer_id": "remote-peer",
+                    "sender_peer_type": "android",
+                    "service_id": "android-main",
+                    "target_peer_id": namespace["PEER_NODE_ID"],
+                    "message_id": "same-id",
+                    "fragment_index": 0,
+                    "fragment_count": 1,
+                    "body": "fragment",
+                }
+                handler(packet, FakeSocket(), ("127.0.0.1", 8888))
+
+                self.assertEqual(
+                    [("persist", service, "remote-peer"),
+                     ("load", service, "remote-peer", "same-id"),
+                     ("claim", "remote-peer", "same-id", "assembled body")],
+                    [event for event in events if event[0] in ("persist", "load", "claim")])
+                self.assertEqual(
+                    ["chat.fragment.ack", "chat.ack"],
+                    [packet["type"] for packet, _ in sent])
+                self.assertEqual(
+                    [("send", "chat.fragment.ack"), ("send", "chat.ack")],
+                    [event for event in events if event[0] == "send"])
+                self.assertLess(events.index(("claim", "remote-peer", "same-id", "assembled body")),
+                                events.index(("send", "chat.ack")))
