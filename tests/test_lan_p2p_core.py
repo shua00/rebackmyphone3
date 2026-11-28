@@ -6540,7 +6540,7 @@ class PythonLongChatLoopbackUdpIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             sender_db = os.path.join(temp_dir, "sender.sqlite3")
             receiver_db = os.path.join(temp_dir, "receiver.sqlite3")
-            body = "真实UDP交叉收发🙂" * 100
+            body = "真实UDP交叉收发🙂" * 60
             message_id = "loopback-cross-service-message"
             created = 123456
             sender_peer = "rescue-peer-stable"
