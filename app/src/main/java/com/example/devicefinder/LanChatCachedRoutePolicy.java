@@ -20,7 +20,8 @@ public final class LanChatCachedRoutePolicy {
                 || localAddress == null || peerAddress == null
                 || prefixLength < 1 || prefixLength > 32
                 || !LanNetworkPath.isUsableLanIpv4(localAddress)
-                || !LanNetworkPath.isUsableLanIpv4(peerAddress)) return false;
+                || !LanNetworkPath.isUsableLanIpv4(peerAddress)
+                || localAddress.equals(peerAddress)) return false;
         byte[] local = localAddress.getAddress();
         byte[] peer = peerAddress.getAddress();
         int remaining = prefixLength;
@@ -42,6 +43,10 @@ public final class LanChatCachedRoutePolicy {
         try {
             for (int i = 0; i < 4; i++) {
                 if (parts[i].isEmpty() || parts[i].length() > 3) return null;
+                for (int j = 0; j < parts[i].length(); j++) {
+                    char digit = parts[i].charAt(j);
+                    if (digit < '0' || digit > '9') return null;
+                }
                 int octet = Integer.parseInt(parts[i]);
                 if (octet < 0 || octet > 255) return null;
                 bytes[i] = (byte) octet;
