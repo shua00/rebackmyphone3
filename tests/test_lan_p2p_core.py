@@ -7067,7 +7067,8 @@ module.list_known_peer_snapshot = lambda *args, **kwargs: [{
     "peer_id": receiver_id, "endpoint_ip": "127.0.0.1",
     "endpoint_port": int(receiver_port),
 }]
-module._start_v2_recovery_retry_worker = lambda: None
+if mode == "first":
+    module._start_v2_recovery_retry_worker = lambda: None
 module.send_startup_peer_beacon = lambda *args, **kwargs: False
 module.get_subnet_broadcasts = lambda: []
 threading.Thread(target=module.udp_listener, daemon=True).start()
@@ -7085,20 +7086,25 @@ if mode == "first":
     # Simulate an abrupt process death: no graceful Outbox flush or ACK wait.
     os._exit(0)
 else:
-    from lan_p2p_core import load_pending_outgoing_for_peer
+    import sqlite3
     body = "生产发送入口进程重启恢复🙂 " * 160
     module._resume_pending_v2_for_peer(
         module.UDP_LISTENER_SOCKET, receiver_id,
         ("127.0.0.1", int(receiver_port)), True)
-    deadline = time.time() + 24
+    deadline = time.time() + 30
     while time.time() < deadline:
-        pending = load_pending_outgoing_for_peer(
-            db, "chat.py", receiver_id, limit=10)
-        if not pending:
+        conn = sqlite3.connect(db)
+        try:
+            row = conn.execute(
+                "SELECT status FROM lan_outbox_targets WHERE message_id=? AND peer_id=?",
+                (message_id, receiver_id)).fetchone()
+        finally:
+            conn.close()
+        if row and row[0] == "delivered":
             print("PRODUCTION_RECOVERY_DELIVERED", flush=True)
             os._exit(0)
         time.sleep(0.1)
-    raise RuntimeError("production Outbox did not reach delivered state")
+    raise RuntimeError("production Outbox target did not reach delivered state: " + repr(row))
 """
             receiver = subprocess.Popen(
                 [sys.executable, "-u", "-c", receiver_code, receiver_copy,
