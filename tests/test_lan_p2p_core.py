@@ -7126,6 +7126,13 @@ else:
                     cwd=temp_dir, env=env, capture_output=True, text=True, timeout=32)
                 self.assertEqual(0, resumed.returncode, resumed.stdout + "\n" + resumed.stderr)
                 self.assertIn("PRODUCTION_RECOVERY_DELIVERED", resumed.stdout)
+                from lan_p2p_core import load_incoming_chat_fragments, assemble_chat_fragments
+                receiver_db = os.path.join(temp_dir, "receiver.sqlite3")
+                cached = load_incoming_chat_fragments(
+                    receiver_db, "rescue2", sender_id, message_id)
+                self.assertEqual(
+                    "生产发送入口进程重启恢复🙂 " * 160,
+                    assemble_chat_fragments(cached))
             finally:
                 if receiver.poll() is None:
                     receiver.terminate()
