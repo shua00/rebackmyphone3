@@ -7611,8 +7611,8 @@ public class TrackingService extends Service implements LocationListener {
                                         + senderId + " path=" + verifiedPathFingerprint);
                                 return;
                             }
-                            // upsertPeer() atomically commits this verified route and joins all
-                            // still-open first-discovery target snapshots in the same transaction.
+                            // Registry admission is now durable, and the same transaction has
+                            // joined this verified peer to every still-open discovery snapshot.
                             FileLogger.log(this, "CHAT", "P2P peer route verified peer=" + senderId
                                     + " endpoint=" + peerAddress.getHostAddress() + ":" + port
                                     + " path=" + verifiedPathFingerprint);
