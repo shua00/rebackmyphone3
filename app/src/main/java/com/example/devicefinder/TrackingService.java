@@ -6845,6 +6845,8 @@ public class TrackingService extends Service implements LocationListener {
                 verifiedRoutePeerIds.add(target.peerId);
                 continue;
             }
+            // The SQLite endpoint is a directed-challenge candidate by default; only the
+            // narrowly guarded single-listener case below may reuse it for chat payloads.
             // Compatibility fallback is deliberately narrow: the durable peer row must
             // carry the exact current listener epoch, the listener must be the only active
             // chat path, and the endpoint must still be on that path's IPv4 subnet.
