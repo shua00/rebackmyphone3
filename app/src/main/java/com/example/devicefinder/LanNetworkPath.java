@@ -96,9 +96,13 @@ public final class LanNetworkPath {
     /** A VPN tunnel must never be treated as a Wi-Fi LAN path, even if Android exposes
      * underlying Wi-Fi transport capabilities on the VPN Network. */
     public static boolean isWifiLanNetwork(NetworkCapabilities capabilities) {
-        return capabilities != null
-                && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-                && !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN);
+        return capabilities != null && isWifiLanTransport(
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI),
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN));
+    }
+
+    static boolean isWifiLanTransport(boolean wifiTransport, boolean vpnTransport) {
+        return wifiTransport && !vpnTransport;
     }
 
     static boolean isUsableLanIpv4(Inet4Address address) {
