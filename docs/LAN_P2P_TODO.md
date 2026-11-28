@@ -687,3 +687,12 @@
 - [ ] **P1**：文件传输发现需记录候选接收/拒绝原因，确认热点 AP 下中兴是否实际收到两台 Redmi 的 beacon；测量 Offer 等待、接受后吞吐、分块耗时和重传率后再调参。
 - [ ] **P1**：验证 server2 主动发现、目标列表更新、群发/多选互斥、版本显示；核查 Windows 8080 冲突时的实际异常原因，必要时补充明确端口占用诊断。
 - [ ] 真机复测前，不将本轮代码/CI 结果标记为 Android↔Android、热点多路径或文件传输实机通过。
+
+
+### 追加：发现链路诊断与 rescue2 多网卡广播（2026-11-28）
+
+- [x] Android Chat 增加异步诊断记录：收到 peer.hello 的来源 IP/端口/ingress path、peer.ack 回发路径、peer.ack 持久化失败，以及最终 verified route。日志写入 peer executor/control executor，不在 UDP 接收快路径执行文件 I/O。
+- [x] 文件发现增加候选接受和跨子网拒绝日志，下一轮真机日志可直接区分“没有收到 beacon”和“收到但被子网校验拒绝”。
+- [x] rescue2 启动发现与首次广播改为枚举所有活动 IPv4 LAN 接口的 directed broadcast，并保留 limited-broadcast 兜底；不扫描公网、不猜测子网、不增加简单单网卡设备的周期探测。
+- Android 诊断日志与 UI/长消息/传输状态改动的 APK build：run [46120796577](https://github.com/shua00/rebackmyphone3/actions/runs/46120796577)，四项 job 均通过，artifact `app-diagnostic-and-slim-apks`。
+- 最新 Python-only 变更（rescue2 多接口广播与回归测试）：run [46120972364](https://github.com/shua00/rebackmyphone3/actions/runs/46120972364)，Python 与 Windows Socket Binding 通过；Android build 按变更检测跳过（该提交未改 Android 文件）。
