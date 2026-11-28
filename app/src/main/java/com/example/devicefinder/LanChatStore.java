@@ -20,7 +20,7 @@ public final class LanChatStore extends SQLiteOpenHelper {
     /** Compatibility aliases; policy values are owned by LanChatRetryPolicy. */
     public static final long FIRST_DISCOVERY_WINDOW_MS = LanChatRetryPolicy.FIRST_DISCOVERY_WINDOW_MS;
     private static final String DB_NAME = "lan_p2p_delivery.db";
-    // v13 binds durable authenticated peer hints to the exact listener path/generation.
+    // v14 binds durable authenticated peer hints to the exact service/listener epoch.
     private static final int DB_VERSION = 14;
     // Durable partial long-chat receive cache: strict per-message, session and global bounds.
     public static final long FRAGMENT_SESSION_TTL_MS = 30L * 60L * 1000L;
