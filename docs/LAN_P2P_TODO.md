@@ -811,3 +811,15 @@
 - [x] marker 写入后再次检查 ingress Listener epoch，避免 SQLite 等待期间 Listener 已被替换仍释放旧 waiter。
 - [x] Python 静态契约与 Robolectric store 测试覆盖“upsert 后 marker 仍为 0”“错误 endpoint/generation/Service instance 不能 CAS”“只有 Registry admission 后 marker 才可用于 fallback”“network_scope 改变清除 marker”。
 - [ ] 最新 DB v15 代码的完整 CI 正在验证；此前 DB v14 的 run #1954 已通过，但不能替代本轮 DB v15 验证。
+
+
+### Android 日志保留与 Outbox 高频重试专项（2026-11-28）
+
+- [ ] **日志文件超限不得清空重写**：当前 `FileLogger.java` 在 `device_log.txt` 超过 5 MiB 后直接 delete，再创建同名文件；这会销毁此前唯一诊断证据。改为有序轮转归档，保留当前文件和有限数量/总容量的历史文件；归档失败时不得先删除原文件。
+- [ ] **控制日志总量而非只提高上限**：INFO/WARN/ERROR 保留状态转移、首次异常、最终结果和必要关联 ID；重复的相同状态/同一 messageId 的并发跳过、Outbox 批次扫描等应采用状态变化日志或限频汇总，不能逐次重复写入文件。
+- [ ] **排查 Outbox 补发空转**：2026-11-28 用户提供的 21:00:19–21:00:21 样本中，多个相同 messageId 在约一秒内反复经历“0/2 ACK”“固定目标均离线”“补发批次 1/2”，账本数量持续 5->5，并大量重复记录“同一 message_id 已在发送/补发，跳过并发副本”。
+- [ ] **高优先级代码嫌疑路径**：`completeLanChatAckWindow()` 在未 ACK 时设置 `lanChatRouteRefreshPending` 并立即调用 `retryPendingLanChatMessages(false)`；补发批次 finally 检测到 route-refresh 标记后又立即启动下一轮。这条路径可能绕过 `LanChatRetryPolicy` 的正常 Outbox 退避。需结合 ACK grace 时长、所有调用源和调度器实际唤醒时间验证，不能仅凭截取日志定根因。
+- [ ] 修复目标：同一 Outbox 只允许一个有界、合并的 route-refresh wake；ACK grace 结束不得直接触发无延迟全表补发；无有效网络路径/目标离线/无新路由状态时必须进入退避等待；真正的网络恢复、Listener 恢复、Peer route verified 事件仍可按既有 peer-scoped/global recovery 规则触发，不得误重置其他 peer 的重试预算。
+- [ ] 日志验收：相同状态持续期间只输出首次记录及限频摘要；关键异常和状态转移不得被采样丢弃；日志轮转后旧日志仍可批量拉取并按时间顺序分析。
+- [ ] 测试验收：覆盖多个消息 ACK 同时超时、多个 ACK grace 同时结束、补发期间 route-refresh 事件到达、无网络路径、目标离线、真实网络恢复、Listener generation 变化；验证不会立即递归/连续空转，重试预算和持久化 Outbox 不丢失。
+- 代码与 CI 尚未修改/验证；此条先记录为当前日志问题和 Outbox 高频调度问题，不能视为已修复。
