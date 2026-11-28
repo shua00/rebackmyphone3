@@ -495,7 +495,7 @@ public final class LanTransferActivity extends Activity {
 
     private List<LanTransferPeerDirectory.Candidate> loadStableCandidates() {
         List<LanTransferPeerDirectory.Candidate> candidates = new ArrayList<>(
-                loadStableCandidates());
+                LanTransferPeerDirectory.loadCurrent(this, System.currentTimeMillis()));
         Collections.sort(candidates, (left, right) -> {
             String leftId = left.peerId == null ? "" : left.peerId;
             String rightId = right.peerId == null ? "" : right.peerId;
