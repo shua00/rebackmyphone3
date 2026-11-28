@@ -1,6 +1,7 @@
 package com.example.devicefinder;
 
 import android.net.Network;
+import android.net.NetworkCapabilities;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InterfaceAddress;
@@ -90,6 +91,14 @@ public final class LanNetworkPath {
             }
         }
         return Collections.unmodifiableList(result);
+    }
+
+    /** A VPN tunnel must never be treated as a Wi-Fi LAN path, even if Android exposes
+     * underlying Wi-Fi transport capabilities on the VPN Network. */
+    public static boolean isWifiLanNetwork(NetworkCapabilities capabilities) {
+        return capabilities != null
+                && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                && !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN);
     }
 
     static boolean isUsableLanIpv4(Inet4Address address) {
