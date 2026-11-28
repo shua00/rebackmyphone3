@@ -6678,6 +6678,19 @@ while not completed:
         'fragment_index': packet['fragment_index'],
         'status': 'received',
     }, secret)
+    # Inject an authenticated but mis-scoped ACK first. The sender must
+    # ignore it and only advance on the ACK bound to this receiver service.
+    forged_fragment_ack = encode_packet({
+        'type': 'chat.fragment.ack',
+        'sender_peer_id': receiver_id,
+        'sender_peer_type': receiver_type,
+        'service_id': 'wrong-service-namespace',
+        'target_peer_id': sender_id,
+        'message_id': packet['message_id'],
+        'fragment_index': packet['fragment_index'],
+        'status': 'received',
+    }, secret)
+    sock.sendto(forged_fragment_ack, sender_addr)
     sock.sendto(fragment_ack, sender_addr)
     if result == 'completed':
         cached = load_incoming_chat_fragments(
@@ -6692,6 +6705,16 @@ while not completed:
             'message_id': packet['message_id'],
             'status': 'stored',
         }, secret)
+        forged_final_ack = encode_packet({
+            'type': 'chat.ack',
+            'sender_peer_id': receiver_id,
+            'sender_peer_type': receiver_type,
+            'service_id': 'wrong-service-namespace',
+            'target_peer_id': sender_id,
+            'message_id': packet['message_id'],
+            'status': 'stored',
+        }, secret)
+        sock.sendto(forged_final_ack, sender_addr)
         sock.sendto(final_ack, sender_addr)
         print('RECEIVER_OK:' + body, flush=True)
         completed = True
@@ -6726,7 +6749,8 @@ while len(acked) < sent:
     raw, source = sock.recvfrom(1200)
     packet = decode_packet(raw, secret)
     assert packet['type'] == 'chat.fragment.ack', packet
-    assert packet_service_identity_matches(packet, receiver_id), packet
+    if not packet_service_identity_matches(packet, receiver_id):
+        continue
     assert packet['target_peer_id'] == sender_id, packet
     assert packet['message_id'] == message_id, packet
     assert record_outgoing_fragment_ack(
@@ -6735,8 +6759,10 @@ while len(acked) < sent:
     acked.add(packet['fragment_index'])
 raw, source = sock.recvfrom(1200)
 final = decode_packet(raw, secret)
-assert final['type'] == 'chat.ack', final
-assert packet_service_identity_matches(final, receiver_id), final
+while (final['type'] != 'chat.ack'
+       or not packet_service_identity_matches(final, receiver_id)):
+    raw, source = sock.recvfrom(1200)
+    final = decode_packet(raw, secret)
 assert final['target_peer_id'] == sender_id and final['message_id'] == message_id
 assert acknowledge_outgoing_message(db, scope, message_id, receiver_id)
 print('SENDER_OK:' + ','.join(str(i) for i in sorted(acked)), flush=True)
@@ -6749,7 +6775,7 @@ sock.close()
                     sender_db = os.path.join(temp_dir, "sender.sqlite3")
                     receiver_db = os.path.join(temp_dir, "receiver.sqlite3")
                     ready = os.path.join(temp_dir, "receiver.ready")
-                    message_id = "proc-" + sender_type.replace(".", "-") + "-" + receiver_type.replace(".", "-")
+                    message_id = "same-message-id-across-independent-services"
                     probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                     probe.bind(("127.0.0.1", 0))
                     port = probe.getsockname()[1]
