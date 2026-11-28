@@ -3167,8 +3167,9 @@ class LanP2PCoreTests(unittest.TestCase):
         retry = source[start:end]
         self.assertIn("if (recoveryEvent) lanChatRecoveryEventPending.set(true)", retry)
         self.assertIn("lanChatRecoveryEventPending.getAndSet(false)", retry)
-        self.assertIn("if (lanChatRecoveryEventPending.get())", retry)
-        self.assertIn("retryPendingLanChatMessages(true)", retry)
+        self.assertIn("LanChatRetryPolicy.shouldImmediatelyRetryForRecovery(", retry)
+        self.assertIn("retryPendingLanChatMessages(lanChatRecoveryEventPending.get())", retry)
+        self.assertIn("scheduleLanChatRetryFromOutbox()", retry)
         self.assertIn("store.resumeExhaustedRetriesForRecoveryEvent", retry)
 
 
