@@ -7349,7 +7349,7 @@ while True:
                                             receiver_id, body, created_at,
                                             ("127.0.0.1", receiver_port), sender_id,
                                             "python", sender_id, secret,
-                                            mark_attempt=False, allow_fast_retry=True)
+                                            mark_attempt=True, allow_fast_retry=True)
                                         self.assertGreater(resumed, 0)
                                         total_sent += resumed
                                     if len(acked) < expected_fragments and len(acked) % 8 == 0:
@@ -7517,12 +7517,13 @@ while True:
                         receiver_out, receiver_err = receiver.communicate(timeout=5)
                         receiver = start_receiver()
 
-                        # The same sender ledger suppresses already-ACKed fragments after restart.
+                        # Retry admission is required to refill an interrupted, partially-ACKed flight.
+                        # The durable bitmap still suppresses fragments already ACKed.
                         sent_total = send_outgoing_fragment_window(
                             sender_sock, sender_db, scope, message_id, receiver_id,
                             body, created_at, destination, sender_id, "python",
-                            sender_id, secret, mark_attempt=False,
-                            allow_fast_retry=False)
+                            sender_id, secret, mark_attempt=True,
+                            allow_fast_retry=True)
                         self.assertGreater(sent_total, 0)
                         sent_total += len(acked)
                         final_ack = False
