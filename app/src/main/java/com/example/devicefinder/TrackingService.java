@@ -6853,7 +6853,6 @@ public class TrackingService extends Service implements LocationListener {
                     ? null : lanChatListenerRuntime.get(preferredChatPath);
             LanChatListenerPathPlan cachedPlan = lanChatListenerPathPlan;
             LanNetworkPath cachedPath = cachedPlan == null ? null : cachedPlan.primary();
-            LanChatCachedRoutePolicy.Inet4AddressHolder unused = null;
             java.net.Inet4Address cachedPeerAddress =
                     LanChatCachedRoutePolicy.parseIpv4Literal(target.endpointIp);
             boolean singleCurrentListener = cachedLease != null && cachedPath != null
