@@ -730,3 +730,14 @@
 - [ ] 验收单路径快路径无额外扫描/线程/探测；快捷模式不成为跨公网匿名入口，跨网文件传输必须使用安全认证会话/受控中继。
 
 > 当前仅完成产品与架构文档契约；没有声称生产代码、CI 或真机能力已经实现。实施仍服从 LAN P2P 普通双 Android 对讲回归与多 Listener/ACK 收口的依赖顺序。
+
+
+## 批次 C 追加审计：peer.ack 持久化与 RouteBinding admission 顺序
+
+- [x] 核对当前 `peer.ack` 路径：先执行 `LanChatStore.upsertPeer(...)`（SQLite 将 peer-wide 行标记 active 并更新待发目标候选），之后才调用 `LanChatPathRegistry.recordVerifiedPeer(..., socket, generation)`。
+- [x] 确认 RouteBinding admission 本身会在 Registry 锁内原子校验 Listener socket/generation；多路径聊天发送授权仍只认 path-scoped binding，peer-wide SQLite endpoint 仅作为定向 challenge 候选。
+- [ ] 继续审计两步之间 Listener generation 被替换或 Registry admission 失败时，SQLite active peer-wide hint 的回滚/降级语义；当前顺序可能留下 stale compatibility hint，尚未证明它会绕过 payload 授权，也不能把它视为已解决。
+- [ ] 为该竞态补 Android/静态回归：RouteBinding admission 失败不得产生可被误读为已验证的持久化状态；并发双路径认证不得由旧 ACK 覆盖新路径的兼容提示或待发送目标。
+- [ ] 决定并实现安全的两阶段提交/条件回滚方案，保持 SQLite 写入不进入 UDP 接收快路径；禁止为了消除竞态而在普通单路径发送快路径增加锁竞争、磁盘 I/O 或探测。
+
+> 当前代码审计发现的是持久化兼容提示与内存 RouteBinding 之间的竞态窗口，不是已确认的聊天 payload 授权绕过，也不是已确认的 #1035 对讲回归根因。需通过针对性测试后再修复，不应贸然撤销 path-scoped 安全边界。
