@@ -7837,6 +7837,8 @@ class PythonRecoveryWorkerLifecycleTests(unittest.TestCase):
                 self.assertEqual(2, FakeThread.starts)
 
     def test_worker_supervisor_retries_unexpected_loop_failure_and_clears_flag_on_exit(self):
+        import types
+
         for filename in ("rescue2.py", "chat.py", "server2.py"):
             with self.subTest(service=filename):
                 class FakeLock:
