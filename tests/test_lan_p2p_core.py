@@ -6526,3 +6526,99 @@ class PythonChatAckServiceIdentityTests(unittest.TestCase):
                 start = source.index(marker)
                 section = source[start:start + 500]
                 self.assertIn("packet_service_identity_matches(envelope, sender)", section)
+
+
+class PythonLongChatLoopbackUdpIntegrationTests(unittest.TestCase):
+    def test_fragment_persist_ack_and_final_delivery_use_real_udp(self):
+        import socket
+        from lan_p2p_core import (
+            persist_outgoing_message, send_outgoing_fragment_window,
+            decode_packet, encode_packet, store_incoming_chat_fragment,
+            load_incoming_chat_fragments, assemble_chat_fragments,
+            record_outgoing_fragment_ack, acknowledge_outgoing_message,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sender_db = os.path.join(temp_dir, "sender.sqlite3")
+            receiver_db = os.path.join(temp_dir, "receiver.sqlite3")
+            body = "真实UDP交叉收发🙂" * 100
+            message_id = "loopback-cross-service-message"
+            created = 123456
+            sender_peer = "rescue-peer-stable"
+            receiver_peer = "chat-peer-stable"
+            secret = "loopback-integration-secret"
+            self.assertTrue(persist_outgoing_message(
+                sender_db, "rescue2", sender_peer, message_id,
+                body, [receiver_peer], created))
+
+            sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.addCleanup(sender.close)
+            self.addCleanup(receiver.close)
+            sender.bind(("127.0.0.1", 0))
+            receiver.bind(("127.0.0.1", 0))
+            sender.settimeout(2.0)
+            receiver.settimeout(2.0)
+            receiver_endpoint = receiver.getsockname()
+
+            sent = send_outgoing_fragment_window(
+                sender, sender_db, "rescue2", message_id, receiver_peer,
+                body, created, receiver_endpoint, sender_peer, "rescue2",
+                sender_peer, secret, mark_attempt=True, allow_fast_retry=True)
+            self.assertGreater(sent, 0)
+
+            fragment_count = None
+            for _ in range(sent):
+                raw, source = receiver.recvfrom(1200)
+                packet = decode_packet(raw, secret)
+                self.assertEqual("chat.fragment", packet["type"])
+                self.assertEqual(receiver_peer, packet["target_peer_id"])
+                stored = store_incoming_chat_fragment(
+                    receiver_db, "chat.py", sender_peer, packet)
+                self.assertIn(stored, ("stored", "completed"))
+                fragment_count = packet["fragment_count"]
+                ack = encode_packet({
+                    "type": "chat.fragment.ack",
+                    "sender_peer_id": receiver_peer,
+                    "sender_peer_type": "chat.py",
+                    "service_id": receiver_peer,
+                    "target_peer_id": sender_peer,
+                    "message_id": message_id,
+                    "fragment_index": packet["fragment_index"],
+                    "status": "received",
+                }, secret)
+                receiver.sendto(ack, source)
+
+            acked = set()
+            for _ in range(sent):
+                raw, endpoint = sender.recvfrom(1200)
+                ack = decode_packet(raw, secret)
+                self.assertEqual("chat.fragment.ack", ack["type"])
+                self.assertEqual(receiver_peer, ack["sender_peer_id"])
+                self.assertEqual(receiver_peer, ack["service_id"])
+                self.assertTrue(record_outgoing_fragment_ack(
+                    sender_db, "rescue2", message_id, receiver_peer,
+                    ack["fragment_index"], endpoint[0], endpoint[1]))
+                acked.add(ack["fragment_index"])
+            self.assertEqual(set(range(sent)), acked)
+
+            cached = load_incoming_chat_fragments(
+                receiver_db, "chat.py", sender_peer, message_id)
+            self.assertEqual(fragment_count, len(cached))
+            self.assertEqual(body, assemble_chat_fragments(cached))
+
+            final_ack = encode_packet({
+                "type": "chat.ack",
+                "sender_peer_id": receiver_peer,
+                "sender_peer_type": "chat.py",
+                "service_id": receiver_peer,
+                "target_peer_id": sender_peer,
+                "message_id": message_id,
+                "status": "stored",
+            }, secret)
+            receiver.sendto(final_ack, sender.getsockname())
+            raw, endpoint = sender.recvfrom(1200)
+            final = decode_packet(raw, secret)
+            self.assertEqual("chat.ack", final["type"])
+            self.assertEqual(receiver_peer, final["service_id"])
+            self.assertTrue(acknowledge_outgoing_message(
+                sender_db, "rescue2", message_id, receiver_peer))
