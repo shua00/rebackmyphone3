@@ -6845,11 +6845,38 @@ public class TrackingService extends Service implements LocationListener {
                 verifiedRoutePeerIds.add(target.peerId);
                 continue;
             }
-            // SQLite stores one peer-wide endpoint and cannot prove which local ingress
-            // path authenticated it. Keep it as a directed-challenge candidate only; every
-            // chat/fragment datagram requires a current path-scoped Registry binding.
-            // This also prevents a route learned on a removed AP path from being reused after
-            // the topology collapses back to one STA listener.
+            // Compatibility fallback is deliberately narrow: the durable peer row must
+            // carry the exact current listener epoch, the listener must be the only active
+            // chat path, and the endpoint must still be on that path's IPv4 subnet.
+            // Multi-listener topologies continue to require a live path-scoped RouteBinding.
+            LanChatListenerRuntime.Lease cachedLease = preferredChatPath == null
+                    ? null : lanChatListenerRuntime.get(preferredChatPath);
+            LanChatListenerPathPlan cachedPlan = lanChatListenerPathPlan;
+            LanNetworkPath cachedPath = cachedPlan == null ? null : cachedPlan.primary();
+            LanChatCachedRoutePolicy.Inet4AddressHolder unused = null;
+            java.net.Inet4Address cachedPeerAddress =
+                    LanChatCachedRoutePolicy.parseIpv4Literal(target.endpointIp);
+            boolean singleCurrentListener = cachedLease != null && cachedPath != null
+                    && lanChatListenerRuntime.listenerCount() == 1
+                    && lanChatPathRegistry.listenerCount() == 1
+                    && cachedLease.socket == socket
+                    && cachedLease.generation == socketGeneration
+                    && cachedLease.pathFingerprint.equals(preferredChatPath)
+                    && cachedPath.diagnosticFingerprint().equals(preferredChatPath)
+                    && lanChatListenerRuntime.isCurrent(cachedLease)
+                    && isCurrentLanChatSocket(socket, socketGeneration);
+            boolean durableCurrentRoute = cachedPeerAddress != null && target.endpointPort > 0
+                    && store.hasFreshVerifiedPeerRoute(target.peerId, target.endpointIp,
+                            target.endpointPort, System.currentTimeMillis(),
+                            preferredChatPath, socketGeneration);
+            if (LanChatCachedRoutePolicy.isEligible(singleCurrentListener, durableCurrentRoute,
+                    cachedPath == null ? null : cachedPath.localAddress,
+                    cachedPath == null ? 0 : cachedPath.prefixLength, cachedPeerAddress)) {
+                dispatchEndpoints.put(target.peerId, new java.net.InetSocketAddress(
+                        cachedPeerAddress, target.endpointPort));
+                FileLogger.logD("CHAT", "P2P single-listener cached route fallback peer="
+                        + target.peerId + " path=" + preferredChatPath);
+            }
         }
         java.util.Set<String> awaitingPeerIds = java.util.Collections.newSetFromMap(
                 new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
@@ -6937,7 +6964,7 @@ public class TrackingService extends Service implements LocationListener {
                     for (String peerId : new java.util.ArrayList<>(awaitingPeerIds)) {
                         LanChatPathRegistry.RouteBinding routeBinding = dispatchBindings.get(peerId);
                         DatagramSocket peerSocket = routeBinding == null ? socket : routeBinding.listener.socket;
-                        if (!isCurrentLanChatSendBinding(routeBinding, socket, socketGeneration)) continue;
+                        if (!isCurrentLanChatTargetBinding(routeBinding, socket, socketGeneration, peerId, peer)) continue;
                         java.net.InetSocketAddress peer = dispatchEndpoints.get(peerId);
                         if (peer == null) continue;
                         try {
@@ -7541,7 +7568,8 @@ public class TrackingService extends Service implements LocationListener {
                                         + controlQueueMs + " peer=" + senderId);
                             }
                             boolean persisted = store.upsertPeer(senderId, peerType, serviceId,
-                                    peerNetwork, peerAddress.getHostAddress(), port, now, now + 120_000L);
+                                    peerNetwork, peerAddress.getHostAddress(), port, now, now + 120_000L,
+                                    verifiedPathFingerprint, verifiedListenerGeneration);
                             if (!persisted) {
                                 FileLogger.log(this, "CHAT", "⚠️ peer.ack 路由持久化失败，暂不启用单播 peer="
                                         + senderId + " path=" + verifiedPathFingerprint);
@@ -7792,6 +7820,36 @@ public class TrackingService extends Service implements LocationListener {
         // A peer-wide persisted endpoint has no authenticated local path identity.
         // It may seed a directed challenge, but can never authorize chat payload dispatch.
         return false;
+    }
+
+    /** Revalidate a fixed-recipient route at every send boundary, including the legacy fallback. */
+    private boolean isCurrentLanChatTargetBinding(LanChatPathRegistry.RouteBinding binding,
+            DatagramSocket socket, long generation, String peerId,
+            java.net.InetSocketAddress endpoint) {
+        if (binding != null) {
+            return binding.isCurrentAndUsable() && lanChatPathRegistry.isCurrentBinding(binding);
+        }
+        if (peerId == null || endpoint == null || endpoint.getAddress() == null
+                || !(endpoint.getAddress() instanceof java.net.Inet4Address)
+                || !isCurrentLanChatSocket(socket, generation)
+                || lanChatListenerRuntime.listenerCount() != 1
+                || lanChatPathRegistry.listenerCount() != 1) return false;
+        String pathFingerprint = rescueSocketPathFingerprint;
+        if (pathFingerprint == null || pathFingerprint.isEmpty()) return false;
+        LanChatListenerRuntime.Lease lease = lanChatListenerRuntime.get(pathFingerprint);
+        LanChatListenerPathPlan plan = lanChatListenerPathPlan;
+        LanNetworkPath path = plan == null ? null : plan.primary();
+        if (lease == null || path == null || lease.socket != socket
+                || lease.generation != generation
+                || !pathFingerprint.equals(lease.pathFingerprint)
+                || !pathFingerprint.equals(path.diagnosticFingerprint())
+                || !lanChatListenerRuntime.isCurrent(lease)) return false;
+        LanChatStore store = lanChatStore;
+        if (store == null || !store.hasFreshVerifiedPeerRoute(peerId,
+                endpoint.getAddress().getHostAddress(), endpoint.getPort(),
+                System.currentTimeMillis(), pathFingerprint, generation)) return false;
+        return LanChatCachedRoutePolicy.isEligible(true, true, path.localAddress,
+                path.prefixLength, (java.net.Inet4Address) endpoint.getAddress());
     }
 
     /**
